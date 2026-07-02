@@ -19,7 +19,9 @@ own tests elsewhere.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -65,7 +67,7 @@ class BuildPlanTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_defaults_preserve_data_and_binaries(self):
+    def test_missing_config_preserves_data_binaries_and_external_connectors(self):
         plan = cmd_uninstall._build_plan(
             wipe_data=False,
             binaries=False,
@@ -74,13 +76,13 @@ class BuildPlanTests(unittest.TestCase):
         )
         self.assertFalse(plan.remove_data_dir)
         self.assertFalse(plan.remove_binaries)
-        self.assertTrue(plan.revert_openclaw)
-        self.assertTrue(plan.remove_plugin)
-        # Defaults should always fill in data_dir / openclaw paths so
-        # renderers never hit an empty string.
+        self.assertFalse(plan.revert_openclaw)
+        self.assertFalse(plan.remove_plugin)
         self.assertTrue(plan.data_dir)
-        self.assertTrue(plan.openclaw_config_file)
-        self.assertIn(plan.connector, plan.connectors)
+        self.assertEqual(plan.openclaw_config_file, "")
+        self.assertEqual(plan.openclaw_home, "")
+        self.assertEqual(plan.connector, "")
+        self.assertEqual(plan.connectors, ())
 
     def test_keep_openclaw_leaves_plugin_alone(self):
         plan = cmd_uninstall._build_plan(
@@ -161,10 +163,73 @@ class ResetCommandTests(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("gateway stop: succeeded", result.output)
-        self.assertIn("connector teardown: succeeded", result.output)
+        self.assertNotIn("connector teardown: succeeded", result.output)
         self.assertIn("data removal: failed", result.output)
         self.assertIn("locked native module", result.output)
         self.assertNotIn("Reset complete", result.output)
+
+    def test_two_resets_do_not_invent_or_mutate_openclaw(self):
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            data_dir = home / ".defenseclaw"
+            openclaw_config = home / ".openclaw" / "openclaw.json"
+            venv = data_dir / ".venv"
+            venv.mkdir(parents=True)
+            openclaw_config.parent.mkdir(parents=True)
+            unrelated_bytes = b'{"owner":"unrelated","unique":"WIN-AUD-018"}\r\n'
+            openclaw_config.write_bytes(unrelated_bytes)
+            before_hash = hashlib.sha256(unrelated_bytes).hexdigest()
+
+            (data_dir / "config.yaml").write_text(
+                "guardrail:\n  enabled: true\n  connectors:\n    codex: {}\n    claudecode: {}\n",
+                encoding="utf-8",
+            )
+            for marker in (
+                "connector_backups/codex/config.toml.json",
+                "connector_backups/claudecode/settings.json.json",
+            ):
+                target = data_dir / marker
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("{}", encoding="utf-8")
+
+            teardown_plans = []
+
+            def record_teardown(plan):
+                teardown_plans.append(plan)
+
+            isolated_env = {
+                "DEFENSECLAW_HOME": str(data_dir),
+                "HOME": str(home),
+                "USERPROFILE": str(home),
+            }
+            with (
+                patch.dict(os.environ, isolated_env, clear=False),
+                patch.object(cmd_uninstall, "_stop_gateway"),
+                patch.object(cmd_uninstall, "_connector_teardown", side_effect=record_teardown),
+            ):
+                first = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+                second = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+
+            self.assertEqual(first.exit_code, 0, first.output)
+            self.assertEqual(second.exit_code, 0, second.output)
+            self.assertEqual(len(teardown_plans), 1)
+            self.assertEqual(set(teardown_plans[0].connectors), {"codex", "claudecode"})
+            first_lower = first.output.lower()
+            self.assertIn("active connectors:", first_lower)
+            self.assertIn("codex", first_lower)
+            self.assertIn("claudecode", first_lower)
+            self.assertNotIn("openclaw", first_lower)
+            self.assertTrue(venv.is_dir())
+            self.assertEqual({path.name for path in data_dir.iterdir()}, {".venv"})
+            self.assertEqual(openclaw_config.read_bytes(), unrelated_bytes)
+            self.assertEqual(hashlib.sha256(openclaw_config.read_bytes()).hexdigest(), before_hash)
+
+            second_lower = second.output.lower()
+            self.assertIn("active connector:    none", second_lower)
+            self.assertIn("connector teardown:  no", second_lower)
+            self.assertNotIn("openclaw", second_lower)
 
 
 class ResolveActiveConnectorTests(unittest.TestCase):
@@ -196,8 +261,8 @@ class ResolveActiveConnectorTests(unittest.TestCase):
 
         self.assertEqual(cmd_uninstall._resolve_active_connector(Cfg()), "zeptoclaw")
 
-    def test_none_cfg_defaults_to_openclaw(self):
-        self.assertEqual(cmd_uninstall._resolve_active_connector(None), "openclaw")
+    def test_none_cfg_has_no_active_connector(self):
+        self.assertEqual(cmd_uninstall._resolve_active_connector(None), "")
 
 
 class BuildPlanConnectorTests(unittest.TestCase):
@@ -220,6 +285,7 @@ class BuildPlanConnectorTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        (Path(self._tmp.name) / "config.yaml").write_text("configured", encoding="utf-8")
         patcher = patch(
             "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
             return_value=self._tmp.name,
@@ -248,6 +314,10 @@ class BuildPlanConnectorTests(unittest.TestCase):
             )
         self.assertEqual(plan.connector, "codex")
         self.assertIn("codex", plan.connectors)
+        self.assertEqual(plan.openclaw_config_file, "")
+        self.assertEqual(plan.openclaw_home, "")
+        self.assertFalse(plan.revert_openclaw)
+        self.assertFalse(plan.remove_plugin)
 
     def test_plan_tears_down_all_active_connectors_on_multi(self):
         # Regression: on a multi-connector install reset/uninstall must sweep
@@ -298,6 +368,7 @@ class BuildPlanConnectorTests(unittest.TestCase):
             patch("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", return_value=data_dir),
             patch("defenseclaw.commands.cmd_uninstall.config_module.load", return_value=Cfg()),
         ):
+            (Path(data_dir) / "config.yaml").write_text("configured", encoding="utf-8")
             plan = cmd_uninstall._build_plan(
                 wipe_data=False,
                 binaries=False,
@@ -306,7 +377,8 @@ class BuildPlanConnectorTests(unittest.TestCase):
             )
         self.assertEqual(plan.connectors, ("codex",))
 
-    def test_plan_defaults_to_openclaw_when_load_fails(self):
+    def test_missing_config_without_markers_has_no_connectors_or_openclaw_paths(self):
+        (Path(self._tmp.name) / "config.yaml").unlink()
         with patch("defenseclaw.commands.cmd_uninstall.config_module.load", side_effect=Exception("boom")):
             plan = cmd_uninstall._build_plan(
                 wipe_data=False,
@@ -314,12 +386,174 @@ class BuildPlanConnectorTests(unittest.TestCase):
                 revert_openclaw=True,
                 remove_plugin=True,
             )
-        self.assertEqual(plan.connector, "openclaw")
+        self.assertEqual(plan.connector, "")
+        self.assertEqual(plan.connectors, ())
+        self.assertEqual(plan.openclaw_config_file, "")
+        self.assertEqual(plan.openclaw_home, "")
+        self.assertFalse(plan.revert_openclaw)
+        self.assertFalse(plan.remove_plugin)
+
+    def test_unreadable_config_without_markers_has_no_connectors(self):
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load", side_effect=ValueError("bad yaml")):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=False,
+                revert_openclaw=True,
+                remove_plugin=True,
+            )
+
+        self.assertEqual(plan.connector, "")
+        self.assertEqual(plan.connectors, ())
+        self.assertEqual(plan.openclaw_config_file, "")
+        self.assertEqual(plan.openclaw_home, "")
+
+    def test_missing_config_uses_only_non_openclaw_durable_marker(self):
+        (Path(self._tmp.name) / "config.yaml").unlink()
+        marker = Path(self._tmp.name) / "connector_backups" / "codex" / "config.toml.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("{}", encoding="utf-8")
+
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load", side_effect=Exception("boom")):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=False,
+                revert_openclaw=True,
+                remove_plugin=True,
+            )
+
+        self.assertEqual(plan.connector, "")
+        self.assertEqual(plan.connectors, ("codex",))
+        self.assertEqual(plan.openclaw_config_file, "")
+        self.assertEqual(plan.openclaw_home, "")
+        self.assertFalse(plan.revert_openclaw)
+        self.assertFalse(plan.remove_plugin)
+
+    def test_missing_config_openclaw_marker_enables_owned_openclaw_path(self):
+        (Path(self._tmp.name) / "config.yaml").unlink()
+        marker = Path(self._tmp.name) / "connector_backups" / "openclaw" / "openclaw.json.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("defenseclaw.commands.cmd_uninstall.config_module.load", side_effect=Exception("boom")),
+            patch("defenseclaw.commands.cmd_uninstall.os.path.expanduser", return_value="/owned/.openclaw"),
+        ):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=False,
+                revert_openclaw=True,
+                remove_plugin=True,
+            )
+
+        self.assertEqual(plan.connectors, ("openclaw",))
+        self.assertEqual(plan.openclaw_config_file, os.path.join("/owned/.openclaw", "openclaw.json"))
+        self.assertEqual(plan.openclaw_home, "/owned/.openclaw")
+        self.assertTrue(plan.revert_openclaw)
+        self.assertTrue(plan.remove_plugin)
+
+    def test_missing_config_openclaw_pristine_enables_owned_openclaw_path(self):
+        (Path(self._tmp.name) / "config.yaml").unlink()
+        openclaw_home = Path(self._tmp.name) / "external-openclaw"
+        openclaw_home.mkdir()
+        (openclaw_home / "openclaw.json.pristine").write_text("owned", encoding="utf-8")
+
+        with (
+            patch("defenseclaw.commands.cmd_uninstall.config_module.load", side_effect=Exception("boom")),
+            patch("defenseclaw.commands.cmd_uninstall.os.path.expanduser", return_value=str(openclaw_home)),
+        ):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=False,
+                revert_openclaw=True,
+                remove_plugin=True,
+            )
+
+        self.assertEqual(plan.connectors, ("openclaw",))
+        self.assertEqual(plan.openclaw_config_file, str(openclaw_home / "openclaw.json"))
+
+    def test_missing_config_valid_backup_index_uses_recorded_openclaw_path(self):
+        (Path(self._tmp.name) / "config.yaml").unlink()
+        recorded_home = Path(self._tmp.name).parent / "recorded-openclaw"
+        recorded_target = recorded_home / "openclaw.json"
+        pristine = Path(self._tmp.name) / "backups" / "openclaw.json.pristine"
+        pristine.parent.mkdir()
+        pristine.write_bytes(b"owned snapshot")
+        (Path(self._tmp.name) / "openclaw-backups.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "entries": {
+                        str(recorded_target): {
+                            "pristine": str(pristine),
+                            "captured_at": "2026-07-02T00:00:00Z",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        plan = cmd_uninstall._build_plan(
+            wipe_data=True,
+            binaries=False,
+            revert_openclaw=True,
+            remove_plugin=True,
+        )
+
+        self.assertEqual(plan.connectors, ("openclaw",))
+        self.assertEqual(plan.openclaw_config_file, str(recorded_target))
+
+    def test_backup_index_snapshot_outside_data_is_not_ownership(self):
+        (Path(self._tmp.name) / "config.yaml").unlink()
+        outside = Path(self._tmp.name).parent / "outside-snapshot"
+        outside.write_bytes(b"not DefenseClaw-owned")
+        recorded_target = Path(self._tmp.name).parent / "unrelated" / "openclaw.json"
+        (Path(self._tmp.name) / "openclaw-backups.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "entries": {
+                        str(recorded_target): {
+                            "pristine": str(outside),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        plan = cmd_uninstall._build_plan(
+            wipe_data=True,
+            binaries=False,
+            revert_openclaw=True,
+            remove_plugin=True,
+        )
+
+        self.assertEqual(plan.connectors, ())
+        self.assertEqual(plan.openclaw_config_file, "")
 
 
 class RenderPlanConnectorTests(unittest.TestCase):
+    def test_render_empty_connector_state_as_none_without_fallback_teardown(self):
+        plan = cmd_uninstall.UninstallPlan(
+            connector="",
+            connectors=(),
+            revert_openclaw=True,
+            data_dir="/tmp/dc",
+        )
+        with capture_click_output() as buf:
+            cmd_uninstall._render_plan(plan, dry_run=True)
+        text = buf.getvalue().lower()
+        self.assertIn("active connector:    none", text)
+        self.assertIn("connector teardown:  no", text)
+        self.assertNotIn("openclaw", text)
+
     def test_render_shows_connector_specific_line_for_codex(self):
-        plan = cmd_uninstall.UninstallPlan(connector="codex", data_dir="/tmp/dc")
+        plan = cmd_uninstall.UninstallPlan(
+            connector="codex",
+            connectors=("codex",),
+            data_dir="/tmp/dc",
+        )
         with capture_click_output() as buf:
             cmd_uninstall._render_plan(plan, dry_run=True)
         text = buf.getvalue()
@@ -347,6 +581,7 @@ class RenderPlanConnectorTests(unittest.TestCase):
     def test_render_shows_openclaw_revert_for_openclaw(self):
         plan = cmd_uninstall.UninstallPlan(
             connector="openclaw",
+            connectors=("openclaw",),
             data_dir="/tmp/dc",
             openclaw_config_file="/tmp/openclaw.json",
         )
@@ -379,6 +614,7 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
     def _plan(self, connector: str) -> cmd_uninstall.UninstallPlan:
         return cmd_uninstall.UninstallPlan(
             connector=connector,
+            connectors=(connector,),
             data_dir="/tmp/dc",
             openclaw_config_file="/tmp/openclaw.json",
             openclaw_home="/tmp/.openclaw",
@@ -607,9 +843,10 @@ class ExecutePlanConnectorTests(unittest.TestCase):
             patch.object(cmd_uninstall, "_remove_binaries"),
         ]
 
-    def test_codex_still_runs_openclaw_plugin_sweep(self):
+    def test_codex_plan_does_not_run_openclaw_plugin_sweep(self):
         plan = cmd_uninstall.UninstallPlan(
             connector="codex",
+            connectors=("codex",),
             data_dir="/tmp/dc",
         )
         ctx_mgrs = self._common_patches()
@@ -619,7 +856,7 @@ class ExecutePlanConnectorTests(unittest.TestCase):
             cmd_uninstall._execute_plan(plan)
             stop_mock.assert_called_once()
             teardown_mock.assert_called_once_with(plan)
-            plugin_mock.assert_called_once_with(plan)
+            plugin_mock.assert_not_called()
             wipe_mock.assert_not_called()
             bin_mock.assert_not_called()
         finally:
@@ -629,6 +866,7 @@ class ExecutePlanConnectorTests(unittest.TestCase):
     def test_teardown_failure_aborts_before_wipe_or_binaries(self):
         plan = cmd_uninstall.UninstallPlan(
             connector="codex",
+            connectors=("codex",),
             data_dir="/tmp/dc",
             remove_data_dir=True,
             remove_binaries=True,
@@ -649,6 +887,7 @@ class ExecutePlanConnectorTests(unittest.TestCase):
     def test_openclaw_runs_remove_plugin_step(self):
         plan = cmd_uninstall.UninstallPlan(
             connector="openclaw",
+            connectors=("openclaw",),
             data_dir="/tmp/dc",
             remove_plugin=True,
         )

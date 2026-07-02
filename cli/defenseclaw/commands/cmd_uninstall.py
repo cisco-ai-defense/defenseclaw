@@ -41,6 +41,7 @@ OpenClaw, never against the other adapters — calling
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -93,7 +94,7 @@ class UninstallPlan:
     # connector is the active framework adapter resolved from config.
     # connectors is the actual teardown sweep, which may include inactive
     # adapters with leftover rollback markers.
-    connector: str = "openclaw"
+    connector: str = ""
     # connectors is the full sweep set. It always includes the active
     # connector unless OpenClaw was explicitly excluded, plus any inactive
     # connector with rollback markers still present under data_dir.
@@ -220,7 +221,7 @@ def _resolve_active_connector(cfg) -> str:
     called even when config loading raised.
     """
     if cfg is None:
-        return "openclaw"
+        return ""
     if hasattr(cfg, "active_connector") and callable(cfg.active_connector):
         try:
             name = (cfg.active_connector() or "").strip().lower()
@@ -232,7 +233,7 @@ def _resolve_active_connector(cfg) -> str:
         name = (cfg.guardrail.connector or "").strip().lower()
         if name:
             return name
-    return "openclaw"
+    return ""
 
 
 def _resolve_active_connectors(cfg) -> list[str]:
@@ -249,8 +250,10 @@ def _resolve_active_connectors(cfg) -> list[str]:
         try:
             names = [(n or "").strip().lower() for n in cfg.active_connectors()]
             names = [n for n in names if n]
-            if names:
-                return names
+            # An authoritative empty plural set means unconfigured. Falling
+            # through to active_connector() here resurrects its historical
+            # OpenClaw default after reset.
+            return names
         except Exception:  # noqa: BLE001 — fall back to the singular connector.
             pass
     single = _resolve_active_connector(cfg)
@@ -267,32 +270,56 @@ def _build_plan(
 ) -> UninstallPlan:
     data_dir = str(config_module.default_data_path())
 
-    # Best-effort config load to discover OpenClaw paths. A broken or
-    # missing config is fine here — we fall back to sensible defaults
-    # rather than blocking the uninstall.
-    openclaw_config_file = ""
-    openclaw_home = ""
+    # Config identifies active connectors. If it is missing or unreadable,
+    # only durable rollback markers may authorize connector teardown.
     cfg = None
-    try:
-        cfg = config_module.load()
-        openclaw_config_file = cfg.claw.config_file
-        openclaw_home = cfg.claw.home_dir
-    except Exception:
-        openclaw_home = os.path.expanduser("~/.openclaw")
-        openclaw_config_file = os.path.join(openclaw_home, "openclaw.json")
+    config_file = config_module.config_path_for_data_dir(data_dir)
+    if config_file.is_file():
+        try:
+            cfg = config_module.load()
+        except Exception:
+            pass
 
-    connector = _resolve_active_connector(cfg)
-    connectors = _teardown_connectors(
-        _resolve_active_connectors(cfg),
-        data_dir=data_dir,
-        openclaw_config_file=openclaw_config_file,
-        include_openclaw=revert_openclaw,
+    active_connectors = _resolve_active_connectors(cfg)
+    resolved_connector = _resolve_active_connector(cfg)
+    connector = (
+        resolved_connector
+        if resolved_connector in active_connectors
+        else (active_connectors[0] if active_connectors else "")
     )
+
+    # The default path is a private candidate only. It is not stored,
+    # rendered, or used unless configuration or durable OpenClaw ownership
+    # evidence adds OpenClaw to the teardown set.
+    configured_openclaw = "openclaw" in active_connectors
+    if configured_openclaw:
+        openclaw_candidate = str(getattr(cfg.claw, "config_file", "") or "")
+        openclaw_home_candidate = str(getattr(cfg.claw, "home_dir", "") or "")
+        openclaw_owned = True
+    else:
+        default_home_candidate = os.path.expanduser("~/.openclaw")
+        default_config_candidate = os.path.join(default_home_candidate, "openclaw.json")
+        openclaw_candidate, openclaw_owned = _owned_openclaw_candidate(
+            data_dir,
+            default_config_candidate,
+        )
+        openclaw_home_candidate = os.path.dirname(openclaw_candidate) if openclaw_owned else ""
+
+    connectors = _teardown_connectors(
+        active_connectors,
+        data_dir=data_dir,
+        openclaw_config_file=openclaw_candidate,
+        include_openclaw=revert_openclaw,
+        openclaw_owned=openclaw_owned,
+    )
+    owns_openclaw = "openclaw" in connectors
+    openclaw_config_file = openclaw_candidate if owns_openclaw else ""
+    openclaw_home = openclaw_home_candidate if owns_openclaw else ""
 
     return UninstallPlan(
         stop_gateway=True,
-        revert_openclaw=revert_openclaw,
-        remove_plugin=remove_plugin,
+        revert_openclaw=revert_openclaw and owns_openclaw,
+        remove_plugin=remove_plugin and owns_openclaw,
         remove_data_dir=wipe_data,
         remove_binaries=binaries,
         data_dir=data_dir,
@@ -304,12 +331,80 @@ def _build_plan(
     )
 
 
+def _owned_openclaw_candidate(data_dir: str, default_candidate: str) -> tuple[str, bool]:
+    """Return an OpenClaw config path only when durable ownership exists.
+
+    Supports the legacy connector backup marker, an adjacent legacy pristine
+    file, and the current pristine-backup index. Indexed snapshots must be
+    real files inside *data_dir* and targets must be absolute openclaw.json
+    paths; malformed or reparse-point evidence is ignored.
+    """
+    legacy_marker = os.path.join(
+        data_dir,
+        "connector_backups",
+        "openclaw",
+        "openclaw.json.json",
+    )
+    adjacent_pristine = _expand(default_candidate) + ".pristine"
+    if (
+        os.path.isfile(legacy_marker)
+        and not _is_reparse_path(legacy_marker)
+        or os.path.isfile(adjacent_pristine)
+        and not _is_reparse_path(adjacent_pristine)
+    ):
+        return default_candidate, True
+
+    index_path = os.path.join(data_dir, "openclaw-backups.json")
+    if not os.path.isfile(index_path) or _is_reparse_path(index_path):
+        return "", False
+    try:
+        with open(index_path, encoding="utf-8") as fh:
+            index = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return "", False
+
+    entries = index.get("entries", {}) if isinstance(index, dict) else {}
+    if not isinstance(entries, dict):
+        return "", False
+    resolved_data_dir = os.path.normcase(os.path.realpath(data_dir))
+    owned_targets: list[str] = []
+    for target, entry in entries.items():
+        if (
+            not isinstance(target, str)
+            or not os.path.isabs(target)
+            or os.path.basename(target).lower() != "openclaw.json"
+            or not isinstance(entry, dict)
+            or os.path.lexists(target)
+            and _is_reparse_path(target)
+        ):
+            continue
+        pristine = entry.get("pristine", "")
+        if not isinstance(pristine, str) or not os.path.isfile(pristine) or _is_reparse_path(pristine):
+            continue
+        resolved_pristine = os.path.normcase(os.path.realpath(pristine))
+        try:
+            inside_data_dir = os.path.commonpath((resolved_data_dir, resolved_pristine)) == resolved_data_dir
+        except ValueError:
+            inside_data_dir = False
+        if inside_data_dir:
+            owned_targets.append(target)
+
+    if not owned_targets:
+        return "", False
+    default_abs = os.path.normcase(os.path.abspath(_expand(default_candidate)))
+    for target in owned_targets:
+        if os.path.normcase(os.path.abspath(target)) == default_abs:
+            return target, True
+    return sorted(owned_targets, key=os.path.normcase)[0], True
+
+
 def _teardown_connectors(
     active_connectors: str | list[str] | tuple[str, ...],
     *,
     data_dir: str,
     openclaw_config_file: str,
     include_openclaw: bool,
+    openclaw_owned: bool = False,
 ) -> tuple[str, ...]:
     """Return connector names that uninstall should restore before cleanup.
 
@@ -338,7 +433,13 @@ def _teardown_connectors(
         active_connectors = [active_connectors]
     for connector_name in active_connectors:
         add(connector_name)
+    if openclaw_owned:
+        add("openclaw")
     for name, markers in _CONNECTOR_BACKUP_MARKERS.items():
+        if name == "openclaw":
+            # OpenClaw evidence also selects an external target path, so it is
+            # validated centrally by _owned_openclaw_candidate().
+            continue
         for marker in markers:
             if os.path.isfile(os.path.join(data_dir, marker)):
                 add(name)
@@ -362,8 +463,8 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         # so list them all without singling one out.
         click.echo(f"  • {ux.bold('active connectors:')}   {', '.join(plan.connectors)}")
     else:
-        click.echo(f"  • {ux.bold('active connector:')}    {plan.connector}")
-    display_connectors = plan.connectors or ((plan.connector,) if plan.revert_openclaw else ())
+        click.echo(f"  • {ux.bold('active connector:')}    {plan.connector or 'none'}")
+    display_connectors = plan.connectors
     teardown = ", ".join(display_connectors) if display_connectors else "no"
     click.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
     click.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
@@ -403,9 +504,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
 
     if plan.stop_gateway:
         run_phase("gateway stop", _stop_gateway)
-    if plan.connectors or plan.revert_openclaw:
+    if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
-    if plan.remove_plugin:
+    if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
         # scripts and config patches. This helper is idempotent and
@@ -494,7 +595,7 @@ def _connector_teardown(plan: UninstallPlan) -> None:
     would corrupt it — so we hard-fail in that case with a clear
     remediation pointing at the gateway upgrade path.
     """
-    connectors = plan.connectors or (plan.connector,)
+    connectors = plan.connectors
     gateway_supported = _gateway_supports_connector_teardown()
     for name in connectors:
         if gateway_supported:
