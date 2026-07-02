@@ -223,7 +223,10 @@ def resolve_subprocess_argv(binary: str, args: tuple[str, ...]) -> tuple[str, ..
             raise RuntimeError("Cannot resolve DefenseClaw CLI: Python executable is unknown")
         return (os.path.abspath(sys.executable), "-m", "defenseclaw.main", *args)
     if binary == "defenseclaw-gateway":
-        return (resolve_gateway_binary() or "defenseclaw-gateway", *args)
+        resolved = resolve_gateway_binary()
+        if not resolved:
+            raise RuntimeError("Cannot resolve DefenseClaw gateway executable")
+        return (resolved, *args)
     return (binary, *args)
 
 

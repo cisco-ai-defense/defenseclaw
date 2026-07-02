@@ -24,6 +24,16 @@ import subprocess
 import tempfile
 
 
+def grant_everyone(path: str | os.PathLike[str], perm: str = "F") -> None:
+    """Grant the well-known Everyone SID broad access for negative-path tests."""
+    subprocess.run(
+        ["icacls", os.fspath(path), "/grant", f"*S-1-1-0:(OI)(CI){perm}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def assert_owner_only_file(path: str | os.PathLike[str]) -> None:
     """Assert POSIX 0600 or the equivalent protected Windows DACL."""
     if os.name != "nt":

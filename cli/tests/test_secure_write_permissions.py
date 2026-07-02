@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import tempfile
 from types import SimpleNamespace
 
@@ -31,7 +30,7 @@ from defenseclaw.commands import cmd_setup_observability as setup_writer
 from defenseclaw.observability import writer as observability_writer
 from defenseclaw.webhooks import writer as webhook_writer
 
-from tests.permissions import assert_owner_only_file
+from tests.permissions import assert_owner_only_file, grant_everyone
 
 _ATOMIC_WRITERS = [
     (
@@ -177,6 +176,39 @@ def test_dotenv_writer_closes_descriptor_when_permissions_fail(monkeypatch, tmp_
     assert descriptor_open is False
 
 
+@pytest.mark.parametrize("failure_stage", ["permission", "replace"])
+def test_dotenv_writer_preserves_target_and_removes_staging_on_failure(
+    monkeypatch,
+    tmp_path,
+    failure_stage,
+):
+    record: dict[str, object] = {}
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        record.update(fd=fd, path=path)
+        return fd, path
+
+    def fail(*_args, **_kwargs):
+        raise OSError(f"injected {failure_stage} failure")
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+    if failure_stage == "permission":
+        monkeypatch.setattr(observability_writer, "set_file_mode", fail)
+    else:
+        monkeypatch.setattr(os, "replace", fail)
+
+    target = tmp_path / ".env"
+    target.write_text("ORIGINAL=value\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match=f"injected {failure_stage} failure"):
+        observability_writer._write_dotenv(os.fspath(target), {"TOKEN": "secret"})
+
+    _assert_staging_cleanup(record)
+    assert target.read_text(encoding="utf-8") == "ORIGINAL=value\n"
+
+
 def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):
     calls: list[tuple[int, int]] = []
     fake_os = SimpleNamespace(
@@ -219,12 +251,7 @@ def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):
 def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
     broad_dir = tmp_path / name
     broad_dir.mkdir()
-    subprocess.run(
-        ["icacls", os.fspath(broad_dir), "/grant", "*S-1-1-0:(OI)(CI)(RX)"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    grant_everyone(broad_dir, "(RX)")
     target = broad_dir / "secret.yaml"
 
     result = write(target)

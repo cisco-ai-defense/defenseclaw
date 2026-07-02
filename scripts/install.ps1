@@ -370,7 +370,7 @@ function Install-Cli {
     Write-Info "Creating Python environment..."
     $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--python", "3.12", "--quiet")
     if ($venvExit -ne 0) {
-        $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--quiet") -ShowFailureOutput
+        $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--allow-existing", "--quiet") -ShowFailureOutput
         if ($venvExit -ne 0) { Die "Failed to create Python virtual environment" }
     }
     $venvPython = Join-Path $Venv "Scripts\python.exe"

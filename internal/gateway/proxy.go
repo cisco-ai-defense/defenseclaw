@@ -29,7 +29,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -3978,13 +3977,17 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: %q not in registry — ignoring\n", newName)
 		return
 	}
-	support := connector.ConnectorSupportOnHostOS(newName)
-	if support.Status == connector.PlatformUnsupported {
-		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: %q is not supported on %s: %s\n", newName, runtime.GOOS, support.Reason)
+	warning, supportErr := connector.CheckPlatformSupportOnHost(newName)
+	if supportErr != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"[guardrail] runtime connector switch: %s\n",
+			strings.TrimPrefix(supportErr.Error(), "connector "),
+		)
 		return
 	}
-	if support.Status == connector.PlatformPreview {
-		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", newName, runtime.GOOS, support.Reason)
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %s\n", warning)
 	}
 
 	ctx := context.Background()

@@ -147,14 +147,31 @@ func ConnectorSupportedOnHostOS(name string) bool {
 	return ConnectorSupportOnHostOS(name).Status != PlatformUnsupported
 }
 
+// CheckPlatformSupport returns the shared operator-facing preview warning or
+// unsupported error for a connector on goos. Supported connectors return two
+// empty values so callers can preserve their existing control flow.
+func CheckPlatformSupport(name, goos string) (string, error) {
+	support := ConnectorSupportOnOS(name, goos)
+	switch support.Status {
+	case PlatformUnsupported:
+		return "", fmt.Errorf("connector %q is not supported on %s: %s", name, goos, support.Reason)
+	case PlatformPreview:
+		return fmt.Sprintf("connector %s is preview on %s: %s", name, goos, support.Reason), nil
+	default:
+		return "", nil
+	}
+}
+
+// CheckPlatformSupportOnHost applies CheckPlatformSupport to runtime.GOOS.
+func CheckPlatformSupportOnHost(name string) (string, error) {
+	return CheckPlatformSupport(name, runtime.GOOS)
+}
+
 // validateConnectorSupportedOnOS returns the clear setup error used by direct
 // connector lifecycle calls. It is injectable by OS for focused tests.
 func validateConnectorSupportedOnOS(name, goos string) error {
-	support := ConnectorSupportOnOS(name, goos)
-	if support.Status != PlatformUnsupported {
-		return nil
-	}
-	return fmt.Errorf("connector %q is not supported on %s: %s", name, goos, support.Reason)
+	_, err := CheckPlatformSupport(name, goos)
+	return err
 }
 
 func errConnectorUnsupportedOnOS(name, goos string) error {

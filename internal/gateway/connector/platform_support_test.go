@@ -145,6 +145,26 @@ func TestValidateConnectorSupportedOnOS(t *testing.T) {
 	}
 }
 
+func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
+	warning, err := CheckPlatformSupport("hermes", "windows")
+	if err != nil {
+		t.Fatalf("preview support error = %v", err)
+	}
+	wantWarning := "connector hermes is preview on windows: " + windowsConnectorSupport["hermes"].Reason
+	if warning != wantWarning {
+		t.Fatalf("preview warning = %q, want %q", warning, wantWarning)
+	}
+
+	warning, err = CheckPlatformSupport("openhands", "windows")
+	if warning != "" {
+		t.Fatalf("unsupported warning = %q, want empty", warning)
+	}
+	wantError := "connector \"openhands\" is not supported on windows: " + windowsConnectorSupport["openhands"].Reason
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("unsupported error = %v, want %q", err, wantError)
+	}
+}
+
 func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
 	reg := NewDefaultRegistry()
 	var got []string

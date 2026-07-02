@@ -40,6 +40,49 @@ func splitHostPort(t *testing.T, rawURL string) (string, int) {
 	return host, port
 }
 
+func TestGatewayBindHostIsSharedAcrossStatusEndpoints(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want string
+	}{
+		{name: "nil config", cfg: nil, want: "127.0.0.1"},
+		{
+			name: "explicit API bind wins",
+			cfg: &config.Config{
+				Gateway:   config.GatewayConfig{APIBind: "192.0.2.10"},
+				Guardrail: config.GuardrailConfig{Host: "192.0.2.20"},
+				OpenShell: config.OpenShellConfig{Mode: "standalone"},
+			},
+			want: "192.0.2.10",
+		},
+		{
+			name: "standalone guardrail host",
+			cfg: &config.Config{
+				Guardrail: config.GuardrailConfig{Host: "192.0.2.20"},
+				OpenShell: config.OpenShellConfig{Mode: "standalone"},
+			},
+			want: "192.0.2.20",
+		},
+		{
+			name: "localhost guardrail keeps loopback",
+			cfg: &config.Config{
+				Guardrail: config.GuardrailConfig{Host: "localhost"},
+				OpenShell: config.OpenShellConfig{Mode: "standalone"},
+			},
+			want: "127.0.0.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := gatewayBindHost(tt.cfg); got != tt.want {
+				t.Fatalf("gatewayBindHost() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // captureStdout runs fn and returns everything it wrote to os.Stdout.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()

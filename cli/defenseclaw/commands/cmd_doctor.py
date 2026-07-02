@@ -742,7 +742,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
         except (json.JSONDecodeError, TypeError):
-            _emit("warn", "Sidecar health JSON", "could not parse /health response", r=r)
+            detail = body if body.startswith("response exceeds") else "could not parse /health response"
+            _emit("warn", "Sidecar health JSON", detail, r=r)
     else:
         _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
 
