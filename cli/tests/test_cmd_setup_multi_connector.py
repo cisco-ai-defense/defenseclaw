@@ -241,10 +241,10 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.app.cfg.guardrail.connector = sorted(connectors)[0]
         self.app.cfg.claw.mode = sorted(connectors)[0]
 
-    def _capture_summary(self, connector):
+    def _capture_summary(self, connector, *, os_name=None):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            _print_observability_summary(connector, self.app.cfg, mode="observe")
+            _print_observability_summary(connector, self.app.cfg, mode="observe", os_name=os_name)
         return buf.getvalue()
 
     def test_multi_connector_summary_lists_all_peers_without_primary(self):
@@ -269,6 +269,29 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertNotIn("guardrail.mode:", out)
         self.assertNotIn("connectors:", out)
         self.assertNotIn("primary:", out)
+
+    def test_windows_summary_uses_native_powershell_and_cli_filtering(self):
+        self._seed_map("claudecode")
+
+        out = self._capture_summary("claudecode", os_name="nt")
+
+        self.assertIn("Get-Content -LiteralPath", out)
+        self.assertIn("-Wait", out)
+        self.assertIn("ConvertFrom-Json", out)
+        self.assertIn("defenseclaw alerts --limit 25 --connector claudecode", out)
+        self.assertNotIn("tail -f", out)
+        self.assertNotIn("| jq", out)
+        self.assertNotIn("Bash", out)
+        self.assertNotIn("WSL", out)
+
+    def test_posix_summary_retains_unix_guidance(self):
+        self._seed_map("claudecode")
+
+        out = self._capture_summary("claudecode", os_name="posix")
+
+        self.assertIn("tail -f ~/.defenseclaw/gateway.jsonl | jq", out)
+        self.assertIn("jq 'select(.connector == \"claudecode\")'", out)
+        self.assertNotIn("Get-Content -LiteralPath", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):

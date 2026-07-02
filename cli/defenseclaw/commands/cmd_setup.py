@@ -4937,7 +4937,41 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo()
 
 
-def _print_observability_summary(connector: str, cfg=None, *, mode: str = "observe") -> None:
+def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -> None:
+    """Print platform-appropriate commands for inspecting connector activity."""
+    if os_name is None:
+        os_name = os.name
+
+    click.echo("  Next steps:")
+    click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
+    click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
+    if os_name == "nt":
+        click.echo("    • Watch decisions live: defenseclaw tui")
+        click.echo(
+            "      Or in PowerShell: Get-Content -LiteralPath "
+            "(Join-Path $HOME '.defenseclaw\\gateway.jsonl') -Wait | "
+            "ForEach-Object { $_ | ConvertFrom-Json }"
+        )
+        click.echo(
+            f"    • Recent alerts for this connector: "
+            f"defenseclaw alerts --limit 25 --connector {connector}"
+        )
+        return
+
+    click.echo("    • Watch decisions live: defenseclaw tui  (or: tail -f ~/.defenseclaw/gateway.jsonl | jq)")
+    click.echo(
+        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
+        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
+    )
+
+
+def _print_observability_summary(
+    connector: str,
+    cfg=None,
+    *,
+    mode: str = "observe",
+    os_name: str | None = None,
+) -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
     if connector == "omnigent":
@@ -4990,14 +5024,7 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     click.echo()
     print_redaction_status_hint(cfg)
     click.echo()
-    click.echo("  Next steps:")
-    click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
-    click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
-    click.echo("    • Watch decisions live: defenseclaw tui  (or: tail -f ~/.defenseclaw/gateway.jsonl | jq)")
-    click.echo(
-        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
-        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
-    )
+    _print_connector_next_steps(connector, os_name=os_name)
     if multi:
         click.echo(f"    • Change this connector's mode: defenseclaw setup {connector} --mode observe|action")
     click.echo()
