@@ -456,22 +456,23 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	if name == "" || presented == "" {
 		return false
 	}
-	a.hookAPITokenMu.RLock()
-	cached := ""
-	if a.hookAPITokens != nil {
-		cached = a.hookAPITokens[name]
-	}
-	a.hookAPITokenMu.RUnlock()
-	if cached != "" && constantTimeStringMatch(presented, cached) {
-		return true
-	}
-
 	dataDir := a.configDataDir()
 	if dataDir == "" {
-		return false
+		a.hookAPITokenMu.RLock()
+		cached := ""
+		if a.hookAPITokens != nil {
+			cached = a.hookAPITokens[name]
+		}
+		a.hookAPITokenMu.RUnlock()
+		return cached != "" && constantTimeStringMatch(presented, cached)
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
 	if err != nil || tok == "" {
+		a.hookAPITokenMu.Lock()
+		if a.hookAPITokens != nil {
+			delete(a.hookAPITokens, name)
+		}
+		a.hookAPITokenMu.Unlock()
 		return false
 	}
 	a.hookAPITokenMu.Lock()
