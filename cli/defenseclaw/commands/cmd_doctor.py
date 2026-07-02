@@ -1340,6 +1340,39 @@ def _powershell_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _normalized_real_path(path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(path))))
+
+
+def _cursor_managed_adapter_paths(cfg) -> set[str]:
+    """Return managed Cursor PowerShell adapters Doctor is allowed to execute."""
+    expected: set[str] = set()
+    for path in _hook_runtime_paths_from_lock(cfg, "cursor"):
+        if os.path.basename(path).lower() == "cursor-hook.ps1":
+            expected.add(_normalized_real_path(path))
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if data_dir:
+        expected.add(_normalized_real_path(os.path.join(data_dir, "hooks", "cursor-hook.ps1")))
+    return expected
+
+
+def _cursor_adapter_trust_error(cfg, resolved: str) -> str | None:
+    if os.path.islink(resolved):
+        return f"configured Cursor Windows adapter is a symlink: {resolved}"
+    expected = _cursor_managed_adapter_paths(cfg)
+    if _normalized_real_path(resolved) not in expected:
+        if expected:
+            return (
+                "configured Cursor Windows adapter is outside the managed DefenseClaw hook path: "
+                f"{resolved}; run `defenseclaw setup cursor` to repair Cursor hooks"
+            )
+        return (
+            "cannot verify configured Cursor Windows adapter against hook_contract_lock.json; "
+            "run `defenseclaw setup cursor` before probing the adapter"
+        )
+    return None
+
+
 def _cursor_health_row(document: str) -> dict[str, object] | None:
     try:
         parsed = json.loads(document)
@@ -1562,6 +1595,11 @@ def _check_cursor_configured_runtime(
     if not resolved or not os.path.isfile(resolved):
         _emit("fail", label, f"configured Cursor hook runtime is missing: {target}", r=r)
         return
+    if windows_adapter:
+        trust_error = _cursor_adapter_trust_error(cfg, resolved)
+        if trust_error is not None:
+            _emit("fail", label, trust_error, r=r)
+            return
     adapter_markers = (
         "defenseclaw-managed-hook v8",
         "--input-file",
