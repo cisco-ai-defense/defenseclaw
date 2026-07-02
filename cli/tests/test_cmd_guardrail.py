@@ -825,6 +825,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertNotIn("nothing to do", result.output)
+        self.assertIn("closed → open", result.output)
+        self.assertNotIn("open → open", result.output)
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
         app.cfg.save.assert_called_once()
 

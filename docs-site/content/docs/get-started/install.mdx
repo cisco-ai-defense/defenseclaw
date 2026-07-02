@@ -63,7 +63,7 @@ defenseclaw quickstart --connector codex
 <Tab value="Windows PowerShell">
 
 ```powershell
-$Version = "<release-version>"
+$Version = "0.8.3"
 $Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"
 $InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
 Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
@@ -76,7 +76,7 @@ The PowerShell installer downloads the Windows release ZIP for your architecture
 For non-interactive demos or CI, download the script and pass flags directly:
 
 ```powershell
-$Version = "<release-version>"
+$Version = "0.8.3"
 $Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"
 $InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
 Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing

@@ -24,6 +24,7 @@ end {
     $hook = '{{.HookBinaryPS}}'
     $payloadPath = Join-Path $PSScriptRoot (".cursor-input-" + [Guid]::NewGuid().ToString("N") + ".json")
     $exitCode = 2
+    $responseWritten = $false
     try {
         if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
             throw "DefenseClaw hook launcher is missing: $hook"
@@ -64,12 +65,26 @@ end {
             }
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
-            $process.WaitForExit()
+            $timeoutMs = {{.HookTimeoutMS}}
+            if (-not $process.WaitForExit($timeoutMs)) {
+                try {
+                    $process.Kill()
+                    [void]$process.WaitForExit(5000)
+                }
+                catch {
+                    [Console]::Error.WriteLine(
+                        "defenseclaw: could not stop timed-out Cursor hook launcher: " + $_.Exception.Message
+                    )
+                }
+                throw "DefenseClaw hook launcher timed out after ${timeoutMs}ms"
+            }
             $stdout = $stdoutTask.GetAwaiter().GetResult()
             $stderr = $stderrTask.GetAwaiter().GetResult()
-            if ($stdout.Length -gt 0) {
-                [Console]::Out.Write($stdout)
+            if ($stdout.Length -eq 0) {
+                throw "DefenseClaw hook launcher returned no response"
             }
+            [Console]::Out.Write($stdout)
+            $responseWritten = $true
             if ($stderr.Length -gt 0) {
                 [Console]::Error.Write($stderr)
             }
@@ -81,9 +96,22 @@ end {
     }
     catch {
         [Console]::Error.WriteLine("defenseclaw: Cursor hook adapter failed: " + $_.Exception.Message)
+        if (-not $responseWritten) {
+            [Console]::Out.Write('{"continue":true}')
+        }
+        $exitCode = 0
     }
     finally {
-        Remove-Item -LiteralPath $payloadPath -Force -ErrorAction SilentlyContinue
+        try {
+            if (Test-Path -LiteralPath $payloadPath) {
+                Remove-Item -LiteralPath $payloadPath -Force -ErrorAction Stop
+            }
+        }
+        catch {
+            [Console]::Error.WriteLine(
+                "defenseclaw: could not remove temporary Cursor payload: " + $_.Exception.Message
+            )
+        }
     }
     exit $exitCode
 }

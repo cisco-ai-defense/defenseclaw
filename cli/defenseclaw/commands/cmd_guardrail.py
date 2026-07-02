@@ -961,7 +961,7 @@ def _set_connector_fail_mode(
 
     click.echo()
     click.echo(
-        f"  {ux.bold(f'Changing {label} hook fail mode:')} {current} "
+        f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} "
         f"{ux.dim('→')} {ux.accent(mode)}"
     )
     if mode == "closed":

@@ -64,6 +64,8 @@ from defenseclaw.inventory.claw_inventory import (
 )
 from defenseclaw.models import ActionEntry
 
+from tests.helpers import seed_cached_plugin
+
 # ---------------------------------------------------------------------------
 # Fixtures — canonical JSON payloads returned by ``openclaw … --json``
 # ---------------------------------------------------------------------------
@@ -2399,26 +2401,16 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         cache = os.path.join(plugin_root, "cache")
         _seed_plugin(plugin_root, "clean-plugin", manifest="plugin.json")
 
-        def seed(registry: str, name: str, version: str) -> str:
-            root = os.path.join(cache, registry, name, version)
-            manifest_dir = os.path.join(root, ".codex-plugin")
-            os.makedirs(manifest_dir, exist_ok=True)
-            with open(
-                os.path.join(manifest_dir, "plugin.json"),
-                "w",
-                encoding="utf-8",
-            ) as handle:
-                json.dump({
-                    "name": name,
-                    "version": version,
-                    "description": f"{name} plugin",
-                }, handle)
-            return root
-
-        browser = seed("openai-bundled", "browser", "2.0.0")
-        sites = seed("openai-bundled", "sites", "1.2.0")
-        seed("openai-curated-remote", "sites", "9.0.0")
-        github = seed("openai-curated-remote", "github", "0.2.0")
+        browser = seed_cached_plugin(
+            cache, "openai-bundled", "browser", "2.0.0"
+        )
+        sites = seed_cached_plugin(
+            cache, "openai-bundled", "sites", "1.2.0"
+        )
+        seed_cached_plugin(cache, "openai-curated-remote", "sites", "9.0.0")
+        github = seed_cached_plugin(
+            cache, "openai-curated-remote", "github", "0.2.0"
+        )
         os.makedirs(codex_home, exist_ok=True)
         with open(
             os.path.join(codex_home, "config.toml"),

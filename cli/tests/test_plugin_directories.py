@@ -16,30 +16,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from defenseclaw.inventory.plugin_directories import discover_plugin_directories
 
-
-def _seed_cached_plugin(
-    cache: Path,
-    registry: str,
-    name: str,
-    version: str,
-) -> Path:
-    root = cache / registry / name / version
-    manifest = root / ".codex-plugin" / "plugin.json"
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text(
-        json.dumps({
-            "name": name,
-            "version": version,
-            "description": f"{name} plugin",
-        }),
-        encoding="utf-8",
-    )
-    return root
+from tests.helpers import seed_cached_plugin
 
 
 def test_codex_cache_discovers_manifests_uses_activation_and_deduplicates(
@@ -47,24 +28,18 @@ def test_codex_cache_discovers_manifests_uses_activation_and_deduplicates(
 ) -> None:
     codex_home = tmp_path / ".codex"
     cache = codex_home / "plugins" / "cache"
-    browser = _seed_cached_plugin(cache, "openai-bundled", "browser", "2.0.0")
-    sites_active = _seed_cached_plugin(cache, "openai-bundled", "sites", "1.2.0")
-    _seed_cached_plugin(cache, "openai-curated-remote", "sites", "9.0.0")
-    github_old = _seed_cached_plugin(
-        cache, "openai-curated-remote", "github", "0.1.0"
-    )
-    github_new = _seed_cached_plugin(
-        cache, "openai-curated-remote", "github", "0.2.0"
-    )
+    browser = seed_cached_plugin(cache, "openai-bundled", "browser", "2.0.0")
+    sites_active = seed_cached_plugin(cache, "openai-bundled", "sites", "1.2.0")
+    seed_cached_plugin(cache, "openai-curated-remote", "sites", "9.0.0")
+    github_old = seed_cached_plugin(cache, "openai-curated-remote", "github", "0.1.0")
+    github_new = seed_cached_plugin(cache, "openai-curated-remote", "github", "0.2.0")
     (codex_home / "config.toml").write_text(
-        "[plugins.'browser@openai-bundled']\n"
-        "enabled = true\n"
-        "[plugins.'sites@openai-bundled']\n"
-        "enabled = true\n",
+        "[plugins.'browser@openai-bundled']\nenabled = true\n[plugins.'sites@openai-bundled']\nenabled = true\n",
         encoding="utf-8",
     )
 
     entries = discover_plugin_directories(str(cache), connector="codex")
+    assert len(entries) == 3
     by_id = {entry.id: entry for entry in entries}
 
     assert set(by_id) == {"browser", "github", "sites"}
@@ -88,6 +63,4 @@ def test_regular_plugin_root_still_returns_immediate_plugins(tmp_path: Path) -> 
 
     entries = discover_plugin_directories(str(root), connector="codex")
 
-    assert [(entry.id, entry.path) for entry in entries] == [
-        ("real-plugin", str(root / "real-plugin"))
-    ]
+    assert [(entry.id, entry.path) for entry in entries] == [("real-plugin", str(root / "real-plugin"))]

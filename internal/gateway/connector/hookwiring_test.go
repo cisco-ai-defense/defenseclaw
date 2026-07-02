@@ -433,9 +433,21 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read Cursor Windows adapter: %v", err)
 				}
-				if !strings.Contains(string(adapter), windowsHookBinaryName) ||
-					!strings.Contains(string(adapter), "--input-file") {
+				adapterText := string(adapter)
+				if !strings.Contains(adapterText, windowsHookBinaryName) ||
+					!strings.Contains(adapterText, "--input-file") {
 					t.Errorf("Cursor adapter does not invoke the native launcher through --input-file:\n%s", adapter)
+				}
+				for _, marker := range []string{
+					"$timeoutMs = 10000",
+					"WaitForExit($timeoutMs)",
+					"$process.Kill()",
+					`{"continue":true}`,
+					"could not remove temporary Cursor payload",
+				} {
+					if !strings.Contains(adapterText, marker) {
+						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
+					}
 				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {

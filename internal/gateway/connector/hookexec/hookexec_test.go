@@ -370,6 +370,9 @@ func TestOversizedPayload(t *testing.T) {
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times on oversized payload, want 0", rt.requests)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
 	})
 
 	cases := map[string]struct {
@@ -413,6 +416,9 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
 	})
 
 	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
@@ -454,6 +460,9 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{status: 401, body: "unauthorized"}, nil)
 		if r.code != 0 {
 			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
 		}
 	})
 
@@ -515,6 +524,9 @@ func TestMissingToken(t *testing.T) {
 		}
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times, want 0", rt.requests)
+		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
 		}
 	})
 
@@ -681,24 +693,42 @@ func TestInvalidTraceparentDropped(t *testing.T) {
 
 // --- DEFENSECLAW_HOME guard ---
 
-func TestDisabledHomeIsNoop(t *testing.T) {
-	rt := ok(`{"action":"block","reason":"x"}`)
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var out, errb bytes.Buffer
-	code := Run(context.Background(), Options{
-		Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
-		HookDir: filepath.Join(home, "hooks"), Token: "t",
-		Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
-		HTTPClient: &http.Client{Transport: rt},
-	})
-	if code != 0 {
-		t.Fatalf("code = %d, want 0 when .disabled present", code)
-	}
-	if rt.requests != 0 {
-		t.Fatalf("gateway called %d times despite .disabled", rt.requests)
+func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		home func(t *testing.T) string
+	}{
+		{name: "disabled", home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "missing", home: func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := ok(`{"action":"block","reason":"x"}`)
+			var out, errb bytes.Buffer
+			home := tc.home(t)
+			code := Run(context.Background(), Options{
+				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
+				HookDir: filepath.Join(home, "hooks"), Token: "t",
+				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
+				HTTPClient: &http.Client{Transport: rt},
+			})
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
+			}
+			if rt.requests != 0 {
+				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			}
+			if out.String() != "" {
+				t.Fatalf("stdout = %q, want empty for non-Cursor no-op", out.String())
+			}
+		})
 	}
 }
 

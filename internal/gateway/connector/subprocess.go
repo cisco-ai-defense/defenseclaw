@@ -51,6 +51,7 @@ type templateData struct {
 	ScopedToken   bool
 	ConnectorName string
 	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS int    // Cursor adapter child timeout; zero for templates that do not use it
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -72,6 +73,12 @@ type templateData struct {
 // runtime, or through the per-connector setup flow (which also
 // persists to guardrail.hook_fail_mode in config.yaml).
 const defaultHookFailMode = "closed"
+
+// cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
+// request budget while staying inside Cursor's 30-second command-hook timeout.
+// Keeping the adapter bound shorter than the vendor timeout gives it time to
+// terminate the launcher, remove the temporary payload, and emit fail-open JSON.
+const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
@@ -468,6 +475,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		ScopedToken:   scopedToken,
 		ConnectorName: strings.ToLower(strings.TrimSpace(connectorName)),
 		HookBinaryPS:  strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookTimeoutMS: cursorAdapterTimeoutMS,
 	}
 
 	scripts := hookScriptNamesFromExtras(extras)
