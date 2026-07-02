@@ -1,13 +1,16 @@
 import type { CSSProperties } from 'react';
 import matrix from '@/data/capability-matrix.json';
-import { connectorIconDefinitions } from '@/data/connector-icons';
+import {
+  connectorIconDefinitions,
+  type ConnectorIconDefinition,
+} from '@/data/connector-icons';
 
 type ConnectorBrandSize = 'sm' | 'md';
 
 // These filenames are intentionally connector IDs. The source SVGs live in
 // public/connector-icons and are copied from LobeHub's official static package
 // so the exported docs never depend on a third-party CDN.
-const OFFICIAL_ICONS = connectorIconDefinitions;
+const OFFICIAL_ICONS: Partial<Record<string, ConnectorIconDefinition>> = connectorIconDefinitions;
 
 const FALLBACKS: Record<string, { initials: string; color: string }> = {
   zeptoclaw: { initials: 'ZC', color: '#7c5ce7' },

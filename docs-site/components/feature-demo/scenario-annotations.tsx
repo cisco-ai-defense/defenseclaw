@@ -46,7 +46,10 @@ export function ScenarioAnnotations({
 
     const stageRect = stage.getBoundingClientRect();
     const codeRect = stage.querySelector<HTMLElement>('.scenario-code-scroll')?.getBoundingClientRect();
-    if (!codeRect) return;
+    if (!codeRect) {
+      setGeometry({ width: 0, height: 0, connectors: [] });
+      return;
+    }
 
     const highlights = Array.from(
       stage.querySelectorAll<HTMLElement>('[data-scenario-highlight-index]'),
@@ -56,7 +59,8 @@ export function ScenarioAnnotations({
     );
 
     const connectors = evidence.flatMap((item, evidenceIndex): ConnectorGeometry[] => {
-      const highlightIndex = evidenceHighlightIndex(evidenceIndex, highlightCount);
+      const resolvedEvidenceIndex = Number(item.dataset.scenarioEvidenceIndex ?? evidenceIndex);
+      const highlightIndex = evidenceHighlightIndex(resolvedEvidenceIndex, highlightCount);
       const lines = highlights.filter(
         (line) => Number(line.dataset.scenarioHighlightIndex) === highlightIndex,
       );

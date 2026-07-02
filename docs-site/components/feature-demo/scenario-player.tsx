@@ -114,11 +114,11 @@ export function ScenarioPlayer({
   }, []);
 
   return (
-    <section ref={rootRef} className={`feature-demo${className ? ` ${className}` : ''}`} aria-labelledby={`${scenario.id}-title`}>
+    <section ref={rootRef} className={`feature-demo${className ? ` ${className}` : ''}`} aria-labelledby={`${instanceId}-title`}>
       <header className="scenario-header">
         <div>
           <p className="scenario-eyebrow"><ShieldCheck aria-hidden />{scenario.syntheticDataNotice}</p>
-          <h2 id={`${scenario.id}-title`}>{scenario.title}</h2>
+          <h2 id={`${instanceId}-title`}>{scenario.title}</h2>
           <p>{scenario.summary}</p>
         </div>
         <div className="scenario-status"><span aria-hidden />Deterministic</div>
