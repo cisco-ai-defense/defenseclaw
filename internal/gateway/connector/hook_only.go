@@ -1686,10 +1686,9 @@ var antigravityLifecycleEvents = []string{
 // tokenizes the command itself and passes quote characters through to direct
 // exec, so shell quoting becomes literal path bytes and the hook silently
 // no-fires (verified empirically via the v0.5.0 Antigravity smoke test). On
-// Unix hookScript is the bare absolute .sh path. On Windows it is the PATH-
-// resolved `defenseclaw-gateway.exe hook --connector antigravity` command;
-// using the stable executable name avoids an unquotable absolute install path
-// containing spaces while retaining the native Go hook path.
+// Unix hookScript is the bare absolute .sh path. On Windows it is the managed
+// no-console hook launcher path without shell quotes, because Antigravity
+// direct-execs the command string and does not dequote executable paths.
 func patchAntigravityHooks(path, hookScript string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {

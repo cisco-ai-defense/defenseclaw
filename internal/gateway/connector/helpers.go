@@ -133,13 +133,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 		return windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + connector
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
-	// characters through to direct exec. An absolute path containing spaces
-	// therefore cannot be quoted safely in its command field. The Windows
-	// installer adds the hook directory to PATH, so use the stable binary
-	// name for this one direct-exec surface. Other agents accept a normal
-	// quoted Windows command line and keep the absolute path.
+	// characters through to direct exec. Write the managed launcher path
+	// without shell quoting so Antigravity does not resolve a bare
+	// defenseclaw-hook.exe through the workspace current directory.
 	if connector == "antigravity" {
-		return windowsHookBinaryName + " " + nativeHookFlag + connector
+		return defenseclawHookBinary() + " " + nativeHookFlag + connector
 	}
 	return windowsQuoteExe(defenseclawHookBinary()) + " " + nativeHookFlag + connector
 }
