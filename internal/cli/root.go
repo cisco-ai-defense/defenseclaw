@@ -51,6 +51,59 @@ func SetBuildInfo(commit, date string) {
 	)
 }
 
+func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	// Load the data-dir .env BEFORE config.Load() so that
+	// token_env-style references in audit_sinks (e.g.
+	// SplunkHECSinkConfig.TokenEnv → os.Getenv) can resolve against
+	// secrets persisted by `defenseclaw setup` / `defenseclaw init`.
+	// config.Load() validates each sink at startup, and the sidecar
+	// daemon runs without the user's interactive shell environment,
+	// so reading .env first is what makes token_env usable at all.
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+
+	var err error
+	cfg, err = config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load config — run 'defenseclaw init' first: %w", err)
+	}
+	// Apply the persisted redaction kill-switch BEFORE any
+	// audit-store / telemetry init so even the very first
+	// log lines emitted during startup honor the operator's
+	// choice. The setter is idempotent and atomic, so a TUI
+	// that flips the flag at runtime can call it directly
+	// without restarting the sidecar — but the canonical
+	// surface is this startup wiring, so a config + restart
+	// gives the same effect with a clearer audit trail.
+	applyPrivacyConfig(cfg)
+	version.SetBinaryVersion(appVersion)
+
+	auditStore, err = audit.NewStore(cfg.AuditDB)
+	if err != nil {
+		return fmt.Errorf("failed to open audit store: %w", err)
+	}
+	if err := auditStore.Init(); err != nil {
+		return fmt.Errorf("failed to init audit store: %w", err)
+	}
+
+	auditLog = audit.NewLogger(auditStore)
+
+	// Register the sliding-window correlator so EmitScanResult
+	// runs it against every persisted scan's session window.
+	// A failure to load the embedded pattern set logs to stderr
+	// and leaves correlation disabled — the rest of the guardrail
+	// stack is unaffected.
+	installCorrelator(auditStore, os.Stderr)
+
+	// Re-run with the resolved data dir in case DEFENSECLAW_HOME
+	// redirected it; second call is a no-op when paths match.
+	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+		loadDotEnvIntoOS(resolved)
+	}
+	initAuditSinks()
+	initOTelProvider()
+	return nil
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "defenseclaw-gateway",
 	Short: "DefenseClaw gateway sidecar daemon",
@@ -59,58 +112,7 @@ monitors tool_call and tool_result events, enforces policy in real time,
 and exposes a local REST API for the Python CLI.
 
 Run without arguments to start the sidecar daemon.`,
-	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-		// Load the data-dir .env BEFORE config.Load() so that
-		// token_env-style references in audit_sinks (e.g.
-		// SplunkHECSinkConfig.TokenEnv → os.Getenv) can resolve against
-		// secrets persisted by `defenseclaw setup` / `defenseclaw init`.
-		// config.Load() validates each sink at startup, and the sidecar
-		// daemon runs without the user's interactive shell environment,
-		// so reading .env first is what makes token_env usable at all.
-		loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
-
-		var err error
-		cfg, err = config.Load()
-		if err != nil {
-			return fmt.Errorf("failed to load config — run 'defenseclaw init' first: %w", err)
-		}
-		// Apply the persisted redaction kill-switch BEFORE any
-		// audit-store / telemetry init so even the very first
-		// log lines emitted during startup honor the operator's
-		// choice. The setter is idempotent and atomic, so a TUI
-		// that flips the flag at runtime can call it directly
-		// without restarting the sidecar — but the canonical
-		// surface is this startup wiring, so a config + restart
-		// gives the same effect with a clearer audit trail.
-		applyPrivacyConfig(cfg)
-		version.SetBinaryVersion(appVersion)
-
-		auditStore, err = audit.NewStore(cfg.AuditDB)
-		if err != nil {
-			return fmt.Errorf("failed to open audit store: %w", err)
-		}
-		if err := auditStore.Init(); err != nil {
-			return fmt.Errorf("failed to init audit store: %w", err)
-		}
-
-		auditLog = audit.NewLogger(auditStore)
-
-		// Register the sliding-window correlator so EmitScanResult
-		// runs it against every persisted scan's session window.
-		// A failure to load the embedded pattern set logs to stderr
-		// and leaves correlation disabled — the rest of the guardrail
-		// stack is unaffected.
-		installCorrelator(auditStore, os.Stderr)
-
-		// Re-run with the resolved data dir in case DEFENSECLAW_HOME
-		// redirected it; second call is a no-op when paths match.
-		if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
-			loadDotEnvIntoOS(resolved)
-		}
-		initAuditSinks()
-		initOTelProvider()
-		return nil
-	},
+	PersistentPreRunE: rootPersistentPreRunE,
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 		if otelProvider != nil {
 			if err := otelProvider.Shutdown(context.Background()); err != nil && !isTransientOTelShutdownError(err) {
