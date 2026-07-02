@@ -39,22 +39,32 @@ unparseable config and managed-mode writes remain administrator-gated.
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import os
 import socket
 import ssl
+import stat
+import tempfile
 import urllib.error
 import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
 import click
+import yaml
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
-from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
+from defenseclaw.config import (
+    _assert_config_write_allowed,
+    config_path_for_data_dir,
+    locked_config_yaml,
+    write_config_yaml_secure,
+)
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.observability import (
     PRESETS,
     Destination,
@@ -1210,11 +1220,46 @@ def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
     """Compatibility wrapper around the authoritative secure config writer.
 
     Older callers and the F-0186 regression test import this private helper.
-    Keeping the shim avoids splitting atomic-write behavior while ensuring all
-    writes use the managed-mode authorization and mode-preservation checks in
-    :func:`write_config_yaml_secure`.
+    Keep current main's managed-mode authorization and existing POSIX mode
+    preservation while applying the native Windows owner-only DACL before any
+    secret-bearing bytes are written.
     """
-    write_config_yaml_secure(cfg_path, raw)
+    _assert_config_write_allowed(cfg_path, raw)
+    directory = os.path.dirname(cfg_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    target_mode = 0o600
+    if os.name != "nt":
+        try:
+            existing_mode = stat.S_IMODE(os.stat(cfg_path).st_mode)
+        except OSError:
+            existing_mode = None
+        if existing_mode is not None and existing_mode != 0o600:
+            target_mode = existing_mode & 0o600
+            if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
+                target_mode = 0o640
+            elif target_mode == 0:
+                target_mode = 0o600
+
+    fd = -1
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
+        set_file_mode(fd, tmp, target_mode)
+        stream = os.fdopen(fd, "w")
+        fd = -1
+        with stream as f:
+            yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, cfg_path)
+        tmp = ""
+    finally:
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 # ---------------------------------------------------------------------------

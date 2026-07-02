@@ -51,6 +51,7 @@ import click
 import yaml
 
 from defenseclaw import ux
+from defenseclaw.file_permissions import copy_windows_dacl, set_file_mode
 
 
 def _ver_tuple(v: str) -> tuple[int, ...]:
@@ -1050,7 +1051,10 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
-        os.fchmod(fd, effective_mode)
+        if os.name == "nt" and mode > 0o600 and os.path.exists(path):
+            copy_windows_dacl(path, tmp_path)
+        else:
+            set_file_mode(fd, tmp_path, effective_mode)
         # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
         # translation), so a caller that preserved a file's CRLF endings
         # does not get them doubled to \r\r\n on Windows.

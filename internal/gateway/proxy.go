@@ -3977,6 +3977,18 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: %q not in registry — ignoring\n", newName)
 		return
 	}
+	warning, supportErr := connector.CheckPlatformSupportOnHost(newName)
+	if supportErr != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"[guardrail] runtime connector switch: %s\n",
+			strings.TrimPrefix(supportErr.Error(), "connector "),
+		)
+		return
+	}
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %s\n", warning)
+	}
 
 	ctx := context.Background()
 	oldConn := p.connector

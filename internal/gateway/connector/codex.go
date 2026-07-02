@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -180,8 +181,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 			if codexOtelBlockLooksManaged(cfg["otel"], opts) {
 				residual = append(residual, "config.toml [otel] still points at defenseclaw")
 			}
-			managedNotify := []interface{}{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
-			if codexValueMatches(cfg["notify"], managedNotify) {
+			if codexNotifyLooksManaged(cfg["notify"], opts) {
 				residual = append(residual, "config.toml notify still points at defenseclaw bridge")
 			}
 		}
@@ -707,16 +707,22 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	// gateway.jsonl with source="codex_otel".
 	cfg["otel"] = buildCodexOtelBlock(opts)
 
-	// agent-turn-complete bridge: codex shells out to ``notify`` with
-	// a JSON payload describing each completed turn. We point it at a
-	// per-instance bash bridge that POSTs to /api/v1/codex/notify.
-	// Runs on every install — the bridge is harmless when the
-	// endpoint isn't yet wired (curl --fail-with-body silently drops
-	// the event rather than crashing codex).
-	if err := writeCodexNotifyBridge(opts); err != nil {
-		return fmt.Errorf("write codex notify bridge: %w", err)
+	// agent-turn-complete bridge: Codex appends one JSON payload argument to
+	// this argv array. Windows invokes the installed no-console hook launcher;
+	// Unix keeps the existing Bash bridge. The native form is an
+	// argv array rather than a command string, so paths containing spaces need
+	// no shell quoting and no Bash/jq/curl dependency is introduced.
+	if runtime.GOOS == "windows" {
+		cfg["notify"] = codexNativeNotifyCommand()
+		// Heal a bridge left by an older Windows setup. It is no longer
+		// referenced and contains a baked gateway token.
+		_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
+	} else {
+		if err := writeCodexNotifyBridge(opts); err != nil {
+			return fmt.Errorf("write codex notify bridge: %w", err)
+		}
+		cfg["notify"] = codexShellNotifyCommand(opts)
 	}
-	cfg["notify"] = []string{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
 
 	if !backupExists {
 		if err := c.saveConfigBackup(opts.DataDir, backup); err != nil {
@@ -952,6 +958,40 @@ func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
 	return block
 }
 
+func codexNativeNotifyCommand() []string {
+	return []string{defenseclawHookBinary(), "notify"}
+}
+
+func codexShellNotifyCommand(opts SetupOpts) []string {
+	return []string{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
+}
+
+// codexNotifyLooksManaged recognizes both the current platform command and the
+// legacy Bash bridge. Native matching is strict on argv shape and DefenseClaw
+// executable basename so teardown never removes an unrelated user notifier
+// that happens to contain the word "notify".
+func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
+	if codexValueMatches(v, codexShellNotifyCommand(opts)) {
+		return true
+	}
+	var argv []string
+	switch list := v.(type) {
+	case []string:
+		argv = append(argv, list...)
+	case []interface{}:
+		for _, raw := range list {
+			s, ok := raw.(string)
+			if !ok {
+				return false
+			}
+			argv = append(argv, s)
+		}
+	default:
+		return false
+	}
+	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawHookExecutable(argv[0])
+}
+
 // writeCodexNotifyBridge writes ~/.defenseclaw/notify-bridge.sh, the
 // shell shim codex invokes on agent-turn-complete. The script POSTs
 // codex's JSON arg to /api/v1/codex/notify with the gateway token
@@ -1105,15 +1145,15 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		delete(cfg, "otel")
 	}
 
-	managedNotify := []interface{}{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
-	if codexValueMatches(cfg["notify"], managedNotify) && backup.HadNotify && len(backup.OriginalNotify) > 0 {
+	managedNotify := codexNotifyLooksManaged(cfg["notify"], opts)
+	if managedNotify && backup.HadNotify && len(backup.OriginalNotify) > 0 {
 		var orig interface{}
 		if err := json.Unmarshal(backup.OriginalNotify, &orig); err == nil {
 			cfg["notify"] = orig
 		} else {
 			delete(cfg, "notify")
 		}
-	} else if codexValueMatches(cfg["notify"], managedNotify) {
+	} else if managedNotify {
 		delete(cfg, "notify")
 	}
 

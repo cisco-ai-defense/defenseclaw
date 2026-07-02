@@ -406,7 +406,7 @@ class TestMCPScan(MCPCommandTestBase):
             catch_exceptions=False,
         )
 
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         data = json.loads(result.stdout)
         self.assertIsInstance(data, list)
         self.assertEqual(len(data), 1)
@@ -416,6 +416,36 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertEqual(row["target"], "node_repl")
         self.assertIn("connection refused", row["error"])
         self.assertEqual(row["findings"], [])
+
+    def test_invalid_package_runner_config_is_concise_and_nonzero(self):
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = lambda connector=None: [  # type: ignore[method-assign]
+            MCPServerEntry(name="broken", command="uvx", args=[], transport="stdio")
+        ]
+
+        result = self.invoke(["scan", "broken", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("launcher 'uvx' requires a package/server argument", result.output)
+        self.assertEqual(result.output.count("error: scan failed:"), 1)
+        self.assertNotIn("Traceback", result.output)
+        self.assertNotIn("ValidationError", result.output)
+        self.assertNotIn("mcpscanner.", result.output)
+
+    def test_scan_all_returns_nonzero_when_a_configured_server_errors(self):
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = lambda connector=None: [  # type: ignore[method-assign]
+            MCPServerEntry(name="broken", command="uvx", args=[], transport="stdio")
+        ]
+
+        result = self.invoke(["scan", "--all", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("errored=1", result.output)
+        self.assertNotIn("Traceback", result.output)
+        self.assertNotIn("ValidationError", result.output)
 
     def test_scan_all_connector_flag_rejects_unknown(self):
         self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
@@ -1613,12 +1643,13 @@ class TestAttachErrorHandler(unittest.TestCase):
         # The transport loggers plus the LLM analyzer's own logger, so an
         # unreachable LLM backend is captured (and surfaced as a skip
         # notice) even when its logger does not propagate.
-        self.assertEqual(len(loggers), 5)
+        self.assertEqual(len(loggers), 6)
         logger_names = [lgr.name for lgr in loggers]
         self.assertIn("mcpscanner", logger_names)
         self.assertIn("mcpscanner.core", logger_names)
         self.assertIn("mcpscanner.core.scanner", logger_names)
         self.assertIn("mcpscanner.core.analyzers.llm_analyzer", logger_names)
+        self.assertIn("mcp", logger_names)
 
         for lgr in loggers:
             self.assertIn(handler, lgr.handlers)
@@ -1668,6 +1699,29 @@ class TestAttachErrorHandler(unittest.TestCase):
         self.assertIn("error message", errors[0][1])
 
         logger.removeHandler(handler)
+
+    def test_sdk_error_capture_suppresses_exception_traceback(self):
+        import contextlib
+        import io
+        import logging
+
+        from defenseclaw.scanner.mcp import _capture_sdk_error_logs
+
+        errors: list[tuple[str, str]] = []
+        stderr = io.StringIO()
+        logger = logging.getLogger("mcp.client.stdio")
+
+        with contextlib.redirect_stderr(stderr), _capture_sdk_error_logs(errors):
+            try:
+                raise ValueError("invalid JSON-RPC payload")
+            except ValueError:
+                logger.error("Failed to parse JSONRPC message from server", exc_info=True)
+
+        self.assertEqual(
+            errors,
+            [("mcp.client.stdio", "Failed to parse JSONRPC message from server")],
+        )
+        self.assertEqual(stderr.getvalue(), "")
 
 
 if __name__ == "__main__":

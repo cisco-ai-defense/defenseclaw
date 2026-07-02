@@ -25,9 +25,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"gopkg.in/yaml.v3"
 )
@@ -434,13 +436,13 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			WritePaths:      []string{hermesConfigPath(opts)},
 			SupportsBackup:  true,
 			SupportsRestore: true,
-			Notes:           []string{"MCP servers are merged into ~/.hermes/config.yaml."},
+			Notes:           []string{"MCP servers are merged into the resolved Hermes config.yaml (HERMES_HOME or the platform default)."},
 		}
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
 			Scope:          "user",
-			ReadPaths:      []string{homePath(".hermes", "skills")},
-			WritePaths:     []string{homePath(".hermes", "skills")},
+			ReadPaths:      []string{filepath.Join(hermespath.HomeDir(), "skills")},
+			WritePaths:     []string{filepath.Join(hermespath.HomeDir(), "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 		}
@@ -970,7 +972,7 @@ func hermesConfigPath(SetupOpts) string {
 	if HermesConfigPathOverride != "" {
 		return HermesConfigPathOverride
 	}
-	return homePath(".hermes", "config.yaml")
+	return hermespath.ConfigPath()
 }
 
 // opencodePluginPath resolves the destination of DefenseClaw's bridge
@@ -1543,8 +1545,16 @@ func patchCopilotHooks(path, hookScript string) error {
 	} {
 		entry := map[string]interface{}{
 			"type":       "command",
-			"bash":       shellWord(hookScript),
 			"timeoutSec": 30,
+		}
+		if runtime.GOOS == "windows" {
+			// Copilot selects the command field by host OS. A `bash`-only
+			// entry is ignored on Windows even when its value names a native
+			// executable. PowerShell requires the call operator before a quoted
+			// executable path, otherwise the path is parsed as a string literal.
+			entry["powershell"] = "& " + hookScript
+		} else {
+			entry["bash"] = shellWord(hookScript)
 		}
 		hooks[event] = appendUniqueFlatHook(hooks[event], hookScript, entry)
 	}
@@ -1672,21 +1682,14 @@ var antigravityLifecycleEvents = []string{
 // scope antigravityLifecycleEvents to the verified-emitting
 // subset.
 //
-// The "command" field is written as a bare path WITHOUT
-// shellWord() quoting. agy v1.0.x invokes the configured command
-// via direct exec(), not through a shell, so any surrounding
-// single quotes added by shellWord() would become literal
-// characters in the exec path and the hook would silently
-// no-fire (verified empirically via the v0.5.0 antigravity smoke
-// test: D1=bare-path-OK, D2=sh -c-OK, D3=direct-exec-FAILS-127).
-// This intentionally diverges from the other patch* helpers
-// (Claude Code, Gemini CLI, OpenHands, etc.), which all run
-// through a shell and where shellWord() correctly handles
-// homedirs containing whitespace. If a future agy release
-// switches to shell invocation we should revisit and add quoting
-// back for spaces/special characters; until then, agy users with
-// paths containing whitespace need DEFENSECLAW_HOME pointed at a
-// whitespace-free directory.
+// The "command" field is written WITHOUT shellWord() quoting. agy v1.0.x
+// tokenizes the command itself and passes quote characters through to direct
+// exec, so shell quoting becomes literal path bytes and the hook silently
+// no-fires (verified empirically via the v0.5.0 Antigravity smoke test). On
+// Unix hookScript is the bare absolute .sh path. On Windows it is the PATH-
+// resolved `defenseclaw-gateway.exe hook --connector antigravity` command;
+// using the stable executable name avoids an unquotable absolute install path
+// containing spaces while retaining the native Go hook path.
 func patchAntigravityHooks(path, hookScript string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {

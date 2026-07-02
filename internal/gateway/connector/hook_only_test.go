@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -64,6 +65,46 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 				t.Fatalf("ConfigPath = %q, want basename %q", caps.ConfigPath, tc.configBase)
 			}
 		})
+	}
+}
+
+func TestHermesConfigPathHonorsHermesHomeAndExplicitOverride(t *testing.T) {
+	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	t.Setenv("HERMES_HOME", hermesHome)
+
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	if got, want := hermesConfigPath(SetupOpts{}), filepath.Join(hermesHome, "config.yaml"); got != want {
+		t.Fatalf("hermesConfigPath() = %q, want %q", got, want)
+	}
+	caps := NewHermesConnector().Capabilities(SetupOpts{})
+	if got, want := caps.Skills.ReadPaths, []string{filepath.Join(hermesHome, "skills")}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Hermes skill paths = %v, want %v", got, want)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "explicit-config.yaml")
+	HermesConfigPathOverride = explicit
+	if got := hermesConfigPath(SetupOpts{}); got != explicit {
+		t.Fatalf("HermesConfigPathOverride lost precedence: got %q, want %q", got, explicit)
+	}
+}
+
+func TestHermesConfigPathUsesWindowsLocalAppData(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows Hermes path")
+	}
+	localAppData := filepath.Join(t.TempDir(), "Local AppData")
+	t.Setenv("HERMES_HOME", "")
+	t.Setenv("LOCALAPPDATA", localAppData)
+
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	if got, want := hermesConfigPath(SetupOpts{}), filepath.Join(localAppData, "hermes", "config.yaml"); got != want {
+		t.Fatalf("hermesConfigPath() = %q, want %q", got, want)
 	}
 }
 
@@ -385,8 +426,12 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read config after setup: %v", err)
 			}
-			if !strings.Contains(string(data), conn.scriptName) {
-				t.Fatalf("config after setup does not reference %s:\n%s", conn.scriptName, string(data))
+			wantConfigNeedle := conn.scriptName
+			if runtime.GOOS == "windows" {
+				wantConfigNeedle = nativeHookFlag + conn.Name()
+			}
+			if !strings.Contains(string(data), wantConfigNeedle) {
+				t.Fatalf("config after setup does not reference %s:\n%s", wantConfigNeedle, string(data))
 			}
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
@@ -617,14 +662,24 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			command,
 		)
 	}
-	// Secondary: the path resolves cleanly to a file ending in
-	// antigravity-hook.sh. Defends against accidentally writing a
-	// relative path or a different script name.
-	if !strings.HasSuffix(command, "antigravity-hook.sh") {
-		t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
+	wantCommand := conn.hookCommand(opts)
+	if command != wantCommand {
+		t.Fatalf("command=%q want %q", command, wantCommand)
 	}
-	if !filepath.IsAbs(command) {
-		t.Fatalf("command=%q is not an absolute path", command)
+	// Unix runs the absolute shell hook. Windows uses the stable no-console hook
+	// basename through PATH because agy's direct-exec tokenizer cannot dequote
+	// an absolute executable path containing spaces.
+	if runtime.GOOS == "windows" {
+		if command != `defenseclaw-hook.exe hook --connector antigravity` {
+			t.Fatalf("windows command=%q", command)
+		}
+	} else {
+		if !strings.HasSuffix(command, "antigravity-hook.sh") {
+			t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
+		}
+		if !filepath.IsAbs(command) {
+			t.Fatalf("command=%q is not an absolute path", command)
+		}
 	}
 	// Tertiary: no surrounding whitespace either.
 	if command != strings.TrimSpace(command) {
@@ -678,8 +733,8 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			t.Errorf("%s[%q][0].hooks[0].type=%#v want command", outerKey, event, hookEntry["type"])
 		}
 		eventCommand, ok := hookEntry["command"].(string)
-		if !ok || !strings.HasSuffix(eventCommand, "antigravity-hook.sh") {
-			t.Errorf("%s[%q][0].hooks[0].command=%#v want absolute path ending antigravity-hook.sh", outerKey, event, hookEntry["command"])
+		if !ok || eventCommand != wantCommand {
+			t.Errorf("%s[%q][0].hooks[0].command=%#v want %q", outerKey, event, hookEntry["command"], wantCommand)
 		}
 	}
 }

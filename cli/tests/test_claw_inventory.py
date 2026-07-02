@@ -2114,6 +2114,26 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["plugins"][0]["id"], "ext1")
         self.assertEqual(inv["plugins"][0]["manifest"], ".codex-plugin/plugin.json")
 
+    def test_codex_inventory_expands_system_skill_container(self):
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        system_root = os.path.join(skill_root, ".system")
+        _seed_skill(system_root, "skill-installer", body="# Built in")
+        os.makedirs(os.path.join(system_root, "cache"), exist_ok=True)
+
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        by_id = {row["id"]: row for row in inv["skills"]}
+        self.assertNotIn(".system", by_id)
+        self.assertNotIn("cache", by_id)
+        self.assertEqual(set(by_id), {"skill-installer"})
+        self.assertTrue(by_id["skill-installer"]["bundled"])
+        self.assertEqual(by_id["skill-installer"]["source"], system_root)
+        self.assertTrue(by_id["skill-installer"]["eligible"])
+
     def test_codex_inventory_carries_connector_paths(self):
         """G3: non-OpenClaw inventories carry connector_home /
         connector_config_files / connector_skill_dirs / connector_plugin_dirs
@@ -2363,6 +2383,24 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             inv = build_claw_aibom(cfg, live=True)
         ids = [p["id"] for p in inv["plugins"]]
         self.assertEqual(ids, ["real"])
+
+    def test_hidden_and_staging_plugin_dirs_are_skipped(self):
+        """Hidden activation state must not surface as enabled plugins."""
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        plugin_root = os.path.join(self.tmp, "plugins")
+        os.makedirs(plugin_root, exist_ok=True)
+        _seed_plugin(plugin_root, ".plugin-appserver", manifest="plugin.json")
+        _seed_plugin(
+            plugin_root,
+            "..plugin-appserver.staging-123",
+            manifest="plugin.json",
+        )
+        _seed_plugin(plugin_root, "real", manifest="plugin.json")
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual([p["id"] for p in inv["plugins"]], ["real"])
 
     def test_mcp_servers_passed_through(self):
         from defenseclaw.connector_paths import MCPServerEntry

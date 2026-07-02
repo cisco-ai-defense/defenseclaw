@@ -196,3 +196,22 @@ func TestHookCommandRegisteredAndHidden(t *testing.T) {
 		t.Error("hook command should be hidden")
 	}
 }
+
+func TestNotifyCommandRegisteredAndHidden(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"notify"})
+	if err != nil {
+		t.Fatalf("notify command not found: %v", err)
+	}
+	if cmd.Name() != "notify" {
+		t.Fatalf("found %q, want notify", cmd.Name())
+	}
+	if !cmd.Hidden {
+		t.Error("notify command should be hidden")
+	}
+	if err := cmd.Args(cmd, nil); err == nil {
+		t.Error("notify command accepted a missing Codex JSON payload")
+	}
+	if err := cmd.Args(cmd, []string{`{"type":"agent-turn-complete"}`}); err != nil {
+		t.Errorf("notify command rejected one JSON payload argument: %v", err)
+	}
+}

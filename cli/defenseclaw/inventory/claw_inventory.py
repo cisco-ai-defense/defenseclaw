@@ -33,6 +33,7 @@ from typing import Any, NamedTuple
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
+from defenseclaw.inventory.plugin_directories import plugin_directory_entries
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
 INVENTORY_VERSION = 3
@@ -2071,7 +2072,9 @@ def _enumerate_skills_filesystem(
     cfg: Config, connector: str | None = None,
 ) -> list[dict[str, Any]]:
     """Walk every directory in ``cfg.skill_dirs(connector)`` and emit one
-    row per immediate subdirectory.
+    row per immediate subdirectory. Codex's reserved ``.system`` container is
+    expanded into its marked child skills instead of being reported as one
+    ineligible skill.
 
     A skill is treated as the directory itself; its ``id`` is the
     basename. ``eligible`` is True if the directory contains at
@@ -2080,30 +2083,29 @@ def _enumerate_skills_filesystem(
     component scanner). ``connector`` scopes the walk to a specific
     connector for multi-connector focus (defaults to active).
     """
+    from defenseclaw.skill_discovery import discover_skill_directories
+
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for skill_dir in cfg.skill_dirs(connector):
         if not os.path.isdir(skill_dir):
             continue
-        try:
-            entries = os.listdir(skill_dir)
-        except OSError:
-            continue
-        for entry in sorted(entries):
+        for discovered in discover_skill_directories(
+            skill_dir, connector=connector or cfg.active_connector()
+        ):
+            entry = discovered.name
             if _is_openhands_installed_container(skill_dir, entry):
                 continue
-            full = os.path.join(skill_dir, entry)
-            if not os.path.isdir(full):
-                continue
+            full = discovered.path
             if entry in seen:
                 continue
             seen.add(entry)
             row: dict[str, Any] = {
                 "id": entry,
-                "source": skill_dir,
+                "source": discovered.source,
                 "eligible": _skill_dir_is_eligible(full),
                 "enabled": True,
-                "bundled": False,
+                "bundled": discovered.bundled,
                 "path": full,
             }
             description = _read_skill_description(full)
@@ -2204,20 +2206,7 @@ def _enumerate_plugins_filesystem(
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for plugin_dir in cfg.plugin_dirs(connector):
-        if not os.path.isdir(plugin_dir):
-            continue
-        try:
-            entries = os.listdir(plugin_dir)
-        except OSError:
-            continue
-        for entry in sorted(entries):
-            if entry == "cache":
-                # Codex / ZeptoClaw use a "cache" sibling for transient
-                # downloads; not a plugin in its own right.
-                continue
-            full = os.path.join(plugin_dir, entry)
-            if not os.path.isdir(full):
-                continue
+        for entry, full in plugin_directory_entries(plugin_dir):
             if entry in seen:
                 continue
             seen.add(entry)

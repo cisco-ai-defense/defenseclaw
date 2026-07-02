@@ -25,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -36,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -489,7 +489,7 @@ func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, binary, "--version").CombinedOutput()
+	out, err := processutil.CommandContext(ctx, binary, "--version").CombinedOutput()
 	if err != nil {
 		return ""
 	}

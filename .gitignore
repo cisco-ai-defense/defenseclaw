@@ -133,3 +133,6 @@ security_report/
 # Manual run artifacts (manual-*/, plan outputs) from local harness runs.
 # Scratch only, not project source.
 outputs/
+
+# Local native-Windows manual acceptance walkthrough.
+/WINDOWS_NATIVE_MANUAL_TEST.md

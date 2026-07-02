@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw.connector_paths import hermes_config_path, omnigent_config_path
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -1045,7 +1045,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
-        path = os.path.expanduser("~/.hermes/config.yaml")
+        path = hermes_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
         return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")

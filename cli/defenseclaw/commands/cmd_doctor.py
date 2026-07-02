@@ -39,10 +39,15 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
-from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw.connector_paths import (
+    hermes_config_path,
+    hermes_legacy_config_path,
+    omnigent_config_path,
+)
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
+from defenseclaw.scanner_binary import resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -199,6 +204,13 @@ _json_mode = False
 # rows ("Codex hooks [codex]", "Claude Code hooks [claudecode]", …) are
 # attributable instead of reading as one primary connector.
 _label_suffix = ""
+
+# Probe bodies are bounded before decoding so an endpoint cannot make doctor
+# buffer an unbounded response. Most probe bodies are rendered only as short
+# diagnostics, but /health is structured input and can legitimately exceed
+# the display limit on multi-connector installs.
+_HTTP_PROBE_DISPLAY_BYTES = 2_000
+_HEALTH_DOCUMENT_MAX_BYTES = 1_048_576
 
 
 @contextlib.contextmanager
@@ -457,6 +469,8 @@ def _http_probe(
     body: bytes | None = None,
     timeout: float = 10.0,
     verify_tls: bool = True,
+    response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
+    allow_truncation: bool = True,
 ) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
 
@@ -468,7 +482,22 @@ def _http_probe(
     returning a redirect. We route through ``build_no_redirect_opener`` and
     surface a refused redirect as a non-following ``(0, message)`` result —
     the same shape callers already treat as "could not complete the probe".
+
+    ``response_limit`` is a byte bound, not just a post-read display slice.
+    The default retains the compact diagnostic-body behavior. Structured
+    callers such as the sidecar health check opt into a larger bounded document
+    and disable truncation so an oversized response is rejected rather than
+    parsed as if it were complete.
     """
+    if response_limit <= 0:
+        raise ValueError("response_limit must be positive")
+
+    def _read_response(stream) -> str:
+        raw = stream.read(response_limit + 1)
+        if len(raw) > response_limit and not allow_truncation:
+            return f"response exceeds {response_limit}-byte limit"
+        return raw[:response_limit].decode("utf-8", errors="replace")
+
     req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
     context = None
     if not verify_tls and url.lower().startswith("https://"):
@@ -478,11 +507,11 @@ def _http_probe(
     opener = build_no_redirect_opener(urllib.request.HTTPSHandler(context=context))
     try:
         with opener.open(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")[:2000]
+            return resp.status, _read_response(resp)
     except urllib.error.HTTPError as exc:
         body_text = ""
         try:
-            body_text = exc.read().decode("utf-8", errors="replace")[:2000]
+            body_text = _read_response(exc)
         except Exception:
             pass
         return exc.code, body_text
@@ -598,11 +627,16 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
         ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
     ]
     for name, binary in bins:
-        path = shutil.which(binary)
+        path = resolve_scanner_binary(binary)
         if path:
             _emit("pass", f"Scanner: {name}", path, r=r)
         else:
-            _emit("fail", f"Scanner: {name}", f"'{binary}' not on PATH", r=r)
+            _emit(
+                "fail",
+                f"Scanner: {name}",
+                f"'{binary}' not found in the managed environment or on PATH",
+                r=r,
+            )
 
 
 def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
@@ -638,7 +672,12 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
     if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
         bind = getattr(cfg.guardrail, "host", None) or bind
     url = f"http://{bind}:{cfg.gateway.api_port}/health"
-    code, body = _http_probe(url, timeout=5.0)
+    code, body = _http_probe(
+        url,
+        timeout=5.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
     if code == 200:
         _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
 
@@ -703,7 +742,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
         except (json.JSONDecodeError, TypeError):
-            _emit("warn", "Sidecar health JSON", "could not parse /health response", r=r)
+            detail = body if body.startswith("response exceeds") else "could not parse /health response"
+            _emit("warn", "Sidecar health JSON", detail, r=r)
     else:
         _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
 
@@ -1403,9 +1443,13 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
     # Prefer the lock-file's recorded paths; fall back to the static map.
-    candidates = _hook_health_paths_from_lock(cfg, connector) or [
-        os.path.join(home, rel) for rel in rel_candidates
-    ]
+    candidates = _hook_health_paths_from_lock(cfg, connector)
+    if not candidates:
+        candidates = (
+            [hermes_config_path()]
+            if connector == "hermes"
+            else [os.path.join(home, rel) for rel in rel_candidates]
+        )
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
@@ -1418,6 +1462,34 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         "fail",
         label,
         "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
+        r=r,
+    )
+
+
+def _check_hermes_legacy_config(r: _DoctorResult, *, platform_name: str | None = None) -> None:
+    """Warn about the pre-native-Windows Hermes config without migrating it.
+
+    Native Hermes uses ``HERMES_HOME`` or ``%LOCALAPPDATA%\\hermes``. Older
+    DefenseClaw builds wrote ``~/.hermes/config.yaml`` on every platform. That
+    file can contain credentials, so doctor only reports it and leaves any
+    review, merge, archival, or deletion to the operator.
+    """
+    if (platform_name or os.name) != "nt":
+        return
+
+    current = os.path.abspath(hermes_config_path())
+    legacy = os.path.abspath(hermes_legacy_config_path())
+    if os.path.normcase(current) == os.path.normcase(legacy) or not os.path.isfile(legacy):
+        return
+
+    current_state = "already exists" if os.path.isfile(current) else "does not exist yet"
+    _emit(
+        "warn",
+        "Hermes config migration",
+        f"legacy Hermes config found at {legacy}. Native Hermes now uses {current}, "
+        f"which {current_state}. Review and merge any needed settings manually, then "
+        "re-run `defenseclaw setup hermes`. DefenseClaw will not copy or delete the "
+        "legacy file because it may contain credentials.",
         r=r,
     )
 
@@ -1449,6 +1521,8 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         # hermes / cursor / windsurf / geminicli / opencode — generic
         # lock-file-driven hook-health row (D4).
         _check_hook_health(cfg, connector, r)
+        if connector == "hermes":
+            _check_hermes_legacy_config(r)
 
 
 def _workspace_dir(cfg) -> str:

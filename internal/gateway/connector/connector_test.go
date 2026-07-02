@@ -1230,6 +1230,225 @@ func TestClaudeCode_Setup_PatchesSettings(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native absolute hook-command refresh is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	thirdPartyCommand := `C:\Tools\team-hook.exe --notify`
+	initial := fmt.Sprintf(
+		`{"hooks":{"Notification":[{"hooks":[{"type":"command","command":%q}]}]}}`,
+		thirdPartyCommand,
+	)
+	if err := os.WriteFile(settingsPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	firstBinary := filepath.Join(dir, "installed", windowsHookBinaryName)
+	secondBinary := filepath.Join(dir, "source-build", windowsHookBinaryName)
+	defenseclawHookBinaryOverride = firstBinary
+	firstCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+	defenseclawHookBinaryOverride = secondBinary
+	secondCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("refresh Setup: %v", err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("idempotent Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks missing after Setup: %T", settings["hooks"])
+	}
+
+	managedCount := 0
+	thirdPartyCount := 0
+	for _, rawEntries := range hooks {
+		entries, _ := rawEntries.([]interface{})
+		for _, rawEntry := range entries {
+			entry, _ := rawEntry.(map[string]interface{})
+			commands, _ := entry["hooks"].([]interface{})
+			for _, rawCommand := range commands {
+				command, _ := rawCommand.(map[string]interface{})
+				value, _ := command["command"].(string)
+				switch value {
+				case secondCommand:
+					managedCount++
+				case thirdPartyCommand:
+					thirdPartyCount++
+				}
+				if value == firstCommand {
+					t.Fatalf("stale managed command survived refresh: %q", value)
+				}
+			}
+		}
+	}
+	if managedCount != len(hookGroups) {
+		t.Fatalf("managed hook count=%d, want %d (one per event)", managedCount, len(hookGroups))
+	}
+	if thirdPartyCount != 1 {
+		t.Fatalf("third-party hook count=%d, want 1", thirdPartyCount)
+	}
+}
+
+func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("canonical native install command is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	installedCommand := windowsQuoteExe(
+		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
+	) + " " + nativeHookFlag + "claudecode"
+	repoCommand := `"C:\Users\test\src\defenseclaw\defenseclaw-gateway.exe" hook --connector claudecode`
+	foreignCommand := `"C:\Tools\team-hook.exe" --notify`
+	hooks := map[string]interface{}{}
+	for _, group := range hookGroups {
+		hooks[group.eventType] = []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": installedCommand},
+				},
+			},
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": repoCommand},
+				},
+			},
+		}
+	}
+	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": foreignCommand},
+		},
+	})
+	settings := map[string]interface{}{
+		"hooks": hooks,
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "installed", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	// Simulate the pre-managed-command backup schema already present on an
+	// upgraded installation. This is the state behind the live 28 -> 56 report.
+	c := NewClaudeCodeConnector()
+	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
+		t.Fatalf("seed legacy backup: %v", err)
+	}
+	opts := SetupOpts{
+		DataDir:  dir,
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "test-token",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("idempotent Setup: %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("parse updated settings: %v", err)
+	}
+	installedFound := false
+	repoFound := false
+	foreignFound := false
+	managedCount := 0
+	currentCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	for _, rawEntries := range settings["hooks"].(map[string]interface{}) {
+		for _, rawEntry := range rawEntries.([]interface{}) {
+			entry := rawEntry.(map[string]interface{})
+			for _, rawHook := range entry["hooks"].([]interface{}) {
+				command, _ := rawHook.(map[string]interface{})["command"].(string)
+				installedFound = installedFound || command == installedCommand
+				repoFound = repoFound || command == repoCommand
+				foreignFound = foreignFound || command == foreignCommand
+				if command == currentCommand {
+					managedCount++
+				}
+			}
+		}
+	}
+	if installedFound || repoFound {
+		t.Fatal("pre-upgrade managed commands survived refresh")
+	}
+	if managedCount != len(hookGroups) {
+		t.Fatalf("managed hook count=%d, want %d", managedCount, len(hookGroups))
+	}
+	if !foreignFound {
+		t.Fatal("third-party hook was removed")
+	}
+}
+
+func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("legacy native command signature is Windows-specific")
+	}
+	valid := []string{
+		`"C:\Users\test\.local\bin\defenseclaw-gateway.exe" hook --connector claudecode`,
+		`"C:\Users\test\src\defenseclaw-gateway.exe" hook --connector claudecode`,
+		`defenseclaw-gateway.exe hook --connector claudecode`,
+	}
+	for _, command := range valid {
+		if !isLegacyClaudeCodeNativeHookCommand(command) {
+			t.Errorf("valid managed command was not recognized: %q", command)
+		}
+	}
+
+	invalid := []string{
+		`"C:\Tools\team-hook.exe" hook --connector claudecode`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector codex`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode --extra`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode & whoami`,
+		`"C:\Tools\defenseclaw-gateway.exe hook --connector claudecode`,
+		`C:\Program Files\DefenseClaw\defenseclaw-gateway.exe hook --connector claudecode`,
+	}
+	for _, command := range invalid {
+		if isLegacyClaudeCodeNativeHookCommand(command) {
+			t.Errorf("non-exact command was recognized as managed: %q", command)
+		}
+	}
+}
+
 // TestClaudeCode_Setup_RegistersFullEventCoverage verifies the Claude
 // Code hook registration matches the current documented lifecycle, with the
 // event-type specific matchers Claude Code expects.
@@ -2010,7 +2229,7 @@ func TestCodex_Setup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook script not created: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Error("hook script not executable")
 	}
 	data, _ := os.ReadFile(hookPath)
@@ -2152,8 +2371,12 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(content, "codex-hook.sh") {
-		t.Errorf("config.toml [hooks] missing codex-hook.sh reference\nfile:\n%s", content)
+	wantHookNeedle := "codex-hook.sh"
+	if runtime.GOOS == "windows" {
+		wantHookNeedle = nativeHookFlag + "codex"
+	}
+	if !strings.Contains(content, wantHookNeedle) {
+		t.Errorf("config.toml [hooks] missing %q reference\nfile:\n%s", wantHookNeedle, content)
 	}
 
 	// Re-parse to ensure it's valid TOML and codex's expected shape
@@ -2174,6 +2397,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
 	}
 	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	hookCommand := hookInvocationCommand("codex", filepath.ToSlash(hookPath))
 	for _, tc := range []struct {
 		eventType string
 		eventKey  string
@@ -2193,7 +2417,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
 		}
 		gotHash, _ := entry["trusted_hash"].(string)
-		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookPath, tc.timeout)
+		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookCommand, tc.timeout)
 		if gotHash != wantHash {
 			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
 		}
@@ -2623,24 +2847,19 @@ log_user_prompt = false
 	}
 }
 
-// TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete
-// telemetry path. Codex shells out to `notify` with a JSON arg
-// describing each completed turn (per https://developers.openai.com
-// /codex/config-advanced). Our Setup writes a per-instance bash
-// bridge that POSTs the JSON to /api/v1/codex/notify. Without
-// this wiring, the third independent observability channel (after
-// hooks + OTel) would be dark.
+// TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete telemetry
+// path. Codex appends a JSON arg to the configured notify argv array. Windows
+// invokes the no-console launcher's native notify subcommand; Unix keeps the per-instance
+// Bash bridge that POSTs to /api/v1/codex/notify.
 //
-// Asserts:
-//   - notify-bridge.sh exists at DataDir, mode 0o700 (operator-only)
-//   - bridge body baked the operator-supplied APIToken AND the
-//     gateway notify endpoint (no env-var indirection — codex's
-//     subshell can scrub env)
-//   - config.toml emits notify = ["bash", "<DataDir>/notify-bridge.sh"]
-//     in the canonical TOML array form (codex parses this; a
-//     non-array would silently disable the bridge with no log).
+// Asserts the platform-specific artifact plus the canonical TOML argv array:
+// Windows writes ["<hook.exe>", "notify"] with no shell bridge; Unix writes
+// ["bash", "<DataDir>/notify-bridge.sh"] and keeps the operator-only bridge.
 func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
+	}
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
 `), 0o600); err != nil {
@@ -2661,22 +2880,28 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	}
 
 	bridgePath := filepath.Join(dir, "notify-bridge.sh")
-	info, err := os.Stat(bridgePath)
-	if err != nil {
-		t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
-	}
-	bridge, err := os.ReadFile(bridgePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(bridge), "test-token-codex-notify") {
-		t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
-	}
-	if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
-		t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
+	if runtime.GOOS == "windows" {
+		if _, err := os.Stat(bridgePath); !os.IsNotExist(err) {
+			t.Fatalf("Windows setup left Bash notify bridge behind: %v", err)
+		}
+	} else {
+		info, err := os.Stat(bridgePath)
+		if err != nil {
+			t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
+		}
+		bridge, err := os.ReadFile(bridgePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(bridge), "test-token-codex-notify") {
+			t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
+		}
+		if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
+			t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
+		}
 	}
 
 	// config.toml notify entry must be the array shape codex parses.
@@ -2690,13 +2915,27 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 		t.Fatalf("notify entry not an array (got %T) — codex would silently disable the bridge", parsed["notify"])
 	}
 	if len(notify) != 2 {
-		t.Errorf("notify array has %d entries, want 2 ([bash, bridge.sh]); got %v", len(notify), notify)
+		t.Fatalf("notify array has %d entries, want 2; got %v", len(notify), notify)
 	}
-	if first, _ := notify[0].(string); first != "bash" {
-		t.Errorf("notify[0] = %q, want \"bash\"", first)
-	}
-	if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
-		t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
+	if runtime.GOOS == "windows" {
+		if first, _ := notify[0].(string); first != `C:\Program Files\DefenseClaw\defenseclaw-hook.exe` {
+			t.Errorf("notify[0] = %q, want installed no-console hook path", first)
+		}
+		if second, _ := notify[1].(string); second != "notify" {
+			t.Errorf("notify[1] = %q, want native notify subcommand", second)
+		}
+		if strings.Contains(strings.ToLower(string(raw)), "bash") ||
+			strings.Contains(strings.ToLower(string(raw)), "curl") ||
+			strings.Contains(strings.ToLower(string(raw)), "jq") {
+			t.Errorf("Windows config contains a Unix notify dependency:\n%s", raw)
+		}
+	} else {
+		if first, _ := notify[0].(string); first != "bash" {
+			t.Errorf("notify[0] = %q, want \"bash\"", first)
+		}
+		if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
+			t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
+		}
 	}
 }
 

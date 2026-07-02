@@ -154,6 +154,7 @@ jobs:
           uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
           uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
+          "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
 
   upgrade-smoke:
     name: Upgrade Smoke
@@ -457,7 +458,8 @@ jobs:
             > "$embed_dir/.placeholder"
 
       # Reproduce GoReleaser's windows outputs by hand so the smoke test stays
-      # fast and self-contained: the in-archive binary is defenseclaw.exe and
+      # fast and self-contained: the archive contains defenseclaw.exe plus the
+      # GUI-subsystem defenseclaw-hook.exe and
       # the archive is defenseclaw_<ver>_windows_amd64.zip (the name
       # install.ps1 -Local globs). The CLI wheel is built via `make dist-cli`,
       # the same target `make dist` uses — it stages cli/defenseclaw/_data
@@ -471,6 +473,8 @@ jobs:
           mkdir -p dist/gwstage
           CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.0.0-smoke" \
             -o dist/gwstage/defenseclaw.exe ./cmd/defenseclaw
+          CGO_ENABLED=0 go build -ldflags "-s -w -H=windowsgui -X main.version=0.0.0-smoke" \
+            -o dist/gwstage/defenseclaw-hook.exe ./cmd/defenseclaw-hook
           make dist-cli
           ls -la dist
 
@@ -478,7 +482,7 @@ jobs:
         shell: pwsh
         run: |
           $zip = "dist/defenseclaw_0.0.0-smoke_windows_amd64.zip"
-          Compress-Archive -Path dist/gwstage/defenseclaw.exe -DestinationPath $zip -Force
+          Compress-Archive -Path dist/gwstage/defenseclaw.exe,dist/gwstage/defenseclaw-hook.exe -DestinationPath $zip -Force
           Get-ChildItem dist
 
       - name: Run install.ps1 against local artifacts
@@ -494,11 +498,19 @@ jobs:
         run: |
           $bin  = Join-Path $env:USERPROFILE ".local\bin"
           $gw   = Join-Path $bin "defenseclaw-gateway.exe"
+          $hook = Join-Path $bin "defenseclaw-hook.exe"
           $shim = Join-Path $bin "defenseclaw.cmd"
           if (-not (Test-Path $gw))   { throw "gateway not installed: $gw" }
+          if (-not (Test-Path $hook)) { throw "hook launcher not installed: $hook" }
           if (-not (Test-Path $shim)) { throw "CLI shim not installed: $shim" }
+          $bytes = [System.IO.File]::ReadAllBytes($hook)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+          if ($subsystem -ne 2) { throw "defenseclaw-hook subsystem $subsystem; expected Windows GUI (2)" }
           $env:PATH = "$bin;$env:PATH"
           & $gw --version
           if ($LASTEXITCODE -ne 0) { throw "defenseclaw-gateway --version exit $LASTEXITCODE" }
+          $hookProcess = Start-Process -FilePath $hook -ArgumentList @("notify", "{}") -Wait -PassThru
+          if ($hookProcess.ExitCode -ne 0) { throw "defenseclaw-hook notify exit $($hookProcess.ExitCode)" }
           & defenseclaw --version
           if ($LASTEXITCODE -ne 0) { throw "defenseclaw --version exit $LASTEXITCODE" }

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from defenseclaw import connector_paths, platform_support, ux
+from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
     from defenseclaw.bootstrap import StepResult
@@ -42,6 +42,11 @@ from defenseclaw.paths import (
     bundled_splunk_bridge_dir,
 )
 from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
+
+_stdout_is_tty = terminal_checkbox.stdout_is_tty
+_supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
+_checkbox_key_name = terminal_checkbox.checkbox_key_name
+_render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 
 
 @click.command("init")
@@ -214,6 +219,18 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
     import platform
+
+    requested_connectors = []
+    if connector:
+        requested_connectors.append(_normalize_connector_arg(connector))
+    requested_connectors.extend(_parse_connector_list(action_connectors))
+    for requested in requested_connectors:
+        support = platform_support.connector_platform_support(requested)
+        if not support.available:
+            raise click.ClickException(
+                f"connector {requested!r} is {support.status} on "
+                f"{platform_support.host_os()}: {support.reason}"
+            )
 
     if _use_guided_first_run(
         non_interactive=non_interactive,
@@ -730,46 +747,6 @@ def _parse_connector_list(raw: str | None) -> list[str]:
     return out
 
 
-def _stdout_is_tty() -> bool:
-    try:
-        return click.get_text_stream("stdout").isatty()
-    except Exception:
-        return False
-
-
-def _checkbox_key_name(ch: str) -> str:
-    if ch in ("\r", "\n"):
-        return "enter"
-    if ch in (" ", "\t"):
-        return "toggle"
-    if ch in ("\x1b[A", "k", "K"):
-        return "up"
-    if ch in ("\x1b[B", "j", "J"):
-        return "down"
-    if ch == "a":
-        return "all"
-    if ch == "n":
-        return "none"
-    return ""
-
-
-def _render_checkbox_menu(
-    options: list[str],
-    selected: set[str],
-    cursor: int,
-    *,
-    redraw: bool,
-) -> None:
-    if redraw:
-        click.echo(f"\x1b[{len(options)}F", nl=False)
-    for idx, name in enumerate(options):
-        if redraw:
-            click.echo("\r\x1b[2K", nl=False)
-        pointer = ">" if idx == cursor else " "
-        mark = "x" if name in selected else " "
-        click.echo(f"  {pointer} [{mark}] {name}")
-
-
 def _prompt_checkbox_selection(
     options: list[str],
     *,
@@ -777,44 +754,14 @@ def _prompt_checkbox_selection(
     title: str,
     empty_ok: bool,
 ) -> list[str]:
-    """Tiny checkbox selector for first-run terminal prompts.
-
-    Click gives us portable raw-key reads but not a full list widget. This keeps
-    the interaction small: j/k moves, Space toggles, Enter accepts.
-    """
-    if not options:
-        return []
-
-    selected = {name for name in default_selected if name in options}
-    cursor = 0
-    ux.subhead(title)
-    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
-
-    redraw = _stdout_is_tty()
-    rendered = False
-    while True:
-        _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)
-        rendered = True
-        key = _checkbox_key_name(click.getchar())
-        if key == "enter":
-            if selected or empty_ok:
-                return [name for name in options if name in selected]
-            ux.warn("Select at least one connector.", indent="  ")
-            continue
-        if key == "toggle":
-            name = options[cursor]
-            if name in selected:
-                selected.remove(name)
-            else:
-                selected.add(name)
-        elif key == "up":
-            cursor = (cursor - 1) % len(options)
-        elif key == "down":
-            cursor = (cursor + 1) % len(options)
-        elif key == "all":
-            selected = set(options)
-        elif key == "none":
-            selected.clear()
+    return terminal_checkbox.prompt_checkbox_selection(
+        options,
+        default_selected=default_selected,
+        title=title,
+        empty_ok=empty_ok,
+        redraw=_supports_terminal_redraw(),
+        getchar=click.getchar,
+    )
 
 
 def _installed_hook_connectors(disc) -> list[str]:
@@ -830,7 +777,13 @@ def _installed_hook_connectors(disc) -> list[str]:
     names: list[str] = []
     for name in order:
         sig = disc.agents.get(name)
-        if sig and sig.installed and name in _HOOK_ENFORCED_CONNECTORS and name not in names:
+        if (
+            sig
+            and sig.installed
+            and name in _HOOK_ENFORCED_CONNECTORS
+            and platform_support.connector_supported_on_os(name)
+            and name not in names
+        ):
             names.append(name)
     return names
 
@@ -979,9 +932,12 @@ def _prompt_connector_selection(
 
     fallback = agent_discovery.first_installed(disc, "codex")
     ux.subhead("No hook connectors were detected. Choose one active connector to configure.")
+    choices = platform_support.supported_connectors(sorted(connector_paths.KNOWN_CONNECTORS))
+    if fallback not in choices:
+        fallback = choices[0] if choices else "codex"
     raw = click.prompt(
         "  Connector",
-        type=click.Choice(sorted(connector_paths.KNOWN_CONNECTORS), case_sensitive=False),
+        type=click.Choice(choices, case_sensitive=False),
         default=fallback,
         show_default=True,
     )
@@ -996,12 +952,23 @@ def _note_proxy_connectors(disc) -> None:
     their dedicated setup so a detected proxy agent isn't silently skipped."""
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
     detected: list[str] = []
+    unavailable: list[str] = []
     for name in order:
         if not platform_support.is_proxy_connector(name):
             continue
         signal = disc.agents.get(name)
         if signal is not None and signal.installed:
-            detected.append(name)
+            if platform_support.connector_supported_on_os(name):
+                detected.append(name)
+            else:
+                unavailable.append(name)
+    for name in unavailable:
+        support = platform_support.connector_platform_support(name)
+        ux.warn(
+            f"Detected {name}, but it is {support.status} on "
+            f"{platform_support.host_os()}: {support.reason}",
+            indent="  ",
+        )
     if not detected:
         return
     ux.subhead(
@@ -1728,7 +1695,12 @@ def _normalize_connector_arg(
     if connector is None and discover_default:
         try:
             disc = agent_discovery.discover_agents(refresh=refresh_agents)
-            connector = agent_discovery.first_installed(disc, "codex")
+            discovered = agent_discovery.first_installed(disc, "codex")
+            if platform_support.connector_supported_on_os(discovered):
+                connector = discovered
+            else:
+                installed = _installed_hook_connectors(disc)
+                connector = installed[0] if installed else "codex"
         except Exception:
             connector = "codex"
     value = (connector or "codex").strip().lower()
@@ -2550,9 +2522,9 @@ def _is_sidecar_running(pid_file: str) -> bool:
     pid = _read_pid(pid_file)
     if pid is None or pid <= 1:
         return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    from defenseclaw.process_liveness import pid_alive
+
+    if not pid_alive(pid):
         return False
     return _pid_looks_like_gateway(pid)
 

@@ -43,13 +43,10 @@ defenseclaw setup omnigent --mode action --yes
 omnigent server --config "${OMNIGENT_CONFIG_HOME:-$HOME/.omnigent}/config.yaml"
 ```
 
-On Windows PowerShell, run:
-
-```powershell
-defenseclaw setup omnigent --mode action --yes
-$configHome = if ($env:OMNIGENT_CONFIG_HOME) { $env:OMNIGENT_CONFIG_HOME } else { Join-Path $HOME ".omnigent" }
-omnigent server --config (Join-Path $configHome "config.yaml")
-```
+OmniGent connector setup is not supported on native Windows. Its terminal
+runner requires `tmux`, its documented OS-sandbox backends are Linux/macOS,
+and its Windows desktop application is not yet available. DefenseClaw does not
+add a WSL implementation; use this connector on macOS/Linux.
 
 `~/.omnigent/config.yaml` is the default. When `OMNIGENT_CONFIG_HOME` is set,
 both OmniGent and DefenseClaw use `OMNIGENT_CONFIG_HOME/config.yaml` instead
@@ -115,21 +112,92 @@ to a hook connector believing it changes the agent's model.
 
 ## Platform support
 
-| Connector | macOS | Linux | Windows |
-| --------- | ----- | ----- | ------- |
-| OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
-| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode, OmniGent (hook-based) | OK | OK | OK |
+Support status is about the complete DefenseClaw integration on the named host,
+not merely whether the upstream agent has some Windows build. `preview` remains
+selectable with an explicit warning; `unsupported` is hidden from pickers and
+rejected by scripted/direct setup with the reason below.
 
-Windows is **hook-only**: the shell-hook connectors run their hook
-decisions natively in the `defenseclaw-gateway` binary (the agent invokes
-`defenseclaw-gateway hook --connector <name> --event <event>`), so no Git Bash, `jq`,
-or shell shims are required. OpenCode is cross-platform without shims by a
-different route — its bridge plugin is JavaScript and calls the gateway over
-HTTP directly, so it never needs the native hook binary. The proxy connectors (OpenClaw, ZeptoClaw) need
-the local guardrail proxy, which DefenseClaw does not host on Windows; they are
-hidden from the connector pickers and rejected by setup there. The Go registry
-(`connectorSupportedOnOS`) and the Python `platform_support` module are the two
-sources of truth for this gating, kept in sync by a parity test.
+The current Windows product scope is **native Windows only**. WSL does not turn
+a connector into a Windows-supported connector: the agent, hook/custom-policy
+surface, DefenseClaw entrypoint, configuration paths, and teardown must all run
+natively. WSL findings are recorded separately below for planning and do not
+represent DefenseClaw Windows support or release certification.
+
+| Connector | macOS | Linux | Native Windows | Windows reason |
+| --------- | ----- | ----- | -------------- | -------------- |
+| Codex | supported | supported | supported | Current Codex releases run natively on Windows and expose Windows-specific hook commands; DefenseClaw uses its native hook entrypoint. |
+| Claude Code | supported | supported | supported | Native Windows with Git for Windows is documented and supports command hooks. |
+| Cursor | supported | supported | supported (IDE hooks) | Cursor IDE hooks are native. **Cursor CLI remains WSL-only** and native DefenseClaw setup does not install or configure it. |
+| Windsurf | supported | supported | supported | Cascade documents Windows hook locations and PowerShell/command execution. |
+| Gemini CLI | supported | supported | supported | Hook reference and best practices document Windows/PowerShell execution. |
+| Copilot CLI | supported | supported | supported | GitHub documents Windows Copilot CLI hooks using PowerShell 7+. |
+| Antigravity | supported | supported | supported | Antigravity runs natively on Windows and exposes local JSON hooks. |
+| OpenCode | supported | supported | supported | OpenCode runs directly on Windows; the DefenseClaw bridge is an auto-loaded JavaScript plugin. |
+| Hermes | supported | supported | **preview** | Native Windows 10/11 is upstream Tier 1, and DefenseClaw honors `HERMES_HOME`, including `%LOCALAPPDATA%\hermes`. The DefenseClaw native hook integration remains preview pending live end-to-end validation. |
+| OpenHands | supported | supported | unsupported | OpenHands CLI explicitly requires WSL; DefenseClaw has no WSL connector implementation. |
+| OmniGent | supported | supported | unsupported | The terminal path requires `tmux`, the OS sandbox documents Linux/macOS backends, and the Windows desktop app is still pending. |
+| OpenClaw | supported | supported | unsupported | OpenClaw itself has a native path, but DefenseClaw's connector requires the local guardrail-proxy lifecycle, which DefenseClaw does not host on Windows. |
+| ZeptoClaw | supported | supported | unsupported | Upstream publishes macOS/Linux support, and the DefenseClaw connector also requires the unavailable Windows guardrail proxy. |
+
+Windows upgrades may still have a legacy `~/.hermes/config.yaml` written by an
+older DefenseClaw build. `defenseclaw doctor` reports that file and the current
+native path, but never copies, merges, or deletes it because Hermes configuration
+can contain credentials. Review any needed settings manually, then re-run
+`defenseclaw setup hermes`.
+
+### WSL research (out of current Windows scope)
+
+This table answers whether upstream explicitly documents or recommends a WSL
+path. It is research input only: DefenseClaw currently tests and ships the
+Windows connector surface against native Windows, not a Windows-to-WSL bridge.
+When upstream documents Linux but does not explicitly document WSL, the result
+is `not separately documented` rather than an inferred support promise.
+
+| Hook connector | Upstream WSL position | Current DefenseClaw Windows decision |
+| -------------- | --------------------- | ------------------------------------ |
+| Codex | WSL2 is documented; WSL1 is no longer supported starting with Codex 0.115. | Native Windows supported; WSL is out of scope. |
+| Claude Code | WSL1 and WSL2 are documented alternatives to native Windows with Git for Windows. | Native Windows supported; WSL is out of scope. |
+| Hermes | Linux/WSL2 is upstream Tier 1 and tested on current WSL2; it is a separate installation from native Windows. | Native Windows preview; WSL is out of scope. |
+| Cursor | Cursor CLI is supported on Windows through WSL; Cursor IDE hooks run on native Windows. | Native IDE hooks supported; the WSL-only CLI is not configured. |
+| Windsurf | Hook docs publish Linux/WSL configuration locations as well as native Windows locations. | Native Windows supported; WSL is out of scope. |
+| Gemini CLI | WSL is mentioned as a Unix-compatibility option, but the supported OS matrix already includes native Windows. | Native Windows supported; WSL is out of scope. |
+| Copilot CLI | Hooks are documented for Windows, Linux, and macOS; WSL is not a separate hook target. | Native Windows supported; no WSL claim is needed. |
+| OpenHands | The CLI explicitly requires WSL on Windows; native Windows is not officially supported. | Unsupported on Windows because WSL-only does not meet the native requirement. |
+| Antigravity | Native Windows CLI/app downloads and local hooks are documented; WSL is not a separate hook target. | Native Windows supported; no WSL claim is needed. |
+| OpenCode | Direct Windows execution is available, while upstream recommends WSL for the best experience. | Native Windows supported through the JavaScript bridge; WSL is out of scope. |
+| OmniGent | Linux terminal and sandbox prerequisites are documented; WSL is not explicitly supported as a Windows product path. | Unsupported on native Windows; no WSL connector is implemented or certified. |
+
+Evidence checked 2026-06-30 against the current upstream documentation:
+[Codex install](https://github.com/openai/codex#quickstart),
+[Codex Windows](https://developers.openai.com/codex/windows),
+[Codex hooks](https://developers.openai.com/codex/hooks),
+[Claude Code Windows setup](https://docs.anthropic.com/en/docs/claude-code/getting-started),
+[Cursor CLI installation](https://docs.cursor.com/en/cli/installation),
+[Cursor hooks](https://cursor.com/docs/hooks),
+[Windsurf Cascade hooks](https://docs.windsurf.com/windsurf/cascade/hooks),
+[Gemini CLI hooks](https://geminicli.com/docs/hooks/reference/),
+[Copilot CLI hooks](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-hooks),
+[Antigravity hooks](https://antigravity.google/docs/hooks),
+[OpenCode Windows](https://opencode.ai/docs/windows-wsl/),
+[OpenCode plugins](https://opencode.ai/docs/plugins/),
+[Hermes platform support](https://hermes-agent.nousresearch.com/docs/getting-started/platform-support),
+[Hermes native Windows guide](https://hermes-agent.nousresearch.com/docs/user-guide/windows-native),
+[OpenHands CLI quick start](https://docs.openhands.dev/openhands/usage/cli/quick-start),
+[OmniGent terminal](https://omnigent.ai/docs/interact/terminal),
+[OmniGent sandbox](https://omnigent.ai/docs/policies/os-sandbox),
+[OmniGent desktop](https://omnigent.ai/docs/interact/desktop), and
+[ZeptoClaw installation](https://zeptoclaw.com/docs/getting-started/installation/).
+
+Windows DefenseClaw is **hook-only**. Supported command-hook connectors invoke
+the no-console `defenseclaw-hook.exe --connector <name> --event <event>` launcher
+natively, without Git Bash, `jq`, shell shims, or WSL. OpenCode is cross-platform
+without shims by a different route: its JavaScript bridge calls the gateway over
+HTTP directly, so it never needs the native hook launcher. The proxy connectors
+(OpenClaw and ZeptoClaw) require the local guardrail proxy, which DefenseClaw
+does not host on Windows; they are hidden from connector pickers and rejected by
+setup there. The Go registry (`connectorSupportedOnOS`) and Python
+`platform_support` module mirror the same supported/preview/unsupported taxonomy
+and reasons, pinned by parity tests.
 
 ## Versioned Hook Contracts
 
@@ -191,7 +259,7 @@ Claude Code is pinned to the current documented hook surface captured at
 | --------- | --------- | -------------- | ---------- | ------------ | -------------------- | ----- | ----------- |
 | Claude Code | yes | yes | `PreToolUse` | 14 current lifecycle events; exact list is checked against `capability-matrix.json` | yes | user | `~/.claude/settings.json` |
 | Codex | yes | no | none | `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` | yes | user | `~/.codex/config.toml` |
-| Hermes | yes | no | none | `pre_tool_call` | no | user | `~/.hermes/config.yaml` |
+| Hermes | yes | no | none | `pre_tool_call` | no | user | `$HERMES_HOME/config.yaml`; defaults to `%LOCALAPPDATA%\hermes\config.yaml` on native Windows and `~/.hermes/config.yaml` elsewhere |
 | Cursor | yes | yes | `beforeShellExecution`, `beforeMCPExecution` | documented pre-action hooks | yes | user | `~/.cursor/hooks.json` |
 | Windsurf | yes | no | none | `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` | no | user | `~/.codeium/windsurf/hooks.json` |
 | Gemini CLI | yes | no | none | `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterAgent` | yes | user | `~/.gemini/settings.json` |
@@ -210,13 +278,13 @@ audit. The DefenseClaw TUI can review those records but cannot resume the call.
 
 | Connector | MCP | Skills | Rules | Plugins / extensions | Agents | CodeGuard native assets |
 | --------- | --- | ------ | ----- | -------------------- | ------ | ----------------------- |
-| Hermes | `~/.hermes/config.yaml` | `~/.hermes/skills` | unsupported | `~/.hermes/plugins` (`.hermes/plugins` discovery only) | unsupported | opt-in skill |
+| Hermes | `$HERMES_HOME/config.yaml` | `$HERMES_HOME/skills` | unsupported | `$HERMES_HOME/plugins` (`.hermes/plugins` workspace discovery only) | unsupported | opt-in skill |
 | Cursor | `.cursor/mcp.json`, `~/.cursor/mcp.json` | `.cursor/skills`, `.agents/skills`, user equivalents | `.cursor/rules`, `AGENTS.md` | unsupported | unsupported | opt-in skill or rule |
 | Windsurf | existing documented/user MCP paths only | unsupported | existing documented/user rules paths only | unsupported | unsupported | opt-in rule only when a rules path exists |
 | Gemini CLI | `~/.gemini/settings.json` | `.gemini/skills`, `.agents/skills` | represented through skills/agents | `.gemini/extensions`, `~/.gemini/extensions` | `.gemini/agents`, `~/.gemini/agents` | opt-in skill |
 | Copilot CLI | `~/.copilot/mcp-config.json`, optional workspace `.github/mcp.json`, `.mcp.json` | `~/.copilot/skills`, optional workspace `.github/skills`, `.agents/skills` | optional workspace `.github/instructions` | CLI marketplace/plugin flow | `~/.copilot/agents`, optional workspace `.github/agents` | opt-in skill or rule |
 | OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
-| Antigravity | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` (read/write); `<plugin>/mcp_config.json` discovery only | AgentSkills folder form read/write: `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md`; CLI direct `~/.gemini/antigravity-cli/skills/*.md` discovery only | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` discovery only | `~/.gemini/config/plugins/<plugin>/`, `~/.gemini/antigravity-cli/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` discovery/scan only | plugin-contained `<plugin>/agents/` discovery only; standalone agents unsupported | opt-in skill |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` (read/write); `<plugin>/mcp_config.json` discovery only | AgentSkills folder form read/write: `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md`; CLI direct `~/.gemini/antigravity-cli/skills/*.md` discovery only | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` discovery only | `~/.gemini/config/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` install/list/scan/remove; `~/.gemini/antigravity-cli/plugins/<plugin>/` discovery/scan | plugin-contained `<plugin>/agents/` discovery only; standalone agents unsupported | opt-in skill |
 | OpenCode | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
 | OmniGent | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
 
@@ -256,8 +324,8 @@ blocking the OpenClaw stack gate. The harness lives under
 | **B — Live agent matrix** | Installs the real agent at its latest version, runs `defenseclaw setup`, drives lifecycle + forced tool calls through the real harness, and asserts observe / block / OTLP / teardown. | yes (deterministic prompts) | yes | per the reality matrix below | nightly + manual dispatch |
 
 Layer A targets `~/.defenseclaw/hooks/<connector>-hook.sh` on Linux/macOS and
-the native `defenseclaw-gateway hook --connector <c> --event <e>` subcommand on
-Windows. Both forward the payload to the local gateway, so every assertion
+the native no-console `defenseclaw-hook.exe --connector <c> --event <e>` launcher
+on Windows. Both forward the payload to the local gateway, so every assertion
 works against `~/.defenseclaw/gateway.jsonl` + `audit.db` regardless of OS.
 
 Hooks are **harness-driven**, not LLM-driven: the agent fires
@@ -280,10 +348,10 @@ harmless (permission denied) if a regression ever lets it through.
 | Copilot CLI | live\* | live\* | live\* | `copilot -p` | user-level hooks only; entitled token |
 | OpenHands | live | — | — | `openhands --headless --json` | Docker runtime, Linux-only |
 | OpenCode | contract-only | contract-only | contract-only | — | JS bridge plugin (tool.execute.before blocks); live smoke pending |
-| Hermes | contract-only | contract-only | contract-only | — | full lifecycle mapped (`hermes-hooks-v1`): `pre_tool_call` blocks, `pre_llm_call` injects context, `post_tool_call`/`post_llm_call`/session/subagent observe; live smoke pending |
+| Hermes | contract-only | contract-only | contract-only (preview) | — | Native Windows is upstream Tier 1; DefenseClaw's full lifecycle is mapped (`hermes-hooks-v1`), but the native integration remains preview until its live smoke passes. |
 | Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
 | Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
-| OmniGent | contract-only | contract-only | contract-only | — | Python custom-policy bridge covered by local integration tests; live smoke pending |
+| OmniGent | contract-only | contract-only | — | — | Native Windows connector unsupported; Python custom-policy bridge covered by local integration tests on supported hosts; live smoke pending |
 
 `\*` = advisory cell (`continue-on-error`) until it goes consistently green.
 All Windows live cells and every Copilot cell start advisory; they are promoted

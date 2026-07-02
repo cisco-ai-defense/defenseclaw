@@ -30,6 +30,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.config import config_path
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.scanner_binary import resolve_scanner_binary
 
 # ---------------------------------------------------------------------------
 # Color conventions for `defenseclaw status`
@@ -153,7 +154,7 @@ def status(app: AppContext, as_json: bool) -> None:
     for name, binary in scanner_bins:
         if binary == "built-in":
             click.echo(f"    {ux.bold(f'{name:<16s}')}{ux.dim('built-in')}")
-        elif shutil.which(binary):
+        elif resolve_scanner_binary(binary):
             click.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('installed', fg='green')}")
         else:
             click.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
@@ -813,7 +814,7 @@ def _scanner_status_map(cfg) -> dict[str, str]:
         if binary == "built-in":
             out[name] = "built-in"
         else:
-            out[name] = "installed" if shutil.which(binary) else "not_found"
+            out[name] = "installed" if resolve_scanner_binary(binary) else "not_found"
     return out
 
 

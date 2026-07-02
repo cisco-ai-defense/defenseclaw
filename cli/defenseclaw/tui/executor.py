@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ntpath
 import os
 import signal
+import subprocess
+import sys
 import time
 
 if os.name == "posix":
@@ -99,7 +102,7 @@ class CommandExecutor:
         if self._process is not None:
             raise CommandAlreadyRunningError("A command is already running.")
 
-        resolved = _resolve_binary(binary)
+        resolved_argv = resolve_subprocess_argv(binary, args)
         started = time.monotonic()
         self._cancelled = False
         child_env = os.environ.copy()
@@ -108,18 +111,18 @@ class CommandExecutor:
         yield CommandEvent("start", " ".join((binary, *args)))
 
         if self.use_pty and stdin_input is None:
-            async for event in self._run_pty(resolved, args, started, env=child_env):
+            async for event in self._run_pty(resolved_argv, started, env=child_env):
                 yield event
             return
 
         try:
             process = await asyncio.create_subprocess_exec(
-                resolved,
-                *args,
+                *resolved_argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=child_env,
+                **captured_subprocess_kwargs(),
             )
         except OSError as exc:
             yield CommandEvent("output", f"Failed to start: {exc}")
@@ -149,8 +152,7 @@ class CommandExecutor:
 
     async def _run_pty(
         self,
-        resolved: str,
-        args: tuple[str, ...],
+        resolved_argv: tuple[str, ...],
         started: float,
         *,
         env: dict[str, str] | None = None,
@@ -160,8 +162,7 @@ class CommandExecutor:
         try:
             master_fd, slave_fd = pty.openpty()
             process = await asyncio.create_subprocess_exec(
-                resolved,
-                *args,
+                *resolved_argv,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -206,10 +207,41 @@ class CommandExecutor:
         yield CommandEvent("done", exit_code=exit_code, duration=duration)
 
 
-def _resolve_binary(binary: str) -> str:
+def resolve_subprocess_argv(binary: str, args: tuple[str, ...]) -> tuple[str, ...]:
+    """Resolve a TUI command to argv that Windows can launch directly.
+
+    Console-script shims on Windows are commonly ``.cmd`` files.  The low-level
+    process API used by ``asyncio.create_subprocess_exec`` does not invoke a
+    command interpreter, so it cannot execute those shims.  Self-invocations
+    always use the current Python interpreter and module entry point instead;
+    this also avoids relying on PATH on every platform.
+    """
+
+    binary_name = ntpath.basename(binary).lower()
+    if binary_name in {"defenseclaw", "defenseclaw.exe", "defenseclaw.cmd", "defenseclaw.bat"}:
+        if not sys.executable:
+            raise RuntimeError("Cannot resolve DefenseClaw CLI: Python executable is unknown")
+        return (os.path.abspath(sys.executable), "-m", "defenseclaw.main", *args)
     if binary == "defenseclaw-gateway":
-        return resolve_gateway_binary() or "defenseclaw-gateway"
-    return binary
+        resolved = resolve_gateway_binary()
+        if not resolved:
+            raise RuntimeError("Cannot resolve DefenseClaw gateway executable")
+        return (resolved, *args)
+    return (binary, *args)
+
+
+def captured_subprocess_kwargs() -> dict[str, int]:
+    """Return platform flags for a noninteractive, captured child process.
+
+    Windows console executables allocate a transient console when their parent
+    is a graphical or detached process. The TUI already captures each child's
+    standard streams, so suppressing that extra console does not detach the
+    process or change its output, exit status, cancellation, or wait behavior.
+    """
+
+    if os.name != "nt":
+        return {}
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}
 
 
 def _split_terminal_chunk(text: str) -> tuple[str, ...]:

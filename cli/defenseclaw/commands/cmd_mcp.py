@@ -773,6 +773,7 @@ def _scan_all_mcp(
     scan_instructions: bool,
     as_json: bool,
     allow_private: bool = False,
+    error_count_sink: list[int] | None = None,
 ) -> list[dict]:
     """Scan every MCP server registered for ``connector``.
 
@@ -884,6 +885,8 @@ def _scan_all_mcp(
         from defenseclaw.commands import hint
         if blocked:
             hint("View alerts:  defenseclaw alerts")
+    if error_count_sink is not None:
+        error_count_sink.append(errored)
     return json_rows
 
 
@@ -1138,17 +1141,21 @@ def scan(
         # with guidance instead of falling back through active_connector().
         connectors = resolve_list_connectors(app, connector_flag)
         json_rows: list[dict] = []
+        error_counts: list[int] = []
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.secho(f"\n── connector: {c} ──", fg="cyan")
             rows = _scan_all_mcp(
                 app, c, analyzers, scan_prompts, scan_resources, scan_instructions,
                 as_json, allow_private=allow_private,
+                error_count_sink=error_counts,
             )
             if as_json:
                 json_rows.extend(rows)
         if as_json:
             click.echo(json.dumps(json_rows, indent=2))
+        if sum(error_counts):
+            raise SystemExit(1)
         return
 
     if not target:
@@ -1156,12 +1163,16 @@ def scan(
         # (no --all, no target) scans every server on that one connector.
         if connector_flag:
             connector = resolve_list_connector(app, connector_flag)
+            error_counts: list[int] = []
             rows = _scan_all_mcp(
                 app, connector, analyzers, scan_prompts, scan_resources,
                 scan_instructions, as_json, allow_private=allow_private,
+                error_count_sink=error_counts,
             )
             if as_json:
                 click.echo(json.dumps(rows, indent=2))
+            if sum(error_counts):
+                raise SystemExit(1)
             return
         raise click.UsageError(
             "Specify what to scan:\n"

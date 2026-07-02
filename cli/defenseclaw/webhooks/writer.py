@@ -32,12 +32,15 @@ than hand-editing YAML.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import inspect
 import ipaddress
 import os
 import re
 import socket
+import stat
+import tempfile
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
@@ -46,10 +49,11 @@ from urllib.parse import urlparse
 import yaml
 
 from defenseclaw.config import (
+    _assert_config_write_allowed,
     config_path_for_data_dir,
     locked_config_yaml,
-    write_config_yaml_secure,
 )
+from defenseclaw.file_permissions import set_file_mode
 
 # ---------------------------------------------------------------------------
 # Constants mirrored with internal/gateway/webhook.go and internal/config
@@ -581,7 +585,43 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
-    write_config_yaml_secure(path, data)
+    """Atomically write webhook config with managed-mode and ACL checks."""
+    _assert_config_write_allowed(path, data)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    target_mode = 0o600
+    if os.name != "nt":
+        try:
+            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            existing_mode = None
+        if existing_mode is not None and existing_mode != 0o600:
+            target_mode = existing_mode & 0o600
+            if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
+                target_mode = 0o640
+            elif target_mode == 0:
+                target_mode = 0o600
+
+    fd = -1
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".webhooks.", suffix=".tmp", dir=directory)
+        set_file_mode(fd, tmp, target_mode)
+        stream = os.fdopen(fd, "w")
+        fd = -1
+        with stream as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 # ---------------------------------------------------------------------------

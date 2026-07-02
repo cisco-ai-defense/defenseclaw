@@ -21,11 +21,13 @@
 .DESCRIPTION
     Installs DefenseClaw from pre-built release artifacts on Windows. The Go
     gateway ships as defenseclaw_<version>_windows_<arch>.zip (containing
-    defenseclaw.exe) and the CLI ships as a pure-Python wheel. This is the
+    defenseclaw.exe and defenseclaw-hook.exe) and the CLI ships as a
+    pure-Python wheel. This is the
     Windows counterpart to scripts/install.sh; it lands:
 
-      * <home>\bin\defenseclaw-gateway.exe  (the Go gateway/sidecar binary)
-      * <home>\bin\defenseclaw.cmd          (shim to the CLI in the venv)
+      * <home>\.local\bin\defenseclaw-gateway.exe  (gateway/sidecar)
+      * <home>\.local\bin\defenseclaw-hook.exe     (no-console hook launcher)
+      * <home>\.local\bin\defenseclaw.cmd          (CLI shim)
 
     and adds that bin dir to the user PATH. Only Python + uv are required; no Go,
     Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
@@ -83,14 +85,21 @@ $Venv = Join-Path $DefenseClawHome ".venv"
 # `defenseclaw upgrade` (which replaces the gateway there). The venv stays under
 # DEFENSECLAW_HOME so a custom home still relocates the heavy CLI environment.
 $InstallDir = Join-Path $env:USERPROFILE ".local\bin"
-
-# Keep in sync with cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS.
-# PowerShell runs on Windows, where OpenClaw/ZeptoClaw proxy connectors are
-# intentionally hidden because the native Windows path is hook-only.
+# Native-Windows release surface. Keep this in sync with
+# cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT. Hermes is
+# intentionally selectable but labelled preview; proxy/WSL-only connectors are
+# rejected by this installer.
 $ConnectorChoices = @(
-    "codex", "claudecode", "hermes", "cursor",
-    "windsurf", "geminicli", "copilot", "openhands",
-    "antigravity", "opencode", "omnigent", "none"
+    "codex",
+    "claudecode",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "antigravity",
+    "opencode",
+    "none"
 )
 $HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
 
@@ -118,7 +127,7 @@ Usage:
 
 Options:
   -Connector <name>    Pick agent connector ($($ConnectorChoices -join '|'))
-  -NoOpenclaw          Install gateway/CLI only when no connector is selected
+  -NoOpenclaw          Legacy alias for -Connector none; installs gateway/CLI only
   -Version <x.y.z>     Install a specific release version
   -Local <dir>         Install from a local dist directory instead of downloading
   -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install
@@ -137,6 +146,47 @@ Environment variables:
 function Test-HasCommand {
     param([string]$Name)
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Invoke-Uv {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [switch]$ShowFailureOutput
+    )
+
+    # Windows PowerShell 5.1 turns any native stderr text into an ErrorRecord.
+    # With the installer's global ErrorActionPreference=Stop, harmless uv
+    # progress/status output would therefore abort even when uv exits zero.
+    # Capture both streams under Continue and make the native exit status the
+    # only success criterion. PowerShell 7 does not need the workaround, but
+    # follows the same explicit status contract here.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = 1
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & uv @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($ShowFailureOutput -and $exitCode -ne 0) {
+        foreach ($line in $output) {
+            Write-Host "    $line" -ForegroundColor DarkGray
+        }
+    }
+    return [int]$exitCode
+}
+
+function Confirm-YesNo {
+    param([string]$Prompt, [string]$Default = "y")
+    if ($Yes) { return $true }
+    $suffix = if ($Default -eq "y") { "[Y/n]" } else { "[y/N]" }
+    $answer = Read-Host "  $Prompt $suffix"
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = $Default }
+    return $answer -match '^[Yy]'
 }
 
 # ── Platform detection ────────────────────────────────────────────────────────
@@ -186,7 +236,8 @@ function Ensure-Python {
     Write-Step "Checking Python"
     # uv manages an interpreter for us; ask it for 3.12 and install on demand.
     # This avoids depending on a system Python being present or new enough.
-    & uv python install 3.12 *> $null
+    $exitCode = Invoke-Uv -Arguments @("python", "install", "3.12") -ShowFailureOutput
+    if ($exitCode -ne 0) { Die "Failed to install Python 3.12 via uv" }
     Write-Ok "Python 3.12 (managed by uv)"
 }
 
@@ -277,14 +328,20 @@ function Install-Gateway {
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
         if ($Local) {
-            # Accept either the zip or a raw defenseclaw.exe in the local dir.
+            # Accept either the release-shaped zip or explicit raw binaries.
             $zip = Get-ChildItem -Path (Join-Path $Local "defenseclaw_*_windows_$Arch.zip") -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($zip) {
                 Expand-Archive -Path $zip.FullName -DestinationPath $tmp -Force
             } else {
-                $exe = Get-ChildItem -Path (Join-Path $Local "defenseclaw*.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
-                if (-not $exe) { Die "No windows zip or defenseclaw.exe found in $Local" }
-                Copy-Item $exe.FullName (Join-Path $tmp "defenseclaw.exe") -Force
+                $gatewayExe = Join-Path $Local "defenseclaw.exe"
+                if (-not (Test-Path $gatewayExe)) {
+                    $gatewayExe = Join-Path $Local "defenseclaw-gateway.exe"
+                }
+                $hookExe = Join-Path $Local "defenseclaw-hook.exe"
+                if (-not (Test-Path $gatewayExe)) { Die "No windows zip or gateway executable found in $Local" }
+                if (-not (Test-Path $hookExe)) { Die "defenseclaw-hook.exe missing from $Local" }
+                Copy-Item $gatewayExe (Join-Path $tmp "defenseclaw.exe") -Force
+                Copy-Item $hookExe (Join-Path $tmp "defenseclaw-hook.exe") -Force
             }
         } else {
             $zipName = "defenseclaw_${script:ReleaseVersion}_windows_${Arch}.zip"
@@ -294,12 +351,16 @@ function Install-Gateway {
             Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
         }
         $binary = Join-Path $tmp "defenseclaw.exe"
+        $hookBinary = Join-Path $tmp "defenseclaw-hook.exe"
         if (-not (Test-Path $binary)) { Die "defenseclaw.exe missing from archive" }
+        if (-not (Test-Path $hookBinary)) { Die "defenseclaw-hook.exe missing from archive" }
         Copy-Item $binary (Join-Path $InstallDir "defenseclaw-gateway.exe") -Force
+        Copy-Item $hookBinary (Join-Path $InstallDir "defenseclaw-hook.exe") -Force
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
     Write-Ok "Gateway installed -> $InstallDir\defenseclaw-gateway.exe"
+    Write-Ok "No-console hook launcher installed -> $InstallDir\defenseclaw-hook.exe"
 }
 
 # ── Install: Python CLI (from wheel) ──────────────────────────────────────────
@@ -307,10 +368,10 @@ function Install-Gateway {
 function Install-Cli {
     Write-Step "Installing DefenseClaw CLI"
     Write-Info "Creating Python environment..."
-    & uv venv $Venv --python 3.12 --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        & uv venv $Venv --quiet
-        if ($LASTEXITCODE -ne 0) { Die "Failed to create Python virtual environment" }
+    $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--python", "3.12", "--quiet")
+    if ($venvExit -ne 0) {
+        $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--python", "3.12", "--allow-existing", "--quiet") -ShowFailureOutput
+        if ($venvExit -ne 0) { Die "Failed to create Python virtual environment" }
     }
     $venvPython = Join-Path $Venv "Scripts\python.exe"
 
@@ -328,8 +389,8 @@ function Install-Cli {
             $resolved = Get-Artifact -Name $whlName -Dest $whlPath
             Test-Checksum -File $whlPath -FileName $resolved
         }
-        & uv pip install --python $venvPython --quiet $whlPath
-        if ($LASTEXITCODE -ne 0) { Die "Failed to install CLI from wheel" }
+        $pipExit = Invoke-Uv -Arguments @("pip", "install", "--python", $venvPython, "--quiet", $whlPath) -ShowFailureOutput
+        if ($pipExit -ne 0) { Die "Failed to install CLI from wheel" }
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
@@ -361,19 +422,16 @@ function Select-Connector {
     $i = 1
     foreach ($v in $ConnectorChoices) {
         switch ($v) {
-            "codex"      { Write-Host "    $i) codex      - patch %USERPROFILE%\.codex\config.toml + hooks" }
-            "claudecode" { Write-Host "    $i) claudecode - patch %USERPROFILE%\.claude\settings.json hooks" }
-            "hermes"     { Write-Host "    $i) hermes     - configure Hermes Agent hooks" }
-            "cursor"     { Write-Host "    $i) cursor     - configure Cursor hooks" }
-            "windsurf"   { Write-Host "    $i) windsurf   - configure Windsurf hooks" }
-            "geminicli"  { Write-Host "    $i) geminicli  - configure Gemini CLI hooks" }
-            "copilot"    { Write-Host "    $i) copilot    - configure GitHub Copilot CLI hooks" }
-            "openhands"  { Write-Host "    $i) openhands  - configure OpenHands hooks" }
-            "antigravity" { Write-Host "    $i) antigravity - configure Antigravity hooks" }
-            "opencode"   { Write-Host "    $i) opencode   - configure OpenCode hooks" }
-            "omnigent"   { Write-Host "    $i) omnigent   - configure OmniGent hooks" }
-            "none"       { Write-Host "    $i) none       - install gateway/CLI only; pick later" }
-            default      { Write-Host "    $i) $v" }
+            "codex"       { Write-Host "    $i) codex       - Codex CLI native hooks" }
+            "claudecode"  { Write-Host "    $i) claudecode  - Claude Code native hooks" }
+            "cursor"      { Write-Host "    $i) cursor      - Cursor IDE native hooks (CLI remains WSL-only)" }
+            "windsurf"    { Write-Host "    $i) windsurf    - Windsurf native hooks" }
+            "geminicli"   { Write-Host "    $i) geminicli   - Gemini CLI native hooks" }
+            "copilot"     { Write-Host "    $i) copilot     - GitHub Copilot native hooks" }
+            "antigravity" { Write-Host "    $i) antigravity - Antigravity native hooks" }
+            "opencode"    { Write-Host "    $i) opencode    - OpenCode native JavaScript bridge" }
+            "hermes"      { Write-Host "    $i) hermes      - Hermes native hooks (preview)" }
+            "none"        { Write-Host "    $i) none        - install gateway/CLI only; pick later" }
         }
         $i++
     }
@@ -441,13 +499,10 @@ function Write-Success {
     Write-Host "         DefenseClaw installed successfully!" -ForegroundColor Green
     Write-Host "  ============================================================" -ForegroundColor Green
     Write-Host ""
-    switch ($script:PickedConnector) {
-        "codex"      { Write-Host "  Get started (Codex):`n`n    defenseclaw init --connector codex`n" -ForegroundColor Cyan }
-        "claudecode" { Write-Host "  Get started (Claude Code):`n`n    defenseclaw init --connector claudecode`n" -ForegroundColor Cyan }
-        { $_ -in $HookConnectors } {
-            Write-Host "  Get started ($script:PickedConnector):`n`n    defenseclaw init --connector $script:PickedConnector`n" -ForegroundColor Cyan
-        }
-        default      { Write-Host "  Get started (pick a connector later):`n`n    defenseclaw init`n" -ForegroundColor Cyan }
+    if ($script:PickedConnector -and $script:PickedConnector -ne "none") {
+        Write-Host "  Get started ($script:PickedConnector):`n`n    defenseclaw init --connector $script:PickedConnector`n" -ForegroundColor Cyan
+    } else {
+        Write-Host "  Get started (pick a connector later):`n`n    defenseclaw init`n" -ForegroundColor Cyan
     }
 }
 
@@ -464,7 +519,8 @@ function Main {
     $script:ChecksumsFile = $null
     $script:ReleaseVersion = $null
 
-    # Validate -Connector and reconcile with -NoOpenclaw.
+    # Validate against the native-Windows connector surface. -NoOpenclaw is
+    # retained only as a backwards-compatible alias for selecting none.
     if ($Connector) {
         if ($ConnectorChoices -notcontains $Connector) {
             Die "Invalid -Connector '$Connector'. Choices: $($ConnectorChoices -join ', ')"
@@ -490,12 +546,10 @@ function Main {
     Install-Gateway -Arch $arch
     Install-Cli
 
-    $cliWiredConnectors = @("codex", "claudecode") + $HookConnectors
-    switch ($script:PickedConnector) {
-        { $_ -in $cliWiredConnectors } {
-            Write-Info "Connector '$script:PickedConnector' wires up via the CLI (no OpenClaw runtime needed)."
-        }
-        default      { Write-Info "Skipping connector setup - run 'defenseclaw init' when ready" }
+    if ($script:PickedConnector -and $script:PickedConnector -ne "none") {
+        Write-Info "Connector '$script:PickedConnector' wires up through the native Windows CLI."
+    } else {
+        Write-Info "Skipping connector setup - run 'defenseclaw init' when ready"
     }
 
     Save-PickedConnector

@@ -154,6 +154,60 @@ func Run(ctx context.Context, opts Options) int {
 	return doRequest(ctx, opts, sp, failMode, payload, token)
 }
 
+// RunCodexNotify forwards the JSON payload Codex appends to its configured
+// `notify` argv array. Notifications are telemetry-only and deliberately
+// best-effort: every local/configuration/transport/response failure returns 0,
+// matching the legacy Bash bridge's `curl ... || true` contract.
+func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
+	opts = withDefaults(opts)
+	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
+		return 0
+	}
+	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
+		return 0
+	}
+	if len(payload) == 0 || int64(len(payload)) > opts.MaxBody {
+		return 0
+	}
+
+	tokenFile := filepath.Join(opts.HookDir, ".token")
+	if opts.Token == "" && !fileExists(tokenFile) {
+		return 0
+	}
+	token := opts.Token
+	if token == "" {
+		token = readTokenFile(tokenFile, false)
+	}
+
+	notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(notifyCtx, http.MethodPost,
+		"http://"+opts.APIAddr+"/api/v1/codex/notify", bytes.NewReader(payload))
+	if err != nil {
+		return 0
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", "codex-notify/1.0")
+	req.Header.Set("x-defenseclaw-source", "codex-notify")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if v := strings.TrimSpace(opts.TraceParent); v != "" && validTraceparent(v) {
+		req.Header.Set("traceparent", v)
+	}
+	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
+		req.Header.Set("tracestate", v)
+	}
+
+	resp, err := opts.HTTPClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, defaultMaxBody))
+	return 0
+}
+
 // doRequest performs the gateway POST and dispatches the response through the
 // connector-specific decision logic, applying the transport vs response
 // failure split exactly like the .sh hooks.

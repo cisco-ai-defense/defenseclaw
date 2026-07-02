@@ -164,16 +164,22 @@ class HintEngine:
         if hint := self._filter_hint(state):
             return hint
         if state.unscanned_skills > 0:
-            return f'{state.unscanned_skills} skills unscanned. Press "s" on a skill, or : scan skill --all.'
+            return (
+                f'{state.unscanned_skills} skills unscanned. Press "s" on a skill, '
+                'or : scan skill --all. Press "u" to unblock a blocked skill.'
+            )
         return (
             "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
-            "a allow | R registries | r refresh | / filter."
+            "a allow | u unblock | R registries | r refresh | / filter."
         )
 
     def _mcps_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "KEYS  j/k move | Enter detail | o actions | s scan | b block | a allow | n add server | R registries."
+        return (
+            "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
+            "a allow | u unblock | n add server | R registries."
+        )
 
     def _plugins_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):

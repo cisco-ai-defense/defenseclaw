@@ -41,7 +41,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import connector_paths, platform_support, ux
+from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
@@ -77,9 +77,14 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
+
+_supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
+_checkbox_key_name = terminal_checkbox.checkbox_key_name
+_render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
@@ -1745,26 +1750,29 @@ def _restore_dotenv_snapshot(path: str, payload: bytes | None, mode: int | None)
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
-    """Write entries to a .env file with mode 0600.
+    """Write entries to a .env file with owner-only access.
 
     Note: ``O_CREAT`` only applies the ``0o600`` mode on *initial*
-    creation. When the file already exists (common on repeat runs),
-    the previous permission bits survive. We chmod() after the write
-    so that repeated invocations keep converging on 0600, even if a
-    stray ``chmod 644`` happened out-of-band.
+    creation. Tighten the open descriptor before writing so repeat runs also
+    converge on POSIX 0600 or the equivalent protected Windows DACL.
     """
     lines = [f"{k}={sanitize_dotenv_value(v, key=k)}\n" for k, v in sorted(entries.items())]
     reject_symlink(path, what="dotenv file")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.writelines(lines)
+    fd = -1
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        # Best-effort: on some filesystems chmod is a no-op. We've
-        # already written the data, so don't fail the caller here.
-        pass
+        fd = os.open(path, flags, 0o600)
+        set_file_mode(fd, path, 0o600)
+        stream = os.fdopen(fd, "w")
+        fd = -1  # ownership transferred; stream closes on every with-path
+        with stream as f:
+            f.writelines(lines)
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _load_config_for_data_dir(data_dir: str):
@@ -1793,11 +1801,14 @@ def _set_config_trusted_bin_prefixes(cfg, prefixes: list[str]) -> None:
     seen: set[str] = set()
     for raw in prefixes:
         resolved, _err = agent_discovery.validate_trusted_prefix(raw)
-        key = resolved or str(raw).strip()
-        if not key or key in seen:
+        entry = resolved or str(raw).strip()
+        if not entry:
+            continue
+        key = agent_discovery._path_key(os.path.realpath(os.path.abspath(entry)))
+        if key in seen:
             continue
         seen.add(key)
-        deduped.append(key)
+        deduped.append(entry)
     ai.trusted_binary_prefixes = deduped
     cfg.save()
 
@@ -1810,7 +1821,11 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
     parts = _config_trusted_bin_prefixes(cfg)
     resolved, _err = agent_discovery.validate_trusted_prefix(prefix)
     entry = resolved or prefix
-    added = entry not in parts
+    entry_key = agent_discovery._path_key(os.path.realpath(os.path.abspath(entry)))
+    added = not any(
+        agent_discovery._path_key(os.path.realpath(os.path.abspath(part))) == entry_key
+        for part in parts
+    )
     if added:
         parts.append(entry)
         _set_config_trusted_bin_prefixes(cfg, parts)
@@ -1828,15 +1843,15 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
 
 
 def _trusted_prefix_status(resolved: str) -> str:
-    """Classify a resolved prefix: ok / missing / not-a-dir / world-writable."""
+    """Classify a resolved prefix for trusted-paths list output."""
     if not os.path.exists(resolved):
         return "missing"
     if not os.path.isdir(resolved):
         return "not-a-dir"
-    try:
-        if os.stat(resolved).st_mode & 0o002:
-            return "world-writable"
-    except OSError:  # pragma: no cover - rare stat failure
+    _path, error = agent_discovery.validate_trusted_prefix(resolved)
+    if error:
+        if "write access" in error or "writable" in error:
+            return "unsafe-permissions"
         return "error"
     return "ok"
 
@@ -1943,7 +1958,7 @@ def trusted_paths_list(app: AppContext, as_json: bool) -> None:
 
 @trusted_paths.command("add")
 @click.argument("directory")
-@click.option("--force", is_flag=True, help="Add even when the directory is world-writable or missing.")
+@click.option("--force", is_flag=True, help="Record the path even when it is missing or has unsafe permissions.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of text.")
 @pass_ctx
 def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: bool) -> None:
@@ -2641,6 +2656,30 @@ def _fetch_connector_names(cfg=None) -> list[str]:
 _CONNECTOR_NAMES = platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
 _HILT_MIN_SEVERITIES = ["HIGH", "MEDIUM", "LOW", "CRITICAL"]
 
+
+class _PlatformConnectorChoice(click.Choice):
+    """Hide unsupported choices while returning their reason on explicit use."""
+
+    def convert(
+        self,
+        value: Any,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> Any:
+        if isinstance(value, str):
+            connector = normalize_connector(value)
+            if connector in _CONNECTOR_NAMES_FALLBACK:
+                support = platform_support.connector_platform_support(connector)
+                if not support.available:
+                    self.fail(
+                        f"connector {connector!r} is {support.status} on "
+                        f"{platform_support.host_os()}: {support.reason}",
+                        param,
+                        ctx,
+                    )
+        return super().convert(value, param, ctx)
+
+
 _CONNECTOR_META: dict[str, dict[str, str]] = {
     "openclaw": {
         "label": "OpenClaw",
@@ -2725,6 +2764,24 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
 }
 
+
+def _connector_presentation_label(connector: str) -> str:
+    """Return the connector label with an explicit preview marker."""
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    if platform_support.connector_preview_on_os(connector):
+        return f"{label} (preview)"
+    return label
+
+
+def _ensure_connector_available(connector: str) -> None:
+    """Reject an unsupported host/connector pair with its recorded reason."""
+    support = platform_support.connector_platform_support(connector)
+    if not support.available:
+        raise click.ClickException(
+            f"connector {connector!r} is {support.status} on "
+            f"{platform_support.host_os()}: {support.reason}"
+        )
+
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     "openclaw": (
         "~/.openclaw/openclaw.json plugin allow/load entries",
@@ -2749,9 +2806,13 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/ and notify bridge files",
     ),
     "hermes": (
-        "~/.hermes/config.yaml hooks",
-        "~/.hermes/config.yaml MCP entries when configured explicitly",
-        "~/.hermes/skills and ~/.hermes/plugins discovery/install surfaces",
+        (
+            "HERMES_HOME/config.yaml hooks (defaults to "
+            "%LOCALAPPDATA%\\hermes\\config.yaml on Windows and "
+            "~/.hermes/config.yaml elsewhere)"
+        ),
+        "HERMES_HOME/config.yaml MCP entries when configured explicitly",
+        "HERMES_HOME/skills and HERMES_HOME/plugins discovery/install surfaces",
         "~/.defenseclaw/hooks/hermes-hook.sh",
     ),
     "cursor": (
@@ -2869,46 +2930,22 @@ def _read_picked_connector(data_dir: str | None) -> str | None:
 
 
 def _detect_installed_connectors() -> list[str]:
-    """Return every agent framework with on-disk install markers, in priority order.
+    """Return verified installed applications in discovery precedence order.
 
-    Pure filesystem detection over each agent's own state directories — no
-    ``picked_connector`` install hint, so callers can layer the hint on top
-    (``_detect_connector``) or reason about *all* installed agents
-    (``quickstart``'s ambiguity check, SU-12). Order matches the historical
-    first-match precedence of ``_detect_connector`` so its contract is
-    unchanged.
+    A connector config file is configuration evidence, not installation
+    evidence.  Reuse the shared discovery model so setup, quickstart, and
+    ``agent discover`` cannot disagree about that distinction.
     """
-    home = os.path.expanduser("~")
-    found: list[str] = []
-
-    def _mark(name: str, present: bool) -> None:
-        if present and name not in found:
-            found.append(name)
-
-    _mark("claudecode", os.path.isdir(os.path.join(home, ".claude")))
-    _mark("codex", os.path.isdir(os.path.join(home, ".codex")))
-    _mark("zeptoclaw", os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")))
-    _mark("hermes", os.path.isfile(os.path.join(home, ".hermes", "config.yaml")))
-    _mark("cursor", os.path.isfile(os.path.join(home, ".cursor", "hooks.json")))
-    _mark("windsurf", os.path.isfile(os.path.join(home, ".codeium", "windsurf", "hooks.json")))
-    _mark("geminicli", os.path.isfile(os.path.join(home, ".gemini", "settings.json")))
-    _mark(
-        "openhands",
-        os.path.isfile(os.path.join(home, ".openhands", "hooks.json"))
-        or os.path.isdir(os.path.join(home, ".openhands")),
-    )
-    # Antigravity auto-detection: agy v1.0.x evaluates hooks from
-    # ~/.gemini/config/hooks.json (the empirical path), but the legacy
-    # ~/.gemini/antigravity-cli/ dir may still exist on machines installed
-    # via pre-v0.5.0 DefenseClaw or simply created by `agy --help`. Either
-    # signal counts as "agy is installed on this host".
-    _mark(
-        "antigravity",
-        os.path.isfile(os.path.join(home, ".gemini", "config", "hooks.json"))
-        or os.path.isfile(os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"))
-        or os.path.isdir(os.path.join(home, ".gemini", "antigravity-cli")),
-    )
-    return found
+    # Setup/quickstart must reflect applications installed since the last
+    # inventory cache was written, so always perform a fresh shared scan.
+    disc = agent_discovery.discover_agents(use_cache=False)
+    order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", ()) or tuple(disc.agents)
+    found = [
+        name
+        for name in order
+        if name in disc.agents and disc.agents[name].installed
+    ]
+    return platform_support.supported_connectors(found)
 
 
 def _detect_connector(data_dir: str | None = None) -> str | None:
@@ -2918,9 +2955,8 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
       1. ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
          --connector ...``) — the operator's explicit choice at install
          time.
-      2. Filesystem heuristics over the agent's own state directories
-         (``~/.claude``, ``~/.codex``, ``~/.zeptoclaw/config.json`` …) — the
-         highest-priority installed agent (see ``_detect_installed_connectors``).
+      2. Shared verified application discovery — the highest-priority
+         installed agent (see ``_detect_installed_connectors``).
 
     Returns ``None`` when neither source is conclusive so the caller
     can fall back to ``"openclaw"``.
@@ -2952,7 +2988,8 @@ def _select_connector_interactive(current: str, data_dir: str | None = None) -> 
     for i, name in enumerate(_CONNECTOR_NAMES, 1):
         meta = _CONNECTOR_META[name]
         marker = " *" if name == default else ""
-        click.echo(f"    {i}. {meta['label']:<14s} — {meta['description']}{marker}")
+        label = _connector_presentation_label(name)
+        click.echo(f"    {i}. {label:<22s} — {meta['description']}{marker}")
     click.echo()
     default_idx = _CONNECTOR_NAMES.index(default) + 1 if default in _CONNECTOR_NAMES else None
     raw = click.prompt(
@@ -2973,7 +3010,11 @@ def _print_connector_info(name: str) -> None:
         tool_display = "pre-execution + response-scan"
     else:
         tool_display = tool_mode
-    click.echo(f"    Connector:         {meta['label']} ({name})")
+    support = platform_support.connector_platform_support(name)
+    click.echo(f"    Connector:         {_connector_presentation_label(name)} ({name})")
+    # Keep the status visible even for stable connectors when this detail view
+    # is explicitly requested; it makes preview classification auditable.
+    click.echo(f"    Platform support:  {support.status} — {support.reason}")
     click.echo(f"    Tool inspection:   {tool_display}")
     click.echo(f"    Subprocess policy: {meta['subprocess_policy']}")
     click.echo()
@@ -3221,8 +3262,13 @@ def _check_guardrail_setup_connector_versions(
 ) -> bool:
     """Verify every connector affected by a guardrail setup run."""
     trusted_prompt_cache: dict[str, bool] | None = {} if allow_prompt else None
-    for connector in _guardrail_setup_check_targets(app, gc, explicit_connector):
-        mode = gc.effective_mode(connector) if hasattr(gc, "effective_mode") else (getattr(gc, "mode", "") or "observe")
+    targets = _guardrail_setup_check_targets(app, gc, explicit_connector)
+    for connector in targets:
+        mode = (
+            gc.effective_mode(connector)
+            if hasattr(gc, "effective_mode")
+            else (getattr(gc, "mode", "") or "observe")
+        )
         version_check_kwargs = {
             "mode": mode or "observe",
             "data_dir": getattr(app.cfg, "data_dir", None),
@@ -3235,6 +3281,11 @@ def _check_guardrail_setup_connector_versions(
                 _downgrade_guardrail_setup_action_connector(gc, connector)
                 continue
             return False
+    # Version validation can refuse a requested action mode and persist an
+    # observe fallback. Reconcile the hook-lane judge gate after every target
+    # has reached its final mode so a refused connector cannot remain judged
+    # when execute_guardrail_setup() saves the configuration below.
+    _prune_judge_gate_to_action_scope(gc, targets)
     return True
 
 
@@ -3536,7 +3587,7 @@ def _resolve_judge_hook_gate(
     "--connector",
     "--agent",
     "agent_name",
-    type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False),
+    type=_PlatformConnectorChoice(_CONNECTOR_NAMES, case_sensitive=False),
     default=None,
     help=(
         "Agent framework connector. Alias: --agent. Defaults to "
@@ -3872,6 +3923,11 @@ def setup_guardrail(
         _disable_guardrail(app, gc, restart=True)
         return
 
+    # Validate explicit operator input before mutating the in-memory config.
+    # Stored/picked fallback values are checked after resolution below.
+    if explicit_connector:
+        _ensure_connector_available(explicit_connector)
+
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
@@ -3901,8 +3957,11 @@ def setup_guardrail(
         elif not gc.connector or gc.connector == "openclaw":
             picked = _read_picked_connector(getattr(app.cfg, "data_dir", None))
             if picked:
+                _ensure_connector_available(normalize_connector(picked))
                 gc.connector = picked
         target_connector = target_connector or gc.connector
+        if target_connector:
+            _ensure_connector_available(normalize_connector(target_connector))
         per_connector_target = bool(
             explicit_connector
             and target_connector
@@ -4382,46 +4441,6 @@ def _configured_connector_set(gc) -> list[str]:
     return [single] if single else []
 
 
-def _checkbox_key_name(ch: str) -> str:
-    if ch in ("\r", "\n"):
-        return "enter"
-    if ch in (" ", "\t"):
-        return "toggle"
-    if ch in ("\x1b[A", "k", "K"):
-        return "up"
-    if ch in ("\x1b[B", "j", "J"):
-        return "down"
-    if ch == "a":
-        return "all"
-    if ch == "n":
-        return "none"
-    return ""
-
-
-def _stdout_is_tty() -> bool:
-    try:
-        return click.get_text_stream("stdout").isatty()
-    except Exception:
-        return False
-
-
-def _render_checkbox_menu(
-    options: list[str],
-    selected: set[str],
-    cursor: int,
-    *,
-    redraw: bool,
-) -> None:
-    if redraw:
-        click.echo(f"\x1b[{len(options)}F", nl=False)
-    for idx, name in enumerate(options):
-        if redraw:
-            click.echo("\r\x1b[2K", nl=False)
-        pointer = ">" if idx == cursor else " "
-        mark = "x" if name in selected else " "
-        click.echo(f"  {pointer} [{mark}] {name}")
-
-
 def _prompt_checkbox_selection(
     options: list[str],
     *,
@@ -4429,44 +4448,14 @@ def _prompt_checkbox_selection(
     title: str,
     empty_ok: bool,
 ) -> list[str]:
-    """Small TTY checkbox selector used by setup wizards.
-
-    Mirrors the first-run init picker: j/k moves, Space toggles, a selects all,
-    n clears, Enter accepts.
-    """
-    if not options:
-        return []
-
-    selected = {name for name in default_selected if name in options}
-    cursor = 0
-    ux.subhead(title)
-    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
-
-    redraw = _stdout_is_tty()
-    rendered = False
-    while True:
-        _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)
-        rendered = True
-        key = _checkbox_key_name(click.getchar())
-        if key == "enter":
-            if selected or empty_ok:
-                return [name for name in options if name in selected]
-            ux.warn("Select at least one connector.", indent="  ")
-            continue
-        if key == "toggle":
-            name = options[cursor]
-            if name in selected:
-                selected.remove(name)
-            else:
-                selected.add(name)
-        elif key == "up":
-            cursor = (cursor - 1) % len(options)
-        elif key == "down":
-            cursor = (cursor + 1) % len(options)
-        elif key == "all":
-            selected = set(options)
-        elif key == "none":
-            selected.clear()
+    return terminal_checkbox.prompt_checkbox_selection(
+        options,
+        default_selected=default_selected,
+        title=title,
+        empty_ok=empty_ok,
+        redraw=_supports_terminal_redraw(),
+        getchar=click.getchar,
+    )
 
 
 def _prompt_add_replace_cancel(connector: str, others: list[str]) -> str | None:
@@ -4806,6 +4795,11 @@ def _apply_hook_connector_setup(
         enable_judge=enable_judge,
         judge_hook_connectors=judge_hook_connectors,
     )
+    # Judge eligibility follows the connector's final enforcement mode. Do
+    # this before cfg.save(): action validation may have fallen back to a
+    # second observe-mode setup call, and pruning only after that save leaves
+    # a stale gate on disk that the restarted gateway immediately reloads.
+    _prune_judge_gate_to_action_scope(gc, [connector])
 
     gc.scanner_mode = "local"
     gc.port = gc.port or 4000
@@ -5190,6 +5184,7 @@ def _setup_observability_alias(
     """
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         raise click.ClickException(f"unsupported connector for hook alias: {connector!r}")
+    _ensure_connector_available(connector)
 
     # Antigravity is global-only by design. agy v1.0.x merges every
     # hooks file it discovers (~/.gemini/config/hooks.json,
@@ -5343,16 +5338,22 @@ def _run_setup_picker(app: AppContext) -> list[str]:
     """SU-11: interactive multi-connector picker for bare ``setup``.
 
     Lists every supported hook connector with detected/configured tags,
-    pre-selects the detected + already-configured ones, and returns the active
-    operator's chosen set (batch mode/judge pickers happen later in
+    pre-selects the already-active set (or detected applications on a fresh
+    install), and returns the operator's chosen active set (batch mode/judge
+    pickers happen later in
     ``_dispatch_bare_setup``). Returns an empty list when the operator selects
     nothing. Only called on an interactive TTY (the caller falls back to help
     on a non-interactive stream).
     """
-    candidates = sorted(_HOOK_ENFORCED_CONNECTORS)
+    candidates = platform_support.supported_connectors(sorted(_HOOK_ENFORCED_CONNECTORS))
     detected = {c for c in _detect_installed_connectors() if c in _HOOK_ENFORCED_CONNECTORS}
-    configured = {c for c in _configured_connector_set(app.cfg.guardrail) if c in _HOOK_ENFORCED_CONNECTORS}
-    preselect = detected | configured
+    configured = {
+        c for c in _configured_connector_set(app.cfg.guardrail) if c in _HOOK_ENFORCED_CONNECTORS
+    }
+    # Once a connector set exists, it is the source of truth for defaults:
+    # discovering another installed application must not silently activate it.
+    # First-time setup still preselects detected applications for convenience.
+    preselect = configured if configured else detected
 
     display_by_connector: dict[str, str] = {}
     for c in candidates:
@@ -5362,11 +5363,14 @@ def _run_setup_picker(app: AppContext) -> list[str]:
         if c in configured:
             tags.append("configured")
         suffix = f"  {ux.dim('(' + ', '.join(tags) + ')')}" if tags else ""
-        display_by_connector[c] = f"{_CONNECTOR_META[c]['label']}{suffix}"
+        display_by_connector[c] = f"{_connector_presentation_label(c)}{suffix}"
     connector_by_display = {label: c for c, label in display_by_connector.items()}
 
     ux.section("Select active connectors")
-    ux.subhead("Detected and already-configured connectors are pre-selected.")
+    if configured:
+        ux.subhead("Active connectors are pre-selected. Detected inactive connectors remain unchecked.")
+    else:
+        ux.subhead("No connectors are active yet. Detected connectors are pre-selected for initial setup.")
     ux.subhead("Unchecked connectors will not remain active after this setup run.")
     selected = _prompt_checkbox_selection(
         [display_by_connector[c] for c in candidates],
@@ -5379,7 +5383,7 @@ def _run_setup_picker(app: AppContext) -> list[str]:
 
 def _connector_display_options(connectors: list[str]) -> tuple[list[str], dict[str, str], dict[str, str]]:
     """Return checkbox labels plus connector/display lookup maps."""
-    display_by_connector = {c: _CONNECTOR_META[c]["label"] for c in connectors}
+    display_by_connector = {c: _connector_presentation_label(c) for c in connectors}
     connector_by_display = {label: c for c, label in display_by_connector.items()}
     return [display_by_connector[c] for c in connectors], display_by_connector, connector_by_display
 
@@ -5599,6 +5603,11 @@ def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
         return []
 
     if current_gate == ["*"]:
+        # Nothing in this setup scope needs removing. Keep the wildcard rather
+        # than needlessly narrowing "all" to today's configured connector
+        # list, which would stop future action-mode connectors inheriting it.
+        if action_targets == targets:
+            return current_gate
         configured_hook_connectors = {
             normalize_connector(c)
             for c in _configured_connector_set(gc)
@@ -5848,6 +5857,12 @@ def _dispatch_bare_setup(
                 f"{sorted(_HOOK_ENFORCED_CONNECTORS)}. (OpenClaw/ZeptoClaw use "
                 "`defenseclaw setup openclaw` — they cannot be batch peers.)"
             )
+        support = platform_support.connector_platform_support(c)
+        if not support.available:
+            raise click.UsageError(
+                f"connector {c!r} is {support.status} on {platform_support.host_os()}: "
+                f"{support.reason}"
+            )
         if c not in targets:
             targets.append(c)
 
@@ -5855,10 +5870,10 @@ def _dispatch_bare_setup(
         _add(raw)
     if detected:
         for c in _detect_installed_connectors():
-            if c in _HOOK_ENFORCED_CONNECTORS:
+            if c in _HOOK_ENFORCED_CONNECTORS and platform_support.connector_supported_on_os(c):
                 _add(c)
     if all_connectors:
-        for c in sorted(_HOOK_ENFORCED_CONNECTORS):
+        for c in platform_support.supported_connectors(sorted(_HOOK_ENFORCED_CONNECTORS)):
             _add(c)
 
     if not targets:
@@ -6483,6 +6498,18 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     """Create a ``defenseclaw setup <connector>`` hook-driven alias."""
     label = _CONNECTOR_META[connector]["label"]
     surface_name = "custom policy API" if connector == "omnigent" else "agent lifecycle hooks"
+    platform = platform_support.connector_platform_support(connector)
+    platform_note = (
+        ""
+        if platform.status == platform_support.SUPPORTED
+        else (
+            f"\n\nPlatform status on {platform_support.host_os()}: "
+            f"{platform.status} — {platform.reason}"
+        )
+    )
+    short_help = f"Configure DefenseClaw for {label}."
+    if platform.status != platform_support.SUPPORTED:
+        short_help = f"{label}: {platform.status} on {platform_support.host_os()}."
 
     @click.command(
         connector,
@@ -6493,8 +6520,9 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             "mode is observe; pass "
             "--mode action to enable agent-native blocking/approval verdicts "
             "on supported events. No proxy is involved in either mode."
+            f"{platform_note}"
         ),
-        short_help=f"Configure DefenseClaw for {label}.",
+        short_help=short_help,
         epilog=(
             "Hook and policy connectors enforce through agent-native lifecycle "
             "verdicts (no LLM proxy). The judge/HILT/block-message options here write "
@@ -6766,6 +6794,7 @@ def _setup_guardrail_connector_alias(
     """Run the full guardrail setup backend for a specific connector."""
     if connector not in _GUARDRAIL_SUPPORTING_CONNECTORS:
         raise click.ClickException(f"{connector!r} is not a guardrail-capable connector")
+    _ensure_connector_available(connector)
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     click.echo()
@@ -6840,6 +6869,18 @@ def _setup_guardrail_connector_alias(
 def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
     """Create ``defenseclaw setup openclaw|zeptoclaw`` aliases."""
     label = _CONNECTOR_META[connector]["label"]
+    platform = platform_support.connector_platform_support(connector)
+    platform_note = (
+        ""
+        if platform.status == platform_support.SUPPORTED
+        else (
+            f"\n\nPlatform status on {platform_support.host_os()}: "
+            f"{platform.status} — {platform.reason}"
+        )
+    )
+    short_help = f"Configure {label} guardrail setup."
+    if platform.status != platform_support.SUPPORTED:
+        short_help = f"{label}: {platform.status} on {platform_support.host_os()}."
 
     @click.command(
         connector,
@@ -6847,8 +6888,9 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             f"Configure DefenseClaw guardrail for {label}.\n\n"
             "Configures the proxy-backed connector selection, then runs the "
             "same backend as `defenseclaw setup guardrail --connector ...`."
+            f"{platform_note}"
         ),
-        short_help=f"Configure {label} guardrail setup.",
+        short_help=short_help,
     )
     @click.option("--yes", "-y", "yes", is_flag=True, help="Skip confirmation prompt.")
     @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Alias for --yes.")

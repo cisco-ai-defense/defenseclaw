@@ -44,6 +44,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+from defenseclaw import platform_support
 from defenseclaw.commands.cmd_setup import setup as setup_group
 
 from tests.helpers import cleanup_app, make_app_context
@@ -272,7 +273,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_new_aliases_pin_observability_connector(self):
-        for connector in HOOK_ALIAS_CONNECTORS:
+        for connector in platform_support.supported_connectors(HOOK_ALIAS_CONNECTORS):
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -317,7 +318,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     self.assertEqual(fh.read().strip(), connector)
 
     def test_new_aliases_support_hook_action_mode(self):
-        for connector in HOOK_ALIAS_CONNECTORS:
+        for connector in platform_support.supported_connectors(HOOK_ALIAS_CONNECTORS):
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -393,6 +394,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         workspace = os.path.join(self.tmp_dir, "repo")
         os.makedirs(workspace)
         with (
+            patch("defenseclaw.platform_support.host_os", return_value="linux"),
             patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None),
             patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
             patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
@@ -458,10 +460,21 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertNotIn("pre-tool hook", result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
-        result = _invoke(["guardrail", "--help"], self.app)
+        host = "windows"
+        command = setup_group.commands["guardrail"]
+        connector_param = next(param for param in command.params if param.name == "agent_name")
+        windows_choices = platform_support.supported_connectors(connector_param.type.choices, host)
+        with (
+            patch("defenseclaw.platform_support.host_os", return_value=host),
+            patch.object(connector_param.type, "choices", windows_choices),
+        ):
+            result = _invoke(["guardrail", "--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in HOOK_ALIAS_CONNECTORS:
+        for connector in platform_support.supported_connectors(HOOK_ALIAS_CONNECTORS, host):
             self.assertIn(connector, result.output)
+        choice_text = result.output.split("--connector, --agent [", 1)[1].split("]", 1)[0]
+        for connector in platform_support.WINDOWS_UNSUPPORTED_CONNECTORS:
+            self.assertNotIn(connector, choice_text)
         self.assertNotIn("openclaw, claudecode, codex, zeptoclaw", result.output)
 
     def test_rotate_token_help_is_connector_agnostic(self):

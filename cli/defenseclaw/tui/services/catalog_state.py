@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
+from defenseclaw.connector_paths import hermes_config_path
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 
@@ -592,7 +593,8 @@ class CatalogListModel(Generic[RowT]):
             f"[bold #22D3EE]{title}[/]\n"
             f"{len(self.filtered)} of {len(self.items)} rows{filter_text}{detail}\n"
             "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  R reveal in registry"
+            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  "
+            "u unblock  ·  R reveal in registry"
         )
 
     def _haystack(self, row: RowT) -> str:
@@ -1627,7 +1629,7 @@ def mcp_unset_target_for_connector(connector: str) -> str:
         case "zeptoclaw":
             return "~/.zeptoclaw/config.json"
         case "hermes":
-            return "~/.hermes/config.yaml"
+            return hermes_config_path()
         case "cursor":
             return "./.cursor/mcp.json"
         case "windsurf":
@@ -1721,9 +1723,9 @@ def connector_source_label(connector: str, category: str) -> str:
         ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("antigravity", "plugins"): (
-            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
-            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),

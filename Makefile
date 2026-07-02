@@ -1,13 +1,11 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
+HOOK_LAUNCHER := defenseclaw-hook
 VERSION     := 0.8.0
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
-INSTALL_DIR := $(HOME)/.local/bin
 PLUGIN_DIR  := extensions/defenseclaw
-DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
-OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 
 DIST_DIR    := dist
@@ -21,12 +19,29 @@ UPGRADE_SMOKE_FROM ?= 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.
 # Linux/macOS. $(OS) is set to "Windows_NT" by Windows itself and inherited by
 # the MSYS/Git-Bash shell make runs there; it is unset elsewhere.
 ifeq ($(OS),Windows_NT)
+# PowerShell's inherited PATH places System32 before MSYS. Make recipes rely on
+# POSIX utilities such as find, cp, ln, and rm, so prefer the MSYS toolchain;
+# otherwise Windows find.exe interprets GNU find arguments and prints
+# "FIND: Parameter format not correct" while silently skipping work.
+export PATH := /usr/bin:$(PATH)
+# GNU Make runs these recipes through MSYS, whose HOME defaults to
+# /home/<user>. Native PowerShell and the installed DefenseClaw CLI use
+# USERPROFILE instead, so deriving install paths from HOME silently places a
+# second copy under C:\msys64\home that PowerShell never executes. Convert the
+# native profile path to an MSYS path for recipe compatibility while keeping
+# every installed artifact in the real Windows user profile.
+USER_HOME := $(shell if [ -n "$$USERPROFILE" ]; then cygpath -u "$$USERPROFILE" 2>/dev/null || printf '%s' "$$USERPROFILE"; else printf '%s' "$$HOME"; fi)
 VENV_BIN := $(VENV)/Scripts
 EXE      := .exe
 else
+USER_HOME := $(HOME)
 VENV_BIN := $(VENV)/bin
 EXE      :=
 endif
+
+INSTALL_DIR := $(USER_HOME)/.local/bin
+DC_EXT_DIR  := $(USER_HOME)/.defenseclaw/extensions/defenseclaw
+OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
 
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
@@ -295,6 +310,10 @@ gateway: sync-openclaw-extension
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
+ifeq ($(OS),Windows_NT)
+	go build -ldflags "-H=windowsgui -X main.version=$(VERSION)" -o $(HOOK_LAUNCHER).exe ./cmd/defenseclaw-hook
+	@echo "Built $(HOOK_LAUNCHER).exe (Windows GUI subsystem)"
+endif
 
 # sync-openclaw-extension copies the runtime files of the DefenseClaw
 # OpenClaw plugin into internal/gateway/connector/openclaw_extension so
@@ -366,6 +385,11 @@ extensions: plugin sync-openclaw-extension
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	@if [ "$(GOOS)" = "windows" ]; then \
+		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
+			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
+			-o $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe ./cmd/defenseclaw-hook; \
+	fi
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
 
 gateway-run: gateway
@@ -387,7 +411,7 @@ plugin:
 # ---------------------------------------------------------------------------
 
 cli-install: pycli
-	@mkdir -p $(INSTALL_DIR)
+	@mkdir -p "$(INSTALL_DIR)"
 	@ln -sf "$(CURDIR)/$(VENV_BIN)/defenseclaw$(EXE)" "$(INSTALL_DIR)/defenseclaw$(EXE)"
 	@ln -sf "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" 2>/dev/null || true
 	@# Expose the scanner entry points (skill-scanner, mcp-scanner,
@@ -414,7 +438,7 @@ cli-install: pycli
 	fi
 
 gateway-install: cli-install gateway
-	@mkdir -p $(INSTALL_DIR)
+	@mkdir -p "$(INSTALL_DIR)"
 	@# Atomic replace: Linux returns ETXTBSY when overwriting an executable
 	@# that is currently running (e.g. the sidecar started via `defenseclaw-
 	@# gateway start`). cp(1) opens the destination for writing, which
@@ -427,18 +451,41 @@ gateway-install: cli-install gateway
 	trap 'rm -f "$$tmp"' EXIT INT TERM; \
 	cp $(GATEWAY)$(EXE) "$$tmp"; \
 	chmod +x "$$tmp"; \
-	mv -f "$$tmp" "$$gwt"
+	was_running=0; \
+	if [ "$(OS)" = "Windows_NT" ] && [ -x "$$gwt" ] && "$$gwt" status >/dev/null 2>&1; then \
+		was_running=1; \
+		echo "Stopping the running Windows gateway before replacing its executable..."; \
+		"$$gwt" stop; \
+	fi; \
+	if ! mv -f "$$tmp" "$$gwt"; then \
+		if [ "$$was_running" -eq 1 ]; then "$$gwt" start || true; fi; \
+		exit 1; \
+	fi; \
+	if [ "$$was_running" -eq 1 ]; then \
+		echo "Starting the updated Windows gateway..."; \
+		"$$gwt" start; \
+	fi
+	@if [ "$(OS)" = "Windows_NT" ]; then \
+		hook_target="$(INSTALL_DIR)/$(HOOK_LAUNCHER).exe"; \
+		hook_tmp="$$hook_target.new.$$$$"; \
+		trap 'rm -f "$$hook_tmp"' EXIT INT TERM; \
+		cp "$(HOOK_LAUNCHER).exe" "$$hook_tmp"; \
+		chmod +x "$$hook_tmp"; \
+		mv -f "$$hook_tmp" "$$hook_target"; \
+	fi
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
-		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY)$(EXE) 2>/dev/null || true; \
+		codesign -f -s - "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" 2>/dev/null || true; \
 	fi
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
-	@# If a sidecar is already running it kept the old inode; tell the
-	@# operator so they know a restart is needed to pick up the new build.
+	@if [ "$(OS)" = "Windows_NT" ]; then echo "Installed $(HOOK_LAUNCHER).exe to $(INSTALL_DIR)"; fi
+	@# On Unix, a running sidecar keeps the old inode; tell the operator a
+	@# restart is needed. The Windows branch above stops and starts the sidecar
+	@# around replacement because a live .exe cannot retain Unix inode semantics.
 	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
 	@# matches this very make invocation ("make gateway-install") and
 	@# any editor/tail window with the binary path on its cmdline, so
 	@# it would fire a false "sidecar is running" hint on every build.
-	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+	@if [ "$(OS)" != "Windows_NT" ] && pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
 		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi
@@ -791,7 +838,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(BINARY)-linux-* $(BINARY)-darwin-*
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

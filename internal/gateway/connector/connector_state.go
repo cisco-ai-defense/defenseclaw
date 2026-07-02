@@ -306,7 +306,19 @@ func surfaceLocations(cap SurfaceCapability) SurfaceLocations {
 	}
 }
 
+// HookContractLockDrifted reports compatibility changes that must gate boot or
+// reconciliation. Generated artifact digest changes are repairable and are not
+// included in this signal.
 func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
+	return HookContractCompatibilityDrifted(previous, current)
+}
+
+// HookContractCompatibilityDrifted reports only upstream compatibility
+// changes: the installed agent version or the selected hook contract changed.
+// It deliberately excludes generated hook-script digests. Changed script
+// bytes are the thing setup/guardian repair is supposed to overwrite, so
+// treating them as compatibility drift would prevent the repair path itself.
+func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false
 	}
@@ -319,9 +331,6 @@ func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
 		return true
 	}
-	// Hook script digests are intentionally not a boot/reconcile drift gate:
-	// changed script bytes are the thing setup/guardian repair is supposed to
-	// overwrite. Treat only agent/contract identity changes as contract drift.
 	return false
 }
 

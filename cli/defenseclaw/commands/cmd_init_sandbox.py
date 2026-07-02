@@ -381,13 +381,13 @@ def _detect_openclaw_home() -> str | None:
     Checks SUDO_USER's home first (since init is typically run with sudo),
     then the current user's home, then /root.
     """
-    import pwd as _pwd
-
     candidates = []
 
     sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
+    if sudo_user and os.name != "nt":
         try:
+            import pwd as _pwd
+
             pw = _pwd.getpwnam(sudo_user)
             candidates.append(os.path.join(pw.pw_dir, ".openclaw"))
         except KeyError:
@@ -429,7 +429,7 @@ def _save_ownership_backup(openclaw_home: str, data_dir: str) -> str:
 
     parents_without_ox = []
     parent = os.path.dirname(real_path)
-    while parent and parent != "/":
+    while parent:
         try:
             pst = os.stat(parent)
             pmode = _stat.S_IMODE(pst.st_mode)
@@ -437,7 +437,10 @@ def _save_ownership_backup(openclaw_home: str, data_dir: str) -> str:
                 parents_without_ox.append({"path": parent, "original_mode": oct(pmode)})
         except OSError:
             break
-        parent = os.path.dirname(parent)
+        next_parent = os.path.dirname(parent)
+        if next_parent == parent:
+            break
+        parent = next_parent
 
     backup = {
         "openclaw_home": real_path,
@@ -464,7 +467,7 @@ def _ensure_parent_traversal(target_path: str) -> None:
     import stat as _stat
 
     parent = os.path.dirname(target_path)
-    while parent and parent != "/":
+    while parent:
         try:
             st = os.stat(parent)
             mode = _stat.S_IMODE(st.st_mode)
@@ -479,7 +482,10 @@ def _ensure_parent_traversal(target_path: str) -> None:
                     click.echo(f"  Traversal:     added o+x to {parent}")
         except OSError:
             break
-        parent = os.path.dirname(parent)
+        next_parent = os.path.dirname(parent)
+        if next_parent == parent:
+            break
+        parent = next_parent
 
 
 def _install_acl_package() -> str | None:

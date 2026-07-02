@@ -30,12 +30,19 @@ deleted.
 
 ### Behaviour changes (no flag)
 
+- **Skill, MCP, and plugin scans now degrade cleanly when optional LLM
+  credentials are unavailable**: the local/static analyzers still complete,
+  the CLI and TUI show a nonfatal skip warning, and Setup/Keys identifies the
+  missing credential. Auto mode adds the LLM analyzer only when its model and
+  authentication are usable; local providers and Bedrock's AWS credential
+  chain remain supported without a DefenseClaw API key.
 - **Antigravity local surfaces now match the PR #365 contract**:
   MCP reads/writes `~/.gemini/config/mcp_config.json` and
   `<workspace>/.agents/mcp_config.json`; hooks remain global-only at
   `~/.gemini/config/hooks.json`; AgentSkills folder form is supported
-  while rules/plugins/plugin-contained agents remain discovery-only
-  unless Google documents a write contract.
+  while rules/plugin-contained agents remain discovery-only. Antigravity
+  plugins now install to Google's documented global/workspace plugin paths;
+  the Antigravity CLI staging directory remains an additional discovery path.
 - **W3C trace propagation is enabled for trusted hook routes**
   (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`) when the
   caller is loopback and the connector route is registered. The
