@@ -35,6 +35,7 @@ import (
 )
 
 const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
+const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(cursorAdapterHelperMode) {
@@ -48,7 +49,7 @@ func TestMain(m *testing.M) {
 		fmt.Print(`{"continue":true}`)
 		os.Exit(0)
 	case "timeout":
-		if pidFile := os.Getenv("TEST_CURSOR_ADAPTER_PID_FILE"); pidFile != "" {
+		if pidFile := os.Getenv(cursorAdapterPIDFileEnv); pidFile != "" {
 			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 		}
 		time.Sleep(30 * time.Second)
@@ -184,7 +185,7 @@ func TestCursorAdapterTimeoutKillsChildAndFailsOpen(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv(cursorAdapterHelperMode, "timeout")
-	t.Setenv("TEST_CURSOR_ADAPTER_PID_FILE", pidFile)
+	t.Setenv(cursorAdapterPIDFileEnv, pidFile)
 	adapter := renderCursorAdapterForTest(t, executable, 1_000)
 	stdout, stderr, code := runCursorAdapterTest(
 		t, adapter, `{"source":"cursor-adapter-probe"}`, false,
