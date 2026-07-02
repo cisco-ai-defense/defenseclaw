@@ -277,6 +277,7 @@ class ObservabilityDestinationRow:
     scope: str
     kind: str
     state: str
+    protocol: str
     signals: str
     endpoint: str
     routing: str = ""
@@ -1068,6 +1069,7 @@ class OverviewPanelModel:
                         scope=str(item.get("scope", "") or "process"),
                         kind=kind,
                         state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        protocol=str(item.get("protocol", "") or "—"),
                         signals=signals,
                         endpoint=redact_endpoint_for_display(str(item.get("endpoint", "") or "—")),
                         routing=routing_label,
@@ -1090,6 +1092,7 @@ class OverviewPanelModel:
                         scope=str(item.get("scope", "") or "global"),
                         kind=str(item.get("kind", "") or "unknown"),
                         state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        protocol=str(item.get("protocol", "") or "—"),
                         signals="audit-events",
                         endpoint=str(endpoint),
                     )

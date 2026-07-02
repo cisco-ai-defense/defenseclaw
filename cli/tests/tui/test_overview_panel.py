@@ -167,6 +167,7 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
                             "name": "galileo",
                             "preset": "galileo",
                             "enabled": True,
+                            "protocol": "http",
                             "endpoint": "https://user:secret@api.example.test/otel/traces?api_key=secret",
                             "signals": "traces",
                             "headers": {"Galileo-API-Key": "must-not-render"},
@@ -177,6 +178,7 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
                             "name": "local-observability",
                             "preset": "local-otlp",
                             "enabled": False,
+                            "protocol": "grpc",
                             "endpoint": "127.0.0.1:4317",
                             "signals": "traces, metrics, logs",
                         },
@@ -191,6 +193,7 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
                             "name": "soc-archive",
                             "kind": "otlp_logs",
                             "enabled": True,
+                            "protocol": "grpc",
                             "scope": "connector:codex",
                             "endpoint": "https://user:secret@collector.example.test:4317/provider/token?token=secret",
                         }
@@ -209,9 +212,12 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
     assert rows[0].routing == "collector accepted 3/3; pending 0; rejected 0; failed 0"
     assert rows[0].endpoint == "https://api.example.test/otel/traces"
     assert rows[0].signals == "traces"
+    assert rows[0].protocol == "http"
     assert rows[1].state == "disabled"
+    assert rows[1].protocol == "grpc"
     assert rows[2].signals == "audit-events"
     assert rows[2].scope == "connector:codex"
+    assert rows[2].protocol == "grpc"
     assert rows[2].endpoint == "https://collector.example.test:4317/…"
     assert "must-not-render" not in repr(rows)
     assert "user:secret" not in repr(rows)

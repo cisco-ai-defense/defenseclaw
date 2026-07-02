@@ -100,6 +100,7 @@ async def test_overview_renders_observability_destination_panel(tmp_path) -> Non
                             "name": "galileo",
                             "preset": "galileo",
                             "enabled": True,
+                            "protocol": "http",
                             "signals": "traces",
                             "endpoint": "https://api.example.test/otel/traces",
                             "routing": {"accepted": 3, "dropped": 1},
@@ -120,6 +121,8 @@ async def test_overview_renders_observability_destination_panel(tmp_path) -> Non
     assert "OBSERVABILITY DESTINATIONS · RUNTIME" in rendered
     assert "Galileo" in rendered
     assert "traces" in rendered
+    assert "PROTOCOL" in rendered
+    assert "http" in rendered
     assert "75.0% (3/4)" in rendered
     assert "api.example.test" in rendered
     assert "/otel/traces" in rendered

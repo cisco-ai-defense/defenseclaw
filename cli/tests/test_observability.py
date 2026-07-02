@@ -30,13 +30,14 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 import textwrap
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yaml
 
@@ -297,6 +298,112 @@ class WriterOTelPresetTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         os.environ.pop("DEFENSECLAW_HOME", None)
+
+    def test_protocol_precedence_and_persistence(self) -> None:
+        cases = (
+            ("grpc", "http", "http"),
+            ("http", "grpc", "grpc"),
+            ("http", None, "http"),
+            ("", None, "grpc"),
+        )
+        for preset_protocol, explicit_protocol, expected in cases:
+            with self.subTest(
+                preset_protocol=preset_protocol,
+                explicit_protocol=explicit_protocol,
+            ):
+                _, tmp = _make_tmp_ctx()
+                preset_id = "protocol-precedence"
+                preset = Preset(
+                    id=preset_id,
+                    display_name="Protocol precedence",
+                    target="otel",
+                    description="test preset",
+                    otel_protocol=preset_protocol,
+                    endpoint_template="{endpoint}",
+                    signal_url_paths={
+                        "traces": "/v1/traces",
+                        "metrics": "/v1/metrics",
+                        "logs": "/v1/logs",
+                    },
+                    prompts=(
+                        ("endpoint", "collector.example.test:4317", "endpoint", ""),
+                        ("protocol", "grpc", "protocol", "grpc"),
+                    ),
+                )
+                inputs = {"endpoint": "collector.example.test:4317"}
+                if explicit_protocol is not None:
+                    inputs["protocol"] = explicit_protocol
+                with patch.dict(PRESETS, {preset_id: preset}):
+                    apply_preset(preset_id, inputs, tmp)
+
+                destination = _read_yaml(tmp)["otel"]["destinations"][0]
+                self.assertEqual(destination["protocol"], expected)
+                for signal in ("traces", "metrics", "logs"):
+                    self.assertEqual(destination[signal]["protocol"], expected)
+                    self.assertEqual(destination[signal]["url_path"], f"/v1/{signal}")
+                self.assertEqual(list_destinations(tmp)[0].protocol, expected)
+
+    def test_protocol_boundary_normalizes_case_and_rejects_invalid_without_write(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset(
+            "otlp",
+            {"endpoint": "collector.example.test:4317", "protocol": " HTTP "},
+            tmp,
+            name="collector",
+        )
+        self.assertEqual(list_destinations(tmp)[0].protocol, "http")
+        before = _read_yaml(tmp)
+
+        for invalid in ("http/protobuf", "udp", "   "):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "must be grpc or http"):
+                    apply_preset(
+                        "otlp",
+                        {"endpoint": "replacement.example.test:4317", "protocol": invalid},
+                        tmp,
+                        name="collector",
+                    )
+                self.assertEqual(_read_yaml(tmp), before)
+
+        with self.assertRaisesRegex(ValueError, "must be grpc or http"):
+            apply_preset(
+                "otlp",
+                {"endpoint": "replacement.example.test:4317", "protocol": "udp"},
+                tmp,
+                name="audit-copy",
+                target_override="audit_sinks",
+            )
+        self.assertEqual(_read_yaml(tmp), before)
+
+        secret_preset = Preset(
+            id="invalid-protocol-secret",
+            display_name="Invalid protocol secret",
+            target="otel",
+            description="test preset",
+            otel_protocol="grpc",
+            endpoint_template="{endpoint}",
+            token_env="TEST_OTLP_TOKEN",
+            prompts=(("endpoint", "collector.example.test:4317", "endpoint", ""),),
+        )
+        with patch.dict(PRESETS, {secret_preset.id: secret_preset}):
+            with self.assertRaisesRegex(ValueError, "must be grpc or http"):
+                apply_preset(
+                    secret_preset.id,
+                    {"endpoint": "replacement.example.test:4317", "protocol": "udp"},
+                    tmp,
+                    name="collector",
+                    secret_value="test-value",
+                )
+        self.assertEqual(_read_yaml(tmp), before)
+        self.assertFalse(os.path.exists(os.path.join(tmp, ".env")))
+
+        apply_preset(
+            "otlp",
+            {"endpoint": "collector.example.test:4317", "protocol": ""},
+            tmp,
+            name="collector",
+        )
+        self.assertEqual(list_destinations(tmp)[0].protocol, "grpc")
 
     def test_datadog_roundtrip_creates_named_destination(self) -> None:
         _, tmp = _make_tmp_ctx()
@@ -946,11 +1053,54 @@ class ObservabilityCLITests(unittest.TestCase):
 
         listed = self._invoke(["list"])
         self.assertEqual(listed.exit_code, 0, listed.output)
-        for heading in ("TARGET", "KIND", "SIGNALS"):
+        for heading in ("TARGET", "KIND", "PROTOCOL", "SIGNALS"):
             self.assertIn(heading, listed.output)
         self.assertIn("tempo", listed.output)
         self.assertIn("otel", listed.output)
         self.assertIn("traces", listed.output)
+
+    def test_otlp_protocol_cli_roundtrip_list_probe_and_remove(self) -> None:
+        for protocol in ("http", "grpc"):
+            with self.subTest(protocol=protocol):
+                name = f"collector-{protocol}"
+                added = self._invoke(
+                    [
+                        "add",
+                        "otlp",
+                        "--non-interactive",
+                        "--name",
+                        name,
+                        "--endpoint",
+                        "127.0.0.1:4318",
+                        "--protocol",
+                        protocol,
+                    ]
+                )
+                self.assertEqual(added.exit_code, 0, added.output)
+
+                destination = _read_yaml(self.tmp)["otel"]["destinations"][0]
+                self.assertEqual(destination["protocol"], protocol)
+                for signal in ("traces", "metrics", "logs"):
+                    self.assertEqual(destination[signal]["protocol"], protocol)
+
+                listed_json = self._invoke(["list", "--json"])
+                self.assertEqual(listed_json.exit_code, 0, listed_json.output)
+                payload = json.loads(listed_json.output)
+                self.assertEqual(payload[0]["protocol"], protocol)
+
+                listed_human = self._invoke(["list"])
+                self.assertEqual(listed_human.exit_code, 0, listed_human.output)
+                self.assertIn("PROTOCOL", listed_human.output)
+                self.assertIn(protocol, listed_human.output)
+
+                with patch("socket.create_connection", return_value=MagicMock()):
+                    probed = self._invoke(["test", name])
+                self.assertEqual(probed.exit_code, 0, probed.output)
+                self.assertEqual(probed.output.count(f"({protocol})"), 3)
+
+                removed = self._invoke(["remove", name, "--yes"])
+                self.assertEqual(removed.exit_code, 0, removed.output)
+                self.assertEqual(list_destinations(self.tmp), [])
 
     def test_add_reports_raw_redaction_status_without_prompting(self) -> None:
         self.app.cfg.privacy.disable_redaction = True

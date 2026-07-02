@@ -6891,6 +6891,7 @@ class DefenseClawTUI(App[None]):
             table.add_column(no_wrap=True, min_width=16)  # SCOPE
             table.add_column(no_wrap=True, min_width=12)  # KIND
             table.add_column(no_wrap=True, min_width=10)  # STATE
+            table.add_column(no_wrap=True, min_width=10)  # PROTOCOL
             table.add_column(no_wrap=True, min_width=18)  # SIGNALS
             table.add_column(no_wrap=True, min_width=13)  # ROUTING
             table.add_column(overflow="ellipsis")  # ENDPOINT
@@ -6900,6 +6901,7 @@ class DefenseClawTUI(App[None]):
                 Text("SCOPE", style=TOKENS.text_secondary),
                 Text("KIND/PRESET", style=TOKENS.text_secondary),
                 Text("STATE", style=TOKENS.text_secondary),
+                Text("PROTOCOL", style=TOKENS.text_secondary),
                 Text("SIGNALS", style=TOKENS.text_secondary),
                 Text("ROUTING", style=TOKENS.text_secondary),
                 Text("ENDPOINT", style=TOKENS.text_secondary),
@@ -6912,6 +6914,7 @@ class DefenseClawTUI(App[None]):
                     Text(row.scope, style=TOKENS.text_secondary),
                     Text(row.kind, style=TOKENS.text_secondary),
                     Text(row.state, style=color),
+                    Text(row.protocol, style=TOKENS.text_secondary),
                     Text(row.signals, style=TOKENS.text_secondary),
                     Text(row.routing or "—", style=TOKENS.accent_cyan),
                     Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
@@ -6981,7 +6984,7 @@ class DefenseClawTUI(App[None]):
             )
         lines = [
             f"  {'NAME':<20}{'TARGET':<14}{'SCOPE':<20}{'KIND/PRESET':<16}{'STATE':<11}"
-            f"{'SIGNALS':<20}{'ROUTING':<16}ENDPOINT"
+            f"{'PROTOCOL':<11}{'SIGNALS':<20}{'ROUTING':<16}ENDPOINT"
         ]
         for row in rows:
             color = state_color(row.state)
@@ -6990,11 +6993,12 @@ class DefenseClawTUI(App[None]):
             scope = rich_escape(row.scope[:19])
             kind = rich_escape(row.kind[:15])
             state = rich_escape(row.state[:10])
+            protocol = rich_escape(row.protocol[:10])
             signals = rich_escape(row.signals[:19])
             routing = rich_escape((row.routing or "—")[:15])
             lines.append(
                 f"  {name:<20}{target:<14}{scope:<20}{kind:<16}"
-                f"[{color}]{state:<11}[/]{signals:<20}"
+                f"[{color}]{state:<11}[/]{protocol:<11}{signals:<20}"
                 f"{routing:<16}{rich_escape(row.endpoint)}"
             )
         lines.append(

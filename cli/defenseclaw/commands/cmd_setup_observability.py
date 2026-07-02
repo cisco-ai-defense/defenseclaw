@@ -93,6 +93,7 @@ from defenseclaw.observability.writer import (
     _resolve_target,
     _sink_endpoint,
     _sink_preset_id,
+    _sink_protocol,
 )
 
 # All prompt keys across all presets. Exposed as Click options so the
@@ -931,11 +932,11 @@ def _destination_signals(d: Destination) -> str:
 def _print_destination_header() -> None:
     click.echo(
         f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<8} "
-        f"{'SIGNALS':<22} {'PRESET':<18} ENDPOINT"
+        f"{'PROTOCOL':<10} {'SIGNALS':<22} {'PRESET':<18} ENDPOINT"
     )
     click.echo(
         f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 8} "
-        f"{'-' * 22} {'-' * 18} {'-' * 36}"
+        f"{'-' * 10} {'-' * 22} {'-' * 18} {'-' * 36}"
     )
 
 
@@ -948,7 +949,8 @@ def _print_destination_row(d: Destination) -> None:
         endpoint = endpoint[:51] + "..."
     click.echo(
         f"  {ux.bold(f'{d.name:<28}')} {d.target:<12} {d.kind:<10} "
-        f"{('yes' if d.enabled else 'no'):<8} {_destination_signals(d):<22} "
+        f"{('yes' if d.enabled else 'no'):<8} {(d.protocol or '-'):<10} "
+        f"{_destination_signals(d):<22} "
         f"{(d.preset_id or '-'):<18} {endpoint}"
     )
 
@@ -961,6 +963,7 @@ def _dest_to_dict(d: Destination) -> dict[str, Any]:
         "enabled": d.enabled,
         "preset_id": d.preset_id,
         "endpoint": d.endpoint,
+        "protocol": d.protocol,
         "signals": d.signals,
     }
 
@@ -1145,6 +1148,7 @@ def _connector_destinations(data_dir: str, connector: str) -> list[Destination] 
                 enabled=bool(sink.get("enabled", False)),
                 preset_id=_sink_preset_id(sink),
                 endpoint=_sink_endpoint(sink),
+                protocol=_sink_protocol(sink),
                 signals={},
             ),
         )

@@ -3785,6 +3785,7 @@ func (s *Sidecar) reportTelemetryHealth() {
 				"preset":   destination.Preset,
 				"enabled":  destination.Enabled,
 				"scope":    "process",
+				"protocol": destination.Protocol,
 				"endpoint": netguard.EndpointForDisplay(destination.Endpoint),
 				"signals":  strings.Join(signals, ", "),
 			}

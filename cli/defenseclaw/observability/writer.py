@@ -121,6 +121,7 @@ class Destination:
     enabled: bool
     preset_id: str  # "" when not stamped by the writer
     endpoint: str
+    protocol: str  # "grpc" | "http" for OTLP; "" when not applicable
     # Per-signal enablement; populated for OTel only.
     signals: dict[str, bool]
 
@@ -275,6 +276,7 @@ def list_destinations(data_dir: str) -> list[Destination]:
                         enabled=bool(otel.get("enabled", False) and item.get("enabled", False)),
                         preset_id=str(item.get("preset", "") or ""),
                         endpoint=_derive_otel_endpoint(item),
+                        protocol=_derive_otel_protocol(item),
                         signals={
                             "traces": bool((item.get("traces") or {}).get("enabled", False)),
                             "metrics": bool((item.get("metrics") or {}).get("enabled", False)),
@@ -298,6 +300,7 @@ def list_destinations(data_dir: str) -> list[Destination]:
                 enabled=bool(sink.get("enabled", False)),
                 preset_id=_sink_preset_id(sink),
                 endpoint=_sink_endpoint(sink),
+                protocol=_sink_protocol(sink),
                 signals={},
             ),
         )
@@ -520,6 +523,8 @@ def _apply_otel_preset(
     dest_name: str,
     warnings: list[str],
 ) -> None:
+    protocol = _effective_otel_protocol(preset, inputs)
+
     otel = raw.setdefault("otel", {})
     if not isinstance(otel, dict):
         warnings.append("otel: replaced non-mapping value")
@@ -548,7 +553,7 @@ def _apply_otel_preset(
         "name": dest_name,
         "preset": preset.id,
         "enabled": bool(enabled),
-        "protocol": preset.otel_protocol or inputs.get("protocol", "grpc"),
+        "protocol": protocol,
         "endpoint": endpoint,
     }
     if preset.id == "galileo":
@@ -574,7 +579,10 @@ def _apply_otel_preset(
 
     signals_set = set(signals)
     for sig in ("traces", "metrics", "logs"):
-        block: dict[str, Any] = {"enabled": sig in signals_set}
+        block: dict[str, Any] = {
+            "enabled": sig in signals_set,
+            "protocol": protocol,
+        }
         path = preset.signal_url_paths.get(sig, "")
         if path:
             block["url_path"] = path
@@ -973,11 +981,7 @@ def _build_sink_entry(
         base["splunk_hec"] = block
     elif kind == _SINK_KIND_OTLP_LOGS:
         endpoint = inputs.get("endpoint", "").strip()
-        protocol = (inputs.get("protocol") or preset.otel_protocol or "grpc").strip()
-        if protocol not in ("grpc", "http"):
-            raise ValueError(
-                f"invalid protocol {protocol!r}; must be grpc or http",
-            )
+        protocol = _effective_otel_protocol(preset, inputs)
         block: dict[str, Any] = {
             "endpoint": _strip_scheme(endpoint),
             "protocol": protocol,
@@ -1055,6 +1059,12 @@ def _resolve_inputs(preset: Preset, inputs: dict[str, str]) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for flag_name, _placeholder, _desc, default in preset.prompts:
         val = inputs.get(flag_name, "")
+        # Transport defaults belong to ``Preset.otel_protocol``. Keeping an
+        # omitted protocol absent here lets the writer distinguish caller
+        # input from a prompt display default and apply the documented
+        # explicit > preset > grpc precedence.
+        if flag_name == "protocol" and not val:
+            continue
         if not val:
             val = default
         if not val:
@@ -1139,6 +1149,19 @@ def _strip_scheme(url: str) -> str:
 
 def _parse_bool(value: str) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _effective_otel_protocol(preset: Preset, inputs: dict[str, str]) -> str:
+    """Resolve and validate the transport before any configuration mutation."""
+
+    protocol = (
+        inputs.get("protocol")
+        or preset.otel_protocol
+        or "grpc"
+    ).strip().lower()
+    if protocol not in {"grpc", "http"}:
+        raise ValueError(f"invalid protocol {protocol!r}; must be grpc or http")
+    return protocol
 
 
 def _summarize_diff(
@@ -1232,6 +1255,17 @@ def _derive_otel_endpoint(otel: dict[str, Any]) -> str:
     return str(otel.get("endpoint", "") or "")
 
 
+def _derive_otel_protocol(otel: dict[str, Any]) -> str:
+    protocol = str(otel.get("protocol", "") or "").strip().lower()
+    if protocol:
+        return protocol
+    for sig in ("traces", "metrics", "logs"):
+        block = otel.get(sig) or {}
+        if isinstance(block, dict) and block.get("protocol"):
+            return str(block["protocol"]).strip().lower()
+    return "grpc"
+
+
 def _sink_endpoint(sink: dict[str, Any]) -> str:
     kind = sink.get("kind", "")
     if kind == _SINK_KIND_SPLUNK_HEC:
@@ -1241,6 +1275,12 @@ def _sink_endpoint(sink: dict[str, Any]) -> str:
     if kind == _SINK_KIND_HTTP_JSONL:
         return str((sink.get("http_jsonl") or {}).get("url", "") or "")
     return ""
+
+
+def _sink_protocol(sink: dict[str, Any]) -> str:
+    if sink.get("kind") != _SINK_KIND_OTLP_LOGS:
+        return ""
+    return str((sink.get("otlp_logs") or {}).get("protocol", "") or "grpc").strip().lower()
 
 
 def _sink_preset_id(sink: dict[str, Any]) -> str:
