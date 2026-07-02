@@ -113,12 +113,28 @@ except Exception:
 # the target user (the test harness) or as root with a follow-up chown
 # (the real installer). They use install(8)/chmod for parents and writes.
 
+ensure_safe_userspace_path() {
+  local dir="$1"
+  local cfg="$2"
+  if [[ -L "${dir}" || -L "${cfg}" ]]; then
+    return 1
+  fi
+  if [[ -e "${dir}" && ! -d "${dir}" ]]; then
+    return 1
+  fi
+  mkdir -p "${dir}" || return 1
+  if [[ -L "${dir}" || -L "${cfg}" ]]; then
+    return 1
+  fi
+}
+
 prepare_codex_userspace() {
   local home="$1"
+  local dir="${home}/.codex"
   local cfg="${home}/.codex/config.toml"
+  ensure_safe_userspace_path "${dir}" "${cfg}" || return 1
   if [[ ! -f "${cfg}" ]]; then
-    mkdir -p "${home}/.codex"
-    chmod 0700 "${home}/.codex"
+    chmod 0700 "${dir}"
     cat > "${cfg}" <<'TOML'
 # Created by DefenseClaw installer so the enterprise hook guardian can
 # repair this file. Edit freely; DefenseClaw only owns [hooks], [otel],
@@ -130,10 +146,11 @@ TOML
 
 prepare_claudecode_userspace() {
   local home="$1"
+  local dir="${home}/.claude"
   local cfg="${home}/.claude/settings.json"
+  ensure_safe_userspace_path "${dir}" "${cfg}" || return 1
   if [[ ! -f "${cfg}" ]]; then
-    mkdir -p "${home}/.claude"
-    chmod 0700 "${home}/.claude"
+    chmod 0700 "${dir}"
     printf '{}\n' > "${cfg}"
     chmod 0600 "${cfg}"
   fi
@@ -141,10 +158,11 @@ prepare_claudecode_userspace() {
 
 prepare_cursor_userspace() {
   local home="$1"
+  local dir="${home}/.cursor"
   local cfg="${home}/.cursor/hooks.json"
+  ensure_safe_userspace_path "${dir}" "${cfg}" || return 1
   if [[ ! -f "${cfg}" ]]; then
-    mkdir -p "${home}/.cursor"
-    chmod 0700 "${home}/.cursor"
+    chmod 0700 "${dir}"
     printf '{"version":1,"hooks":{}}\n' > "${cfg}"
     chmod 0600 "${cfg}"
   fi

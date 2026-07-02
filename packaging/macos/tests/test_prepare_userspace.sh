@@ -47,7 +47,34 @@ t_dispatch_via_helper() {
   assert_file_exists "${home}/.claude/settings.json"
 }
 
+t_rejects_symlinked_agent_dir() {
+  local home target status
+  home="$(mktest_tmp)"
+  target="$(mktest_tmp)"
+  ln -s "${target}" "${home}/.codex"
+  prepare_codex_userspace "${home}"
+  status=$?
+  assert_status "${status}" 1 "symlinked .codex rejected"
+  if [[ -e "${target}/config.toml" ]]; then
+    _fail "symlink target was written through"
+  fi
+}
+
+t_rejects_symlinked_config_file() {
+  local home target status
+  home="$(mktest_tmp)"
+  target="$(mktest_tmp)/settings.json"
+  mkdir -p "${home}/.claude"
+  printf '{}\n' > "${target}"
+  ln -s "${target}" "${home}/.claude/settings.json"
+  prepare_claudecode_userspace "${home}"
+  status=$?
+  assert_status "${status}" 1 "symlinked settings.json rejected"
+}
+
 run_case "codex userspace pre-create + idempotent" t_codex_creates
 run_case "claudecode userspace pre-create"         t_claudecode_creates
 run_case "cursor userspace pre-create"             t_cursor_creates
 run_case "prepare_userspace_for dispatch"          t_dispatch_via_helper
+run_case "symlinked agent dir rejected"            t_rejects_symlinked_agent_dir
+run_case "symlinked config file rejected"          t_rejects_symlinked_config_file
