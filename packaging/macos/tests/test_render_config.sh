@@ -30,20 +30,20 @@ t_multi_connector() {
   assert_contains "${out}" "    cursor:"              "cursor entry under connectors"
   assert_contains "${out}" "    claudecode:"          "claudecode entry under connectors"
   assert_contains "${out}" "    codex:"               "codex entry under connectors"
-  assert_contains "${out}" "disable_redaction: true"  "redaction-on (default)"
+  assert_contains "${out}" "disable_redaction: true"  "redaction kill-switch"
   assert_contains "${out}" "mode: observe"            "observe mode"
 }
 
-t_redaction_default_off() {
+t_redaction_default_on() {
   local out
-  out="$(render_config observe codex 18970 true "/var/lib/dc" codex)"
-  assert_contains "${out}" "disable_redaction: true" "redaction kill-switch flag"
+  out="$(render_config observe codex 18970 false "/var/lib/dc" codex)"
+  assert_contains "${out}" "disable_redaction: false" "redaction enabled by default"
 }
 
-t_redaction_enabled() {
+t_redaction_disabled() {
   local out
-  out="$(render_config action codex 18970 false "/var/lib/dc" codex)"
-  assert_contains "${out}" "disable_redaction: false" "redaction enabled"
+  out="$(render_config action codex 18970 true "/var/lib/dc" codex)"
+  assert_contains "${out}" "disable_redaction: true" "redaction kill-switch flag"
 }
 
 t_yaml_parses() {
@@ -70,6 +70,6 @@ t_yaml_parses() {
 
 run_case "single-connector config"  t_single_connector
 run_case "multi-connector config"   t_multi_connector
-run_case "redaction default (off)"  t_redaction_default_off
-run_case "redaction enabled flag"   t_redaction_enabled
+run_case "redaction default (on)"   t_redaction_default_on
+run_case "redaction disabled flag"  t_redaction_disabled
 run_case "rendered YAML parses"     t_yaml_parses
