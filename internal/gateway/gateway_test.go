@@ -6463,6 +6463,48 @@ func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
 	}
 }
 
+func TestHookScopedTokenCacheDoesNotAuthenticateDeletedOrRotatedToken(t *testing.T) {
+	dataDir := t.TempDir()
+	api := &APIServer{
+		scannerCfg: &config.Config{
+			DataDir: dataDir,
+			Gateway: config.GatewayConfig{
+				Token: "master-token",
+			},
+		},
+	}
+	original, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken: %v", err)
+	}
+	api.SetHookAPITokens(map[string]string{"codex": original})
+	if !api.hookAPITokenMatches("codex", original) {
+		t.Fatal("fresh hook token did not authenticate")
+	}
+
+	path, err := connector.HookAPITokenFilePath(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove token: %v", err)
+	}
+	if api.hookAPITokenMatches("codex", original) {
+		t.Fatal("deleted hook token still authenticated from cache")
+	}
+
+	rotated := strings.Repeat("a", 64)
+	if err := os.WriteFile(path, []byte(rotated+"\n"), 0o600); err != nil {
+		t.Fatalf("write rotated token: %v", err)
+	}
+	if api.hookAPITokenMatches("codex", original) {
+		t.Fatal("rotated-away hook token still authenticated")
+	}
+	if !api.hookAPITokenMatches("codex", rotated) {
+		t.Fatal("rotated hook token did not authenticate")
+	}
+}
+
 func TestHookScopedTokenLegacyFallbackDoesNotInferWildcardHookScopes(t *testing.T) {
 	api := &APIServer{
 		scannerCfg: &config.Config{
