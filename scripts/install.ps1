@@ -249,6 +249,252 @@ function Test-ManagedCli {
     }
 }
 
+function Test-ManagedEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Venv
+    )
+
+    $venvPython = Join-Path $Venv "Scripts\python.exe"
+    $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
+    Test-ManagedCli -Venv $Venv -CliExe $cliExe
+
+    $pipCheck = Invoke-Uv -Arguments @("pip", "check", "--python", $venvPython) -ShowFailureOutput
+    if ($pipCheck -ne 0) {
+        throw "Managed CLI dependency validation failed (uv pip check exit $pipCheck)"
+    }
+
+    $integrityCode = @'
+import importlib.metadata as metadata
+import pathlib
+import re
+import shutil
+import sys
+
+site_packages = pathlib.Path(sys.argv[1]).resolve()
+scripts = pathlib.Path(sys.argv[2]).resolve()
+projects = {}
+problems = []
+separator = ' | '
+for distribution in metadata.distributions(path=[str(site_packages)]):
+    name = distribution.metadata.get('Name')
+    if not name:
+        problems.append('distribution without Name metadata: ' + str(distribution.locate_file('')))
+        continue
+    normalized = re.sub(r'[-_.]+', '-', name).lower()
+    projects.setdefault(normalized, []).append(str(distribution.locate_file('')))
+for normalized, paths in sorted(projects.items()):
+    if len(paths) != 1:
+        problems.append(f'duplicate distribution {normalized}: {separator.join(paths)}')
+if len(projects.get('defenseclaw', [])) != 1:
+    problems.append('expected exactly one defenseclaw distribution')
+for command in ('defenseclaw', 'skill-scanner', 'mcp-scanner'):
+    resolved = shutil.which(command, path=str(scripts))
+    if not resolved:
+        problems.append(f'missing managed console entry point: {command}')
+        continue
+    resolved_path = pathlib.Path(resolved).resolve()
+    try:
+        resolved_path.relative_to(scripts)
+    except ValueError:
+        problems.append(f'console entry point escaped managed Scripts: {resolved_path}')
+if problems:
+    print('; '.join(problems), file=sys.stderr)
+    raise SystemExit(1)
+'@
+    $sitePackages = Join-Path $Venv "Lib\site-packages"
+    $scripts = Join-Path $Venv "Scripts"
+    $integrityResult = Invoke-ManagedCommand -Executable $venvPython `
+        -Arguments @("-I", "-c", $integrityCode, $sitePackages, $scripts)
+    if ($integrityResult.ExitCode -ne 0) {
+        $detail = ($integrityResult.Output | Select-Object -First 5) -join " | "
+        throw "Managed distribution integrity validation failed: $detail"
+    }
+
+    $doctorResult = Invoke-ManagedCommand -Executable $cliExe -Arguments @("doctor", "--help")
+    if ($doctorResult.ExitCode -ne 0) {
+        $detail = ($doctorResult.Output | Select-Object -First 5) -join " | "
+        throw "Managed doctor startup validation failed (exit $($doctorResult.ExitCode)): $detail"
+    }
+}
+
+function Assert-ManagedDirectoryPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ManagedHome,
+        [switch]$AllowMissing
+    )
+
+    $homeFull = [System.IO.Path]::GetFullPath($ManagedHome).TrimEnd('\')
+    $pathFull = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $expectedFull = [System.IO.Path]::GetFullPath($ExpectedPath).TrimEnd('\')
+    if (-not $pathFull.Equals($expectedFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing unverified managed directory path: $pathFull"
+    }
+    $parentFull = [System.IO.Path]::GetDirectoryName($pathFull).TrimEnd('\')
+    if (-not $parentFull.Equals($homeFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Managed directory escaped its install root: $pathFull"
+    }
+
+    $homeItem = Get-Item -LiteralPath $homeFull -Force -ErrorAction Stop
+    if (-not $homeItem.PSIsContainer -or ($homeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "Managed install root must be a real directory, not a reparse point: $homeFull"
+    }
+
+    $entry = $null
+    try {
+        $entry = Get-Item -LiteralPath $pathFull -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        if (-not $AllowMissing) { throw }
+    }
+    if ($null -ne $entry) {
+        if (-not $entry.PSIsContainer -or ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Managed venv path must be a real directory, not a reparse point: $pathFull"
+        }
+    }
+    return $pathFull
+}
+
+function Remove-ManagedDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ManagedHome
+    )
+
+    $safePath = Assert-ManagedDirectoryPath -Path $Path -ExpectedPath $ExpectedPath `
+        -ManagedHome $ManagedHome -AllowMissing
+    if (-not (Test-Path -LiteralPath $safePath)) { return }
+
+    foreach ($item in @(Get-ChildItem -LiteralPath $safePath -Force -ErrorAction Stop)) {
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+        } elseif ($item.PSIsContainer) {
+            Remove-ManagedDirectory -Path $item.FullName -ExpectedPath $item.FullName `
+                -ManagedHome $safePath
+        } else {
+            Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+        }
+    }
+    Remove-Item -LiteralPath $safePath -Force -ErrorAction Stop
+}
+
+function Install-ManagedWheel {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetVenv,
+        [Parameter(Mandatory = $true)]
+        [string]$WheelPath
+    )
+
+    $venvExit = Invoke-Uv -Arguments @("venv", $TargetVenv, "--python", "3.12", "--quiet")
+    if ($venvExit -ne 0) {
+        $venvExit = Invoke-Uv -Arguments @("venv", $TargetVenv, "--allow-existing", "--quiet") `
+            -ShowFailureOutput
+        if ($venvExit -ne 0) { throw "Failed to create Python virtual environment at $TargetVenv" }
+    }
+
+    $venvPython = Join-Path $TargetVenv "Scripts\python.exe"
+    $pipExit = Invoke-Uv -Arguments @(
+        "pip", "install", "--python", $venvPython, "--quiet",
+        "--reinstall", "--no-cache", "--strict", $WheelPath
+    ) -ShowFailureOutput
+    if ($pipExit -ne 0) { throw "Failed to install CLI wheel into $TargetVenv" }
+}
+
+function Invoke-ManagedVenvRebuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Venv,
+        [Parameter(Mandatory = $true)]
+        [string]$WheelPath
+    )
+
+    $managedHome = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($Venv))
+    $expectedVenv = Join-Path $managedHome ".venv"
+    $null = Assert-ManagedDirectoryPath -Path $Venv -ExpectedPath $expectedVenv `
+        -ManagedHome $managedHome -AllowMissing
+
+    $suffix = [guid]::NewGuid().ToString("N")
+    $staging = Join-Path $managedHome ".venv.rebuild.$suffix"
+    $backup = Join-Path $managedHome ".venv.backup.$suffix"
+    $null = Assert-ManagedDirectoryPath -Path $staging -ExpectedPath $staging `
+        -ManagedHome $managedHome -AllowMissing
+    $null = Assert-ManagedDirectoryPath -Path $backup -ExpectedPath $backup `
+        -ManagedHome $managedHome -AllowMissing
+
+    $backupCreated = $false
+    $newAtFinalPath = $false
+    try {
+        Install-ManagedWheel -TargetVenv $staging -WheelPath $WheelPath
+        $null = Assert-ManagedDirectoryPath -Path $staging -ExpectedPath $staging `
+            -ManagedHome $managedHome
+        Test-ManagedEnvironment -Venv $staging
+
+        if (Test-Path -LiteralPath $Venv) {
+            Move-Item -LiteralPath $Venv -Destination $backup -ErrorAction Stop
+            $backupCreated = $true
+        }
+        Move-Item -LiteralPath $staging -Destination $Venv -ErrorAction Stop
+        $newAtFinalPath = $true
+        $null = Assert-ManagedDirectoryPath -Path $Venv -ExpectedPath $expectedVenv `
+            -ManagedHome $managedHome
+
+        # Windows console launchers embed the interpreter path. Reinstall every
+        # package after the rename so all entry points target the final venv.
+        Install-ManagedWheel -TargetVenv $Venv -WheelPath $WheelPath
+        Test-ManagedEnvironment -Venv $Venv
+    } catch {
+        $rebuildError = $_.Exception.Message
+        $rollbackError = $null
+        try {
+            if ($newAtFinalPath -and (Test-Path -LiteralPath $Venv)) {
+                Remove-ManagedDirectory -Path $Venv -ExpectedPath $expectedVenv -ManagedHome $managedHome
+                $newAtFinalPath = $false
+            }
+            if ($backupCreated -and (Test-Path -LiteralPath $backup)) {
+                Move-Item -LiteralPath $backup -Destination $Venv -ErrorAction Stop
+                $backupCreated = $false
+            }
+        } catch {
+            $rollbackError = $_.Exception.Message
+        }
+
+        if ($backupCreated) {
+            throw "Managed venv rebuild failed: $rebuildError. Rollback failed: $rollbackError. " + `
+                "Prior environment retained at '$backup'."
+        }
+        if ($rollbackError) {
+            throw "Managed venv rebuild failed: $rebuildError. Rollback failed: $rollbackError"
+        }
+        throw "Managed venv rebuild failed; prior environment restored: $rebuildError"
+    } finally {
+        if (Test-Path -LiteralPath $staging) {
+            try {
+                Remove-ManagedDirectory -Path $staging -ExpectedPath $staging -ManagedHome $managedHome
+            } catch {
+                Write-Warn2 "Rebuild staging directory requires manual cleanup: $staging"
+            }
+        }
+    }
+
+    if ($backupCreated) {
+        try {
+            Remove-ManagedDirectory -Path $backup -ExpectedPath $backup -ManagedHome $managedHome
+        } catch {
+            throw "Managed venv rebuilt successfully, but backup cleanup failed. " + `
+                "Recovery data remains at '$backup': $($_.Exception.Message)"
+        }
+    }
+}
+
 function Publish-CliLauncher {
     param(
         [Parameter(Mandatory = $true)]
@@ -488,17 +734,10 @@ function Install-Gateway {
 
 function Install-Cli {
     Write-Step "Installing DefenseClaw CLI"
-    Write-Info "Creating Python environment..."
-    $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--python", "3.12", "--quiet")
-    if ($venvExit -ne 0) {
-        $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--allow-existing", "--quiet") -ShowFailureOutput
-        if ($venvExit -ne 0) { Die "Failed to create Python virtual environment" }
-    }
-    $venvPython = Join-Path $Venv "Scripts\python.exe"
-
-    Write-Info "Installing from wheel..."
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("dc-cli-" + [guid]::NewGuid())
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $installError = $null
+    $shim = $null
     try {
         if ($Local) {
             $whl = Get-ChildItem -Path (Join-Path $Local "defenseclaw-*.whl") -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -510,24 +749,31 @@ function Install-Cli {
             $resolved = Get-Artifact -Name $whlName -Dest $whlPath
             Test-Checksum -File $whlPath -FileName $resolved
         }
-        $pipExit = Invoke-Uv -Arguments @(
-            "pip", "install", "--python", $venvPython, "--quiet",
-            "--reinstall", "--no-cache", "--strict", $whlPath
-        ) -ShowFailureOutput
-        if ($pipExit -ne 0) { Die "Failed to install CLI from wheel" }
-    } finally {
-        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-    }
 
-    $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
-    try {
-        Test-ManagedCli -Venv $Venv -CliExe $cliExe
+        Write-Info "Reconciling managed Python environment..."
+        $reconcileError = $null
+        try {
+            Install-ManagedWheel -TargetVenv $Venv -WheelPath $whlPath
+            Test-ManagedEnvironment -Venv $Venv
+        } catch {
+            $reconcileError = $_.Exception.Message
+        }
+        if ($reconcileError) {
+            Write-Warn2 "Managed environment reconciliation failed: $reconcileError"
+            Write-Info "Rebuilding managed Python environment safely..."
+            Invoke-ManagedVenvRebuild -Venv $Venv -WheelPath $whlPath
+        }
+
+        $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
         # PowerShell resolves .EXE before .CMD. Publish the managed-venv shim
         # only after removing the exact same-directory stale launcher.
         $shim = Publish-CliLauncher -CliExe $cliExe -InstallDir $InstallDir
     } catch {
-        Die $_.Exception.Message
+        $installError = $_.Exception.Message
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
+    if ($installError) { Die $installError }
     Write-Ok "CLI installed -> $shim"
 }
 

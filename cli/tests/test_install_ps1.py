@@ -96,18 +96,18 @@ def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     assert "& uv venv" not in text
     assert "& uv pip install" not in text
     assert 'Invoke-Uv -Arguments @("python", "install", "3.12")' in text
-    assert 'Invoke-Uv -Arguments @("venv", $Venv' in text
-    assert 'Invoke-Uv -Arguments @("venv", $Venv, "--allow-existing", "--quiet")' in text
+    assert 'Invoke-Uv -Arguments @("venv", $TargetVenv' in text
+    assert 'Invoke-Uv -Arguments @("venv", $TargetVenv, "--allow-existing", "--quiet")' in text
     assert 'Invoke-Uv -Arguments @("venv", $Venv, "--clear"' not in text
     assert '"pip", "install", "--python", $venvPython, "--quiet"' in text
-    assert '"--reinstall", "--no-cache", "--strict", $whlPath' in text
+    assert '"--reinstall", "--no-cache", "--strict", $WheelPath' in text
 
 
 def test_cli_smoke_precedes_launcher_publication() -> None:
     text = INSTALL_PS1.read_text()
     install_cli = text.split("function Install-Cli", 1)[1].split("function Select-Connector", 1)[0]
 
-    assert install_cli.index("Test-ManagedCli") < install_cli.index("Publish-CliLauncher")
+    assert install_cli.index("Test-ManagedEnvironment") < install_cli.index("Publish-CliLauncher")
     assert install_cli.index("Publish-CliLauncher") < install_cli.index('Write-Ok "CLI installed')
     assert 'set `"PYTHONPATH=`"' in text
     assert 'set `"PYTHONHOME=`"' in text
@@ -385,8 +385,18 @@ def test_same_version_reinstall_repairs_managed_venv_and_ignores_checkout_python
     )
     damaged_file = venv / "Lib" / "site-packages" / "certifi_fixture" / "__init__.py"
     assert damaged_file.is_file()
+    installed_dist_info = next((venv / "Lib" / "site-packages").glob("dc_certifi_fixture-*.dist-info"))
+    (installed_dist_info / "RECORD").unlink()
     damaged_file.unlink()
     assert not damaged_file.exists()
+    duplicate_dist_info = venv / "Lib" / "site-packages" / "dc.certifi_fixture-0.9.0.dist-info"
+    duplicate_dist_info.mkdir()
+    (duplicate_dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: dc.certifi_fixture\nVersion: 0.9.0\n"
+    )
+    corrupt_marker = venv / "corrupt-environment-marker"
+    corrupt_marker.write_text("old venv")
+    healthy_marker = venv / "healthy-reinstall-marker"
 
     functions = "".join(
         _extract_powershell_function(name)
@@ -394,6 +404,11 @@ def test_same_version_reinstall_repairs_managed_venv_and_ignores_checkout_python
             "Invoke-Uv",
             "Invoke-ManagedCommand",
             "Test-ManagedCli",
+            "Test-ManagedEnvironment",
+            "Assert-ManagedDirectoryPath",
+            "Remove-ManagedDirectory",
+            "Install-ManagedWheel",
+            "Invoke-ManagedVenvRebuild",
             "Publish-CliLauncher",
             "Install-Cli",
         )
@@ -404,10 +419,12 @@ $Local = '{_ps_quote(fixtures)}'
 $Venv = '{_ps_quote(venv)}'
 $InstallDir = '{_ps_quote(install_dir)}'
 function Write-Step {{ param([string]$Msg) }}
-function Write-Info {{ param([string]$Msg) }}
+function Write-Info {{ param([string]$Msg) Write-Output "INFO=$Msg" }}
 function Write-Ok {{ param([string]$Msg) Write-Output "OK=$Msg" }}
+function Write-Warn2 {{ param([string]$Msg) Write-Output "WARN=$Msg" }}
 function Die {{ param([string]$Msg) throw $Msg }}
 Install-Cli
+Set-Content -LiteralPath '{_ps_quote(healthy_marker)}' -Value 'healthy venv retained'
 Install-Cli
 """
     install_env = clean_env.copy()
@@ -431,7 +448,12 @@ Install-Cli
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.count("OK=CLI installed") == 2
+    assert "WARN=Managed environment reconciliation failed:" in completed.stdout
+    assert completed.stdout.count("INFO=Rebuilding managed Python environment safely...") == 1
     assert damaged_file.is_file()
+    assert not corrupt_marker.exists()
+    assert healthy_marker.read_text().strip() == "healthy venv retained"
+    assert not duplicate_dist_info.exists()
     assert not (install_dir / "defenseclaw.exe").exists()
     shim = install_dir / "defenseclaw.cmd"
     assert shim.is_file()
@@ -482,6 +504,44 @@ Install-Cli
     assert len(scanner_lines) == 2
     assert all(Path(line).is_relative_to(scripts) for line in scanner_lines)
 
+    pip_check = subprocess.run(
+        [uv, "--no-config", "pip", "check", "--python", str(scripts / "python.exe")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=clean_env,
+    )
+    assert pip_check.returncode == 0, pip_check.stderr
+
+    distributions = subprocess.run(
+        [
+            scripts / "python.exe",
+            "-I",
+            "-c",
+            textwrap.dedent(
+                """
+                import importlib.metadata as metadata
+                import re
+                from collections import Counter
+
+                names = [re.sub(r"[-_.]+", "-", d.metadata["Name"]).lower() for d in metadata.distributions()]
+                print(metadata.version("defenseclaw"))
+                print(",".join(sorted(name for name, count in Counter(names).items() if count != 1)))
+                """
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=clean_env,
+    )
+    assert distributions.returncode == 0, distributions.stderr
+    distribution_lines = distributions.stdout.splitlines()
+    assert distribution_lines[0] == "1.0.0"
+    assert len(distribution_lines) == 1 or distribution_lines[1] == ""
+
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
 def test_failed_managed_smoke_prevents_launcher_publication_and_success(tmp_path: Path) -> None:
@@ -507,12 +567,15 @@ $Venv = '{_ps_quote(venv)}'
 $InstallDir = '{_ps_quote(install_dir)}'
 function Write-Step {{ param([string]$Msg) }}
 function Write-Info {{ param([string]$Msg) }}
+function Write-Warn2 {{ param([string]$Msg) }}
 function Write-Ok {{
     param([string]$Msg)
     if ($Msg -like 'CLI installed*') {{ Set-Content -LiteralPath '{_ps_quote(success_marker)}' -Value 'success' }}
 }}
 function Invoke-Uv {{ return 0 }}
-function Test-ManagedCli {{ throw 'managed smoke failed' }}
+function Install-ManagedWheel {{}}
+function Test-ManagedEnvironment {{ throw 'managed smoke failed' }}
+function Invoke-ManagedVenvRebuild {{ throw 'managed smoke failed' }}
 function Publish-CliLauncher {{ Set-Content -LiteralPath '{_ps_quote(publish_marker)}' -Value 'published' }}
 function Die {{ param([string]$Msg) throw $Msg }}
 Install-Cli
@@ -530,6 +593,241 @@ Install-Cli
     assert not publish_marker.exists()
     assert not success_marker.exists()
     assert existing_shim.read_text() == "existing launcher"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_rebuild_final_validation_failure_restores_prior_venv(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    managed_home = tmp_path / ".defenseclaw"
+    venv = managed_home / ".venv"
+    venv.mkdir(parents=True)
+    old_marker = venv / "old-marker"
+    old_marker.write_text("prior environment")
+    wheel = tmp_path / "defenseclaw.whl"
+    wheel.write_text("fixture")
+    functions = "".join(
+        _extract_powershell_function(name)
+        for name in ("Assert-ManagedDirectoryPath", "Remove-ManagedDirectory", "Invoke-ManagedVenvRebuild")
+    )
+    command = functions + rf"""
+$ErrorActionPreference = 'Stop'
+$finalVenv = '{_ps_quote(venv)}'
+function Write-Warn2 {{ param([string]$Msg) }}
+function Install-ManagedWheel {{
+    param([string]$TargetVenv, [string]$WheelPath)
+    New-Item -ItemType Directory -Force -Path $TargetVenv | Out-Null
+    Set-Content -LiteralPath (Join-Path $TargetVenv 'new-marker') -Value 'replacement'
+}}
+function Test-ManagedEnvironment {{
+    param([string]$Venv)
+    if ($Venv -eq $finalVenv) {{ throw 'final smoke failed' }}
+}}
+try {{
+    Invoke-ManagedVenvRebuild -Venv $finalVenv -WheelPath '{_ps_quote(wheel)}'
+}} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}}
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ERROR=Managed venv rebuild failed; prior environment restored: final smoke failed" in completed.stdout
+    assert old_marker.read_text() == "prior environment"
+    assert not (venv / "new-marker").exists()
+    assert not list(managed_home.glob(".venv.backup.*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_rebuild_install_failure_leaves_prior_venv(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    managed_home = tmp_path / ".defenseclaw"
+    venv = managed_home / ".venv"
+    venv.mkdir(parents=True)
+    marker = venv / "old-marker"
+    marker.write_text("prior environment")
+    functions = "".join(
+        _extract_powershell_function(name)
+        for name in ("Assert-ManagedDirectoryPath", "Invoke-ManagedVenvRebuild")
+    )
+    command = functions + rf"""
+$ErrorActionPreference = 'Stop'
+function Write-Warn2 {{ param([string]$Msg) }}
+function Install-ManagedWheel {{ throw 'rebuild install failed' }}
+try {{
+    Invoke-ManagedVenvRebuild -Venv '{_ps_quote(venv)}' -WheelPath '{_ps_quote(tmp_path / 'wheel.whl')}'
+}} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}}
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "rebuild install failed" in completed.stdout
+    assert marker.read_text() == "prior environment"
+    assert not list(managed_home.glob(".venv.backup.*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_rebuild_locked_rename_fails_without_moving_prior_venv(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    managed_home = tmp_path / ".defenseclaw"
+    venv = managed_home / ".venv"
+    venv.mkdir(parents=True)
+    marker = venv / "old-marker"
+    marker.write_text("prior environment")
+    functions = "".join(
+        _extract_powershell_function(name)
+        for name in ("Assert-ManagedDirectoryPath", "Remove-ManagedDirectory", "Invoke-ManagedVenvRebuild")
+    )
+    command = functions + rf"""
+$ErrorActionPreference = 'Stop'
+$finalVenv = '{_ps_quote(venv)}'
+function Write-Warn2 {{ param([string]$Msg) }}
+function Install-ManagedWheel {{
+    param([string]$TargetVenv, [string]$WheelPath)
+    New-Item -ItemType Directory -Force -Path $TargetVenv | Out-Null
+}}
+function Test-ManagedEnvironment {{ param([string]$Venv) }}
+function Move-Item {{
+    param([string]$LiteralPath, [string]$Destination, [object]$ErrorAction)
+    if ($LiteralPath -eq $finalVenv) {{ throw 'venv is locked' }}
+    Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination -ErrorAction $ErrorAction
+}}
+try {{
+    Invoke-ManagedVenvRebuild -Venv $finalVenv -WheelPath '{_ps_quote(tmp_path / 'wheel.whl')}'
+}} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}}
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "venv is locked" in completed.stdout
+    assert marker.read_text() == "prior environment"
+    assert not list(managed_home.glob(".venv.backup.*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_rebuild_locked_rollback_removal_retains_backup_path(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    managed_home = tmp_path / ".defenseclaw"
+    venv = managed_home / ".venv"
+    venv.mkdir(parents=True)
+    (venv / "old-marker").write_text("prior environment")
+    functions = "".join(
+        _extract_powershell_function(name)
+        for name in ("Assert-ManagedDirectoryPath", "Invoke-ManagedVenvRebuild")
+    )
+    command = functions + rf"""
+$ErrorActionPreference = 'Stop'
+$finalVenv = '{_ps_quote(venv)}'
+function Write-Warn2 {{ param([string]$Msg) }}
+function Install-ManagedWheel {{
+    param([string]$TargetVenv, [string]$WheelPath)
+    New-Item -ItemType Directory -Force -Path $TargetVenv | Out-Null
+    Set-Content -LiteralPath (Join-Path $TargetVenv 'new-marker') -Value 'replacement'
+}}
+function Test-ManagedEnvironment {{
+    param([string]$Venv)
+    if ($Venv -eq $finalVenv) {{ throw 'final smoke failed' }}
+}}
+function Remove-ManagedDirectory {{ throw 'replacement is locked' }}
+try {{
+    Invoke-ManagedVenvRebuild -Venv $finalVenv -WheelPath '{_ps_quote(tmp_path / 'wheel.whl')}'
+}} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}}
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Rollback failed: replacement is locked" in completed.stdout
+    assert "Prior environment retained at" in completed.stdout
+    backups = list(managed_home.glob(".venv.backup.*"))
+    assert len(backups) == 1
+    assert (backups[0] / "old-marker").read_text() == "prior environment"
+    assert (venv / "new-marker").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_managed_directory_validation_rejects_escape_and_reparse_root(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    managed_home = tmp_path / ".defenseclaw"
+    managed_home.mkdir()
+    expected = managed_home / ".venv"
+    escaped = tmp_path / "escaped"
+    command = _extract_powershell_function("Assert-ManagedDirectoryPath") + rf"""
+$ErrorActionPreference = 'Stop'
+try {{
+    Assert-ManagedDirectoryPath -Path '{_ps_quote(escaped)}' -ExpectedPath '{_ps_quote(expected)}' `
+        -ManagedHome '{_ps_quote(managed_home)}' -AllowMissing
+}} catch {{
+    Write-Output "ESCAPE=$($_.Exception.Message)"
+}}
+function Get-Item {{
+    param([string]$LiteralPath, [switch]$Force, [object]$ErrorAction)
+    return [pscustomobject]@{{
+        PSIsContainer = $true
+        Attributes = [System.IO.FileAttributes]::Directory -bor [System.IO.FileAttributes]::ReparsePoint
+    }}
+}}
+try {{
+    Assert-ManagedDirectoryPath -Path '{_ps_quote(expected)}' -ExpectedPath '{_ps_quote(expected)}' `
+        -ManagedHome '{_ps_quote(managed_home)}' -AllowMissing
+}} catch {{
+    Write-Output "REPARSE=$($_.Exception.Message)"
+}}
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ESCAPE=Refusing unverified managed directory path" in completed.stdout
+    assert "REPARSE=Managed install root must be a real directory" in completed.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")
