@@ -187,6 +187,17 @@ connector:
   "native_ask": true
 }`,
       },
+      {
+        id: 'observe-decision', label: 'observe-decision.json', language: 'json',
+        source: `{
+  "connector": "claudecode",
+  "raw_action": "allow",
+  "decision": "observe",
+  "reason": "high-risk system path change",
+  "mode": "observe",
+  "evidence_emitted": true
+}`,
+      },
     ],
     evidence: [
       { id: 'mode-event', label: 'Finding', value: 'system.path-change · HIGH', detail: 'The same pending action is used for every mode.', tone: 'warning' },
@@ -209,7 +220,7 @@ connector:
         id: 'observe', label: 'Observe', description: 'Allow execution and record evidence.',
         steps: [
           step('observe-input', 'Inspect action', 'The HIGH-risk action reaches the guardrail.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-          step('observe-decision', 'Observe only', 'Observe mode records the finding without blocking.', 'decision', ['mode-event', 'mode-observe'], [{ tabId: 'decision', start: 2, end: 7, tone: 'info' }], 'observe-result'),
+          step('observe-decision', 'Observe only', 'Observe mode records the finding without blocking.', 'observe-decision', ['mode-event', 'mode-observe'], [{ tabId: 'observe-decision', start: 2, end: 7, tone: 'info' }], 'observe-result'),
         ],
       },
       {
@@ -314,6 +325,13 @@ critical_behavior: always_block` },
   "execution_resumed": true,
   "severity": "high"
 }` },
+      { id: 'hitl-denied-audit', label: 'denial-audit.json', language: 'json', source: `{
+  "connector": "claudecode",
+  "decision": "denied",
+  "operator_reason": "synthetic path change rejected",
+  "execution_resumed": false,
+  "severity": "high"
+}` },
     ],
     evidence: [
       { id: 'hitl-hook', label: 'Connector event', value: 'PreToolUse', detail: 'Claude Code can block and ask before the tool runs.', tone: 'info' },
@@ -345,7 +363,7 @@ critical_behavior: always_block` },
       { id: 'deny', label: 'Deny', description: 'Claude Code receives the operator reason.', steps: [
         step('deny-hook', 'PreToolUse', 'Capture and score the pending action.', 'hitl-event', ['hitl-hook', 'hitl-high'], [{ tabId: 'hitl-event', start: 2, end: 6, tone: 'warning' }]),
         step('deny-native', 'Native ask', 'Action + HITL produces a native Claude Code prompt.', 'hitl-config', ['hitl-enabled', 'hitl-native'], [{ tabId: 'hitl-config', start: 1, end: 7, tone: 'warning' }]),
-        step('deny-final', 'Deny', 'The pre-authored denial branch stops the action.', 'hitl-audit', ['operator-denied'], [{ tabId: 'hitl-audit', start: 2, end: 6, tone: 'danger' }], 'hitl-denied'),
+        step('deny-final', 'Deny', 'The pre-authored denial branch stops the action.', 'hitl-denied-audit', ['operator-denied'], [{ tabId: 'hitl-denied-audit', start: 2, end: 6, tone: 'danger' }], 'hitl-denied'),
       ] },
       { id: 'codex', label: 'Codex', description: 'Show the downgraded confirm path.', steps: [
         step('codex-hook', 'Inspect', 'The connector presents the same HIGH finding.', 'hitl-event', ['hitl-high'], [{ tabId: 'hitl-event', start: 4, end: 6, tone: 'warning' }]),
@@ -600,6 +618,13 @@ registry_required: true` },
   "severity": "clean",
   "status": "eligible_for_promotion"
 }` },
+      { id: 'registry-warning-scan', label: 'warning-result.json', language: 'json', source: `{
+  "entry": "workspace-helper@1.2.0",
+  "sha256": "verified",
+  "scanner": "skill",
+  "severity": "warning",
+  "status": "operator_review_required"
+}` },
       { id: 'asset-policy', label: 'asset-policy.yaml', language: 'yaml', source: `asset_policy:
   skill:
     registry:
@@ -612,6 +637,13 @@ registry_required: true` },
   "scanner_severity": "clean",
   "decision": "promote",
   "reason": "registry:internal-catalog"
+}` },
+      { id: 'admission-deny', label: 'denied-admission.json', language: 'json', source: `{
+  "asset": "unknown-helper@0.1.0",
+  "registry_match": false,
+  "registry_required": true,
+  "decision": "deny",
+  "reason": "registry_empty_action"
 }` },
     ],
     evidence: [
@@ -641,11 +673,11 @@ registry_required: true` },
       ] },
       { id: 'warning', label: 'Warning', description: 'Cache and require operator review.', steps: [
         step('warning-fetch', 'Fetch on demand', 'The operator starts the sync.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 1, end: 7, tone: 'info' }]),
-        step('warning-review', 'Hold', 'A warning result is cached but not promoted.', 'registry-scan', ['registry-warning'], [{ tabId: 'registry-scan', start: 4, end: 6, tone: 'warning' }], 'registry-review'),
+        step('warning-review', 'Hold', 'A warning result is cached but not promoted.', 'registry-warning-scan', ['registry-warning'], [{ tabId: 'registry-warning-scan', start: 4, end: 6, tone: 'warning' }], 'registry-review'),
       ] },
       { id: 'unknown', label: 'Unknown + required', description: 'Deny when no promoted rule matches.', steps: [
         step('unknown-check', 'Check policy', 'registry_required is enabled for this asset class.', 'registry-config', ['registry-fetch'], [{ tabId: 'registry-config', start: 6, end: 7, tone: 'warning' }]),
-        step('unknown-deny', 'Deny', 'No promoted registry rule matches the unknown asset.', 'admission', ['registry-unknown'], [{ tabId: 'admission', start: 2, end: 6, tone: 'danger' }], 'registry-deny'),
+        step('unknown-deny', 'Deny', 'No promoted registry rule matches the unknown asset.', 'admission-deny', ['registry-unknown'], [{ tabId: 'admission-deny', start: 2, end: 6, tone: 'danger' }], 'registry-deny'),
       ] },
     ],
     boundaries: {
@@ -657,10 +689,12 @@ registry_required: true` },
 
 export const featureDemos = scenarios;
 
-export const featureDemoById = Object.fromEntries(
+export const featureDemoById = new Map<ScenarioId, ScenarioDefinition>(
   scenarios.map((scenario) => [scenario.id, scenario]),
-) as Record<ScenarioId, ScenarioDefinition>;
+);
 
 export function getFeatureDemo(id: ScenarioId): ScenarioDefinition {
-  return featureDemoById[id];
+  const scenario = featureDemoById.get(id);
+  if (!scenario) throw new Error(`Unknown feature demo: ${id}`);
+  return scenario;
 }

@@ -72,6 +72,13 @@ export function DiagramLightbox({
     setHydrated(true);
   }, []);
 
+  const handleClose = useCallback(() => {
+    setOpen(false);
+    requestAnimationFrame(() => {
+      triggerRef.current?.focus();
+    });
+  }, []);
+
   // One-shot viewport intersection trigger. The Flow / Sequence /
   // capability-matrix CSS animations are gated on
   // `data-animate="entered"` on this <figure>, so the SSR-rendered
@@ -115,10 +122,7 @@ export function DiagramLightbox({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        setOpen(false);
-        requestAnimationFrame(() => {
-          triggerRef.current?.focus();
-        });
+        handleClose();
       }
     };
     document.addEventListener('keydown', onKey);
@@ -140,15 +144,7 @@ export function DiagramLightbox({
       clearTimeout(t);
       document.body.style.overflow = previousOverflow;
     };
-  }, [open]);
-
-  const handleClose = useCallback(() => {
-    setOpen(false);
-    // Restore focus to the trigger on close.
-    requestAnimationFrame(() => {
-      triggerRef.current?.focus();
-    });
-  }, []);
+  }, [handleClose, open]);
 
   const handleSurfaceClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {

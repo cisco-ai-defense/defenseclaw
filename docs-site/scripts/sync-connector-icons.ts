@@ -22,9 +22,13 @@ const icons: Record<string, string> = {
 
 await mkdir(targetRoot, { recursive: true });
 await Promise.all(
-  Object.entries(icons).map(([source, target]) =>
-    copyFile(join(packageRoot, 'icons', source), join(targetRoot, target)),
-  ),
+  Object.entries(icons).map(async ([source, target]) => {
+    try {
+      await copyFile(join(packageRoot, 'icons', source), join(targetRoot, target));
+    } catch (error) {
+      throw new Error(`Failed to sync connector icon ${source} -> ${target}`, { cause: error });
+    }
+  }),
 );
 
 console.log(`[sync-connector-icons] synced ${Object.keys(icons).length} LobeHub icons.`);

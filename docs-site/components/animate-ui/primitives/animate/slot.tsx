@@ -16,8 +16,7 @@ type WithAsChild<Base extends object> =
   | (Base & { asChild?: false | undefined });
 
 type SlotProps<T extends HTMLElement = HTMLElement> = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  children?: any;
+  children?: React.ReactElement;
 } & DOMMotionProps<T>;
 
 function mergeRefs<T>(
@@ -55,28 +54,40 @@ function mergeProps<T extends HTMLElement>(
     };
   }
 
+  for (const key of Object.keys(childProps)) {
+    if (!/^on[A-Z]/.test(key)) continue;
+    const childHandler = childProps[key];
+    const slotHandler = (slotProps as AnyProps)[key];
+    if (typeof childHandler !== 'function' || typeof slotHandler !== 'function') continue;
+    merged[key] = (...args: unknown[]) => {
+      childHandler(...args);
+      const event = args[0] as { defaultPrevented?: boolean } | undefined;
+      if (!event?.defaultPrevented) slotHandler(...args);
+    };
+  }
+
   return merged;
 }
 
-function Slot<T extends HTMLElement = HTMLElement>({
+function ValidSlot<T extends HTMLElement = HTMLElement>({
   children,
   ref,
   ...props
-}: SlotProps<T>) {
+}: SlotProps<T> & { children: React.ReactElement }) {
+  const childType = children.type;
   const isAlreadyMotion =
-    typeof children.type === 'object' &&
-    children.type !== null &&
-    isMotionComponent(children.type);
+    typeof childType === 'object' &&
+    childType !== null &&
+    isMotionComponent(childType);
 
   const Base = React.useMemo(
-    () =>
-      isAlreadyMotion
-        ? (children.type as React.ElementType)
-        : motion.create(children.type as React.ElementType),
-    [isAlreadyMotion, children.type],
+    () => {
+      return isAlreadyMotion
+        ? (childType as React.ElementType)
+        : motion.create(childType as React.ElementType);
+    },
+    [childType, isAlreadyMotion],
   );
-
-  if (!React.isValidElement(children)) return null;
 
   const { ref: childRef, ...childProps } = children.props as AnyProps;
 
@@ -85,6 +96,11 @@ function Slot<T extends HTMLElement = HTMLElement>({
   return (
     <Base {...mergedProps} ref={mergeRefs(childRef as React.Ref<T>, ref)} />
   );
+}
+
+function Slot<T extends HTMLElement = HTMLElement>(props: SlotProps<T>) {
+  if (!React.isValidElement(props.children)) return null;
+  return <ValidSlot {...props} children={props.children} />;
 }
 
 export {

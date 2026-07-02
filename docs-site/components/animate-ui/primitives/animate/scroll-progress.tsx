@@ -5,6 +5,7 @@ import {
   motion,
   useScroll,
   useSpring,
+  useTransform,
   type MotionValue,
   type HTMLMotionProps,
   type SpringOptions,
@@ -12,7 +13,6 @@ import {
 
 import { Slot, type WithAsChild } from '@/components/animate-ui/primitives/animate/slot';
 import { getStrictContext } from '@/lib/get-strict-context';
-import { useMotionValueState } from '@/hooks/use-motion-value-state';
 
 type ScrollProgressDirection = 'horizontal' | 'vertical';
 
@@ -78,13 +78,9 @@ function ScrollProgress({
   ...props
 }: ScrollProgressProps) {
   const { scale, direction, global } = useScrollProgress();
-  const usesLength = mode === 'width' || mode === 'height';
-  // Width/height modes need a serialisable number. Transform modes can
-  // bind the MotionValue directly and should not re-render React on every
-  // scroll tick.
-  const scaleValue = useMotionValueState(scale, usesLength);
+  const length = useTransform(scale, (value) => `${value * 100}%`);
 
-  const Component = asChild ? Slot : motion.div;
+  const Component: React.ElementType = asChild ? Slot : motion.div;
 
   return (
     <Component
@@ -95,7 +91,7 @@ function ScrollProgress({
       style={{
         ...(mode === 'width' || mode === 'height'
           ? {
-              [mode]: scaleValue * 100 + '%',
+              [mode]: length,
             }
           : {
               [mode]: scale,
@@ -118,7 +114,7 @@ function ScrollProgressContainer({
 
   React.useImperativeHandle(ref, () => containerRef.current as HTMLDivElement);
 
-  const Component = asChild ? Slot : motion.div;
+  const Component: React.ElementType = asChild ? Slot : motion.div;
 
   return (
     <Component

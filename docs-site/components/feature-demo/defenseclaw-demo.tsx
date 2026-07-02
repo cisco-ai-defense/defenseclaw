@@ -1,5 +1,5 @@
 import { cache } from 'react';
-import { codeToTokens } from 'shiki';
+import { codeToTokensWithThemes } from 'shiki';
 import { getFeatureDemo } from '@/data/feature-demos';
 import { ScenarioPlayer } from './scenario-player';
 import type {
@@ -19,20 +19,20 @@ const languageMap = {
 
 const highlightTab = cache(async (tab: Omit<HighlightedScenarioTab, 'lightTokens' | 'darkTokens'>): Promise<HighlightedScenarioTab> => {
   const lang = languageMap[tab.language];
-  const [light, dark] = await Promise.all([
-    codeToTokens(tab.source, { lang, theme: 'github-light' }),
-    codeToTokens(tab.source, { lang, theme: 'github-dark' }),
-  ]);
-  const serialize = (lines: typeof light.tokens): SerializedToken[][] => lines.map((line) => line.map((token) => ({
+  const tokens = await codeToTokensWithThemes(tab.source, {
+    lang,
+    themes: { light: 'github-light', dark: 'github-dark' },
+  });
+  const serialize = (theme: 'light' | 'dark'): SerializedToken[][] => tokens.map((line) => line.map((token) => ({
     content: token.content,
-    color: token.color,
-    fontStyle: token.fontStyle,
+    color: token.variants[theme]?.color,
+    fontStyle: token.variants[theme]?.fontStyle,
   })));
 
   return {
     ...tab,
-    lightTokens: serialize(light.tokens),
-    darkTokens: serialize(dark.tokens),
+    lightTokens: serialize('light'),
+    darkTokens: serialize('dark'),
   };
 });
 

@@ -37,8 +37,9 @@ export function EvidenceRail({
           <motion.article
             key={item.id}
             className={`scenario-evidence-item scenario-tone-${item.tone}`}
-            initial={prefersReducedMotion ? false : { opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
+            data-scenario-evidence-index={index}
+            initial={prefersReducedMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
             transition={{
               duration: prefersReducedMotion ? 0 : 0.2,
               delay: prefersReducedMotion ? 0 : index * 0.035,

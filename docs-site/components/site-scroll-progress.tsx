@@ -1,11 +1,12 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import {
   ScrollProgress,
   ScrollProgressProvider,
 } from '@/components/animate-ui/primitives/animate/scroll-progress';
 
-export function SiteScrollProgress({ children }: { children: React.ReactNode }) {
+export function SiteScrollProgress({ children }: { children: ReactNode }) {
   return (
     <ScrollProgressProvider
       global

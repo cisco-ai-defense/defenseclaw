@@ -1,4 +1,5 @@
 import matrix from '@/data/capability-matrix.json';
+import Link from 'next/link';
 import { CapabilityMatrixWrapper } from './capability-matrix-wrapper';
 import { ConnectorBrand } from './connector-brand';
 
@@ -87,10 +88,10 @@ export function CapabilityMatrix() {
               style={{ animationDelay: `${i * 35}ms` }}
             >
               <Td>
-                <a href={`/docs/connectors/${c.id}`} className="connector-matrix-name font-medium text-[var(--brand-cisco-strong)] hover:underline">
+                <Link href={`/docs/connectors/${c.id}`} className="connector-matrix-name font-medium text-[var(--brand-cisco-strong)] hover:underline">
                   <ConnectorBrand id={c.id} size="sm" />
                   <span>{c.label}</span>
-                </a>
+                </Link>
                 <div className="connector-matrix-id text-xs text-fd-muted-foreground">{c.id}</div>
               </Td>
               <Td>

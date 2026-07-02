@@ -20,21 +20,18 @@ import { ResponsiveTable } from '@/components/responsive-table';
 import { ConnectorCatalog } from '@/components/connector-catalog';
 import { ConnectorLabel } from '@/components/connector-brand';
 import type { ComponentProps } from 'react';
-
-function mergeClassName(base: string, className?: string) {
-  return className ? `${base} ${className}` : base;
-}
+import { cn } from '@/lib/utils';
 
 function Callout(props: ComponentProps<typeof FumadocsCallout>) {
-  return <FumadocsCallout {...props} className={mergeClassName('editorial-callout', props.className)} />;
+  return <FumadocsCallout {...props} className={cn('editorial-callout', props.className)} />;
 }
 
 function Cards(props: ComponentProps<typeof FumadocsCards>) {
-  return <FumadocsCards {...props} className={mergeClassName('editorial-cards', props.className)} />;
+  return <FumadocsCards {...props} className={cn('editorial-cards', props.className)} />;
 }
 
 function Card(props: ComponentProps<typeof FumadocsCard>) {
-  return <FumadocsCard {...props} className={mergeClassName('editorial-card', props.className)} />;
+  return <FumadocsCard {...props} className={cn('editorial-card', props.className)} />;
 }
 
 function MdxInput(props: ComponentProps<'input'>) {

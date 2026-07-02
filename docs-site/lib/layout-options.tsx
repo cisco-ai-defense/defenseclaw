@@ -57,29 +57,19 @@ export const baseOptions: BaseLayoutProps = {
       url: '/docs/stories',
       active: 'nested-url',
     },
-    // Keep the two interactive builders one click away without letting
-    // their long labels force the tablet navbar onto two lines. The
-    // menu preserves both destinations and gives each tool enough room
-    // for a useful description.
     {
-      type: 'menu',
-      text: 'Tools',
-      items: [
-        {
-          type: 'main',
-          text: 'Command generator',
-          description: 'Build a non-interactive setup command.',
-          url: '/docs/command-generator',
-          active: 'nested-url',
-        },
-        {
-          type: 'main',
-          text: 'Policy creator',
-          description: 'Author and evaluate a policy in the browser.',
-          url: '/docs/policies/creator',
-          active: 'nested-url',
-        },
-      ],
+      type: 'main',
+      text: 'Command',
+      description: 'Build a non-interactive setup command.',
+      url: '/docs/command-generator',
+      active: 'nested-url',
+    },
+    {
+      type: 'main',
+      text: 'Policy',
+      description: 'Author and evaluate a policy in the browser.',
+      url: '/docs/policies/creator',
+      active: 'nested-url',
     },
     // Secondary nav anchors the project to its sibling community
     // surfaces. Order is intentional: parent-org → Discord → repo

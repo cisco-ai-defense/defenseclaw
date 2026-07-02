@@ -21,13 +21,21 @@ function TokenLines({
     <code className={`scenario-code-theme scenario-code-theme-${theme}`}>
       {lines.map((line, index) => {
         const lineNumber = index + 1;
-        const highlight = highlights.find(
+        const highlightIndex = highlights.findIndex(
           (range) => lineNumber >= range.start && lineNumber <= range.end,
         );
+        const highlight = highlightIndex >= 0 ? highlights[highlightIndex] : undefined;
+        const markerNumbers = highlights.flatMap((range, rangeIndex) => {
+          if (lineNumber !== range.end) return [];
+          return Array.from({ length: evidenceCount }, (_, evidenceIndex) => evidenceIndex)
+            .filter((evidenceIndex) => Math.min(evidenceIndex, highlights.length - 1) === rangeIndex)
+            .map((evidenceIndex) => evidenceIndex + 1);
+        });
         return (
           <span
             className={`scenario-code-line${highlight ? ` is-highlighted scenario-tone-${highlight.tone}` : ''}`}
             key={`${theme}-${lineNumber}`}
+            data-scenario-highlight-index={highlight ? highlightIndex : undefined}
           >
             {highlight ? (
               <motion.span
@@ -48,8 +56,8 @@ function TokenLines({
                 </span>
               ))}
             </span>
-            {highlight && evidenceCount > 0 ? (
-              <span className="scenario-mobile-marker" aria-hidden>1</span>
+            {markerNumbers.length > 0 ? (
+              <span className="scenario-mobile-marker" aria-hidden>{markerNumbers.join(',')}</span>
             ) : null}
           </span>
         );
@@ -62,16 +70,18 @@ export function ScenarioCode({
   tab,
   highlights,
   evidenceCount,
+  instanceId,
 }: {
   tab: HighlightedScenarioTab;
   highlights: ScenarioHighlight[];
   evidenceCount: number;
+  instanceId: string;
 }) {
   return (
     <div
-      id={`scenario-panel-${tab.id}`}
+      id={`${instanceId}-panel-${tab.id}`}
       role="tabpanel"
-      aria-labelledby={`scenario-tab-${tab.id}`}
+      aria-labelledby={`${instanceId}-tab-${tab.id}`}
       className="scenario-code-scroll"
       tabIndex={0}
       aria-label={`${tab.label} source with ${highlights.length} active annotation range${highlights.length === 1 ? '' : 's'}`}

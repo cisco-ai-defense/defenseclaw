@@ -13,7 +13,7 @@ export type PlayerAction =
   | { type: 'NEXT'; lastStep: number }
   | { type: 'PREVIOUS' }
   | { type: 'RESTART'; play?: boolean }
-  | { type: 'GO_TO'; stepIndex: number; lastStep: number }
+  | { type: 'AUTOPLAY_NEXT'; stepIndex: number; lastStep: number }
   | { type: 'SELECT_TAB'; tabId: string }
   | { type: 'SELECT_VARIANT'; variantId: string; lastStep: number }
   | { type: 'SHOW_FINAL'; lastStep: number };
@@ -51,8 +51,14 @@ export function playerReducer(
       return { ...state, stepIndex: Math.max(0, state.stepIndex - 1), isPlaying: false, completed: false, manualTabId: undefined };
     case 'RESTART':
       return { ...state, stepIndex: 0, isPlaying: Boolean(action.play), completed: false, manualTabId: undefined };
-    case 'GO_TO':
-      return { ...state, stepIndex: action.stepIndex, isPlaying: false, completed: action.stepIndex === action.lastStep, manualTabId: undefined };
+    case 'AUTOPLAY_NEXT':
+      return {
+        ...state,
+        stepIndex: action.stepIndex,
+        isPlaying: action.stepIndex < action.lastStep,
+        completed: action.stepIndex === action.lastStep,
+        manualTabId: undefined,
+      };
     case 'SELECT_TAB':
       return { ...state, manualTabId: action.tabId, isPlaying: false };
     case 'SELECT_VARIANT':

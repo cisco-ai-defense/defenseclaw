@@ -120,7 +120,7 @@ export function flattenToLines(node: React.ReactNode): string[] {
 // CSS handles the final wrapping inside the box we reserved here.
 export function measureLabel(
   lines: string[],
-  opts: { kind: DiagramKind; compact?: boolean; dense?: boolean } = { kind: 'generic' },
+  opts: { kind?: DiagramKind; compact?: boolean; dense?: boolean } = {},
 ): { width: number; height: number; lines: string[] } {
   const widthsPx = lines.map(l => Math.max(1, l.length) * CHAR_WIDTH);
   const naturalWidth = Math.max(...widthsPx) + NODE_PAD_X * 2 + NODE_ICON_SPACE;

@@ -41,7 +41,7 @@
   --diagram-row-number: #71818c;
   --diagram-text: #17212a;
   --diagram-muted: #56656f;
-  --diagram-accent-blue: #0075a3;
+  --diagram-accent-blue: var(--brand-cisco);
   --diagram-accent-amber: #955900;
   --diagram-accent-slate: #5d6b75;
   --diagram-role-runtime: #536bd7;
@@ -126,7 +126,7 @@
   --diagram-row-number: #87959e;
   --diagram-text: #d9e0e4;
   --diagram-muted: #9eabb3;
-  --diagram-accent-blue: #5bc2e8;
+  --diagram-accent-blue: var(--brand-cisco);
   --diagram-accent-amber: #efb052;
   --diagram-accent-slate: #abb7bf;
   --diagram-role-runtime: #91a3ff;
@@ -630,6 +630,7 @@ article#nd-page table thead tr {
 
 .connector-brand-mark {
   --connector-brand: var(--brand-cisco);
+
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -837,7 +838,7 @@ article#nd-page table thead tr {
   --editorial-soft: #f5f7f8;
   --editorial-rule: #dce2e7;
   --editorial-muted: #58636d;
-  --editorial-blue: #006f9d;
+  --editorial-blue: var(--brand-cisco);
   --editorial-blue-bright: #007fb3;
   --editorial-red: #d92d38;
   --editorial-amber: #8f5100;
@@ -852,7 +853,7 @@ article#nd-page table thead tr {
   --editorial-soft: #171e24;
   --editorial-rule: #35414a;
   --editorial-muted: #b4bec6;
-  --editorial-blue: #5bc2e8;
+  --editorial-blue: var(--brand-cisco);
   --editorial-blue-bright: #72ccef;
   --editorial-red: #ff737b;
   --editorial-amber: #f2ad45;
@@ -1385,7 +1386,7 @@ article#nd-page table thead tr {
 
 .dark .editorial-install {
   border-block: 1px solid var(--editorial-rule);
-  background: #1b232a;
+  background: var(--color-fd-secondary);
   color: var(--editorial-ink);
 }
 
@@ -1409,6 +1410,7 @@ article#nd-page table thead tr {
   --scenario-ink: var(--editorial-ink);
   --scenario-muted: var(--editorial-muted);
   --scenario-rule: var(--editorial-rule);
+
   width: 100%;
   margin-block: 2.5rem 3rem;
   color: var(--scenario-ink);
@@ -1657,14 +1659,33 @@ article#nd-page table thead tr {
   inset: 0;
   z-index: -1;
   transform-origin: left;
-  background: color-mix(in oklab, currentColor 4%, transparent);
-  border-right: 2px solid currentColor;
+  background: color-mix(in oklab, currentcolor 4%, transparent);
+  border-right: 2px solid currentcolor;
 }
 
-.scenario-code-line.scenario-tone-info { color: var(--editorial-blue); }
-.scenario-code-line.scenario-tone-warning { color: var(--editorial-amber); }
-.scenario-code-line.scenario-tone-danger { color: var(--editorial-red); }
-.scenario-code-line.scenario-tone-success { color: var(--editorial-green); }
+.scenario-code-line.scenario-tone-info {
+  --scenario-annotation-color: var(--editorial-blue);
+
+  color: var(--editorial-blue);
+}
+
+.scenario-code-line.scenario-tone-warning {
+  --scenario-annotation-color: var(--editorial-amber);
+
+  color: var(--editorial-amber);
+}
+
+.scenario-code-line.scenario-tone-danger {
+  --scenario-annotation-color: var(--editorial-red);
+
+  color: var(--editorial-red);
+}
+
+.scenario-code-line.scenario-tone-success {
+  --scenario-annotation-color: var(--editorial-green);
+
+  color: var(--editorial-green);
+}
 
 .scenario-line-number {
   padding-right: 1rem;
@@ -1738,7 +1759,7 @@ article#nd-page table thead tr {
   height: 1.15rem;
   align-items: center;
   justify-content: center;
-  border: 1px solid currentColor;
+  border: 1px solid currentcolor;
   border-radius: 50%;
   font-family: var(--font-mono), monospace;
   font-size: 0.56rem;
@@ -1746,7 +1767,7 @@ article#nd-page table thead tr {
 
 .scenario-evidence-value {
   margin: 0.38rem 0 0;
-  color: currentColor;
+  color: currentcolor;
   font-family: var(--font-mono), monospace;
   font-size: 0.72rem;
   font-weight: 650;
@@ -1778,13 +1799,17 @@ article#nd-page table thead tr {
 
 .scenario-connector {
   fill: none;
-  stroke: currentColor;
+  stroke: currentcolor;
   stroke-width: 1.25;
   vector-effect: non-scaling-stroke;
 }
 
 .scenario-connector-dot {
-  fill: currentColor;
+  fill: currentcolor;
+}
+
+.scenario-connector-arrow {
+  fill: currentcolor;
 }
 
 .scenario-outcome {
@@ -1794,7 +1819,7 @@ article#nd-page table thead tr {
   grid-template-columns: 1.05fr 1.35fr 1fr;
   min-height: 5.2rem;
   border-top: 1px solid var(--scenario-rule);
-  background: color-mix(in oklab, currentColor 5%, var(--scenario-surface));
+  background: color-mix(in oklab, currentcolor 5%, var(--scenario-surface));
 }
 
 .scenario-outcome > div {
@@ -1835,7 +1860,7 @@ article#nd-page table thead tr {
   gap: 0.5rem;
   align-items: center;
   margin-top: 0.28rem;
-  color: currentColor;
+  color: currentcolor;
   font-size: 0.88rem;
 }
 
@@ -1845,12 +1870,10 @@ article#nd-page table thead tr {
 }
 
 .scenario-outcome p {
-  overflow: hidden;
   margin: 0.28rem 0 0;
   color: var(--scenario-ink);
   font-size: 0.69rem;
   line-height: 1.4;
-  text-overflow: ellipsis;
 }
 
 .scenario-footer {
@@ -2190,12 +2213,16 @@ article#nd-page .scenario-frame code {
   }
 
   .scenario-mobile-marker {
+    position: sticky;
+    right: 0.5rem;
+    z-index: 2;
     align-items: center;
     justify-content: center;
-    width: 1.15rem;
+    min-width: 1.15rem;
     height: 1.15rem;
+    padding-inline: 0.22rem;
     border-radius: 50%;
-    background: currentColor;
+    background: var(--scenario-annotation-color);
     color: var(--scenario-surface);
     font-size: 0.56rem;
   }

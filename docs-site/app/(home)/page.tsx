@@ -17,6 +17,7 @@ import { CtaGlowButton } from '@/components/cta-glow-button';
 import { DefenseClawDemo } from '@/components/feature-demo';
 import { EditorialMotionGrid } from '@/components/editorial-motion-grid';
 import { ConnectorBrand } from '@/components/connector-brand';
+import { CapabilityMatrixWrapper } from '@/components/capability-matrix-wrapper';
 import matrix from '@/data/capability-matrix.json';
 
 const connectors = matrix.connectors;
@@ -145,7 +146,7 @@ export default function HomePage() {
           <SectionIntro eyebrow="Connector-aware enforcement" title="Use the strongest control each agent exposes" id="coverage-heading">
             DefenseClaw normalizes the decision contract while preserving the difference between native ask, downgraded confirm, and pre-execution blocking.
           </SectionIntro>
-          <div className="connector-preview" role="region" aria-label="Connector capability preview" tabIndex={0}>
+          <CapabilityMatrixWrapper className="connector-preview" ariaLabel="Connector capability preview">
             <table>
               <thead><tr><th>Connector</th><th>Pre-execution block</th><th>Native ask</th><th>Fail closed</th></tr></thead>
               <tbody>
@@ -164,7 +165,7 @@ export default function HomePage() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </CapabilityMatrixWrapper>
           <Link className="editorial-inline-link" href="/docs/capability-matrix">Compare all {connectors.length} connectors <ArrowRight aria-hidden /></Link>
         </div>
       </section>

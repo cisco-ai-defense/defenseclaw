@@ -1,27 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState, type ComponentProps } from 'react';
+import type { ComponentProps } from 'react';
+import { useScrollable } from '@/hooks/use-scrollable';
 
 export function ResponsiveTable({
   'aria-label': ariaLabel = 'Scrollable data table',
   ...props
 }: ComponentProps<'table'>) {
-  const regionRef = useRef<HTMLDivElement>(null);
-  const [scrollable, setScrollable] = useState(false);
-
-  useEffect(() => {
-    const region = regionRef.current;
-    if (!region) return;
-
-    const update = () => {
-      setScrollable(region.scrollWidth > region.clientWidth + 1);
-    };
-    update();
-
-    const observer = new ResizeObserver(update);
-    observer.observe(region);
-    return () => observer.disconnect();
-  }, []);
+  const { ref: regionRef, scrollable } = useScrollable<HTMLDivElement>();
 
   return (
     <div

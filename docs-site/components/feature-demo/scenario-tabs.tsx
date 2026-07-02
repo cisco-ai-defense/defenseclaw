@@ -9,10 +9,12 @@ export function ScenarioTabs({
   tabs,
   activeTabId,
   onSelect,
+  instanceId,
 }: {
   tabs: HighlightedScenarioTab[];
   activeTabId: string;
   onSelect: (id: string) => void;
+  instanceId: string;
 }) {
   const railRef = useRef<HTMLDivElement | null>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -36,7 +38,7 @@ export function ScenarioTabs({
 
   useEffect(() => {
     const rail = railRef.current;
-    const activeTab = rail?.querySelector<HTMLElement>(`#scenario-tab-${activeTabId}`);
+    const activeTab = document.getElementById(`${instanceId}-tab-${activeTabId}`);
     if (!rail || !activeTab) return;
     const leftEdge = activeTab.offsetLeft;
     const rightEdge = leftEdge + activeTab.offsetWidth;
@@ -53,7 +55,7 @@ export function ScenarioTabs({
     });
     const frame = window.requestAnimationFrame(updateScrollState);
     return () => window.cancelAnimationFrame(frame);
-  }, [activeTabId, updateScrollState]);
+  }, [activeTabId, instanceId, updateScrollState]);
 
   function scrollRail(direction: -1 | 1) {
     const rail = railRef.current;
@@ -67,7 +69,7 @@ export function ScenarioTabs({
   function moveFocus(currentIndex: number, offset: number) {
     const next = (currentIndex + offset + tabs.length) % tabs.length;
     onSelect(tabs[next].id);
-    document.getElementById(`scenario-tab-${tabs[next].id}`)?.focus();
+    document.getElementById(`${instanceId}-tab-${tabs[next].id}`)?.focus();
   }
 
   return (
@@ -84,11 +86,11 @@ export function ScenarioTabs({
           return (
             <button
               key={tab.id}
-              id={`scenario-tab-${tab.id}`}
+              id={`${instanceId}-tab-${tab.id}`}
               type="button"
               role="tab"
               aria-selected={active}
-              aria-controls={`scenario-panel-${tab.id}`}
+              aria-controls={`${instanceId}-panel-${tab.id}`}
               tabIndex={active ? 0 : -1}
               onClick={() => onSelect(tab.id)}
               onKeyDown={(event) => {
@@ -113,7 +115,7 @@ export function ScenarioTabs({
               {tab.label}
               {active ? (
                 <motion.span
-                  layoutId="scenario-active-tab"
+                  layoutId={`${instanceId}-active-tab`}
                   className="scenario-tab-underline"
                   transition={{ duration: 0.18, ease: 'easeOut' }}
                 />

@@ -43,7 +43,7 @@ const MotionGrid = ({
 }: MotionGridProps) => {
   const [index, setIndex] = React.useState(0);
   const [pageVisible, setPageVisible] = React.useState(true);
-  const intervalRef = React.useRef<NodeJS.Timeout | null>(null);
+  const intervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
   React.useEffect(() => {
     const updateVisibility = () => setPageVisible(document.visibilityState === 'visible');
@@ -63,7 +63,7 @@ const MotionGrid = ({
 
   const [cols, rows] = gridSize;
 
-  const Component = asChild ? Slot : motion.div;
+  const Component: React.ElementType = asChild ? Slot : motion.div;
 
   return (
     <MotionGridProvider

@@ -66,6 +66,7 @@ interface ResolvedMessage extends MessageProps {
 
 const PILL_PAD_X = 20;
 const PILL_HEIGHT = 58;
+const PILL_MAX_WIDTH = 146;
 const COL_MIN_GAP = 150;
 // Cap how wide any single column gap can grow. Without this, one
 // 60-char message label can push every other column outward and
@@ -79,11 +80,15 @@ const PILL_MARGIN_BOTTOM = 24;
 const MESSAGE_GAP = 54;
 const BOTTOM_MARGIN = 30;
 const SIDE_MARGIN = 24;
+const CHIP_MIN_WIDTH = 40;
+const CHIP_MAX_WIDTH = 300;
+const CHIP_CHAR_WIDTH = 6.5;
+const CHIP_PAD_X = 20;
 // Same chip-width estimator used inside the renderer (see
 // SequenceLabelChip below). Hoisted so the layout stage can reserve
 // the right amount of space per column without rendering yet.
 function estimateChipWidth(label: string): number {
-  return Math.min(300, Math.max(40, label.length * 6.6 + 20));
+  return Math.min(CHIP_MAX_WIDTH, Math.max(CHIP_MIN_WIDTH, label.length * CHIP_CHAR_WIDTH + CHIP_PAD_X));
 }
 
 // Filter Message children out of the JSX tree, ignoring whitespace
@@ -126,7 +131,7 @@ export function Sequence({
 
   // Resolve pill widths from the label characters.
   const pillWidths = participants.map((p) =>
-    Math.max(128, p.label.length * CHAR_WIDTH + PILL_PAD_X * 2 + 22),
+    Math.min(PILL_MAX_WIDTH, Math.max(128, p.label.length * CHAR_WIDTH + PILL_PAD_X * 2 + 22)),
   );
 
   const idIndex = new Map(participants.map((p, i) => [p.id, i]));
@@ -493,6 +498,7 @@ function ParticipantPill({
 }) {
   const kind: DiagramKind = p.kind ?? 'generic';
   const style = KIND_TO_STYLE[kind];
+  const accent = style.accent ?? 'var(--diagram-accent-slate)';
   const x = p.x - p.pillW / 2;
   const y = TOP_MARGIN;
   const stroke = p.emphasis
@@ -518,7 +524,7 @@ function ParticipantPill({
           strokeWidth: p.emphasis ? 1.6 : 1,
         }}
       />
-      {style.accent && (
+      {accent && (
         <rect
           x={x}
           y={y}
@@ -526,7 +532,7 @@ function ParticipantPill({
           height={p.pillH}
           rx={3}
           ry={3}
-          style={{ fill: p.emphasis ? 'var(--diagram-accent-blue)' : style.accent }}
+          style={{ fill: p.emphasis ? 'var(--diagram-accent-blue)' : accent }}
         />
       )}
       <foreignObject x={x} y={y} width={p.pillW} height={p.pillH}>
@@ -560,10 +566,10 @@ function ParticipantPill({
               justifyContent: 'center',
               width: '28px',
               height: '28px',
-              border: `1px solid color-mix(in oklab, ${style.accent} 28%, var(--diagram-border))`,
+              border: `1px solid color-mix(in oklab, ${accent} 28%, var(--diagram-border))`,
               borderRadius: '5px',
-              background: `color-mix(in oklab, ${style.accent} 8%, var(--diagram-node-bg))`,
-              color: style.accent,
+              background: `color-mix(in oklab, ${accent} 8%, var(--diagram-node-bg))`,
+              color: accent,
             }}
             aria-hidden
           >
@@ -578,7 +584,7 @@ function ParticipantPill({
             }}
           >
             <span style={{
-              color: style.accent,
+              color: accent,
               fontFamily: 'var(--font-mono), ui-monospace, monospace',
               fontSize: '8px',
               fontWeight: 750,
@@ -716,7 +722,7 @@ function SequenceLabelChip({
   anchor: 'start' | 'middle' | 'end';
   animationDelay?: string;
 }) {
-  const w = Math.min(300, Math.max(40, label.length * 6.5 + 20));
+  const w = estimateChipWidth(label);
   const h = 22;
   const offsetX = anchor === 'middle' ? -w / 2 : anchor === 'end' ? -w : 0;
   return (

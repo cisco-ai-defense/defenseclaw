@@ -78,7 +78,11 @@ describe('feature demo catalog', () => {
       for (const steps of allStepSets(scenario)) {
         for (const current of steps) {
           if (!current.outcomeId) continue;
-          const hasCriticalEvidence = current.evidenceIds.some((id) => /critical/i.test(`${evidence.get(id)?.value} ${evidence.get(id)?.detail}`));
+          const hasCriticalEvidence = current.evidenceIds.some((id) => {
+            const item = evidence.get(id);
+            assert.ok(item, `${scenario.id}/${current.id} references unknown evidence ${id}`);
+            return /critical/i.test(`${item.value} ${item.detail}`);
+          });
           if (hasCriticalEvidence) assert.notEqual(outcomes.get(current.outcomeId)?.kind, 'pause', `${scenario.id} pauses a CRITICAL finding`);
         }
       }
@@ -100,7 +104,7 @@ describe('feature demo catalog', () => {
   });
 
   it('keeps fixtures synthetic and free of credential-shaped values', () => {
-    const credentialShape = /(?:sk|token|secret|password|bearer)[-_]?[a-z0-9]{12,}/i;
+    const credentialShape = /\b(?:sk|token|secret|password|bearer)(?:[-_][a-z0-9]{12,}|(?:[-_][a-z0-9]{4,}){2,})\b/i;
     for (const scenario of featureDemos) {
       for (const tab of scenario.tabs) {
         assert.doesNotMatch(tab.source, credentialShape, `${scenario.id}/${tab.id} contains a credential-shaped value`);
@@ -115,7 +119,7 @@ describe('feature demo catalog', () => {
 describe('scenario player reducer', () => {
   it('starts server-rendered at the complete state and autoplays from step one', () => {
     const initial = createInitialPlayerState(4);
-    assert.deepEqual(initial, { stepIndex: 4, isPlaying: false, completed: true, selectedVariant: undefined });
+    assert.deepStrictEqual(initial, { stepIndex: 4, isPlaying: false, completed: true, selectedVariant: undefined });
     const playing = playerReducer(initial, { type: 'AUTOPLAY_START' });
     assert.equal(playing.stepIndex, 0);
     assert.equal(playing.isPlaying, true);
@@ -129,5 +133,35 @@ describe('scenario player reducer', () => {
     const variant = playerReducer(playing, { type: 'SELECT_VARIANT', variantId: 'deny', lastStep: 2 });
     assert.equal(variant.stepIndex, 2);
     assert.equal(variant.completed, true);
+  });
+
+  it('navigates, pauses, restarts, and completes deterministically', () => {
+    const initial = createInitialPlayerState(3);
+    const playing = playerReducer(initial, { type: 'PLAY', lastStep: 3 });
+    assert.deepStrictEqual(playing, {
+      stepIndex: 0,
+      isPlaying: true,
+      completed: false,
+      selectedVariant: undefined,
+      manualTabId: undefined,
+    });
+
+    const advanced = playerReducer(playing, { type: 'AUTOPLAY_NEXT', stepIndex: 1, lastStep: 3 });
+    assert.equal(advanced.stepIndex, 1);
+    assert.equal(advanced.isPlaying, true);
+    const paused = playerReducer(advanced, { type: 'PAUSE' });
+    assert.equal(paused.isPlaying, false);
+    const next = playerReducer(paused, { type: 'NEXT', lastStep: 3 });
+    assert.equal(next.stepIndex, 2);
+    assert.equal(next.completed, false);
+    const previous = playerReducer(next, { type: 'PREVIOUS' });
+    assert.equal(previous.stepIndex, 1);
+    const restarted = playerReducer(previous, { type: 'RESTART', play: true });
+    assert.equal(restarted.stepIndex, 0);
+    assert.equal(restarted.isPlaying, true);
+    const complete = playerReducer(restarted, { type: 'SHOW_FINAL', lastStep: 3 });
+    assert.equal(complete.stepIndex, 3);
+    assert.equal(complete.completed, true);
+    assert.equal(complete.isPlaying, false);
   });
 });

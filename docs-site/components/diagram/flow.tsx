@@ -156,14 +156,19 @@ export function Flow({
   // rail than as a narrow vertical ladder. Preserve explicit topology, but
   // promote a TB chain when its measured width still fits the article.
   const isLinear = isLinearChain(nodeProps, edgeProps);
-  const compactCandidateWidth = nodeProps.reduce((sum, node) => {
+  const compactNodeWidth = nodeProps.reduce((sum, node) => {
     const kind = node.kind ?? 'generic';
     const measured = measureLabel(flattenToLines(node.children), {
       kind,
       compact: true,
     });
     return sum + measured.width;
-  }, 0) + Math.max(0, nodeProps.length - 1) * 54 + 56;
+  }, 0);
+  const compactTransitionWidth = edgeProps.reduce((sum, edge) => {
+    const labelWidth = edge.label ? Math.min(180, edge.label.length * 6 + 16) : 0;
+    return sum + Math.max(54, labelWidth);
+  }, 0);
+  const compactCandidateWidth = compactNodeWidth + compactTransitionWidth + 56;
   const autoLinearHorizontal =
     direction === 'TB' &&
     isLinear &&
@@ -367,23 +372,39 @@ export function Flow({
 function isLinearChain(nodes: NodeProps[], edges: EdgeProps[]): boolean {
   if (nodes.length < 2 || edges.length !== nodes.length - 1) return false;
   const ids = new Set(nodes.map((node) => node.id));
+  if (ids.size !== nodes.length) return false;
   const incoming = new Map(nodes.map((node) => [node.id, 0]));
   const outgoing = new Map(nodes.map((node) => [node.id, 0]));
+  const nextById = new Map<string, string>();
   for (const edge of edges) {
     if (!ids.has(edge.from) || !ids.has(edge.to)) return false;
     incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
     outgoing.set(edge.from, (outgoing.get(edge.from) ?? 0) + 1);
+    if (nextById.has(edge.from)) return false;
+    nextById.set(edge.from, edge.to);
   }
   let starts = 0;
   let ends = 0;
+  let startId: string | undefined;
   for (const id of ids) {
     const inCount = incoming.get(id) ?? 0;
     const outCount = outgoing.get(id) ?? 0;
-    if (inCount === 0 && outCount === 1) starts += 1;
+    if (inCount === 0 && outCount === 1) {
+      starts += 1;
+      startId = id;
+    }
     else if (inCount === 1 && outCount === 0) ends += 1;
     else if (inCount !== 1 || outCount !== 1) return false;
   }
-  return starts === 1 && ends === 1;
+  if (starts !== 1 || ends !== 1 || !startId) return false;
+
+  const visited = new Set<string>();
+  let cursor: string | undefined = startId;
+  while (cursor && !visited.has(cursor)) {
+    visited.add(cursor);
+    cursor = nextById.get(cursor);
+  }
+  return cursor === undefined && visited.size === ids.size;
 }
 
 function FlowContainer({
