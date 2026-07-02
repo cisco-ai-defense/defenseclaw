@@ -950,5 +950,99 @@ class DiscoveryScanTests(unittest.TestCase):
         self.assertIn("sidecar unavailable", result.output)
 
 
+class AgentProcessesTests(unittest.TestCase):
+    def test_refresh_zero_match_does_not_render_gone_cached_process(self):
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def scan_ai_usage(self):
+                return {
+                    "summary": {"result": "ok"},
+                    "signals": [{"state": "gone", "runtime": {"pid": 1234}}],
+                }
+
+        app = _make_ctx(enabled=True)
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+            result = CliRunner().invoke(cmd_agent.processes, ["--refresh", "--json"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(__import__("json").loads(result.output)["processes"], [])
+
+    def test_refresh_replaces_cached_empty_processes_in_json_and_human_output(self):
+        runtime_signal = {
+            "product": "Codex",
+            "vendor": "OpenAI",
+            "last_active_at": "2026-07-02T12:00:00Z",
+            "runtime": {
+                "pid": 4242,
+                "ppid": 100,
+                "user": r"WORKSTATION\kevin",
+                "uptime_sec": 90,
+                "comm": "codex.exe",
+            },
+        }
+
+        class FakeClient:
+            scans = 0
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return {"signals": []}
+
+            def scan_ai_usage(self):
+                self.__class__.scans += 1
+                return {"summary": {"result": "ok"}, "signals": [runtime_signal]}
+
+        app = _make_ctx(enabled=True)
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+            stale = runner.invoke(cmd_agent.processes, ["--json"], obj=app)
+            fresh = runner.invoke(cmd_agent.processes, ["--refresh", "--json"], obj=app)
+            human = runner.invoke(cmd_agent.processes, ["--refresh"], obj=app)
+        self.assertEqual(stale.exit_code, 0, msg=stale.output)
+        self.assertEqual(__import__("json").loads(stale.output)["processes"], [])
+        self.assertEqual(fresh.exit_code, 0, msg=fresh.output)
+        self.assertEqual(__import__("json").loads(fresh.output)["processes"][0]["runtime"]["pid"], 4242)
+        self.assertEqual(human.exit_code, 0, msg=human.output)
+        self.assertIn("4242", human.output)
+        self.assertIn("Codex", human.output)
+        self.assertEqual(FakeClient.scans, 2)
+
+    def test_snapshot_failure_is_structured_and_nonzero(self):
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def scan_ai_usage(self):
+                return {
+                    "summary": {
+                        "result": "partial",
+                        "errors": 1,
+                        "detector_errors": {"process": "process snapshot: enumeration failed"},
+                    },
+                    "signals": [],
+                }
+
+        app = _make_ctx(enabled=True)
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+            result = CliRunner().invoke(cmd_agent.processes, ["--refresh", "--json"], obj=app)
+            human = CliRunner().invoke(cmd_agent.processes, ["--refresh"], obj=app)
+        self.assertNotEqual(result.exit_code, 0)
+        payload = __import__("json").loads(result.output)
+        self.assertEqual(payload["processes"], [])
+        self.assertEqual(payload["errors"][0]["detector"], "process")
+        self.assertIn("enumeration failed", payload["errors"][0]["message"])
+        self.assertNotEqual(human.exit_code, 0)
+        self.assertIn("process snapshot failed", human.output)
+
+
 if __name__ == "__main__":
     unittest.main()

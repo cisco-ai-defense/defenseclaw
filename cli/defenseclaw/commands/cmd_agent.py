@@ -367,7 +367,10 @@ def processes(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     raw_signals = payload.get("signals", []) or []
-    process_signals = [s for s in raw_signals if s.get("runtime")]
+    process_signals = [
+        s for s in raw_signals
+        if s.get("runtime") and str(s.get("state", "")).lower() != "gone"
+    ]
     # Most-recently-seen first so an operator hunting a runaway agent
     # sees fresh activity at the top.
     process_signals.sort(
@@ -375,9 +378,21 @@ def processes(
         reverse=True,
     )
 
+    process_error = str(
+        ((payload.get("summary") or {}).get("detector_errors") or {}).get("process", "")
+    )
+
     if as_json:
-        click.echo(json.dumps({"processes": process_signals}, indent=2, sort_keys=True))
+        output: dict[str, Any] = {"processes": process_signals}
+        if process_error:
+            output["errors"] = [{"detector": "process", "message": process_error}]
+        click.echo(json.dumps(output, indent=2, sort_keys=True))
+        if process_error:
+            raise click.exceptions.Exit(1)
         return
+
+    if process_error:
+        raise click.ClickException(f"process snapshot failed: {process_error}")
 
     click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
 

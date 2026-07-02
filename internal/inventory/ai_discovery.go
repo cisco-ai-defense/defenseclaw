@@ -17,7 +17,6 @@
 package inventory
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -36,7 +35,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -208,12 +206,12 @@ type AIComponent struct {
 // gated behind the existing `StoreRawLocalPaths` privacy switch via
 // per-evidence raw paths, not here.
 type ProcessRuntime struct {
-	PID       int       `json:"pid"`
-	PPID      int       `json:"ppid,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UptimeSec int64     `json:"uptime_sec,omitempty"`
-	User      string    `json:"user,omitempty"`
-	Comm      string    `json:"comm,omitempty"`
+	PID       int        `json:"pid"`
+	PPID      int        `json:"ppid,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	UptimeSec int64      `json:"uptime_sec,omitempty"`
+	User      string     `json:"user,omitempty"`
+	Comm      string     `json:"comm,omitempty"`
 }
 
 // AISignal is the sanitized signal shape returned by API responses and used
@@ -288,21 +286,22 @@ type AISignal struct {
 const maxEvidencePerSignal = 32
 
 type AIDiscoverySummary struct {
-	ScanID            string         `json:"scan_id"`
-	ScannedAt         time.Time      `json:"scanned_at"`
-	DurationMs        int64          `json:"duration_ms"`
-	PrivacyMode       string         `json:"privacy_mode"`
-	Source            string         `json:"source"`
-	Result            string         `json:"result"`
-	TotalSignals      int            `json:"total_signals"`
-	ActiveSignals     int            `json:"active_signals"`
-	NewSignals        int            `json:"new_signals"`
-	ChangedSignals    int            `json:"changed_signals"`
-	GoneSignals       int            `json:"gone_signals"`
-	FilesScanned      int            `json:"files_scanned"`
-	DedupeSuppressed  int            `json:"dedupe_suppressed"`
-	Errors            int            `json:"errors"`
-	DetectorDurations map[string]int `json:"detector_durations_ms,omitempty"`
+	ScanID            string            `json:"scan_id"`
+	ScannedAt         time.Time         `json:"scanned_at"`
+	DurationMs        int64             `json:"duration_ms"`
+	PrivacyMode       string            `json:"privacy_mode"`
+	Source            string            `json:"source"`
+	Result            string            `json:"result"`
+	TotalSignals      int               `json:"total_signals"`
+	ActiveSignals     int               `json:"active_signals"`
+	NewSignals        int               `json:"new_signals"`
+	ChangedSignals    int               `json:"changed_signals"`
+	GoneSignals       int               `json:"gone_signals"`
+	FilesScanned      int               `json:"files_scanned"`
+	DedupeSuppressed  int               `json:"dedupe_suppressed"`
+	Errors            int               `json:"errors"`
+	DetectorErrors    map[string]string `json:"detector_errors,omitempty"`
+	DetectorDurations map[string]int    `json:"detector_durations_ms,omitempty"`
 }
 
 type AIDiscoveryReport struct {
@@ -770,12 +769,13 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 type scanStats struct {
 	FilesScanned      int
 	Errors            int
+	DetectorErrors    map[string]string
 	DedupeSuppressed  int
 	DetectorDurations map[string]int
 }
 
 func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool) ([]AISignal, scanStats) {
-	stats := scanStats{DetectorDurations: map[string]int{}}
+	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
 	var signals []AISignal
 	seen := map[string]bool{}
 
@@ -804,6 +804,12 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 		}
 		if err != nil {
 			stats.Errors++
+			// Only the process detector is surfaced here. Other detector
+			// errors can contain local paths; keep their existing aggregate
+			// count without widening the API's sensitive-data surface.
+			if name == "process" {
+				stats.DetectorErrors[name] = err.Error()
+			}
 			child.RecordError(err)
 			child.SetStatus(codes.Error, err.Error())
 		}
@@ -813,7 +819,10 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 		add(out)
 	}
 
-	measure("process", func() ([]AISignal, int, error) { return s.detectProcesses(), 0, nil })
+	measure("process", func() ([]AISignal, int, error) {
+		out, err := s.detectProcesses()
+		return out, 0, err
+	})
 	if !full {
 		sortAISignals(signals)
 		return signals, stats
@@ -967,6 +976,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		FilesScanned:      stats.FilesScanned,
 		DedupeSuppressed:  stats.DedupeSuppressed,
 		Errors:            stats.Errors,
+		DetectorErrors:    stats.DetectorErrors,
 		DetectorDurations: stats.DetectorDurations,
 	}
 	if stats.Errors > 0 {
@@ -1040,14 +1050,30 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 	return out
 }
 
-func (s *ContinuousDiscoveryService) detectProcesses() []AISignal {
+func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	procs, err := processSnapshot()
-	if err != nil || len(procs) == 0 {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("process snapshot: %w", err)
+	}
+	if len(procs) == 0 {
+		return nil, nil
+	}
+	windowsSnapshot := len(procs) > 0 && procs[0].Windows
+	if windowsSnapshot {
+		classifyWindowsProcesses(procs, s.catalog)
 	}
 	now := time.Now().UTC()
 	var out []AISignal
 	for _, sig := range s.catalog {
+		if windowsSnapshot {
+			for i := range procs {
+				if procs[i].Connector != sig.ID {
+					continue
+				}
+				out = append(out, s.signalFromProcess(sig, procs[i], now, MatchKindExact, 1.0))
+			}
+			continue
+		}
 		for _, want := range sig.ProcessNames {
 			want = strings.ToLower(strings.TrimSpace(want))
 			if want == "" {
@@ -1084,31 +1110,34 @@ func (s *ContinuousDiscoveryService) detectProcesses() []AISignal {
 				quality = 0.5
 				matchKind = MatchKindSubstring
 			}
-			ev := AIEvidence{
-				Type:      "process",
-				ValueHash: hashValue(best.Comm),
-				Quality:   quality,
-				MatchKind: matchKind,
-			}
-			signal := s.signalFromEvidence(sig, SignalActiveProcess, "process", []AIEvidence{ev})
-			runtime := &ProcessRuntime{
-				PID:       best.PID,
-				PPID:      best.PPID,
-				StartedAt: best.StartedAt,
-				UptimeSec: int64(now.Sub(best.StartedAt).Seconds()),
-				User:      best.User,
-				Comm:      best.Comm,
-			}
-			signal.Runtime = runtime
-			// Process detector's `LastActiveAt` is the process'
-			// start time, not the scan time. That's the answer to
-			// "when was this thing last active" the operator wants.
-			started := best.StartedAt
-			signal.LastActiveAt = &started
-			out = append(out, signal)
+			out = append(out, s.signalFromProcess(sig, *best, now, matchKind, quality))
 		}
 	}
-	return out
+	return out, nil
+}
+
+func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc processInfo, now time.Time, matchKind string, quality float64) AISignal {
+	// Include the PID in Windows hashes so multiple live instances remain
+	// distinct, while preserving the existing POSIX fingerprint contract. The
+	// raw PID is already intentional ProcessRuntime data; argv and executable
+	// paths never participate in evidence or leave the process reader.
+	evidenceValue := proc.Comm
+	if proc.Windows {
+		evidenceValue = fmt.Sprintf("%s:%d", proc.Comm, proc.PID)
+	}
+	ev := AIEvidence{Type: "process", ValueHash: hashValue(evidenceValue), Quality: quality, MatchKind: matchKind}
+	signal := s.signalFromEvidence(sig, SignalActiveProcess, "process", []AIEvidence{ev})
+	runtimeInfo := &ProcessRuntime{PID: proc.PID, PPID: proc.PPID, User: proc.User, Comm: proc.Comm}
+	if !proc.StartedAt.IsZero() {
+		started := proc.StartedAt
+		runtimeInfo.StartedAt = &started
+		if uptime := now.Sub(proc.StartedAt); uptime >= 0 {
+			runtimeInfo.UptimeSec = int64(uptime.Seconds())
+		}
+		signal.LastActiveAt = &started
+	}
+	signal.Runtime = runtimeInfo
+	return signal
 }
 
 func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
@@ -2560,7 +2589,7 @@ func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gat
 	}
 	if sig.Runtime != nil {
 		started := ""
-		if !sig.Runtime.StartedAt.IsZero() {
+		if sig.Runtime.StartedAt != nil && !sig.Runtime.StartedAt.IsZero() {
 			started = sig.Runtime.StartedAt.UTC().Format(time.RFC3339)
 		}
 		out.Runtime = &gatewaylog.AIDiscoveryRuntime{
@@ -2927,20 +2956,6 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 	return os.Rename(tmpName, s.path)
 }
 
-// processInfo is the per-process snapshot record returned by
-// processSnapshot(). It carries enough fidelity to render in CLI/TUI
-// "active processes" views (PID, start time, uptime, user) without
-// ever exporting a full argv (which can contain secrets, prompts, or
-// workspace paths). Full argv stays gated behind StoreRawLocalPaths
-// via the existing per-evidence raw path mechanism.
-type processInfo struct {
-	PID       int
-	PPID      int
-	User      string
-	Comm      string
-	StartedAt time.Time
-}
-
 // processNames is kept for backward compatibility with existing
 // callers and tests that only care about the process basename. The
 // new code path (detectProcesses) uses processSnapshot() instead.
@@ -2954,105 +2969,6 @@ func processNames() ([]string, error) {
 		out = append(out, p.Comm)
 	}
 	return out, nil
-}
-
-// processSnapshot returns one record per running process on POSIX
-// systems via `ps`, or an empty slice on Windows (the equivalent
-// `tasklist` parse is intentionally TODO'd; falling back to empty is
-// safe — discovery just won't emit `process` signals on Windows).
-//
-// The fields requested are: pid, ppid, user, comm, etime — exactly
-// what's needed to compute uptime + a "last invoked" timestamp without
-// reading proc internals or pulling in a third-party process library.
-//
-// Privacy posture: we deliberately do NOT request `args` or `command`
-// here. The full command line can carry secrets (API keys passed as
-// CLI flags), prompts, or local paths. Operators who explicitly want
-// argv must enable `StoreRawLocalPaths`, at which point `comm` plus
-// the per-evidence `RawPath` already cover the legitimate use cases.
-func processSnapshot() ([]processInfo, error) {
-	if runtime.GOOS == "windows" {
-		return nil, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	// `etime` is requested last because some `ps` builds emit a
-	// trailing space-padded value; we tokenise on whitespace and the
-	// last column captures the entire etime string.
-	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,user=,comm=,etime=")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil, err
-	}
-	now := time.Now().UTC()
-	var infos []processInfo
-	for _, line := range strings.Split(out.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		ppid, _ := strconv.Atoi(fields[1])
-		user := fields[2]
-		// `comm` may itself contain spaces (rare but legal); join
-		// everything between user and the trailing etime token.
-		comm := strings.ToLower(filepath.Base(strings.Join(fields[3:len(fields)-1], " ")))
-		etime := fields[len(fields)-1]
-		started := now.Add(-parsePsEtime(etime))
-		infos = append(infos, processInfo{
-			PID:       pid,
-			PPID:      ppid,
-			User:      user,
-			Comm:      comm,
-			StartedAt: started,
-		})
-	}
-	return infos, nil
-}
-
-// parsePsEtime parses the elapsed-time format ps emits with
-// `-o etime=`: `[[dd-]hh:]mm:ss`. Returns zero on parse failure so
-// downstream code degrades gracefully (we just don't have a start
-// time for that process).
-func parsePsEtime(value string) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	days := 0
-	if idx := strings.IndexByte(value, '-'); idx >= 0 {
-		d, err := strconv.Atoi(value[:idx])
-		if err != nil {
-			return 0
-		}
-		days = d
-		value = value[idx+1:]
-	}
-	parts := strings.Split(value, ":")
-	if len(parts) == 0 || len(parts) > 3 {
-		return 0
-	}
-	var hours, minutes, seconds int
-	switch len(parts) {
-	case 3:
-		hours, _ = strconv.Atoi(parts[0])
-		minutes, _ = strconv.Atoi(parts[1])
-		seconds, _ = strconv.Atoi(parts[2])
-	case 2:
-		minutes, _ = strconv.Atoi(parts[0])
-		seconds, _ = strconv.Atoi(parts[1])
-	case 1:
-		seconds, _ = strconv.Atoi(parts[0])
-	}
-	return time.Duration(days)*24*time.Hour + time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second
 }
 
 // processCommExactlyEquals reports whether `have` is byte-for-byte
