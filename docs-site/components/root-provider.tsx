@@ -3,6 +3,8 @@
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import type { ReactNode } from 'react';
 import dynamic from 'next/dynamic';
+import { MotionConfig } from 'motion/react';
+import { SiteScrollProgress } from '@/components/site-scroll-progress';
 
 // Client wrapper around Fumadocs's RootProvider so we can hand it the
 // custom (FlexSearch-backed) SearchDialog component reference. Server
@@ -25,12 +27,18 @@ export default function ClientRootProvider({
   children: ReactNode;
 }) {
   return (
-    <RootProvider
-      search={{
-        SearchDialog,
-      }}
-    >
-      {children}
-    </RootProvider>
+    <MotionConfig reducedMotion="user">
+      <RootProvider
+        theme={{
+          defaultTheme: 'light',
+          enableSystem: true,
+        }}
+        search={{
+          SearchDialog,
+        }}
+      >
+        <SiteScrollProgress>{children}</SiteScrollProgress>
+      </RootProvider>
+    </MotionConfig>
   );
 }

@@ -5,6 +5,10 @@ import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
 import { mdxComponents } from '@/components/mdx-components';
 import { BreadcrumbSchema, TechArticleSchema } from '@/components/structured-data';
+import { ConnectorBrand } from '@/components/connector-brand';
+import matrix from '@/data/capability-matrix.json';
+
+const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 
 interface PageParams {
   params: Promise<{ slug?: string[] }>;
@@ -22,6 +26,10 @@ export default async function Page({ params }: PageParams) {
   // so dynamic intermediate folders (e.g. "stories") still surface
   // their human-friendly title rather than the slug.
   const crumbs = buildBreadcrumbs(slug ?? []);
+  const connectorId =
+    slug?.length === 2 && slug[0] === 'connectors' && connectorIds.has(slug[1])
+      ? slug[1]
+      : null;
 
   // Default to wide-article (`full: true`) for every docs page. Most of
   // our pages contain at least one wide artifact — capability matrix,
@@ -33,7 +41,15 @@ export default async function Page({ params }: PageParams) {
   const fullWidth = page.data.full ?? true;
 
   return (
-    <DocsPage toc={page.data.toc} full={fullWidth}>
+    <DocsPage
+      toc={page.data.toc}
+      full={fullWidth}
+      tableOfContent={{
+        enabled: page.data.toc.length > 0,
+        style: 'clerk',
+      }}
+      role="main"
+    >
       <BreadcrumbSchema crumbs={crumbs} />
       <TechArticleSchema
         title={page.data.title}
@@ -41,7 +57,14 @@ export default async function Page({ params }: PageParams) {
         url={url}
         datePublished={page.data.updatedAt}
       />
-      <DocsTitle>{page.data.title}</DocsTitle>
+      <DocsTitle>
+        {connectorId ? (
+          <span className="docs-title-with-brand">
+            <ConnectorBrand id={connectorId} />
+            <span>{page.data.title}</span>
+          </span>
+        ) : page.data.title}
+      </DocsTitle>
       {page.data.description ? (
         <DocsDescription>{page.data.description}</DocsDescription>
       ) : null}

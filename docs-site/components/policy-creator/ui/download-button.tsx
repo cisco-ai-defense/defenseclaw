@@ -79,7 +79,7 @@ export function DownloadButton({
   const sizeCls = size === 'sm' ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm';
   const variantCls =
     variant === 'primary'
-      ? 'bg-[var(--brand-cisco)] text-white shadow-sm hover:opacity-95 font-semibold'
+      ? 'bg-[var(--brand-cisco)] text-[var(--editorial-on-blue)] shadow-sm hover:opacity-95 font-semibold'
       : 'border border-fd-border bg-fd-background text-fd-foreground font-medium hover:border-[var(--brand-cisco)] hover:bg-[var(--brand-cisco)]/10';
   const disabledCls = disabledReason ? 'cursor-not-allowed opacity-50' : '';
 

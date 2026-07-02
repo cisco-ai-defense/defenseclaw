@@ -15,6 +15,12 @@ Human-in-the-Loop (HITL) changes a confirmable policy finding into an approval r
 HITL is opt-in and only affects **action mode**. Observe mode records findings without enforcing them. CRITICAL findings reach the block threshold before HITL is considered and still block unconditionally with the default policy profile.
 </Callout>
 
+<DefenseClawDemo scenario="hitl-native-approval" variant="approve" />
+
+## What you just saw
+
+A HIGH-risk Claude Code action paused at `PreToolUse`, where the connector can present a native approval. The Approve and Deny controls select pre-authored audit outcomes; the Codex control shows the downgraded-confirm path used when a connector can block but cannot ask natively. No action is executed in this page.
+
 ## Two runtime outcomes
 
 <Cards>

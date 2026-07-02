@@ -57,20 +57,17 @@ export const baseOptions: BaseLayoutProps = {
       url: '/docs/stories',
       active: 'nested-url',
     },
-    // Interactive builders — surfaced as top-level nav after the
-    // content sections (Connectors, Stories) so operators can jump
-    // straight to the two "do something" pages: assemble a
-    // non-interactive `setup guardrail` command, or author a policy
-    // with live OPA-WASM evaluation.
     {
       type: 'main',
-      text: 'Command generator',
+      text: 'Command',
+      description: 'Build a non-interactive setup command.',
       url: '/docs/command-generator',
       active: 'nested-url',
     },
     {
       type: 'main',
-      text: 'Policy creator',
+      text: 'Policy',
+      description: 'Author and evaluate a policy in the browser.',
       url: '/docs/policies/creator',
       active: 'nested-url',
     },
@@ -124,7 +121,7 @@ export const baseOptions: BaseLayoutProps = {
     {
       type: 'custom',
       secondary: true,
-      children: <RepoStats variant="nav" />,
+      children: <li className="flex items-center"><RepoStats variant="nav" /></li>,
     },
     {
       type: 'icon',

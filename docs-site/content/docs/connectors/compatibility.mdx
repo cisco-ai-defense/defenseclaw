@@ -15,19 +15,19 @@ DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at
 
 | Connector | Gate | Supported connector versions | Contract / hook script | AID surfaces |
 | --- | --- | --- | --- | --- |
-| OpenClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
-| ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
-| Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| GitHub Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| Antigravity | hook contract | `>=1.0.0` | `antigravity-hooks-v2` / `v7` | prompt, tool_call, tool_result |
-| OpenCode | hook contract | unversioned / plugin API; tested with `opencode 1.16.2` | `opencode-hooks-v1` / `v6` | tool_call, tool_result |
-| OmniGent | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="openclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
+| <ConnectorLabel id="zeptoclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
+| <ConnectorLabel id="codex" /> | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="claudecode" /> | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="hermes" /> | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="cursor" /> | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="windsurf" /> | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="geminicli" /> | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="openhands" /> | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="antigravity" /> | hook contract | `>=1.0.0` | `antigravity-hooks-v2` / `v7` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="opencode" /> | hook contract | unversioned / plugin API; tested with `opencode 1.16.2` | `opencode-hooks-v1` / `v6` | tool_call, tool_result |
+| <ConnectorLabel id="omnigent" /> | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result |
 
 DefenseClaw leaves `max_exclusive` empty until an upstream release publishes a breaking hook change. Future versions are tracked through `hook_contract_lock.json` and doctor drift checks rather than a guessed major-version cap.
 
