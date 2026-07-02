@@ -934,23 +934,100 @@ function Get-ManagedGatewayProcess {
     }
     try {
         $state = Get-Content -LiteralPath $pidFile -Raw -ErrorAction Stop | ConvertFrom-Json
-        $pid = [int]$state.pid
-        if ($pid -le 0) { return $null }
-        $expected = [System.IO.Path]::GetFullPath($GatewayPath)
-        $recorded = [System.IO.Path]::GetFullPath([string]$state.executable)
-        if (-not $recorded.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $null
-        }
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $pid" -ErrorAction Stop
-        if ($null -eq $process -or -not $process.ExecutablePath) { return $null }
-        $live = [System.IO.Path]::GetFullPath([string]$process.ExecutablePath)
-        if (-not $live.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $null
-        }
-        return [pscustomobject]@{ PID = $pid; Path = $expected; PIDFile = $pidFile }
     } catch {
+        throw "Invalid managed gateway PID file '$pidFile': $($_.Exception.Message)"
+    }
+    $managedPid = 0
+    if (-not [int]::TryParse([string]$state.pid, [ref]$managedPid) -or $managedPid -le 0) {
+        throw "Invalid managed gateway PID in '$pidFile'"
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$state.executable)) {
+        throw "Managed gateway PID file is missing executable identity: $pidFile"
+    }
+    $expected = [System.IO.Path]::GetFullPath($GatewayPath)
+    $recorded = [System.IO.Path]::GetFullPath([string]$state.executable)
+    if (-not $recorded.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $null
     }
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $managedPid" -ErrorAction Stop
+    if ($null -eq $process -or -not $process.ExecutablePath) { return $null }
+    $live = [System.IO.Path]::GetFullPath([string]$process.ExecutablePath)
+    if (-not $live.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$state.start_identity)) {
+        $liveProcess = Get-Process -Id $managedPid -ErrorAction Stop
+        $epoch = [datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')
+        $liveIdentity = (($liveProcess.StartTime.ToUniversalTime().Ticks - $epoch.Ticks) * 100).ToString()
+        if ($liveIdentity -ne [string]$state.start_identity) { return $null }
+    }
+    return [pscustomobject]@{ PID = $managedPid; Path = $expected; PIDFile = $pidFile }
+}
+
+function Get-ManagedWatchdogProcess {
+    param([string]$GatewayPath, [string]$DataDir)
+    $pidFile = Join-Path $DataDir "watchdog.pid"
+    if (-not (Test-Path -LiteralPath $pidFile)) { return $null }
+    $pidItem = Get-Item -LiteralPath $pidFile -Force -ErrorAction Stop
+    if ($pidItem.PSIsContainer -or
+        ($pidItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "Managed watchdog PID path must be a regular file: $pidFile"
+    }
+    try {
+        $state = Get-Content -LiteralPath $pidFile -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        throw "Invalid managed watchdog PID file '$pidFile': $($_.Exception.Message)"
+    }
+    $watchdogPid = 0
+    if (-not [int]::TryParse([string]$state.pid, [ref]$watchdogPid) -or $watchdogPid -le 0 -or
+        [string]::IsNullOrWhiteSpace([string]$state.executable) -or
+        [string]::IsNullOrWhiteSpace([string]$state.start_time)) {
+        throw "Managed watchdog PID file lacks a complete process identity: $pidFile"
+    }
+    $expected = [System.IO.Path]::GetFullPath($GatewayPath)
+    $recorded = [System.IO.Path]::GetFullPath([string]$state.executable)
+    if (-not $recorded.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Managed watchdog PID file names an untrusted executable: $recorded"
+    }
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $watchdogPid" -ErrorAction Stop
+    if ($null -eq $process -or -not $process.ExecutablePath) { return $null }
+    $live = [System.IO.Path]::GetFullPath([string]$process.ExecutablePath)
+    if (-not $live.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Managed watchdog PID belongs to a different executable: $live"
+    }
+    $liveProcess = Get-Process -Id $watchdogPid -ErrorAction Stop
+    $epoch = [datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')
+    $liveStartSeconds = [int64][math]::Floor(
+        ($liveProcess.StartTime.ToUniversalTime() - $epoch).TotalSeconds
+    )
+    $recordedStartSeconds = 0L
+    if (-not [int64]::TryParse([string]$state.start_time, [ref]$recordedStartSeconds) -or
+        [math]::Abs($liveStartSeconds - $recordedStartSeconds) -gt 2) {
+        throw "Managed watchdog PID start identity does not match the live process"
+    }
+    return [pscustomobject]@{ PID = $watchdogPid; Path = $expected; PIDFile = $pidFile }
+}
+
+function Test-ManagedFileRenameRoundTrip {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    $probe = Join-Path ([System.IO.Path]::GetDirectoryName($Path)) (
+        "." + [System.IO.Path]::GetFileName($Path) + "." +
+        [guid]::NewGuid().ToString("N") + ".release-probe"
+    )
+    try {
+        [System.IO.File]::Move($Path, $probe)
+    } catch [System.IO.IOException] {
+        return $false
+    } catch [System.UnauthorizedAccessException] {
+        return $false
+    }
+    try {
+        [System.IO.File]::Move($probe, $Path)
+    } catch {
+        throw "Gateway replaceability probe could not restore '$Path'; recovery file: $probe"
+    }
+    return $true
 }
 
 function Wait-GatewayFileRelease {
@@ -965,25 +1042,7 @@ function Wait-GatewayFileRelease {
         if ($ProcessId -gt 0) {
             $processExited = $null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
         }
-        $fileReleased = $false
-        if (-not (Test-Path -LiteralPath $GatewayPath)) {
-            $fileReleased = $true
-        } else {
-            try {
-                $stream = [System.IO.File]::Open(
-                    $GatewayPath,
-                    [System.IO.FileMode]::Open,
-                    [System.IO.FileAccess]::Read,
-                    [System.IO.FileShare]::None
-                )
-                $stream.Dispose()
-                $fileReleased = $true
-            } catch [System.IO.IOException] {
-                $fileReleased = $false
-            } catch [System.UnauthorizedAccessException] {
-                $fileReleased = $false
-            }
-        }
+        $fileReleased = $processExited -and (Test-ManagedFileRenameRoundTrip -Path $GatewayPath)
         if ($processExited -and $fileReleased) { return }
         if ($attempt -lt $Attempts -and $DelayMilliseconds -gt 0) {
             Start-Sleep -Milliseconds $DelayMilliseconds
@@ -996,11 +1055,16 @@ function Stop-ManagedGateway {
     param([string]$GatewayPath, [string]$DataDir)
     $managedProcess = Get-ManagedGatewayProcess -GatewayPath $GatewayPath -DataDir $DataDir
     if ($null -eq $managedProcess) { return $false }
+    $watchdogProcess = Get-ManagedWatchdogProcess -GatewayPath $GatewayPath -DataDir $DataDir
     $stopResult = Invoke-ManagedCommand -Executable $GatewayPath -Arguments @("stop")
     if ($stopResult.ExitCode -ne 0) {
         throw "Managed gateway stop failed (exit $($stopResult.ExitCode))"
     }
     Wait-GatewayFileRelease -GatewayPath $GatewayPath -ProcessId $managedProcess.PID
+    if ($null -ne $watchdogProcess -and
+        $null -ne (Get-Process -Id $watchdogProcess.PID -ErrorAction SilentlyContinue)) {
+        throw "Managed watchdog did not exit during gateway stop (PID $($watchdogProcess.PID))"
+    }
     return $true
 }
 
@@ -1011,7 +1075,7 @@ function Get-ManagedGatewayEndpoint {
 import json
 from defenseclaw.config import load
 cfg = load()
-print(json.dumps({'host': cfg.gateway.api_bind or '127.0.0.1', 'port': cfg.gateway.api_port, 'data_dir': cfg.data_dir}))
+print(json.dumps({'host': cfg.gateway.api_bind or '127.0.0.1', 'port': cfg.gateway.api_port, 'data_dir': cfg.data_dir, 'token': cfg.gateway.resolved_token()}))
 '@
     $result = Invoke-ManagedCommand -Executable $python -Arguments @("-I", "-c", $code)
     if ($result.ExitCode -ne 0) { throw "Could not load managed gateway endpoint" }
@@ -1029,7 +1093,7 @@ print(json.dumps({'host': cfg.gateway.api_bind or '127.0.0.1', 'port': cfg.gatew
          -not [System.Net.IPAddress]::IsLoopback($address))) {
         throw "Refusing non-loopback gateway health target: $hostName"
     }
-    return [pscustomobject]@{ Host = $hostName; Port = [int]$endpoint.port }
+    return [pscustomobject]@{ Host = $hostName; Port = [int]$endpoint.port; Token = [string]$endpoint.token }
 }
 
 function Start-ManagedGateway {
@@ -1040,11 +1104,16 @@ function Start-ManagedGateway {
     }
     $endpoint = Get-ManagedGatewayEndpoint -Venv $Venv -ExpectedDataDir $DataDir
     $uri = "http://$($endpoint.Host):$($endpoint.Port)/health"
+    $headers = @{}
+    if (-not [string]::IsNullOrWhiteSpace($endpoint.Token)) {
+        $headers["Authorization"] = "Bearer $($endpoint.Token)"
+        $headers["X-DefenseClaw-Token"] = $endpoint.Token
+    }
     for ($attempt = 1; $attempt -le 40; $attempt++) {
         $managedProcess = Get-ManagedGatewayProcess -GatewayPath $GatewayPath -DataDir $DataDir
         if ($null -ne $managedProcess) {
             try {
-                $health = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec 1
+                $health = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -TimeoutSec 1
                 if ($health.api.state -eq "running") { return }
             } catch {
                 # Continue the bounded readiness wait.
@@ -1109,29 +1178,35 @@ function Restore-PairedInstallBackup {
         [object]$Backup,
         [string]$ManagedHome,
         [string]$InstallRoot,
-        [string]$Venv
+        [string]$Venv,
+        [switch]$RestoreGateway,
+        [switch]$RestoreHook,
+        [switch]$RestoreCli,
+        [switch]$RestoreLauncher
     )
-    foreach ($name in @(
-        "defenseclaw-gateway.exe",
-        "defenseclaw-hook.exe",
-        "defenseclaw.cmd",
-        "defenseclaw.exe"
-    )) {
+    $names = @()
+    if ($RestoreGateway) { $names += "defenseclaw-gateway.exe" }
+    if ($RestoreHook) { $names += "defenseclaw-hook.exe" }
+    if ($RestoreLauncher) { $names += @("defenseclaw.cmd", "defenseclaw.exe") }
+    foreach ($name in $names) {
         $target = Join-Path $InstallRoot $name
         $null = Assert-ManagedInstallFile -Path $target -ExpectedPath $target `
             -InstallRoot $InstallRoot -AllowMissing
         if ($Backup.Present[$name]) {
-            [System.IO.File]::Copy((Join-Path $Backup.Files $name), $target, $true)
+            Replace-ManagedInstallFile -Source (Join-Path $Backup.Files $name) `
+                -Target $target -InstallRoot $InstallRoot
         } elseif (Test-Path -LiteralPath $target) {
             Remove-Item -LiteralPath $target -Force -ErrorAction Stop
         }
     }
 
-    if (Test-Path -LiteralPath $Venv) {
-        Remove-ManagedDirectory -Path $Venv -ExpectedPath $Venv -ManagedHome $ManagedHome
-    }
-    if ($Backup.HasVenv) {
-        Move-Item -LiteralPath $Backup.Venv -Destination $Venv -ErrorAction Stop
+    if ($RestoreCli) {
+        if (Test-Path -LiteralPath $Venv) {
+            Remove-ManagedDirectory -Path $Venv -ExpectedPath $Venv -ManagedHome $ManagedHome
+        }
+        if ($Backup.HasVenv) {
+            Move-Item -LiteralPath $Backup.Venv -Destination $Venv -ErrorAction Stop
+        }
     }
 }
 
@@ -1144,7 +1219,28 @@ function Replace-ManagedInstallFile {
         [guid]::NewGuid().ToString("N") + ".tmp")
     try {
         [System.IO.File]::Copy($Source, $temporary, $false)
-        Move-Item -LiteralPath $temporary -Destination $Target -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $Target) {
+            if ($null -eq ("DefenseClawWindowsFile" -as [type])) {
+                Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class DefenseClawWindowsFile {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool MoveFileEx(
+        string existingFile, string replacementFile, int flags);
+}
+'@
+            }
+            # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH. Unlike
+            # Move-Item -Force, this has an explicit Windows overwrite contract.
+            if (-not [DefenseClawWindowsFile]::MoveFileEx($temporary, $Target, 9)) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw [System.ComponentModel.Win32Exception]::new(
+                    $errorCode, "Could not atomically replace '$Target'"
+                )
+            }
+        } else {
+            [System.IO.File]::Move($temporary, $Target)
+        }
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
@@ -1177,7 +1273,7 @@ function Test-PairedInstalledState {
     try {
         $env:PATH = "$InstallRoot;$savedPath"
         $env:PATHEXT = ".EXE;.CMD"
-        $resolved = Get-Command defenseclaw -CommandType Application -ErrorAction Stop
+        $resolved = @(Get-Command defenseclaw -CommandType Application -ErrorAction Stop)[0]
         if (-not [System.IO.Path]::GetFullPath($resolved.Source).Equals(
             [System.IO.Path]::GetFullPath($shim),
             [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -1193,16 +1289,29 @@ function Invoke-PairedInstallTransaction {
     param([object]$Artifacts)
     $gatewayPath = Join-Path $InstallDir "defenseclaw-gateway.exe"
     $hookPath = Join-Path $InstallDir "defenseclaw-hook.exe"
+    $null = Assert-ManagedDirectoryPath -Path $Venv -ExpectedPath $Venv `
+        -ManagedHome $DefenseClawHome -AllowMissing
+    $null = Assert-ManagedInstallFile -Path $gatewayPath -ExpectedPath $gatewayPath `
+        -InstallRoot $InstallDir -AllowMissing
+    $null = Assert-ManagedInstallFile -Path $hookPath -ExpectedPath $hookPath `
+        -InstallRoot $InstallDir -AllowMissing
     $managedProcess = Get-ManagedGatewayProcess -GatewayPath $gatewayPath `
         -DataDir $DefenseClawHome
     $wasRunning = $null -ne $managedProcess
     $phase = "preflight"
     $backup = $null
+    $oldStopped = $false
+    $gatewayReplaced = $false
+    $hookReplaced = $false
+    $cliMutationStarted = $false
+    $launcherMutationStarted = $false
+    $newGatewayStartAttempted = $false
 
     try {
         if ($wasRunning) {
             $phase = "stop-old-gateway"
             $null = Stop-ManagedGateway -GatewayPath $gatewayPath -DataDir $DefenseClawHome
+            $oldStopped = $true
         } else {
             # A planted/unrelated PID is never stopped. The file must still be
             # unlocked before any mutation can begin.
@@ -1230,12 +1339,17 @@ function Invoke-PairedInstallTransaction {
         $phase = "replace-gateway"
         Replace-ManagedInstallFile -Source $Artifacts.Gateway -Target $gatewayPath `
             -InstallRoot $InstallDir
+        $gatewayReplaced = $true
+        $phase = "replace-hook"
         Replace-ManagedInstallFile -Source $Artifacts.Hook -Target $hookPath `
             -InstallRoot $InstallDir
+        $hookReplaced = $true
 
         $phase = "repair-cli"
+        $cliMutationStarted = $true
         Install-Cli -WheelPath $Artifacts.Wheel -DeferLauncher
         $phase = "publish-launcher"
+        $launcherMutationStarted = $true
         $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
         $null = Publish-CliLauncher -CliExe $cliExe -InstallDir $InstallDir
 
@@ -1245,6 +1359,7 @@ function Invoke-PairedInstallTransaction {
 
         if ($wasRunning) {
             $phase = "restart-new-gateway"
+            $newGatewayStartAttempted = $true
             Start-ManagedGateway -GatewayPath $gatewayPath -DataDir $DefenseClawHome -Venv $Venv
         }
 
@@ -1260,20 +1375,26 @@ function Invoke-PairedInstallTransaction {
         $transactionError = $_.Exception.Message
         $rollbackOutcomes = @()
         try {
-            $newProcess = Get-ManagedGatewayProcess -GatewayPath $gatewayPath `
-                -DataDir $DefenseClawHome
-            if ($null -ne $newProcess) {
-                $null = Stop-ManagedGateway -GatewayPath $gatewayPath -DataDir $DefenseClawHome
-                $rollbackOutcomes += "stopped partial gateway"
-            } else {
-                Wait-GatewayFileRelease -GatewayPath $gatewayPath
+            if ($newGatewayStartAttempted) {
+                $newProcess = Get-ManagedGatewayProcess -GatewayPath $gatewayPath `
+                    -DataDir $DefenseClawHome
+                if ($null -ne $newProcess) {
+                    $null = Stop-ManagedGateway -GatewayPath $gatewayPath -DataDir $DefenseClawHome
+                    $rollbackOutcomes += "stopped partial gateway"
+                } else {
+                    Wait-GatewayFileRelease -GatewayPath $gatewayPath
+                }
             }
-            if ($null -ne $backup) {
+            $artifactMutationOccurred = $gatewayReplaced -or $hookReplaced -or
+                $cliMutationStarted -or $launcherMutationStarted
+            if ($null -ne $backup -and $artifactMutationOccurred) {
                 Restore-PairedInstallBackup -Backup $backup -ManagedHome $DefenseClawHome `
-                    -InstallRoot $InstallDir -Venv $Venv
+                    -InstallRoot $InstallDir -Venv $Venv `
+                    -RestoreGateway:$gatewayReplaced -RestoreHook:$hookReplaced `
+                    -RestoreCli:$cliMutationStarted -RestoreLauncher:$launcherMutationStarted
                 $rollbackOutcomes += "restored paired artifacts"
             }
-            if ($wasRunning) {
+            if ($wasRunning -and ($oldStopped -or $gatewayReplaced)) {
                 Start-ManagedGateway -GatewayPath $gatewayPath -DataDir $DefenseClawHome -Venv $Venv
                 $rollbackOutcomes += "restarted prior gateway"
             }
@@ -1455,9 +1576,7 @@ function Main {
 
 try {
     Main
-    $global:LASTEXITCODE = 0
 } catch {
-    $global:LASTEXITCODE = 1
     Write-Err2 $_.Exception.Message
     throw
 }

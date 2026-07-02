@@ -96,6 +96,7 @@ def _transaction_functions() -> str:
             "Assert-ManagedInstallFile",
             "Copy-VerifiedDirectory",
             "Test-StagedReleaseFile",
+            "Test-ManagedFileRenameRoundTrip",
             "New-PairedInstallBackup",
             "Restore-PairedInstallBackup",
             "Replace-ManagedInstallFile",
@@ -143,6 +144,9 @@ def test_release_staging_precedes_gateway_stop_and_mutation() -> None:
     assert transaction.index("Stop-ManagedGateway") < transaction.index("New-PairedInstallBackup")
     assert transaction.index("New-PairedInstallBackup") < transaction.index("Replace-ManagedInstallFile")
     assert transaction.index("Test-PairedInstalledState") < transaction.index('$phase = "restart-new-gateway"')
+    assert '$headers["Authorization"]' in text
+    assert "resolved_token()" in text
+    assert "@(Get-Command defenseclaw -CommandType Application -ErrorAction Stop)[0]" in text
 
 
 def test_windows_installer_offers_only_native_connector_surface() -> None:
@@ -894,7 +898,7 @@ $stream.Dispose()
 
             time.sleep(0.02)
         assert ready.exists()
-        command = _extract_powershell_function("Wait-GatewayFileRelease") + rf"""
+        command = _extract_powershell_function("Test-ManagedFileRenameRoundTrip") + _extract_powershell_function("Wait-GatewayFileRelease") + rf"""
 Wait-GatewayFileRelease -GatewayPath '{_ps_quote(gateway)}' -ProcessId {child.pid} `
     -Attempts 30 -DelayMilliseconds 100
 Write-Output 'RELEASED=true'
@@ -920,7 +924,7 @@ def test_gateway_lock_timeout_preserves_installed_artifact(tmp_path: Path) -> No
 
     gateway = tmp_path / "defenseclaw-gateway.exe"
     gateway.write_bytes(b"unchanged gateway")
-    command = _extract_powershell_function("Wait-GatewayFileRelease") + rf"""
+    command = _extract_powershell_function("Test-ManagedFileRenameRoundTrip") + _extract_powershell_function("Wait-GatewayFileRelease") + rf"""
 $before = (Get-FileHash -LiteralPath '{_ps_quote(gateway)}' -Algorithm SHA256).Hash
 $stream = [System.IO.File]::Open(
     '{_ps_quote(gateway)}',
@@ -968,7 +972,11 @@ def test_unrelated_pid_evidence_is_never_stopped(tmp_path: Path) -> None:
     unrelated = tmp_path / "unrelated.exe"
     command = "".join(
         _extract_powershell_function(name)
-        for name in ("Get-ManagedGatewayProcess", "Stop-ManagedGateway")
+        for name in (
+            "Get-ManagedGatewayProcess",
+            "Get-ManagedWatchdogProcess",
+            "Stop-ManagedGateway",
+        )
     ) + rf"""
 $script:invoked = $false
 function Get-CimInstance {{
@@ -990,6 +998,69 @@ Write-Output "INVOKED=$script:invoked"
     assert completed.returncode == 0, completed.stderr
     assert "STOPPED=False" in completed.stdout
     assert "INVOKED=False" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")
+def test_managed_gateway_pid_contract_is_strict_and_does_not_collide_with_pid(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    command = _extract_powershell_function("Get-ManagedGatewayProcess") + rf"""
+$gateway = (Get-Process -Id $PID).Path
+$epoch = [datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')
+$identity = (((Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks - $epoch.Ticks) * 100).ToString()
+@{{ pid = $PID; executable = $gateway; start_identity = $identity }} |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath '{_ps_quote(data_dir / 'gateway.pid')}'
+$managed = Get-ManagedGatewayProcess -GatewayPath $gateway -DataDir '{_ps_quote(data_dir)}'
+Write-Output "MATCH=$($managed.PID -eq $PID)"
+Set-Content -LiteralPath '{_ps_quote(data_dir / 'gateway.pid')}' -Value '{{not-json'
+try {{
+    $null = Get-ManagedGatewayProcess -GatewayPath $gateway -DataDir '{_ps_quote(data_dir)}'
+}} catch {{
+    Write-Output "STRICT=$($_.Exception.Message)"
+}}
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "MATCH=True" in completed.stdout
+    assert "STRICT=Invalid managed gateway PID file" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows replacement semantics")
+def test_existing_managed_file_is_atomically_replaced_without_residue(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+    install = tmp_path / "bin"
+    install.mkdir()
+    source = tmp_path / "new.exe"
+    target = install / "defenseclaw-gateway.exe"
+    source.write_text("new")
+    target.write_text("old")
+    command = (
+        _extract_powershell_function("Test-StagedReleaseFile")
+        + _extract_powershell_function("Assert-ManagedInstallFile")
+        + _extract_powershell_function("Replace-ManagedInstallFile")
+        + rf"""
+$ErrorActionPreference = 'Stop'
+Replace-ManagedInstallFile -Source '{_ps_quote(source)}' -Target '{_ps_quote(target)}' `
+    -InstallRoot '{_ps_quote(install)}'
+"""
+    )
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert target.read_text() == "new"
+    assert not list(install.glob("*.tmp"))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
@@ -1030,6 +1101,61 @@ try {{
 
     assert completed.returncode == 0, completed.stderr
     assert "ERROR=Managed install artifact must be a regular file" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_stop_failure_mutates_nothing_and_keeps_prior_gateway_running(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+    home = tmp_path / ".defenseclaw"
+    venv = home / ".venv"
+    install = tmp_path / "bin"
+    staged = tmp_path / "staged"
+    venv.mkdir(parents=True)
+    install.mkdir()
+    staged.mkdir()
+    old_values = {
+        "defenseclaw-gateway.exe": "old-gateway",
+        "defenseclaw-hook.exe": "old-hook",
+        "defenseclaw.cmd": "old-shim",
+    }
+    for name, value in old_values.items():
+        (install / name).write_text(value)
+    new_gateway = staged / "gateway.exe"
+    new_hook = staged / "hook.exe"
+    new_gateway.write_text("new-gateway")
+    new_hook.write_text("new-hook")
+    command = _transaction_functions() + rf"""
+$ErrorActionPreference = 'Stop'
+$DefenseClawHome = '{_ps_quote(home)}'
+$Venv = '{_ps_quote(venv)}'
+$InstallDir = '{_ps_quote(install)}'
+$script:running = $true
+$artifacts = [pscustomobject]@{{ Gateway = '{_ps_quote(new_gateway)}'; Hook = '{_ps_quote(new_hook)}'; Wheel = 'fixture.whl' }}
+function Get-ManagedGatewayProcess {{
+    if ($script:running) {{ return [pscustomobject]@{{ PID = 44 }} }}
+    return $null
+}}
+function Stop-ManagedGateway {{ throw 'graceful stop failed' }}
+function Start-ManagedGateway {{ throw 'must not restart an unstopped gateway' }}
+function Write-Ok {{ param([string]$Msg) Write-Output "SUCCESS=$Msg" }}
+try {{ Invoke-PairedInstallTransaction -Artifacts $artifacts }} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}}
+Write-Output "RUNNING=$script:running"
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "ERROR=Preflight stop failed before artifact mutation" in completed.stdout
+    assert "RUNNING=True" in completed.stdout
+    assert "SUCCESS=" not in completed.stdout
+    for name, value in old_values.items():
+        assert (install / name).read_text() == value
+    assert not list(home.glob(".install-backup.*"))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
@@ -1113,7 +1239,9 @@ Write-Output "STARTS=$script:starts"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-@pytest.mark.parametrize("failure_phase", ["replace", "cli", "validation", "restart"])
+@pytest.mark.parametrize(
+    "failure_phase", ["gateway-replace", "hook-replace", "cli", "validation", "restart"]
+)
 def test_paired_transaction_failure_restores_all_artifacts(
     tmp_path: Path, failure_phase: str
 ) -> None:
@@ -1163,9 +1291,14 @@ function Stop-ManagedGateway {{ $script:running = $false; return $true }}
 function Wait-GatewayFileRelease {{}}
 function Replace-ManagedInstallFile {{
     param([string]$Source, [string]$Target, [string]$InstallRoot)
+    if ($failPhase -eq 'gateway-replace' -and $Source -eq $artifacts.Gateway) {{
+        throw 'gateway replace failed'
+    }}
+    if ($failPhase -eq 'hook-replace' -and $Source -eq $artifacts.Hook) {{
+        throw 'hook replace failed'
+    }}
     [System.IO.File]::Copy($Source, $Target, $true)
     $script:replaceCount++
-    if ($failPhase -eq 'replace' -and $script:replaceCount -eq 2) {{ throw 'replace failed' }}
 }}
 function Install-Cli {{
     Set-Content -LiteralPath (Join-Path $Venv 'cli-state') -Value 'new-cli'
@@ -1208,7 +1341,7 @@ Write-Output "STARTS=$script:startCount"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_call_operator_sets_explicit_success_and_failure_status() -> None:
+def test_call_operator_reports_success_with_question_mark_and_failure_by_exception() -> None:
     powershell = shutil.which("powershell.exe")
     if not powershell:
         pytest.skip("Windows PowerShell is not installed")
@@ -1219,7 +1352,7 @@ def test_call_operator_sets_explicit_success_and_failure_status() -> None:
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            f"& '{_ps_quote(INSTALL_PS1)}' -Help; Write-Output \"STATUS=$LASTEXITCODE\"",
+            f"& '{_ps_quote(INSTALL_PS1)}' -Help; Write-Output \"SUCCESS=$?\"",
         ],
         capture_output=True,
         text=True,
@@ -1227,11 +1360,15 @@ def test_call_operator_sets_explicit_success_and_failure_status() -> None:
         check=False,
     )
     assert success.returncode == 0, success.stderr
-    assert "STATUS=0" in success.stdout
+    assert "SUCCESS=True" in success.stdout
 
     failure_command = rf"""
-try {{ & '{_ps_quote(INSTALL_PS1)}' -Connector invalid }} catch {{ Write-Output 'CAUGHT=true' }}
-Write-Output "STATUS=$LASTEXITCODE"
+try {{
+    & '{_ps_quote(INSTALL_PS1)}' -Connector invalid
+    Write-Output "UNEXPECTED_SUCCESS=$?"
+}} catch {{
+    Write-Output 'CAUGHT=true'
+}}
 """
     failure = subprocess.run(
         [powershell, "-NoProfile", "-NonInteractive", "-Command", failure_command],
@@ -1242,7 +1379,7 @@ Write-Output "STATUS=$LASTEXITCODE"
     )
     assert failure.returncode == 0, failure.stderr
     assert "CAUGHT=true" in failure.stdout
-    assert "STATUS=1" in failure.stdout
+    assert "UNEXPECTED_SUCCESS=" not in failure.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")
