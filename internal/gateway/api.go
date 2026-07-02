@@ -1054,6 +1054,15 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"health":     snap,
 		"provenance": version.Current(),
+		// Runtime identity is intentionally available only through this
+		// authenticated endpoint. Doctor uses it to bind the live listener to
+		// the managed process and configured data home without reading another
+		// process's memory or environment. Never add authentication material to
+		// this object.
+		"runtime": map[string]interface{}{
+			"pid":      os.Getpid(),
+			"data_dir": a.configDataDir(),
+		},
 		// connector_mode reports which guardrail surface the active
 		// connector is running. The TUI uses this to render the
 		// "Observability mode" banner with the right copy and to

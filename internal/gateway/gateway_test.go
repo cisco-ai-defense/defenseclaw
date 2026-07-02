@@ -2550,7 +2550,8 @@ func TestAPIHealthHandlerRejectsPut(t *testing.T) {
 
 func TestAPIStatusHandler(t *testing.T) {
 	health := NewSidecarHealth()
-	api := &APIServer{health: health, client: nil}
+	dataDir := t.TempDir()
+	api := &APIServer{health: health, client: nil, scannerCfg: &config.Config{DataDir: dataDir}}
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	w := httptest.NewRecorder()
@@ -2568,6 +2569,21 @@ func TestAPIStatusHandler(t *testing.T) {
 	}
 	if result["gateway_hello"] != nil {
 		t.Error("gateway_hello should be absent when client is nil")
+	}
+	runtime, ok := result["runtime"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response runtime = %#v, want object", result["runtime"])
+	}
+	if got := int(runtime["pid"].(float64)); got != os.Getpid() {
+		t.Errorf("runtime.pid = %d, want %d", got, os.Getpid())
+	}
+	if got := runtime["data_dir"]; got != dataDir {
+		t.Errorf("runtime.data_dir = %q, want %q", got, dataDir)
+	}
+	for key := range runtime {
+		if strings.Contains(strings.ToLower(key), "token") || strings.Contains(strings.ToLower(key), "secret") {
+			t.Errorf("runtime metadata must not contain authentication field %q", key)
+		}
 	}
 }
 
