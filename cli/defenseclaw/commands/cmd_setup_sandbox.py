@@ -16,6 +16,7 @@ from defenseclaw.commands.cmd_init_sandbox import (
     _ensure_sudo_cache,
     _fix_data_dir_ownership,
     _needs_sudo,
+    _require_sandbox_platform,
     _sudo_prefix,
     _sudo_write,
 )
@@ -255,7 +256,7 @@ def setup_sandbox(
       defenseclaw sandbox setup --policy strict --no-auto-pair
       defenseclaw sandbox setup --disable
     """
-    import platform
+    _require_sandbox_platform()
 
     from defenseclaw.commands.cmd_setup import (
         _mask,
@@ -285,10 +286,6 @@ def setup_sandbox(
         _ensure_sudo_cache()
         _disable_sandbox(app)
         return
-
-    if platform.system() != "Linux":
-        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
-        raise SystemExit(1)
 
     # S4.5 — sandbox mode is OpenClaw-only today.
     #

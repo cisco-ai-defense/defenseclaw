@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_init import _normalize_connector_arg, init_cmd
+from defenseclaw.commands.cmd_sandbox import sandbox as sandbox_group
 from defenseclaw.commands.cmd_setup import (
     _CONNECTOR_NAMES_FALLBACK,
     _HOOK_ENFORCED_CONNECTORS,
@@ -147,6 +149,75 @@ def test_supported_connectors_preserves_order_and_keeps_preview() -> None:
 
 def test_host_os_returns_known_token() -> None:
     assert host_os() in {"windows", "darwin", "linux"} or isinstance(host_os(), str)
+
+
+def test_windows_sandbox_setup_rejects_every_connector_before_side_effects() -> None:
+    for connector in ("codex", "claudecode", "openclaw"):
+        app = AppContext()
+        app.cfg = SimpleNamespace(guardrail=SimpleNamespace(connector=connector))
+
+        with (
+            patch("defenseclaw.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.commands.cmd_setup_sandbox._resolve_active_connector",
+                side_effect=AssertionError("connector resolver reached"),
+            ) as resolve_connector,
+            patch(
+                "defenseclaw.commands.cmd_setup_sandbox._ensure_sudo_cache",
+                side_effect=AssertionError("setup helper reached"),
+            ) as ensure_sudo,
+            patch(
+                "defenseclaw.commands.cmd_setup_sandbox._validate_sandbox_connector",
+                side_effect=AssertionError("connector validation reached"),
+            ) as validate_connector,
+            patch(
+                "defenseclaw.commands.cmd_setup_sandbox._disable_sandbox",
+                side_effect=AssertionError("filesystem mutation reached"),
+            ) as disable_sandbox,
+            patch(
+                "defenseclaw.commands.cmd_setup_sandbox.os.makedirs",
+                side_effect=AssertionError("filesystem write reached"),
+            ) as makedirs,
+            patch(
+                "defenseclaw.commands.cmd_setup_sandbox.subprocess.run",
+                side_effect=AssertionError("subprocess reached"),
+            ) as subprocess_run,
+        ):
+            result = CliRunner().invoke(sandbox_group, ["setup"], obj=app)
+
+        output = result.output.lower()
+        assert result.exit_code != 0, connector
+        assert "unsupported on native windows" in output, connector
+        assert "openclaw" not in output, connector
+        assert "connector" not in output, connector
+        resolve_connector.assert_not_called()
+        ensure_sudo.assert_not_called()
+        validate_connector.assert_not_called()
+        disable_sandbox.assert_not_called()
+        makedirs.assert_not_called()
+        subprocess_run.assert_not_called()
+
+
+def test_linux_sandbox_setup_preserves_connector_guidance() -> None:
+    app = AppContext()
+    app.cfg = SimpleNamespace(guardrail=SimpleNamespace(connector="codex"))
+    app.store = object()
+    app.logger = object()
+
+    with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+        result = CliRunner().invoke(sandbox_group, ["setup"], obj=app)
+
+    assert result.exit_code != 0
+    assert "requires the OpenClaw connector" in result.output
+    assert "defenseclaw setup guardrail --connector openclaw" in result.output
+
+
+def test_windows_sandbox_init_keeps_nonzero_rejection_with_aligned_wording() -> None:
+    with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+        result = CliRunner().invoke(sandbox_group, ["init"], obj=AppContext())
+
+    assert result.exit_code != 0
+    assert "unsupported on native Windows" in result.output
 
 
 def test_all_connector_lists_share_one_taxonomy() -> None:

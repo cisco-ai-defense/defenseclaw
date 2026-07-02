@@ -15,6 +15,22 @@ import click
 
 from defenseclaw.context import AppContext, pass_ctx
 
+
+def _require_sandbox_platform(action: str = "setup") -> None:
+    """Reject unsupported hosts before sandbox setup performs any work."""
+    from defenseclaw.platform_support import host_os
+
+    os_name = host_os()
+    if os_name == "windows":
+        click.echo(
+            f"  ERROR: Sandbox {action} is unsupported on native Windows.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if os_name != "linux":
+        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
+        raise SystemExit(1)
+
 OPENCLAW_OWNERSHIP_BACKUP = "openclaw-ownership-backup.json"
 
 _SANDBOX_SYSTEM_DEPS = ["iptables"]
@@ -146,13 +162,9 @@ def sandbox_init_cmd(app: AppContext) -> None:
     Example:
       defenseclaw sandbox init
     """
-    import platform
-
     from defenseclaw.config import config_path, load
 
-    if platform.system() != "Linux":
-        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
-        raise SystemExit(1)
+    _require_sandbox_platform("init")
 
     if not os.path.exists(config_path()):
         click.echo("  ERROR: DefenseClaw is not initialized.", err=True)
