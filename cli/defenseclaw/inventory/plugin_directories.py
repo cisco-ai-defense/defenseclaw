@@ -26,6 +26,12 @@ from typing import Any
 
 import tomllib
 
+from defenseclaw.inventory.plugin_identity import (
+    AmbiguousPluginIdentityError,
+    PluginIdentityError,
+    canonical_plugin_id,
+    filesystem_identity_key,
+)
 from defenseclaw.safety import is_symlink, is_within_roots
 
 _CODEX_MANIFEST = ".codex-plugin/plugin.json"
@@ -149,13 +155,9 @@ def _discover_codex_cache(cache_root: str) -> list[PluginDirectory]:
             if logical_name.startswith("."):
                 continue
             for folder_version, plugin_path in _child_directories(logical_path):
-                if folder_version.startswith(".") or not is_within_roots(
-                    plugin_path, cache_root
-                ):
+                if folder_version.startswith(".") or not is_within_roots(plugin_path, cache_root):
                     continue
-                manifest_path = os.path.join(
-                    plugin_path, ".codex-plugin", "plugin.json"
-                )
+                manifest_path = os.path.join(plugin_path, ".codex-plugin", "plugin.json")
                 if not is_within_roots(manifest_path, plugin_path):
                     continue
                 manifest = _read_bounded_json(manifest_path)
@@ -197,10 +199,14 @@ def _discover_codex_cache(cache_root: str) -> list[PluginDirectory]:
             candidate.registry.casefold(),
         )
         current_rank = (
-            int(current.enabled),
-            _natural_version_key(current.version),
-            current.registry.casefold(),
-        ) if current is not None else None
+            (
+                int(current.enabled),
+                _natural_version_key(current.version),
+                current.registry.casefold(),
+            )
+            if current is not None
+            else None
+        )
         if current_rank is None or candidate_rank > current_rank:
             selected[key] = candidate
     return sorted(selected.values(), key=lambda entry: entry.id.casefold())
@@ -218,15 +224,30 @@ def discover_plugin_directories(
         return _discover_codex_cache(root)
 
     plugins: list[PluginDirectory] = []
+    claimed: dict[str, str] = {}
     for entry, path in _child_directories(root):
         if entry == "cache" or entry.startswith("."):
             continue
+        try:
+            plugin_id, manifest = canonical_plugin_id(path)
+        except PluginIdentityError as exc:
+            if not str(exc).startswith(("invalid plugin manifest", "could not read plugin manifest")):
+                raise
+            plugin_id, manifest = entry, ""
+        key = filesystem_identity_key(plugin_id, root)
+        if key in claimed:
+            raise AmbiguousPluginIdentityError(
+                f"ambiguous plugin identity {plugin_id!r}: {claimed[key]}, {path}; "
+                "remove or rename duplicate directories"
+            )
+        claimed[key] = path
         plugins.append(
             PluginDirectory(
-                id=entry,
-                name=entry,
+                id=plugin_id,
+                name=plugin_id,
                 path=path,
                 origin=root,
+                manifest=manifest,
             )
         )
     return plugins
@@ -238,7 +259,4 @@ def plugin_directory_entries(
     connector: str = "",
 ) -> list[tuple[str, str]]:
     """Backward-compatible ``(id, path)`` view of plugin discovery."""
-    return [
-        (entry.id, entry.path)
-        for entry in discover_plugin_directories(root, connector=connector)
-    ]
+    return [(entry.id, entry.path) for entry in discover_plugin_directories(root, connector=connector)]

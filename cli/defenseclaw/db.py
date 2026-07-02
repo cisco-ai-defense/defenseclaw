@@ -203,7 +203,9 @@ class Store:
     def __init__(self, db_path: str) -> None:
         newly_created = self._db_will_be_created(db_path)
         self.db = sqlite3.connect(
-            db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=5.0,
+            db_path,
+            detect_types=sqlite3.PARSE_DECLTYPES,
+            timeout=5.0,
         )
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
@@ -275,13 +277,9 @@ class Store:
     # -- Old list migration (matches Go migrateOldLists) --
 
     def _migrate_old_lists(self) -> None:
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'")
         block_exists = cur.fetchone()[0] > 0
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'")
         allow_exists = cur.fetchone()[0] > 0
 
         if not block_exists and not allow_exists:
@@ -314,17 +312,11 @@ class Store:
 
     def _ensure_run_id_columns(self) -> None:
         for table in ("audit_events", "scan_results"):
-            columns = {
-                row[1]
-                for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()
-            }
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()}
             if "run_id" in columns:
                 continue
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
-        audit_columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
+        audit_columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         if "structured_json" not in audit_columns:
             self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
@@ -334,10 +326,7 @@ class Store:
     def _ensure_audit_connector_columns(self) -> None:
         """Mirror Go's additive audit_events connector columns and indexes."""
 
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         for column, ddl in (
             ("connector", "ALTER TABLE audit_events ADD COLUMN connector TEXT"),
             ("step_idx", "ALTER TABLE audit_events ADD COLUMN step_idx INTEGER"),
@@ -369,14 +358,9 @@ class Store:
         ``(target_type, target_name, connector)`` so a target can carry one
         global entry plus one entry per connector without colliding.
         """
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(actions)").fetchall()
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(actions)").fetchall()}
         if "connector" not in columns:
-            self.db.execute(
-                "ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''"
-            )
+            self.db.execute("ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''")
         # Swap the legacy 2-column uniqueness index for the connector-aware one.
         # DROP first so an upgraded DB cannot keep both (the old one would
         # reject per-connector rows). Both statements are guarded so re-running
@@ -478,10 +462,18 @@ class Store:
                 id, timestamp, action, target, actor, details,
                 structured_json, severity, run_id, connector
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event.id, event.timestamp.isoformat(), event.action,
-             event.target or None, event.actor, event.details or None,
-             structured_json, event.severity or None, event.run_id or None,
-             connector or None),
+            (
+                event.id,
+                event.timestamp.isoformat(),
+                event.action,
+                event.target or None,
+                event.actor,
+                event.details or None,
+                structured_json,
+                event.severity or None,
+                event.run_id or None,
+                connector or None,
+            ),
         )
         self.db.commit()
 
@@ -589,9 +581,7 @@ class Store:
         """Count scan results in the active Overview session window."""
 
         if since is None:
-            return int(
-                self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0
-            )
+            return int(self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0)
         return int(
             self.db.execute(
                 "SELECT COUNT(*) FROM scan_results WHERE datetime(timestamp) >= datetime(?)",
@@ -683,31 +673,52 @@ class Store:
     # -- Scan results --
 
     def insert_scan_result(
-        self, scan_id: str, scanner: str, target: str,
-        ts: datetime, duration_ms: int, finding_count: int,
-        max_severity: str, raw_json: str,
+        self,
+        scan_id: str,
+        scanner: str,
+        target: str,
+        ts: datetime,
+        duration_ms: int,
+        finding_count: int,
+        max_severity: str,
+        raw_json: str,
     ) -> None:
         run_id = _current_run_id()
         self.db.execute(
             """INSERT INTO scan_results
                (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (scan_id, scanner, target, ts.isoformat(), duration_ms,
-             finding_count, max_severity, raw_json, run_id or None),
+            (
+                scan_id,
+                scanner,
+                target,
+                ts.isoformat(),
+                duration_ms,
+                finding_count,
+                max_severity,
+                raw_json,
+                run_id or None,
+            ),
         )
         self.db.commit()
 
     def insert_finding(
-        self, finding_id: str, scan_id: str, severity: str,
-        title: str, description: str, location: str,
-        remediation: str, scanner: str, tags: str,
+        self,
+        finding_id: str,
+        scan_id: str,
+        severity: str,
+        title: str,
+        description: str,
+        location: str,
+        remediation: str,
+        scanner: str,
+        tags: str,
     ) -> None:
         self.db.execute(
             """INSERT INTO findings
                (id, scan_id, severity, title, description, location, remediation, scanner, tags)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (finding_id, scan_id, severity, title, description,
-             location, remediation, scanner, tags),
+            (finding_id, scan_id, severity, title, description, location, remediation, scanner, tags),
         )
         self.db.commit()
 
@@ -734,18 +745,22 @@ class Store:
         )
         results: list[dict[str, Any]] = []
         for row in cur.fetchall():
-            results.append({
-                "id": row[0],
-                "target": row[1],
-                "timestamp": _parse_ts(row[2]),
-                "finding_count": row[3] or 0,
-                "max_severity": row[4] or "INFO",
-                "raw_json": row[5] or "",
-            })
+            results.append(
+                {
+                    "id": row[0],
+                    "target": row[1],
+                    "timestamp": _parse_ts(row[2]),
+                    "finding_count": row[3] or 0,
+                    "max_severity": row[4] or "INFO",
+                    "raw_json": row[5] or "",
+                }
+            )
         return results
 
     def get_severity_counts_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> dict[str, int]:
         """Return {severity: count} from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -763,7 +778,9 @@ class Store:
         return {row[0]: row[1] for row in cur.fetchall()}
 
     def get_findings_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> list[dict[str, Any]]:
         """Return findings from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -780,10 +797,7 @@ class Store:
                    WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END""",
             (target, scanner),
         )
-        return [
-            {"severity": r[0], "title": r[1], "location": r[2] or ""}
-            for r in cur.fetchall()
-        ]
+        return [{"severity": r[0], "title": r[1], "location": r[2] or ""} for r in cur.fetchall()]
 
     # -- Actions --
     #
@@ -798,8 +812,12 @@ class Store:
     # admission layer composes the two exact-match lookups it needs.
 
     def set_action(
-        self, target_type: str, target_name: str,
-        source_path: str, state: ActionState, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        source_path: str,
+        state: ActionState,
+        reason: str,
         connector: str = "",
     ) -> None:
         actions_json = json.dumps(state.to_dict())
@@ -815,14 +833,17 @@ class Store:
                  reason = excluded.reason,
                  updated_at = excluded.updated_at,
                  source_path = COALESCE(excluded.source_path, source_path)""",
-            (aid, target_type, target_name, source_path or None,
-             actions_json, reason, now, connector),
+            (aid, target_type, target_name, source_path or None, actions_json, reason, now, connector),
         )
         self.db.commit()
 
     def set_action_field(
-        self, target_type: str, target_name: str,
-        field: str, value: str, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
+        value: str,
+        reason: str,
         connector: str = "",
     ) -> None:
         _validate(field, value)
@@ -844,7 +865,10 @@ class Store:
         self.db.commit()
 
     def clear_action_field(
-        self, target_type: str, target_name: str, field: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
         connector: str = "",
     ) -> None:
         _validate(field, "")
@@ -857,23 +881,42 @@ class Store:
         )
         self.db.execute(
             """DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?
-               AND actions_json IN ('{}', 'null', '')""",
+               AND actions_json IN ('{}', 'null', '') AND source_path IS NULL""",
             (target_type, target_name, connector),
         )
         self.db.commit()
 
     def set_source_path(
-        self, target_type: str, target_name: str, path: str,
+        self,
+        target_type: str,
+        target_name: str,
+        path: str,
         connector: str = "",
     ) -> None:
         self.db.execute(
-            "UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ? AND connector = ?",
-            (path, target_type, target_name, connector),
+            """INSERT INTO actions (
+                 id, target_type, target_name, source_path, actions_json, reason,
+                 updated_at, connector)
+               VALUES (?, ?, ?, ?, '{}', '', ?, ?)
+               ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+                 source_path = excluded.source_path,
+                 updated_at = excluded.updated_at""",
+            (
+                str(uuid.uuid4()),
+                target_type,
+                target_name,
+                path,
+                datetime.now(timezone.utc).isoformat(),
+                connector,
+            ),
         )
         self.db.commit()
 
     def remove_action(
-        self, target_type: str, target_name: str, connector: str = "",
+        self,
+        target_type: str,
+        target_name: str,
+        connector: str = "",
     ) -> None:
         self.db.execute(
             "DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?",
@@ -882,7 +925,10 @@ class Store:
         self.db.commit()
 
     def get_action(
-        self, target_type: str, target_name: str, connector: str = "",
+        self,
+        target_type: str,
+        target_name: str,
+        connector: str = "",
     ) -> ActionEntry | None:
         cur = self.db.execute(
             """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
@@ -895,7 +941,11 @@ class Store:
         return self._row_to_action(row)
 
     def has_action(
-        self, target_type: str, target_name: str, field: str, value: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
+        value: str,
         connector: str = "",
     ) -> bool:
         _validate(field, value)
@@ -918,7 +968,10 @@ class Store:
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_by_action_and_type(
-        self, field: str, value: str, target_type: str,
+        self,
+        field: str,
+        value: str,
+        target_type: str,
     ) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
@@ -930,7 +983,9 @@ class Store:
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_actions_by_type(
-        self, target_type: str, connector: str | None = None,
+        self,
+        target_type: str,
+        connector: str | None = None,
     ) -> list[ActionEntry]:
         """List action entries for a target type.
 
@@ -971,13 +1026,9 @@ class Store:
             allowed_skills=_count(q_skill + "'allow'"),
             blocked_mcps=_count(q_mcp + "'block'"),
             allowed_mcps=_count(q_mcp + "'allow'"),
-            alerts=_count(
-                "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
-            ),
+            alerts=_count("SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count(
-                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
-            ),
+            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
         )
 
     def get_enforcement_counts(self) -> Counts:
@@ -1000,9 +1051,7 @@ class Store:
             blocked_mcps=_count(q_mcp + "'block'"),
             allowed_mcps=_count(q_mcp + "'allow'"),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count(
-                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
-            ),
+            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
         )
 
     # -- Row converters --
@@ -1030,9 +1079,7 @@ class Store:
             connector=(row[9] or "") if len(row) > 9 else "",
         )
 
-    def get_target_snapshot(
-        self, target_type: str, target_path: str
-    ) -> TargetSnapshot | None:
+    def get_target_snapshot(self, target_type: str, target_path: str) -> TargetSnapshot | None:
         row = self.db.execute(
             "SELECT id, target_type, target_path, content_hash,"
             " dependency_hashes, config_hashes, network_endpoints,"
