@@ -930,6 +930,97 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIn("Warning", stderr)
         self.assertIn("failed", stderr)
 
+    def test_codex_and_claude_limitations_keep_cli_successful(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(Config, "active_connectors", return_value=["codex", "claudecode"]), \
+             patch.object(Config, "skill_dirs", return_value=[]), \
+             patch.object(Config, "plugin_dirs", return_value=[]), \
+             patch.object(Config, "mcp_servers", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            for connector in ("codex", "claudecode"):
+                with self.subTest(connector=connector):
+                    result = runner.invoke(
+                        aibom, ["scan", "--json", "--connector", connector], obj=self.app,
+                    )
+                    self.assertEqual(result.exit_code, 0, result.output)
+                    data = json.loads(result.stdout)
+                    self.assertEqual(data["errors"], [])
+                    self.assertEqual(len(data["limitations"]), 4)
+                    self.assertNotIn("failed", result.stderr.lower())
+
+    def test_combined_codex_claude_has_four_limitations_without_warning(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(
+            Config, "active_connectors", return_value=["codex", "claudecode"],
+        ), patch(
+            "defenseclaw.inventory.claw_inventory._model_providers_for_connector",
+            return_value=[],
+        ), patch(
+            "defenseclaw.inventory.claw_inventory._memory_for_connector",
+            return_value=[],
+        ):
+            result = runner.invoke(
+                aibom, ["scan", "--json", "--only", "models,memory"], obj=self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertEqual(len(data), 2)
+        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 4)
+        self.assertTrue(all(inv["errors"] == [] for inv in data))
+        self.assertNotIn("failed", result.stderr.lower())
+
+    def test_human_limitations_are_informational_not_warning(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(Config, "active_connectors", return_value=["codex"]), \
+             patch.object(Config, "skill_dirs", return_value=[]), \
+             patch.object(Config, "plugin_dirs", return_value=[]), \
+             patch.object(Config, "mcp_servers", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            result = runner.invoke(aibom, ["scan", "--connector", "codex"], obj=self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Unsupported inventory capabilities", result.stdout)
+        self.assertIn("informational", result.stdout)
+        self.assertNotIn("command(s) failed", result.output)
+
+    def test_mixed_real_failure_warns_once_and_keeps_limitations_separate(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(Config, "active_connectors", return_value=["codex"]), patch(
+            "defenseclaw.inventory.claw_inventory._enumerate_skills_filesystem",
+            side_effect=PermissionError("skills directory denied"),
+        ), patch.object(Config, "plugin_dirs", return_value=[]), \
+             patch.object(Config, "mcp_servers", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            result = runner.invoke(
+                aibom, ["scan", "--json", "--connector", "codex"], obj=self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        json_start = result.stdout.find("{")
+        self.assertGreaterEqual(json_start, 0)
+        data = json.loads(result.stdout[json_start:])
+        self.assertEqual(len(data["errors"]), 1)
+        self.assertEqual(len(data["limitations"]), 4)
+        self.assertIn("1 connector inventory command(s) failed", result.output)
+
 
 class TestLiveIsFalse(unittest.TestCase):
     """When live=False, no commands should be dispatched."""
@@ -2291,21 +2382,63 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertIn("triage", {row["id"] for row in inv["tools"]})
         self.assertNotIn("antigravity:tools", {e["command"] for e in inv["errors"]})
 
-    def test_openclaw_only_categories_return_empty_with_notes(self):
+    def test_codex_expected_limitations_are_not_errors(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         with self._patch_skill_dirs([]), \
              self._patch_plugin_dirs([]), \
-             self._patch_mcp([]):
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
             inv = build_claw_aibom(cfg, live=True)
         self.assertEqual(inv["agents"], [])
         self.assertEqual(inv["tools"], [])
         self.assertEqual(inv["model_providers"], [])
         self.assertEqual(inv["memory"], [])
-        commands = {e["command"] for e in inv["errors"]}
-        self.assertIn("codex:agents", commands)
-        self.assertIn("codex:tools", commands)
-        self.assertIn("codex:models", commands)
-        self.assertIn("codex:memory", commands)
+        self.assertEqual(inv["errors"], [])
+        self.assertEqual(inv["summary"]["errors"], 0)
+        self.assertEqual(inv["summary"]["limitations"], 4)
+        self.assertEqual(
+            {item["category"] for item in inv["limitations"]},
+            {"agents", "tools", "models", "memory"},
+        )
+        self.assertTrue(all(item["connector"] == "codex" for item in inv["limitations"]))
+        self.assertTrue(all(item["status"] == "unsupported" for item in inv["limitations"]))
+
+    def test_claudecode_expected_limitations_are_not_errors(self):
+        cfg = _make_cfg_for_connector(self.tmp, "claudecode")
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual(inv["errors"], [])
+        self.assertEqual(len(inv["limitations"]), 4)
+        self.assertTrue(all(item["connector"] == "claudecode" for item in inv["limitations"]))
+
+    def test_real_collection_failure_stays_separate_from_limitations(self):
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        with patch(
+            "defenseclaw.inventory.claw_inventory._enumerate_skills_filesystem",
+            side_effect=PermissionError("skills directory denied"),
+        ), self._patch_plugin_dirs([]), self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual(len(inv["errors"]), 1)
+        self.assertEqual(inv["errors"][0]["command"], "codex:skills")
+        self.assertIn("denied", inv["errors"][0]["error"])
+        self.assertEqual(len(inv["limitations"]), 4)
+        self.assertEqual(inv["summary"]["errors"], 1)
+        self.assertEqual(inv["summary"]["limitations"], 4)
 
     def test_skill_eligibility_requires_marker(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

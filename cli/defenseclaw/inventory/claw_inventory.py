@@ -27,9 +27,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from typing import Any, NamedTuple
+from enum import Enum
+from typing import Any, NamedTuple, TypedDict
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
@@ -72,6 +74,26 @@ class _CmdResult(NamedTuple):
     data: Any
     error: str | None
     command: str
+
+
+class InventoryCapabilityStatus(str, Enum):
+    """Machine-readable availability of an inventory surface."""
+
+    UNSUPPORTED = "unsupported"
+
+
+class InventoryLimitation(TypedDict):
+    """Expected connector capability gap; never an attempted-operation error."""
+
+    connector: str
+    category: str
+    status: InventoryCapabilityStatus
+    reason: str
+
+
+class _FilesystemCollectionResult(NamedTuple):
+    items: list[dict[str, Any]]
+    error: dict[str, str] | None
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +166,7 @@ def build_claw_aibom(
         ),
         "memory": _parse_memory(cache.get("memory_status")) if "memory" in cats else [],
         "errors": errors,
+        "limitations": [],
     }
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
@@ -584,6 +607,7 @@ def format_claw_aibom_human(
         _render_models(console, inv.get("model_providers", []))
         _render_memory(console, inv.get("memory", []))
 
+    _render_limitations(console, inv.get("limitations", []))
     _render_errors(console, inv.get("errors", []))
 
 
@@ -719,6 +743,7 @@ def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
         "total_items": total,
         **cats,
         "errors": len(inv.get("errors", [])),
+        "limitations": len(inv.get("limitations", [])),
     }
 
 
@@ -1126,6 +1151,19 @@ def _render_errors(console: Any, errors: list[dict[str, Any]]) -> None:
     console.print()
 
 
+def _render_limitations(console: Any, limitations: list[dict[str, Any]]) -> None:
+    """Render expected connector gaps as information, never warnings."""
+
+    if not limitations:
+        return
+    console.print("[bold cyan]Unsupported inventory capabilities[/bold cyan] [dim](informational)[/dim]:")
+    for limitation in limitations:
+        category = limitation.get("category", "?")
+        reason = limitation.get("reason", "unsupported by this connector")
+        console.print(f"  [cyan]{category}[/cyan] — {reason}")
+    console.print()
+
+
 def _trunc(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
@@ -1459,7 +1497,7 @@ def _parse_memory(raw: Any) -> list[dict[str, Any]]:
 # components by walking the directory layouts documented in
 # defenseclaw.connector_paths. Categories that are OpenClaw-only
 # concepts (agents, models, memory, tools-as-plugin-export) come back
-# as empty lists with a clear "errors" entry pointing the reader at
+# as empty lists with typed limitation metadata pointing the reader at
 # the connector-specific surface that owns that concept.
 
 _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
@@ -1468,6 +1506,27 @@ _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
     "models": "model providers are configured inside the framework",
     "memory": "memory backend is private to the framework",
 }
+
+
+def _collect_filesystem_category(
+    connector: str,
+    category: str,
+    collector: Callable[[], list[dict[str, Any]]],
+) -> _FilesystemCollectionResult:
+    """Run one filesystem collector while preserving partial inventory.
+
+    An exception means an attempted collection unexpectedly failed and belongs
+    in ``errors``. An empty successful result is not an error; callers may
+    separately describe a connector's expected capability limitation.
+    """
+
+    try:
+        return _FilesystemCollectionResult(collector(), None)
+    except Exception as exc:  # noqa: BLE001 - partial inventory records the failure.
+        return _FilesystemCollectionResult(
+            [],
+            {"command": f"{connector}:{category}", "error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2039,55 +2098,50 @@ def _build_aibom_from_filesystem(
     treat the result uniformly.
     """
     now = datetime.now(timezone.utc).isoformat()
-    errors: list[dict[str, str]] = []
-
-    skills: list[dict[str, Any]] = []
-    if "skills" in cats:
-        skills = _enumerate_skills_filesystem(cfg, connector)
-
-    plugins: list[dict[str, Any]] = []
-    if "plugins" in cats:
-        plugins = _enumerate_plugins_filesystem(cfg, connector)
-
-    mcps: list[dict[str, Any]] = []
-    if "mcp" in cats:
-        mcps = _enumerate_mcp_filesystem(cfg, connector)
-
-    # Plan C7: dispatch into per-connector adapters for the four
-    # categories that the CLI shellout used to own. When an adapter
-    # returns an empty list we still emit the informational note so
-    # operators see *why* a category is empty (no agent dir, no env
-    # var set, etc.).
-    agents = _agents_for_connector(connector, cfg) if "agents" in cats else []
-    tools = _tools_for_connector(connector, cfg) if "tools" in cats else []
-    model_providers = _model_providers_for_connector(connector, cfg) if "models" in cats else []
-    memory = _memory_for_connector(connector, cfg) if "memory" in cats else []
-
-    # Populate "errors" with informational notes for categories that
-    # don't translate to non-OpenClaw connectors. This keeps the
-    # output schema stable while telling operators why those buckets
-    # are empty.
-    _fs_only_results = {
-        "agents": agents,
-        "tools": tools,
-        "models": model_providers,
-        "memory": memory,
+    collectors: dict[str, Callable[[], list[dict[str, Any]]]] = {
+        "skills": lambda: _enumerate_skills_filesystem(cfg, connector),
+        "plugins": lambda: _enumerate_plugins_filesystem(cfg, connector),
+        "mcp": lambda: _enumerate_mcp_filesystem(cfg, connector),
+        "agents": lambda: _agents_for_connector(connector, cfg),
+        "tools": lambda: _tools_for_connector(connector, cfg),
+        "models": lambda: _model_providers_for_connector(connector, cfg),
+        "memory": lambda: _memory_for_connector(connector, cfg),
     }
+    results: dict[str, _FilesystemCollectionResult] = {}
+    for category, collector in collectors.items():
+        if category in cats:
+            results[category] = _collect_filesystem_category(connector, category, collector)
+
+    errors = [result.error for result in results.values() if result.error is not None]
+
+    def _items(category: str) -> list[dict[str, Any]]:
+        result = results.get(category)
+        return result.items if result is not None else []
+
+    skills = _items("skills")
+    plugins = _items("plugins")
+    mcps = _items("mcp")
+    agents = _items("agents")
+    tools = _items("tools")
+    model_providers = _items("models")
+    memory = _items("memory")
+
+    # Empty adapters for these connector-owned surfaces are deterministic
+    # capability gaps, not failed commands. Keep them typed and separate so
+    # automation never has to infer semantics from human-readable text.
+    limitations: list[InventoryLimitation] = []
     for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
         if cat_key not in cats:
             continue
-        # Only attach the "informational" note when the adapter
-        # actually returned no rows; if the adapter found rows we
-        # don't want to confuse operators with "agents are not a
-        # first-class concept" alongside a populated agents list.
-        if _fs_only_results.get(cat_key):
+        result = results.get(cat_key)
+        if result is None or result.items or result.error is not None:
             continue
-        errors.append(
-            {
-                "command": f"{connector}:{cat_key}",
-                "error": note,
-            }
-        )
+        limitations.append({
+            "connector": connector,
+            "category": cat_key,
+            "status": InventoryCapabilityStatus.UNSUPPORTED,
+            "reason": note,
+        })
 
     out: dict[str, Any] = {
         "version": INVENTORY_VERSION,
@@ -2110,6 +2164,7 @@ def _build_aibom_from_filesystem(
         "model_providers": model_providers,
         "memory": memory,
         "errors": errors,
+        "limitations": limitations,
     }
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
