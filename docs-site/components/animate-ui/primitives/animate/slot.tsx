@@ -38,7 +38,7 @@ function mergeProps<T extends HTMLElement>(
   childProps: AnyProps,
   slotProps: DOMMotionProps<T>,
 ): AnyProps {
-  const merged: AnyProps = { ...childProps, ...slotProps };
+  const merged: AnyProps = { ...slotProps, ...childProps };
 
   if (childProps.className || slotProps.className) {
     merged.className = cn(
@@ -89,17 +89,32 @@ function ValidSlot<T extends HTMLElement = HTMLElement>({
     [childType, isAlreadyMotion],
   );
 
-  const { ref: childRef, ...childProps } = children.props as AnyProps;
+  const { ref: propsRef, ...childProps } = children.props as AnyProps;
+  const legacyRef = Number.parseInt(React.version, 10) < 19
+    ? (children as unknown as { ref?: React.Ref<T> }).ref
+    : undefined;
+  const childRef = (propsRef ?? legacyRef) as React.Ref<T> | undefined;
 
   const mergedProps = mergeProps(childProps, props);
 
   return (
-    <Base {...mergedProps} ref={mergeRefs(childRef as React.Ref<T>, ref)} />
+    <Base {...mergedProps} ref={mergeRefs(childRef, ref)} />
   );
 }
 
 function Slot<T extends HTMLElement = HTMLElement>(props: SlotProps<T>) {
-  if (!React.isValidElement(props.children)) return null;
+  if (!React.isValidElement(props.children)) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('Animate UI Slot expects exactly one React element child.');
+    }
+    return null;
+  }
+  if (props.children.type === React.Fragment) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('Animate UI Slot cannot forward motion props or refs to a Fragment.');
+    }
+    return props.children;
+  }
   return <ValidSlot {...props} children={props.children} />;
 }
 

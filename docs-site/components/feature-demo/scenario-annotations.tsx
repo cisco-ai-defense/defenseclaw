@@ -2,7 +2,7 @@
 
 import { motion, useReducedMotion } from 'motion/react';
 import { useCallback, useId, useLayoutEffect, useRef, useState } from 'react';
-import type { ScenarioTone } from './types';
+import { evidenceHighlightIndex, type ScenarioTone } from './types';
 
 interface ConnectorGeometry {
   id: string;
@@ -56,7 +56,7 @@ export function ScenarioAnnotations({
     );
 
     const connectors = evidence.flatMap((item, evidenceIndex): ConnectorGeometry[] => {
-      const highlightIndex = Math.min(evidenceIndex, highlightCount - 1);
+      const highlightIndex = evidenceHighlightIndex(evidenceIndex, highlightCount);
       const lines = highlights.filter(
         (line) => Number(line.dataset.scenarioHighlightIndex) === highlightIndex,
       );
@@ -102,13 +102,22 @@ export function ScenarioAnnotations({
     const observer = new ResizeObserver(measure);
     observer.observe(stage);
     const codeScroller = stage.querySelector<HTMLElement>('.scenario-code-scroll');
-    codeScroller?.addEventListener('scroll', measure, { passive: true });
+    let scrollFrame: number | null = null;
+    const onScroll = () => {
+      if (scrollFrame !== null) return;
+      scrollFrame = window.requestAnimationFrame(() => {
+        scrollFrame = null;
+        measure();
+      });
+    };
+    codeScroller?.addEventListener('scroll', onScroll, { passive: true });
 
     return () => {
       window.cancelAnimationFrame(frame);
       window.clearTimeout(settledFrame);
       observer.disconnect();
-      codeScroller?.removeEventListener('scroll', measure);
+      codeScroller?.removeEventListener('scroll', onScroll);
+      if (scrollFrame !== null) window.cancelAnimationFrame(scrollFrame);
     };
   }, [measure]);
 

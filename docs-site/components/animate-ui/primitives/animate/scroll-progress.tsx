@@ -84,11 +84,13 @@ function ScrollProgress({
 
   return (
     <Component
+      aria-hidden={props['aria-hidden'] ?? true}
       data-slot="scroll-progress"
       data-direction={direction}
       data-mode={mode}
       data-global={global}
       style={{
+        ...style,
         ...(mode === 'width' || mode === 'height'
           ? {
               [mode]: length,
@@ -96,7 +98,6 @@ function ScrollProgress({
           : {
               [mode]: scale,
             }),
-        ...style,
       }}
       {...props}
     />
@@ -112,13 +113,17 @@ function ScrollProgressContainer({
 }: ScrollProgressContainerProps) {
   const { containerRef, direction, global } = useScrollProgress();
 
-  React.useImperativeHandle(ref, () => containerRef.current as HTMLDivElement);
+  const setContainerRef = React.useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    if (typeof ref === 'function') ref(node);
+    else if (ref) ref.current = node;
+  }, [containerRef, ref]);
 
   const Component: React.ElementType = asChild ? Slot : motion.div;
 
   return (
     <Component
-      ref={containerRef}
+      ref={setContainerRef}
       data-slot="scroll-progress-container"
       data-direction={direction}
       data-global={global}

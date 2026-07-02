@@ -71,21 +71,23 @@ export function EditorialTabs({
       defaultValue={initialValue}
       className={cn('editorial-tabs flex flex-col overflow-hidden border bg-fd-secondary my-4', className)}
     >
-      <TabsPrimitive.List
-        aria-label={typeof label === 'string' ? label : 'Documentation examples'}
-        className="flex gap-3.5 overflow-x-auto px-4 text-fd-secondary-foreground not-prose"
-      >
+      <div className="flex gap-3.5 overflow-x-auto px-4 text-fd-secondary-foreground not-prose">
         {label ? <span className="me-auto my-auto text-sm font-medium">{label}</span> : null}
-        {items.map((item, index) => (
-          <TabsPrimitive.Trigger
-            key={values[index]}
-            value={values[index]}
-            className="inline-flex items-center gap-2 whitespace-nowrap border-b border-transparent py-2 text-sm font-medium text-fd-muted-foreground transition-colors hover:text-fd-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fd-ring data-[state=active]:border-fd-primary data-[state=active]:text-fd-primary"
-          >
-            {item}
-          </TabsPrimitive.Trigger>
-        ))}
-      </TabsPrimitive.List>
+        <TabsPrimitive.List
+          aria-label={typeof label === 'string' ? label : 'Documentation examples'}
+          className="flex gap-3.5"
+        >
+          {items.map((item, index) => (
+            <TabsPrimitive.Trigger
+              key={values[index]}
+              value={values[index]}
+              className="inline-flex items-center gap-2 whitespace-nowrap border-b border-transparent py-2 text-sm font-medium text-fd-muted-foreground transition-colors hover:text-fd-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fd-ring data-[state=active]:border-fd-primary data-[state=active]:text-fd-primary"
+            >
+              {item}
+            </TabsPrimitive.Trigger>
+          ))}
+        </TabsPrimitive.List>
+      </div>
       {resolvedChildren}
     </TabsPrimitive.Root>
   );

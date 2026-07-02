@@ -16,6 +16,10 @@ export type ScenarioTone =
   | 'danger'
   | 'success';
 
+export function evidenceHighlightIndex(evidenceIndex: number, highlightCount: number) {
+  return highlightCount > 0 ? Math.min(evidenceIndex, highlightCount - 1) : -1;
+}
+
 export interface ScenarioTab {
   id: string;
   label: string;

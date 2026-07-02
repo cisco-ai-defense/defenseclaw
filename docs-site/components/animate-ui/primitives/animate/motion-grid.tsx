@@ -38,6 +38,7 @@ const MotionGrid = ({
   duration = 200,
   animate = true,
   asChild = false,
+  'aria-hidden': ariaHidden = true,
   style,
   ...props
 }: MotionGridProps) => {
@@ -70,6 +71,7 @@ const MotionGrid = ({
       value={{ animate: animate && pageVisible, index, cols, rows, frames, duration }}
     >
       <Component
+        aria-hidden={ariaHidden}
         data-animate={animate && pageVisible}
         style={{
           display: 'grid',

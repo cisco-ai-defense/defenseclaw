@@ -5,6 +5,7 @@ import type {
   HighlightedScenarioTab,
   ScenarioHighlight,
 } from './types';
+import { evidenceHighlightIndex } from './types';
 
 function TokenLines({
   lines,
@@ -28,7 +29,7 @@ function TokenLines({
         const markerNumbers = highlights.flatMap((range, rangeIndex) => {
           if (lineNumber !== range.end) return [];
           return Array.from({ length: evidenceCount }, (_, evidenceIndex) => evidenceIndex)
-            .filter((evidenceIndex) => Math.min(evidenceIndex, highlights.length - 1) === rangeIndex)
+            .filter((evidenceIndex) => evidenceHighlightIndex(evidenceIndex, highlights.length) === rangeIndex)
             .map((evidenceIndex) => evidenceIndex + 1);
         });
         return (

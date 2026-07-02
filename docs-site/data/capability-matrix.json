@@ -200,7 +200,7 @@
     {
       "id": "antigravity",
       "label": "Antigravity",
-      "summary": "Five lifecycle hooks with an unbypassable native ask decision.",
+      "summary": "Five lifecycle hooks, with a verified native ask on PreToolUse.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",

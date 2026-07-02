@@ -90,7 +90,7 @@ export function ScenarioTabs({
               type="button"
               role="tab"
               aria-selected={active}
-              aria-controls={`${instanceId}-panel-${tab.id}`}
+              aria-controls={active ? `${instanceId}-panel-${tab.id}` : undefined}
               tabIndex={active ? 0 : -1}
               onClick={() => onSelect(tab.id)}
               onKeyDown={(event) => {

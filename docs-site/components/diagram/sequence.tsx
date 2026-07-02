@@ -197,8 +197,16 @@ export function Sequence({
   // width gate, the data-* attrs, and downstream max-width: ${w}px
   // CSS all read better as integers.
   const lastIdx = participants.length - 1;
+  const selfMessageRight = messages.reduce((right, message) => {
+    if (message.fromIdx !== message.toIdx || !message.label) return right;
+    const labelRight = lifelineXs[message.fromIdx] + 34 + estimateChipWidth(message.label) + SIDE_MARGIN;
+    return Math.max(right, labelRight);
+  }, 0);
   const totalWidth = Math.ceil(
-    lifelineXs[lastIdx] + pillWidths[lastIdx] / 2 + SIDE_MARGIN,
+    Math.max(
+      lifelineXs[lastIdx] + pillWidths[lastIdx] / 2 + SIDE_MARGIN,
+      selfMessageRight,
+    ),
   );
   const lifelineTop = TOP_MARGIN + PILL_HEIGHT + PILL_MARGIN_BOTTOM;
   const totalHeight =

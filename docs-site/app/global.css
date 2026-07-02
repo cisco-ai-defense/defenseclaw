@@ -895,6 +895,7 @@ article#nd-page table thead tr {
   inset: 0;
   z-index: -1;
   opacity: 0.52;
+  -webkit-mask-image: linear-gradient(to right, black, transparent 46%);
   mask-image: linear-gradient(to right, black, transparent 46%);
 }
 
@@ -1551,6 +1552,7 @@ article#nd-page table thead tr {
   border-inline: 1px solid var(--scenario-rule);
   color: var(--scenario-ink);
   background: color-mix(in oklab, var(--scenario-surface) 94%, transparent);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
 }
 
@@ -2222,7 +2224,7 @@ article#nd-page .scenario-frame code {
     height: 1.15rem;
     padding-inline: 0.22rem;
     border-radius: 50%;
-    background: var(--scenario-annotation-color);
+    background: var(--scenario-annotation-color, var(--editorial-blue));
     color: var(--scenario-surface);
     font-size: 0.56rem;
   }

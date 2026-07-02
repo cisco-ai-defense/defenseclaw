@@ -23,6 +23,18 @@ import { DiagramLightbox } from './lightbox';
 // component-name strings (which break under prod minification).
 const NODE_MARKER = Symbol.for('defenseclaw.diagram.Node');
 const EDGE_MARKER = Symbol.for('defenseclaw.diagram.Edge');
+const EDGE_LABEL_MIN_WIDTH = 40;
+const EDGE_LABEL_MAX_WIDTH = 220;
+const EDGE_LABEL_CHAR_WIDTH = 6.4;
+const EDGE_LABEL_PADDING = 14;
+
+function measureEdgeLabel(label?: string): number {
+  if (!label) return 0;
+  return Math.min(
+    EDGE_LABEL_MAX_WIDTH,
+    Math.max(EDGE_LABEL_MIN_WIDTH, label.length * EDGE_LABEL_CHAR_WIDTH + EDGE_LABEL_PADDING),
+  );
+}
 
 export interface NodeProps {
   id: string;
@@ -165,12 +177,13 @@ export function Flow({
     return sum + measured.width;
   }, 0);
   const compactTransitionWidth = edgeProps.reduce((sum, edge) => {
-    const labelWidth = edge.label ? Math.min(180, edge.label.length * 6 + 16) : 0;
+    const labelWidth = measureEdgeLabel(edge.label);
     return sum + Math.max(54, labelWidth);
   }, 0);
   const compactCandidateWidth = compactNodeWidth + compactTransitionWidth + 56;
   const autoLinearHorizontal =
     direction === 'TB' &&
+    compact !== false &&
     isLinear &&
     nodeProps.length <= 5 &&
     compactCandidateWidth <= ARTICLE_WIDTH_TARGET;
@@ -239,7 +252,7 @@ export function Flow({
       // Edge labels need a hint to dagre about their footprint so the
       // layout makes room for them.
       labelpos: 'c',
-      width: e.label ? Math.min(180, e.label.length * 6 + 16) : 0,
+      width: measureEdgeLabel(e.label),
       height: e.label ? 22 : 0,
     });
   }
@@ -601,7 +614,7 @@ function EdgeLabelChip({
   // Estimate chip width from char count. The chip uses an HTML
   // foreignObject so we get full font fallback and crisp anti-aliased
   // text instead of SVG <text> spacing quirks.
-  const chipW = Math.min(220, Math.max(40, label.length * 6.4 + 14));
+  const chipW = measureEdgeLabel(label);
   const chipH = 20;
   return (
     <foreignObject

@@ -129,7 +129,7 @@ export default function HomePage() {
               return (
                 <li key={item.title}>
                   <Link href={item.href}>
-                    <span className="capability-number">0{index + 1}</span>
+                    <span className="capability-number">{String(index + 1).padStart(2, '0')}</span>
                     <Icon aria-hidden />
                     <strong>{item.title}</strong>
                     <ArrowRight aria-hidden />
@@ -148,11 +148,11 @@ export default function HomePage() {
           </SectionIntro>
           <CapabilityMatrixWrapper className="connector-preview" ariaLabel="Connector capability preview">
             <table>
-              <thead><tr><th>Connector</th><th>Pre-execution block</th><th>Native ask</th><th>Fail closed</th></tr></thead>
+              <thead><tr><th scope="col">Connector</th><th scope="col">Pre-execution block</th><th scope="col">Native ask</th><th scope="col">Fail closed</th></tr></thead>
               <tbody>
                 {connectors.slice(0, 7).map((connector) => (
                   <tr key={connector.id}>
-                    <th>
+                    <th scope="row">
                       <Link href={`/docs/connectors/${connector.id}`} className="connector-preview-name">
                         <ConnectorBrand id={connector.id} size="sm" />
                         {connector.label}
