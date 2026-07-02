@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -181,18 +182,28 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
             nonlocal metric_refresh_calls
             metric_refresh_calls += 1
 
+        live_signature_calls = 0
+
+        def counted_live_signature() -> bool:
+            nonlocal live_signature_calls
+            live_signature_calls += 1
+            return False
+
         app._refresh_models_from_disk = counted_refresh  # type: ignore[method-assign]
         app._render_overview_metrics = counted_metric_refresh  # type: ignore[method-assign]
+        app._overview_live_data_changed_since_render = counted_live_signature  # type: ignore[method-assign]
         app._overview_last_scroll_activity_at = 0.0
         app._overview_sampled_refresh_scheduled = True
         app._periodic_refresh()
         assert refresh_calls == 0
-        assert metric_refresh_calls == 1
+        assert metric_refresh_calls == 0
+        assert live_signature_calls == 0
 
         scroller.scroll_to(y=0, animate=False, immediate=True)
         app._periodic_refresh()
         assert refresh_calls == 0
-        assert metric_refresh_calls == 2
+        assert metric_refresh_calls == 0
+        assert live_signature_calls == 0
 
         sampled_render_calls = 0
 
@@ -406,6 +417,30 @@ def test_live_overview_signature_ignores_clock_driven_sparkline_motion(
     )
 
     assert app._overview_live_data_signature() == first
+
+
+@pytest.mark.asyncio
+async def test_overview_repaint_uses_one_telemetry_sample() -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        # Keep the mount-time general ticker from racing the direct repaint.
+        app._periodic_refresh_running = True
+        sample_scopes = 0
+        original_sample = app._connector_hook_event_render_cache
+
+        @contextmanager
+        def counted_sample():
+            nonlocal sample_scopes
+            sample_scopes += 1
+            with original_sample():
+                yield
+
+        app._connector_hook_event_render_cache = counted_sample  # type: ignore[method-assign]
+        app._render_chrome()
+
+        assert sample_scopes == 1
 
 
 @pytest.mark.asyncio
@@ -1956,6 +1991,11 @@ async def test_health_poll_allows_scrolled_repaint_when_live_overview_changes(
     monkeypatch.setattr(app, "_mark_restart_if_gateway_restarted", lambda _snapshot: None)
     monkeypatch.setattr(app, "_sync_setup_readiness", lambda: None)
     monkeypatch.setattr(app, "_render_overview_scope_indicator", lambda: None)
+    monkeypatch.setattr(
+        app,
+        "_overview_live_data_changed_since_render",
+        lambda: pytest.fail("health polling must not calculate Overview data on the UI loop"),
+    )
     scheduled: list[bool] = []
     monkeypatch.setattr(
         app,
@@ -5948,7 +5988,7 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
             ]
         )
 
-        app._periodic_refresh()
+        app._schedule_overview_sampled_refresh(allow_scrolled=True)
         await pilot.pause()
 
         assert render_calls == 1

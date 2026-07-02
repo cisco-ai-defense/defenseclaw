@@ -930,7 +930,9 @@ def _set_connector_fail_mode(
         current = "open"
 
     entry = conns.get(key)
-    has_override = bool(getattr(entry, "hook_fail_mode", "")) if entry is not None else False
+    stored_mode = str(getattr(entry, "hook_fail_mode", "") or "").strip().lower()
+    has_override = stored_mode in ("open", "closed")
+    configured_mode = stored_mode if has_override else global_fm
 
     # No mode argument → just report this connector's effective value and
     # whether it is an override or inherited from the global default.
@@ -950,7 +952,7 @@ def _set_connector_fail_mode(
         click.echo()
         return
 
-    if mode == current:
+    if mode == configured_mode:
         click.echo(
             f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} "
             f"{ux.dim('— nothing to do.')}"
@@ -959,7 +961,7 @@ def _set_connector_fail_mode(
 
     click.echo()
     click.echo(
-        f"  {ux.bold(f'Changing {label} hook fail mode:')} {current} "
+        f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} "
         f"{ux.dim('→')} {ux.accent(mode)}"
     )
     if mode == "closed":
@@ -1146,14 +1148,15 @@ def fail_mode_cmd(
     fail_mode_targets = _multi_connector_fail_mode_targets(app)
     target_modes: dict[str, str] = {}
     if fail_mode_targets:
-        target_modes = {
-            name: (
-                gc.effective_hook_fail_mode(name)
-                if hasattr(gc, "effective_hook_fail_mode")
-                else current
-            ).lower()
-            for name in fail_mode_targets
-        }
+        # Mutation comparisons use the stored posture, not the effective one.
+        # Observe mode intentionally forces the effective value open, but an
+        # operator must still be able to replace a dormant closed override
+        # before switching that connector into action mode.
+        configured = getattr(gc, "connectors", {}) or {}
+        for name in fail_mode_targets:
+            entry = configured.get(name)
+            stored = str(getattr(entry, "hook_fail_mode", "") or "").strip().lower()
+            target_modes[name] = stored if stored in ("open", "closed") else current
 
     if fail_mode_targets and all(value == mode for value in target_modes.values()):
         click.echo(

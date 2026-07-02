@@ -408,9 +408,11 @@ func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
 // value for those that set one.
 func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Mode = "action"
 	s.cfg.Guardrail.HookFailMode = "open"
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"cursor": {HookFailMode: "closed"},
+		"cursor":   {Mode: "action", HookFailMode: "closed"},
+		"windsurf": {Mode: "observe", HookFailMode: "closed"},
 	}
 
 	codexOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
@@ -420,6 +422,10 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	cursorOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}, "tok", "a", "b")
 	if cursorOpts.HookFailMode != "closed" {
 		t.Errorf("cursor HookFailMode=%q, want override %q", cursorOpts.HookFailMode, "closed")
+	}
+	windsurfOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}, "tok", "a", "b")
+	if windsurfOpts.HookFailMode != "open" {
+		t.Errorf("windsurf HookFailMode=%q, want observe-mode open", windsurfOpts.HookFailMode)
 	}
 }
 

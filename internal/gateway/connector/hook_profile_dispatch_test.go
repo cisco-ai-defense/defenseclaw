@@ -287,6 +287,63 @@ func TestCodexProfileRespond_Parity(t *testing.T) {
 	}
 }
 
+func TestCursorProfileRespondAlwaysEmitsValidJSON(t *testing.T) {
+	cases := []struct {
+		name     string
+		event    string
+		action   string
+		reason   string
+		expected map[string]interface{}
+	}{
+		{
+			name:     "prompt allow",
+			event:    "beforeSubmitPrompt",
+			action:   "allow",
+			expected: map[string]interface{}{"continue": true},
+		},
+		{
+			name:   "prompt block",
+			event:  "beforeSubmitPrompt",
+			action: "block",
+			reason: "prompt denied",
+			expected: map[string]interface{}{
+				"continue": false, "user_message": "prompt denied",
+			},
+		},
+		{
+			name:     "shell allow",
+			event:    "beforeShellExecution",
+			action:   "allow",
+			expected: map[string]interface{}{"continue": true, "permission": "allow"},
+		},
+		{
+			name:     "lifecycle allow",
+			event:    "sessionStart",
+			action:   "allow",
+			expected: map[string]interface{}{"continue": true},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := hookOnlyProfileRespond(HookRespondInput{
+				Req: HookProfileRequest{
+					ConnectorName: "cursor",
+					HookEventName: tc.event,
+				},
+				Action: tc.action,
+				Reason: tc.reason,
+			})
+			if out.FieldName != "hook_output" {
+				t.Fatalf("FieldName=%q want hook_output", out.FieldName)
+			}
+			if !reflect.DeepEqual(out.Output, tc.expected) {
+				t.Errorf("Output mismatch\n got: %#v\nwant: %#v", out.Output, tc.expected)
+			}
+		})
+	}
+}
+
 // TestClaudeCodeProfileRespond_Parity is the claudecode-side mirror
 // of TestCodexProfileRespond_Parity. Covers the "confirm on PreToolUse
 // becomes permissionDecision=ask" and "deny on PermissionRequest"

@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -35,10 +36,11 @@ func init() {
 }
 
 // newHookCmd builds the hidden `hook` subcommand the agent runtime invokes per
-// event. On Windows this replaces the Bash hook scripts entirely: the agent is
-// configured to run `defenseclaw-hook hook --connector <name> --event <ev>`,
-// which reads the event JSON from stdin, forwards it to the local gateway, and
-// shapes the agent-native stdout + exit code. It is hidden because it is a
+// event. On Windows most agents invoke the native launcher directly. Cursor's
+// PowerShell transport instead uses a generated adapter and this command's
+// validated --input-file path because its object pipeline cannot preserve JSON
+// on native stdin. Both paths forward the event to the local gateway and shape
+// the agent-native stdout + exit code. It is hidden because it is a
 // machine-facing entrypoint, not something a human runs directly.
 func newHookCmd() *cobra.Command {
 	var (
@@ -46,6 +48,7 @@ func newHookCmd() *cobra.Command {
 		event     string
 		apiAddr   string
 		failMode  string
+		inputFile string
 	)
 
 	cmd := &cobra.Command{
@@ -61,9 +64,28 @@ func newHookCmd() *cobra.Command {
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := buildHookOptions(connector, event, apiAddr, failMode)
+			var input *os.File
+			if inputFile != "" {
+				if runtime.GOOS != "windows" || connector != "cursor" {
+					return fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter")
+				}
+				var err error
+				input, err = openCursorHookInputFile(opts.HookDir, inputFile)
+				if err != nil {
+					return err
+				}
+				opts.Stdin = input
+			}
 			// hookexec returns the exact agent exit code (0 allow / 2 block).
 			// os.Exit is required because cobra collapses RunE outcomes to 0/1.
-			os.Exit(hookexec.Run(cmd.Context(), opts))
+			code := hookexec.Run(cmd.Context(), opts)
+			if input != nil {
+				// Preserve hookexec's exact allow/block exit code after it has
+				// emitted the vendor response. Process exit also releases the
+				// read handle if an unusual filesystem reports a close error.
+				_ = input.Close()
+			}
+			os.Exit(code)
 			return nil
 		},
 	}
@@ -72,9 +94,58 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&event, "event", "", "agent hook event name (informational)")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
+	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
+	_ = cmd.Flags().MarkHidden("input-file")
 	_ = cmd.MarkFlagRequired("connector")
 
 	return cmd
+}
+
+const cursorHookInputMaxBytes int64 = 1 << 20
+
+func openCursorHookInputFile(hookDir, path string) (*os.File, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("Cursor hook input path must be absolute")
+	}
+	cleanDir, err := filepath.Abs(hookDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Cursor hook directory: %w", err)
+	}
+	cleanPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Cursor hook input: %w", err)
+	}
+	if !strings.EqualFold(filepath.Clean(filepath.Dir(cleanPath)), filepath.Clean(cleanDir)) {
+		return nil, fmt.Errorf("Cursor hook input must be inside the DefenseClaw hooks directory")
+	}
+	base := filepath.Base(cleanPath)
+	if !strings.HasPrefix(base, ".cursor-input-") || !strings.HasSuffix(base, ".json") {
+		return nil, fmt.Errorf("Cursor hook input filename is not DefenseClaw-managed")
+	}
+	info, err := os.Lstat(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Cursor hook input: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("Cursor hook input must be a regular file")
+	}
+	if info.Size() > cursorHookInputMaxBytes {
+		return nil, fmt.Errorf("Cursor hook input exceeds %d bytes", cursorHookInputMaxBytes)
+	}
+	input, err := os.Open(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("open Cursor hook input: %w", err)
+	}
+	openedInfo, err := input.Stat()
+	if err != nil {
+		_ = input.Close()
+		return nil, fmt.Errorf("inspect opened Cursor hook input: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > cursorHookInputMaxBytes {
+		_ = input.Close()
+		return nil, fmt.Errorf("opened Cursor hook input is not a valid payload file")
+	}
+	return input, nil
 }
 
 // buildHookOptions resolves the hook configuration from flags plus the same

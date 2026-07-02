@@ -33,7 +33,7 @@ from typing import Any, NamedTuple
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
-from defenseclaw.inventory.plugin_directories import plugin_directory_entries
+from defenseclaw.inventory.plugin_directories import discover_plugin_directories
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
 INVENTORY_VERSION = 3
@@ -466,6 +466,9 @@ def _inventory_key_candidates(
         plugin_name = item.get("name", "")
         add(plugin_name)
         add(os.path.basename(str(plugin_name).rstrip("/")))
+        add(item.get("path", ""))
+        add(item.get("baseDir", ""))
+        add(item.get("filePath", ""))
     elif target_type == "mcp":
         add(item.get("url", ""))
         add(item.get("command", ""))
@@ -2194,34 +2197,52 @@ def _frontmatter_description(text: str) -> str:
 def _enumerate_plugins_filesystem(
     cfg: Config, connector: str | None = None,
 ) -> list[dict[str, Any]]:
-    """One row per plugin directory under ``cfg.plugin_dirs(connector)``.
+    """One row per logical plugin under ``cfg.plugin_dirs(connector)``.
 
     A plugin is treated as a directory containing one of the
     documented manifest names (matches plugin_scanner._MANIFEST_CANDIDATES
     after S2.3): package.json, manifest.json, plugin.json,
     openclaw.plugin.json, .codex-plugin/plugin.json,
-    .claude-plugin/plugin.json. ``connector`` scopes the walk for
-    multi-connector focus (defaults to active).
+    .claude-plugin/plugin.json. Codex cache registry buckets are expanded to
+    their exact manifest roots and logical names are deduplicated using Codex's
+    active-plugin metadata. ``connector`` scopes the walk for multi-connector
+    focus (defaults to active).
     """
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    resolved_connector = connector or cfg.active_connector()
     for plugin_dir in cfg.plugin_dirs(connector):
-        for entry, full in plugin_directory_entries(plugin_dir):
-            if entry in seen:
+        for discovered in discover_plugin_directories(
+            plugin_dir, connector=resolved_connector
+        ):
+            entry = discovered.id
+            entry_key = entry.casefold()
+            if entry_key in seen:
                 continue
-            seen.add(entry)
-            manifest = _detect_plugin_manifest(full)
+            seen.add(entry_key)
+            full = discovered.path
+            manifest = discovered.manifest or _detect_plugin_manifest(full)
             row: dict[str, Any] = {
                 "id": entry,
-                "name": entry,
-                "version": "",
-                "origin": plugin_dir,
-                "enabled": True,
-                "status": "loaded" if manifest else "no-manifest",
+                "name": discovered.name or entry,
+                "version": discovered.version,
+                "origin": discovered.origin or plugin_dir,
+                "enabled": discovered.enabled,
+                "status": (
+                    "loaded" if manifest and discovered.enabled
+                    else "disabled" if manifest
+                    else "no-manifest"
+                ),
                 "path": full,
             }
             if manifest:
-                row["manifest"] = manifest
+                row["manifest"] = manifest.replace("\\", "/")
+            if discovered.description:
+                row["description"] = discovered.description
+            if discovered.registry:
+                row["registry"] = discovered.registry
+            if discovered.cached:
+                row["cached"] = True
             rows.append(row)
     return rows
 

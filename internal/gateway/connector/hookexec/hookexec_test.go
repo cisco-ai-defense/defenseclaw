@@ -206,6 +206,13 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
+			name:       "cursor allow without hook_output emits valid json",
+			connector:  "cursor",
+			respBody:   `{"action":"allow"}`,
+			wantStdout: cursorAllow() + "\n",
+			wantCode:   0,
+		},
+		{
 			name:       "cursor echoes hook_output exit 0",
 			connector:  "cursor",
 			respBody:   `{"hook_output":{"continue":true,"permission":"deny","user_message":"no"}}`,
@@ -363,6 +370,9 @@ func TestOversizedPayload(t *testing.T) {
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times on oversized payload, want 0", rt.requests)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
 	})
 
 	cases := map[string]struct {
@@ -406,6 +416,19 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
+	})
+
+	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", &stubRT{err: errors.New("dial tcp: refused")}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorAllow()+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		}
 	})
 
 	t.Run("strict availability fails closed", func(t *testing.T) {
@@ -437,6 +460,19 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{status: 401, body: "unauthorized"}, nil)
 		if r.code != 0 {
 			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
+	})
+
+	t.Run("cursor response failure fail open emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", &stubRT{status: 401, body: "unauthorized"}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorAllow()+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
 		}
 	})
 
@@ -488,6 +524,19 @@ func TestMissingToken(t *testing.T) {
 		}
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times, want 0", rt.requests)
+		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
+	})
+
+	t.Run("cursor default emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", ok(`{"action":"allow"}`), noToken)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorAllow()+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
 		}
 	})
 
@@ -703,24 +752,75 @@ func TestInvalidTraceparentDropped(t *testing.T) {
 
 // --- DEFENSECLAW_HOME guard ---
 
-func TestDisabledHomeIsNoop(t *testing.T) {
-	rt := ok(`{"action":"block","reason":"x"}`)
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
-		t.Fatal(err)
+func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		home func(t *testing.T) string
+	}{
+		{name: "disabled", home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "missing", home: func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := ok(`{"action":"block","reason":"x"}`)
+			var out, errb bytes.Buffer
+			home := tc.home(t)
+			code := Run(context.Background(), Options{
+				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
+				HookDir: filepath.Join(home, "hooks"), Token: "t",
+				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
+				HTTPClient: &http.Client{Transport: rt},
+			})
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
+			}
+			if rt.requests != 0 {
+				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			}
+			if out.String() != "" {
+				t.Fatalf("stdout = %q, want empty for non-Cursor no-op", out.String())
+			}
+		})
 	}
-	var out, errb bytes.Buffer
-	code := Run(context.Background(), Options{
-		Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
-		HookDir: filepath.Join(home, "hooks"), Token: "t",
-		Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
-		HTTPClient: &http.Client{Transport: rt},
-	})
-	if code != 0 {
-		t.Fatalf("code = %d, want 0 when .disabled present", code)
-	}
-	if rt.requests != 0 {
-		t.Fatalf("gateway called %d times despite .disabled", rt.requests)
+}
+
+func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		home func(t *testing.T) string
+	}{
+		{name: "disabled", home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "missing", home: func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			home := tc.home(t)
+			code := Run(context.Background(), Options{
+				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"),
+				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
+			})
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
+			}
+			if out.String() != cursorAllow()+"\n" {
+				t.Fatalf("stdout = %q, want Cursor allow JSON", out.String())
+			}
+		})
 	}
 }
 

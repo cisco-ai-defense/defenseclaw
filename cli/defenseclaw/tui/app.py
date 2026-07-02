@@ -2568,15 +2568,20 @@ class DefenseClawTUI(App[None]):
                 and self._last_body_signature is not None
             )
             wheel_active = self._overview_scroll_activity_recent() and self._last_body_signature is not None
-            live_data_changed = (
-                False if wheel_active else self._overview_live_data_changed_since_render()
-            )
-            if (scrolling_now or wheel_active) and not live_data_changed:
-                self._overview_last_render_scroll_y = current_scroll_y
-                self._table_columns = ()
-                self._table_rows = ()
-            else:
-                with self._connector_hook_event_render_cache():
+            # Change detection and rendering consume the same sampled event
+            # window. Previously the change check opened one cache scope and
+            # the render opened another, so a single passive repaint could
+            # query and classify the same hook rows twice on Textual's event
+            # loop. Keeping one scope makes each repaint one bounded sample.
+            with self._connector_hook_event_render_cache():
+                live_data_changed = (
+                    False if wheel_active else self._overview_live_data_changed_since_render()
+                )
+                if (scrolling_now or wheel_active) and not live_data_changed:
+                    self._overview_last_render_scroll_y = current_scroll_y
+                    self._table_columns = ()
+                    self._table_rows = ()
+                else:
                     renderable = self._overview_renderable()
                     body_signature = self._overview_body_signature()
                     connector_rows_signature = self._overview_connector_rows_signature()
@@ -5678,6 +5683,12 @@ class DefenseClawTUI(App[None]):
             # additional TTL.
             self._connector_hook_event_stats_cache = None
             self._connector_hook_event_stats_loaded_at = 0.0
+            # The change-detection signature may have materialized connector
+            # rows from the old grouped-stats TTL. Rebuild only that derived
+            # object; the event list and per-scope summaries remain cached for
+            # this sample, so no second hook-history read is introduced.
+            if self._connector_hook_event_cache_enabled:
+                self._overview_connector_rows_render_cache = None
         return changed
 
     def _hook_event_timestamps(self, connector: str = "") -> list[datetime]:
@@ -9457,13 +9468,10 @@ class DefenseClawTUI(App[None]):
         if len(self.screen_stack) > 1:
             return
         if self.active_panel == "overview" and not self.help_open:
-            live_data_changed = self._overview_live_data_changed_since_render()
-            # A changed generation is rendered as one unit so the native tiles,
-            # ENFORCEMENT box, and CONNECTORS table never show mixed samples.
-            # When nothing changed, retain the cheap native-tile refresh.
-            if not live_data_changed:
-                self._render_overview_metrics()
-            self._schedule_overview_sampled_refresh(allow_scrolled=live_data_changed)
+            # Live Overview data is sampled after the existing 3 s gateway
+            # health poll. Do not run a second telemetry pass from this general
+            # 2 s model ticker: overlapping passes made scroll and tab input
+            # wait behind duplicate SQLite reads without improving freshness.
             return
         self._periodic_refresh_running = True
         try:
@@ -9627,12 +9635,15 @@ class DefenseClawTUI(App[None]):
         self._sync_setup_readiness()
         # Passive health polls update the model but do not force a full
         # Overview repaint. The dashboard render is expensive enough that a
-        # 3s timer can block the first wheel/key event after idle.
+        # 3s timer can block the first wheel/key event after idle. Schedule one
+        # sampled generation and let the sampler defer while the wheel is
+        # active. It may repaint a scrolled dashboard after interaction stops,
+        # preserving live counts without performing a synchronous signature
+        # pass here on the event loop.
         if self.active_panel == "overview" and not self.help_open:
             self._render_overview_scope_indicator()
-            live_data_changed = self._overview_live_data_changed_since_render()
             self._schedule_overview_sampled_refresh(
-                allow_scrolled=live_data_changed,
+                allow_scrolled=True,
             )
 
     async def _poll_ai_usage(self, *, force_render: bool) -> None:

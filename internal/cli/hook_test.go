@@ -17,10 +17,72 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestOpenCursorHookInputFile(t *testing.T) {
+	hookDir := filepath.Join(t.TempDir(), "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"hook_event_name":"beforeSubmitPrompt","prompt":"hello"}`)
+	path := filepath.Join(hookDir, ".cursor-input-test.json")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input, err := openCursorHookInputFile(hookDir, path)
+	if err != nil {
+		t.Fatalf("openCursorHookInputFile: %v", err)
+	}
+	got, err := io.ReadAll(input)
+	_ = input.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("payload = %q, want %q", got, payload)
+	}
+}
+
+func TestOpenCursorHookInputFileRejectsUntrustedPaths(t *testing.T) {
+	hookDir := filepath.Join(t.TempDir(), "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), ".cursor-input-outside.json")
+	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if input, err := openCursorHookInputFile(hookDir, outside); err == nil {
+		_ = input.Close()
+		t.Fatal("accepted input outside the hooks directory")
+	}
+	wrongName := filepath.Join(hookDir, "payload.json")
+	if err := os.WriteFile(wrongName, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if input, err := openCursorHookInputFile(hookDir, wrongName); err == nil {
+		_ = input.Close()
+		t.Fatal("accepted a non-managed filename")
+	}
+	oversized := filepath.Join(hookDir, ".cursor-input-oversized.json")
+	f, err := os.OpenFile(oversized, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(cursorHookInputMaxBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if input, err := openCursorHookInputFile(hookDir, oversized); err == nil {
+		_ = input.Close()
+		t.Fatal("accepted an oversized payload")
+	}
+}
 
 // writeHookSidecarForTest writes a hooks/.hookcfg under home so buildHookOptions
 // can resolve the gateway address + fail mode without per-install flags (the

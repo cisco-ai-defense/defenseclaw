@@ -2226,6 +2226,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
             connectors={
                 "codex": PerConnectorGuardrailConfig(
                     enabled=False,
+                    mode="action",
                     hook_fail_mode="closed",
                     block_message="codex blocked",
                     hilt=HILTConfig(enabled=True, min_severity="LOW"),
@@ -2299,7 +2300,7 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
     cfg = _multi_connector_cfg()
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "closed")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "closed"
-    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "closed"
+    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "open"
     # Anything that is not "closed" normalizes to "open".
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"

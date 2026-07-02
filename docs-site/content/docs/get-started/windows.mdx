@@ -1,0 +1,253 @@
+---
+title: Native Windows
+description: Install and operate DefenseClaw directly on Windows with PowerShell, native agent hooks, multi-connector setup, and Windows-specific troubleshooting. No WSL required.
+keywords:
+  - DefenseClaw Windows
+  - DefenseClaw PowerShell
+  - native Windows agent hooks
+  - DefenseClaw Windows install
+  - DefenseClaw without WSL
+---
+
+DefenseClaw runs directly on 64-bit Windows. Native agents send lifecycle events
+to the local DefenseClaw gateway through their Windows hook surfaces. Observe
+mode records decisions; action mode can return blocking or approval decisions
+before supported actions run.
+
+<Callout>
+This is a **native Windows** integration. DefenseClaw does not install, configure,
+or protect agents inside WSL, and it does not require Git Bash, `jq`, or a POSIX
+shell for its hook path.
+</Callout>
+
+## Connector support
+
+| Agent | Setup name | Status on native Windows | Important detail |
+| --- | --- | --- | --- |
+| Codex CLI | `codex` | supported | Native Codex hooks. |
+| Claude Code | `claudecode` | supported | Follow Claude Code's Git for Windows prerequisite. |
+| Cursor | `cursor` | supported | Cursor IDE hooks only; Cursor CLI remains WSL-only. |
+| Windsurf | `windsurf` | supported | Native Cascade hooks. |
+| Gemini CLI | `geminicli` | supported | Native Gemini CLI hooks. |
+| GitHub Copilot CLI | `copilot` | supported | Upstream Windows hooks require PowerShell 7+. |
+| Antigravity | `antigravity` | supported | Native local hooks. |
+| OpenCode | `opencode` | supported | JavaScript bridge; it does not invoke the hook executable. |
+| Hermes | `hermes` | preview | Pending live end-to-end validation of the native DefenseClaw integration. |
+
+OpenHands, OmniGent, OpenClaw, and ZeptoClaw are not supported on native
+Windows. OpenHands is WSL-only; OmniGent has no supported native terminal and
+sandbox path; and the OpenClaw and ZeptoClaw connectors require a local proxy
+that DefenseClaw does not host on Windows. Unsupported connectors are omitted
+from Windows pickers and rejected by scripted setup.
+
+## Requirements
+
+- 64-bit Windows on amd64 or arm64. The installer rejects x86.
+- Windows PowerShell 5.1+ or PowerShell 7+.
+- Internet access to GitHub Releases and the `uv` installer.
+- A supported agent installed natively for the same Windows user.
+
+DefenseClaw installs per user. Use a normal PowerShell session; Administrator
+rights are not required. The installer adds `%USERPROFILE%\.local\bin` to the
+user `PATH`, installs `uv` when needed, and provisions Python 3.12 for the CLI.
+
+## Install and initialize
+
+<Steps>
+
+<Step>
+
+### Download the release installer
+
+Downloading to a file lets you inspect the script and pass PowerShell
+parameters directly. Keep the installer tag and `-Version` value the same.
+
+```powershell
+$Version = "<release-version>"
+$Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"
+$InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
+
+Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
+& $Installer -Version $Version
+```
+
+The installer downloads the ZIP for the current architecture, verifies release
+checksums when a matching entry is available, installs the CLI and gateway, and
+offers a native connector picker.
+
+</Step>
+
+<Step>
+
+### Configure one or more agents
+
+For a guided setup, including discovery of every installed native connector:
+
+```powershell
+defenseclaw init
+```
+
+The wizard pre-selects detected hook connectors in observe mode and asks which
+subset, if any, should use action mode. For one explicit connector:
+
+```powershell
+defenseclaw init --connector codex
+```
+
+You can also combine installation and zero-prompt observe-mode setup:
+
+```powershell
+& $Installer `
+  -Version $Version `
+  -Connector codex `
+  -Quickstart `
+  -QuickstartMode observe `
+  -Yes
+```
+
+</Step>
+
+<Step>
+
+### Verify the gateway and hook launcher
+
+Open a new PowerShell window so the updated user `PATH` is loaded, then run:
+
+```powershell
+Get-Command defenseclaw
+Get-Command defenseclaw-gateway
+Get-Command defenseclaw-hook
+
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw doctor
+```
+
+If initialization did not start the gateway, run `defenseclaw-gateway start`
+and repeat `defenseclaw doctor`.
+
+</Step>
+
+<Step>
+
+### Drive the native agent
+
+Restart the configured agent so it reloads its hook configuration, then trigger
+a prompt or tool call. Inspect the resulting decisions:
+
+```powershell
+defenseclaw tui
+defenseclaw alerts
+```
+
+</Step>
+
+</Steps>
+
+## Observe, action, and multiple connectors
+
+Observe mode is the safe starting point: findings are recorded without
+blocking. Promote a connector to action only after reviewing the observed
+traffic and confirming its installed version maps to a known
+[hook contract](/docs/connectors/compatibility).
+
+```powershell
+# Add or refresh a connector in observe mode
+defenseclaw setup codex --mode observe
+
+# Enable native blocking for this connector
+defenseclaw setup codex --mode action
+
+# Remove only this connector's DefenseClaw wiring
+defenseclaw setup remove codex
+```
+
+One gateway can protect several native hook connectors. For scripted setup,
+repeat `--connector`:
+
+```powershell
+defenseclaw setup `
+  --connector codex `
+  --connector cursor `
+  --mode observe `
+  --restart `
+  --yes
+```
+
+Connector setup updates each agent's documented user-level configuration and
+keeps the backups needed for targeted removal. A native agent and a copy of the
+same agent inside WSL are separate installations with different executables,
+home directories, and hook files; do not mix their configurations.
+
+## Windows file layout
+
+| Location | Purpose |
+| --- | --- |
+| `%USERPROFILE%\.local\bin\defenseclaw.cmd` | Python CLI shim. |
+| `%USERPROFILE%\.local\bin\defenseclaw-gateway.exe` | Local gateway and sidecar. |
+| `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` | No-console native hook launcher. |
+| `%USERPROFILE%\.defenseclaw\config.yaml` | Primary configuration. |
+| `%USERPROFILE%\.defenseclaw\audit.db` | Audit history and policy state. |
+| `%USERPROFILE%\.defenseclaw\gateway.jsonl` | JSONL runtime events. |
+| `%USERPROFILE%\.defenseclaw\.venv` | Managed Python environment. |
+
+Set `DEFENSECLAW_HOME` before installation and on later CLI/gateway runs to move
+the state directory. Executables remain in `%USERPROFILE%\.local\bin` so
+[`defenseclaw upgrade`](/docs/get-started/upgrade) can replace them in place.
+
+Hermes defaults to `$env:LOCALAPPDATA\hermes\config.yaml` on native Windows. If
+an older DefenseClaw version wrote `$HOME\.hermes\config.yaml`, `doctor` reports
+both paths but does not copy, merge, or delete either file.
+
+## Operations and limits
+
+```powershell
+defenseclaw-gateway restart
+defenseclaw-gateway stop
+defenseclaw upgrade
+defenseclaw doctor
+```
+
+Native Windows is hook-only. The OpenClaw/ZeptoClaw guardrail proxy is not
+available, and `defenseclaw init --sandbox` is Linux-only. Inventory, scanners,
+audit storage, alerts, and the TUI remain available. The TUI accepts Windows
+arrow-key sequences and falls back to numbered prompts when a console cannot
+redraw safely.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="defenseclaw is not recognized">
+    Open a new PowerShell window. To repair only the current session, run
+    `$env:Path = "$HOME\.local\bin;$env:Path"`, then `Get-Command defenseclaw`.
+  </Accordion>
+  <Accordion title="PowerShell blocks the downloaded installer">
+    Inspect it with `Get-Content $Installer`, then run `Unblock-File $Installer`
+    and retry. If an organization-managed policy still blocks it, follow your
+    administrator's approved signing or execution-policy process; do not weaken
+    machine-wide policy for the install.
+  </Accordion>
+  <Accordion title="The gateway runs but hooks do not fire">
+    Run `defenseclaw-gateway restart`, `defenseclaw doctor`, and `defenseclaw
+    status`. Confirm the agent and DefenseClaw run as the same Windows user,
+    re-run `defenseclaw setup <name>`, and restart the agent.
+  </Accordion>
+  <Accordion title="A connector is missing from the picker">
+    Confirm it is installed natively for the same Windows user and run
+    `defenseclaw doctor`. Unsupported and WSL-only connectors are intentionally
+    hidden. Hermes appears with a preview warning.
+  </Accordion>
+  <Accordion title="Scanner commands are reported missing">
+    Re-run `defenseclaw init`, then `defenseclaw doctor`. DefenseClaw checks the
+    managed environment's `Scripts` directory before the system `PATH`, so the
+    bundled scanners do not need a separate global installation.
+  </Accordion>
+</Accordions>
+
+## Next
+
+<Cards>
+  <Card title="Connector compatibility" href="/docs/connectors/compatibility" description="Version floors, hook contracts, and action-mode gates." />
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Guided and zero-prompt first-run workflows." />
+  <Card title="CLI reference" href="/docs/reference/cli" description="Setup, status, scanning, alerts, and gateway commands." />
+</Cards>

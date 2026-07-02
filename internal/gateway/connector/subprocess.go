@@ -50,6 +50,8 @@ type templateData struct {
 	TokenFile     string
 	ScopedToken   bool
 	ConnectorName string
+	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS int    // Cursor adapter child timeout; zero for templates that do not use it
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -71,6 +73,12 @@ type templateData struct {
 // runtime, or through the per-connector setup flow (which also
 // persists to guardrail.hook_fail_mode in config.yaml).
 const defaultHookFailMode = "closed"
+
+// cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
+// request budget while staying inside Cursor's 30-second command-hook timeout.
+// Keeping the adapter bound shorter than the vendor timeout gives it time to
+// terminate the launcher, remove the temporary payload, and emit fail-open JSON.
+const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
@@ -466,6 +474,8 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		TokenFile:     tokenFile,
 		ScopedToken:   scopedToken,
 		ConnectorName: strings.ToLower(strings.TrimSpace(connectorName)),
+		HookBinaryPS:  strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookTimeoutMS: cursorAdapterTimeoutMS,
 	}
 
 	scripts := hookScriptNamesFromExtras(extras)
@@ -530,8 +540,9 @@ const hookConfigSidecarName = ".hookcfg"
 
 // writeHookConfigSidecar persists the gateway address and fail mode the native
 // Go hook entrypoint resolves at runtime. It is only written on Windows, where
-// the native entrypoint replaces the Bash hooks; Unix keeps the .sh hooks
-// unchanged and never reads this file.
+// connectors either invoke the native entrypoint directly or, for Cursor, via
+// the PowerShell input adapter. Unix keeps the .sh hooks unchanged and never
+// reads this file.
 func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
 	if runtime.GOOS != "windows" {
 		return nil

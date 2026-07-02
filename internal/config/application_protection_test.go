@@ -157,8 +157,8 @@ func TestApplicationProtectionManualGuardrailPrecedence(t *testing.T) {
 	if got := cfg.EffectiveGuardrailModeForConnector("codex"); got != "observe" {
 		t.Errorf("manual mode should win, got %q", got)
 	}
-	if got := cfg.EffectiveHookFailModeForConnector("codex"); got != "closed" {
-		t.Errorf("manual hook fail mode should win, got %q", got)
+	if got := cfg.EffectiveHookFailModeForConnector("codex"); got != "open" {
+		t.Errorf("manual observe mode should force hook fail-open, got %q", got)
 	}
 	if got := cfg.EffectiveBlockMessageForConnector("codex"); got != "manual block" {
 		t.Errorf("manual block message should win, got %q", got)

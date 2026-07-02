@@ -141,6 +141,16 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if connector == "antigravity" {
 		return windowsHookBinaryName + " " + nativeHookFlag + connector
 	}
+	// Cursor 3.9.x writes the hook payload to a temporary file and then feeds
+	// it through Windows PowerShell's object pipeline. A native executable on
+	// that boundary receives encoding preambles instead of the JSON. The
+	// generated PowerShell adapter accepts the object pipeline, writes UTF-8
+	// without a BOM into the secured hooks directory, then invokes the
+	// consoleless launcher with a validated --input-file path.
+	if connector == "cursor" {
+		adapter := strings.TrimSuffix(unixCommand, ".sh") + ".ps1"
+		return "& " + powershellQuoteLiteral(adapter)
+	}
 	return windowsQuoteExe(defenseclawHookBinary()) + " " + nativeHookFlag + connector
 }
 
@@ -179,6 +189,16 @@ func defenseclawGatewayBinary() string {
 // single token. Backslashes are preserved verbatim inside double quotes.
 func windowsQuoteExe(p string) string {
 	return `"` + p + `"`
+}
+
+// powershellQuoteLiteral returns one inert PowerShell string literal. Cursor
+// inserts the generated command after a pipeline operator, so its adapter must
+// be invoked as `& '<path>'`; a quoted path without `&` is only an expression
+// and PowerShell rejects it as a pipeline target. Doubling a single quote is
+// PowerShell's literal escape and prevents a user-controlled home path from
+// changing the command structure.
+func powershellQuoteLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // isNativeHookCommand reports whether cmd is the DefenseClaw native Go hook

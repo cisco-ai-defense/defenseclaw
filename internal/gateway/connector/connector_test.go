@@ -6489,6 +6489,16 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		out = append(out, vendor)
 		return out
 	}
+	withVendors := func(vendors ...string) []string {
+		out := make([]string, 0, len(generic)+len(vendors))
+		out = append(out, generic...)
+		out = append(out, vendors...)
+		return out
+	}
+	cursorScripts := withVendor("cursor-hook.sh")
+	if runtime.GOOS == "windows" {
+		cursorScripts = withVendors("cursor-hook.sh", "cursor-hook.ps1")
+	}
 
 	cases := []struct {
 		ctor func() Connector
@@ -6500,7 +6510,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
 		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
-		{func() Connector { return NewCursorConnector() }, "cursor", withVendor("cursor-hook.sh")},
+		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
 		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
 		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
@@ -6792,6 +6802,10 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - openclaw   owns no vendor template (fetch-interceptor plugin)
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
+	cursorScripts := []string{"cursor-hook.sh"}
+	if runtime.GOOS == "windows" {
+		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
+	}
 	cases := []struct {
 		name string
 		ctor func() Connector
@@ -6800,7 +6814,7 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
-		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, cursorScripts},
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},

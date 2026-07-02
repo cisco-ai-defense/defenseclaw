@@ -1,11 +1,14 @@
 # Installation Guide
 
-This guide covers two scenarios:
+This guide covers three scenarios:
 
 1. **You already have OpenClaw running** — add DefenseClaw to secure it
 2. **Fresh install** — set up OpenClaw inside OpenShell, then add DefenseClaw
+3. **Native Windows** — protect a supported agent through its native hook surface
 
-Instructions are provided for both **NVIDIA DGX Spark** (aarch64/Ubuntu) and **macOS** (Apple Silicon).
+Instructions cover **NVIDIA DGX Spark** (aarch64/Ubuntu), **macOS** (Apple
+Silicon), Linux, and native Windows. For the complete PowerShell install and
+operations flow, see the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/).
 
 ---
 
@@ -42,10 +45,14 @@ On **native Windows**, DefenseClaw is **hook-only**. The current Windows
 connector scope deliberately excludes WSL and requires both the upstream agent
 and the complete DefenseClaw hook path to run directly on Windows.
 
+Follow the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
+for prerequisites, PowerShell installation, connector setup, verification,
+upgrades, and troubleshooting.
+
 - **Supported:** Codex, Claude Code, Cursor IDE hooks, Windsurf, Gemini CLI,
   Copilot CLI, Antigravity, and OpenCode.
-- **Preview:** Hermes, because upstream labels native Windows support Early
-  Beta.
+- **Preview:** Hermes, pending live end-to-end validation of the DefenseClaw
+  native integration.
 - **Unsupported:** OpenHands and OmniGent. OpenHands CLI requires WSL;
   OmniGent has no supported native Windows terminal/sandbox path.
 

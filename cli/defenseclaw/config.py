@@ -1917,7 +1917,9 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Per-connector override > global > ``"open"`` (non-"closed")."""
+        """Observe always opens; action uses per-connector > global."""
+        if self.effective_mode(connector).strip().lower() != "action":
+            return "open"
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":

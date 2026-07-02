@@ -64,6 +64,8 @@ from defenseclaw.inventory.claw_inventory import (
 )
 from defenseclaw.models import ActionEntry
 
+from tests.helpers import seed_cached_plugin
+
 # ---------------------------------------------------------------------------
 # Fixtures — canonical JSON payloads returned by ``openclaw … --json``
 # ---------------------------------------------------------------------------
@@ -2243,7 +2245,11 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
                 f,
             )
 
-        with patch.dict(os.environ, {"HOME": home}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"HOME": home, "USERPROFILE": home},
+            clear=False,
+        ):
             inv = build_claw_aibom(cfg, live=True)
 
         self.assertEqual(inv["connector"], "opencode")
@@ -2271,7 +2277,11 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         with open(os.path.join(command_dir, "triage.md"), "w", encoding="utf-8") as f:
             f.write("---\ndescription: Triage issues\n---\n")
 
-        with patch.dict(os.environ, {"HOME": home}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"HOME": home, "USERPROFILE": home},
+            clear=False,
+        ):
             inv = build_claw_aibom(cfg, live=True)
 
         self.assertEqual(inv["connector"], "antigravity")
@@ -2383,6 +2393,54 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             inv = build_claw_aibom(cfg, live=True)
         ids = [p["id"] for p in inv["plugins"]]
         self.assertEqual(ids, ["real"])
+
+    def test_codex_cache_inventory_uses_manifest_roots_and_active_metadata(self):
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        codex_home = os.path.join(self.tmp, ".codex")
+        plugin_root = os.path.join(codex_home, "plugins")
+        cache = os.path.join(plugin_root, "cache")
+        _seed_plugin(plugin_root, "clean-plugin", manifest="plugin.json")
+
+        browser = seed_cached_plugin(
+            cache, "openai-bundled", "browser", "2.0.0"
+        )
+        sites = seed_cached_plugin(
+            cache, "openai-bundled", "sites", "1.2.0"
+        )
+        seed_cached_plugin(cache, "openai-curated-remote", "sites", "9.0.0")
+        github = seed_cached_plugin(
+            cache, "openai-curated-remote", "github", "0.2.0"
+        )
+        os.makedirs(codex_home, exist_ok=True)
+        with open(
+            os.path.join(codex_home, "config.toml"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                "[plugins.'browser@openai-bundled']\n"
+                "enabled = true\n"
+                "[plugins.'sites@openai-bundled']\n"
+                "enabled = true\n"
+            )
+
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root, cache]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        by_id = {plugin["id"]: plugin for plugin in inv["plugins"]}
+        self.assertEqual(set(by_id), {"clean-plugin", "browser", "github", "sites"})
+        self.assertNotIn("openai-bundled", by_id)
+        self.assertNotIn("openai-curated-remote", by_id)
+        self.assertEqual(by_id["browser"]["path"], browser)
+        self.assertTrue(by_id["browser"]["enabled"])
+        self.assertEqual(by_id["sites"]["path"], sites)
+        self.assertTrue(by_id["sites"]["enabled"])
+        self.assertEqual(by_id["github"]["path"], github)
+        self.assertFalse(by_id["github"]["enabled"])
+        self.assertEqual(inv["summary"]["plugins"]["count"], 4)
+        self.assertEqual(inv["summary"]["plugins"]["disabled"], 1)
 
     def test_hidden_and_staging_plugin_dirs_are_skipped(self):
         """Hidden activation state must not surface as enabled plugins."""
