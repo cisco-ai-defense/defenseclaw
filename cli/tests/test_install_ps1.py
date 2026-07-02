@@ -87,6 +87,23 @@ def _fixture_wheel(
     return wheel
 
 
+def _transaction_functions() -> str:
+    return "".join(
+        _extract_powershell_function(name)
+        for name in (
+            "Assert-ManagedDirectoryPath",
+            "Remove-ManagedDirectory",
+            "Assert-ManagedInstallFile",
+            "Copy-VerifiedDirectory",
+            "Test-StagedReleaseFile",
+            "New-PairedInstallBackup",
+            "Restore-PairedInstallBackup",
+            "Replace-ManagedInstallFile",
+            "Invoke-PairedInstallTransaction",
+        )
+    )
+
+
 def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     text = INSTALL_PS1.read_text()
 
@@ -113,6 +130,19 @@ def test_cli_smoke_precedes_launcher_publication() -> None:
     assert 'set `"PYTHONHOME=`"' in text
     assert "setlocal" in text
     assert "endlocal & exit /b %defenseclawExit%" in text
+
+
+def test_release_staging_precedes_gateway_stop_and_mutation() -> None:
+    text = INSTALL_PS1.read_text()
+    main = text.split("function Main", 1)[1]
+    transaction = text.split("function Invoke-PairedInstallTransaction", 1)[1].split(
+        "function Install-Gateway", 1
+    )[0]
+
+    assert main.index("Stage-ReleaseArtifacts") < main.index("Invoke-PairedInstallTransaction")
+    assert transaction.index("Stop-ManagedGateway") < transaction.index("New-PairedInstallBackup")
+    assert transaction.index("New-PairedInstallBackup") < transaction.index("Replace-ManagedInstallFile")
+    assert transaction.index("Test-PairedInstalledState") < transaction.index('$phase = "restart-new-gateway"')
 
 
 def test_windows_installer_offers_only_native_connector_surface() -> None:
@@ -828,6 +858,391 @@ try {{
     assert completed.returncode == 0, completed.stderr
     assert "ESCAPE=Refusing unverified managed directory path" in completed.stdout
     assert "REPARSE=Managed install root must be a real directory" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows file sharing")
+def test_gateway_lock_waits_for_process_exit_and_handle_release(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    gateway = tmp_path / "defenseclaw-gateway.exe"
+    gateway.write_bytes(b"old gateway")
+    ready = tmp_path / "ready"
+    child_command = rf"""
+$stream = [System.IO.File]::Open(
+    '{_ps_quote(gateway)}',
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+)
+Set-Content -LiteralPath '{_ps_quote(ready)}' -Value 'ready'
+Start-Sleep -Milliseconds 750
+$stream.Dispose()
+"""
+    child = subprocess.Popen(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", child_command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        for _ in range(50):
+            if ready.exists():
+                break
+            import time
+
+            time.sleep(0.02)
+        assert ready.exists()
+        command = _extract_powershell_function("Wait-GatewayFileRelease") + rf"""
+Wait-GatewayFileRelease -GatewayPath '{_ps_quote(gateway)}' -ProcessId {child.pid} `
+    -Attempts 30 -DelayMilliseconds 100
+Write-Output 'RELEASED=true'
+"""
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "RELEASED=true" in completed.stdout
+    finally:
+        child.communicate(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_gateway_lock_timeout_preserves_installed_artifact(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    gateway = tmp_path / "defenseclaw-gateway.exe"
+    gateway.write_bytes(b"unchanged gateway")
+    command = _extract_powershell_function("Wait-GatewayFileRelease") + rf"""
+$before = (Get-FileHash -LiteralPath '{_ps_quote(gateway)}' -Algorithm SHA256).Hash
+$stream = [System.IO.File]::Open(
+    '{_ps_quote(gateway)}',
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+)
+try {{
+    Wait-GatewayFileRelease -GatewayPath '{_ps_quote(gateway)}' -Attempts 2 -DelayMilliseconds 0
+}} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}} finally {{
+    $stream.Dispose()
+}}
+$after = (Get-FileHash -LiteralPath '{_ps_quote(gateway)}' -Algorithm SHA256).Hash
+Write-Output "UNCHANGED=$($before -eq $after)"
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "did not exit and release" in completed.stdout
+    assert "UNCHANGED=True" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_unrelated_pid_evidence_is_never_stopped(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    gateway = tmp_path / "bin" / "defenseclaw-gateway.exe"
+    gateway.parent.mkdir()
+    gateway.write_text("managed")
+    (data_dir / "gateway.pid").write_text(
+        '{"pid":4242,"executable":"' + str(gateway).replace("\\", "\\\\") + '"}'
+    )
+    unrelated = tmp_path / "unrelated.exe"
+    command = "".join(
+        _extract_powershell_function(name)
+        for name in ("Get-ManagedGatewayProcess", "Stop-ManagedGateway")
+    ) + rf"""
+$script:invoked = $false
+function Get-CimInstance {{
+    return [pscustomobject]@{{ ExecutablePath = '{_ps_quote(unrelated)}' }}
+}}
+function Invoke-ManagedCommand {{ $script:invoked = $true }}
+$stopped = Stop-ManagedGateway -GatewayPath '{_ps_quote(gateway)}' -DataDir '{_ps_quote(data_dir)}'
+Write-Output "STOPPED=$stopped"
+Write-Output "INVOKED=$script:invoked"
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "STOPPED=False" in completed.stdout
+    assert "INVOKED=False" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_gateway_install_path_rejects_reparse_artifact(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    install = tmp_path / "bin"
+    install.mkdir()
+    gateway = install / "defenseclaw-gateway.exe"
+    command = _extract_powershell_function("Assert-ManagedInstallFile") + rf"""
+$root = '{_ps_quote(install)}'
+$target = '{_ps_quote(gateway)}'
+function Get-Item {{
+    param([string]$LiteralPath, [switch]$Force, [object]$ErrorAction)
+    if ($LiteralPath -eq $root) {{
+        return [pscustomobject]@{{ PSIsContainer = $true; Attributes = [System.IO.FileAttributes]::Directory }}
+    }}
+    return [pscustomobject]@{{
+        PSIsContainer = $false
+        Attributes = [System.IO.FileAttributes]::ReparsePoint
+    }}
+}}
+try {{
+    Assert-ManagedInstallFile -Path $target -ExpectedPath $target -InstallRoot $root
+}} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}}
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ERROR=Managed install artifact must be a regular file" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+@pytest.mark.parametrize("was_running", [False, True])
+def test_paired_transaction_success_replaces_all_artifacts_and_restarts_conditionally(
+    tmp_path: Path, was_running: bool
+) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    home = tmp_path / ".defenseclaw"
+    venv = home / ".venv"
+    install = tmp_path / "bin"
+    staged = tmp_path / "staged"
+    venv.mkdir(parents=True)
+    install.mkdir()
+    staged.mkdir()
+    (venv / "cli-state").write_text("old-cli")
+    for name, value in (
+        ("defenseclaw-gateway.exe", "old-gateway"),
+        ("defenseclaw-hook.exe", "old-hook"),
+        ("defenseclaw.cmd", "old-shim"),
+    ):
+        (install / name).write_text(value)
+    new_gateway = staged / "gateway.exe"
+    new_hook = staged / "hook.exe"
+    new_gateway.write_text("new-gateway")
+    new_hook.write_text("new-hook")
+    command = _transaction_functions() + rf"""
+$ErrorActionPreference = 'Stop'
+$DefenseClawHome = '{_ps_quote(home)}'
+$Venv = '{_ps_quote(venv)}'
+$InstallDir = '{_ps_quote(install)}'
+$script:running = ${str(was_running).lower()}
+$script:stops = 0
+$script:starts = 0
+$artifacts = [pscustomobject]@{{
+    Gateway = '{_ps_quote(new_gateway)}'
+    Hook = '{_ps_quote(new_hook)}'
+    Wheel = '{_ps_quote(staged / 'cli.whl')}'
+    GatewayVersion = 'fixture'
+}}
+function Get-ManagedGatewayProcess {{
+    if ($script:running) {{ return [pscustomobject]@{{ PID = 44 }} }}
+    return $null
+}}
+function Stop-ManagedGateway {{ $script:stops++; $script:running = $false; return $true }}
+function Wait-GatewayFileRelease {{}}
+function Install-Cli {{
+    Set-Content -LiteralPath (Join-Path $Venv 'cli-state') -Value 'new-cli'
+}}
+function Publish-CliLauncher {{
+    Set-Content -LiteralPath (Join-Path $InstallDir 'defenseclaw.cmd') -Value 'new-shim'
+}}
+function Test-PairedInstalledState {{}}
+function Start-ManagedGateway {{ $script:starts++; $script:running = $true }}
+function Write-Warn2 {{ param([string]$Msg) }}
+function Write-Ok {{ param([string]$Msg) Write-Output "SUCCESS=$Msg" }}
+Invoke-PairedInstallTransaction -Artifacts $artifacts
+Write-Output "STOPS=$script:stops"
+Write-Output "STARTS=$script:starts"
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "SUCCESS=Paired gateway, hook, and CLI installation validated" in completed.stdout
+    assert (install / "defenseclaw-gateway.exe").read_text() == "new-gateway"
+    assert (install / "defenseclaw-hook.exe").read_text() == "new-hook"
+    assert (install / "defenseclaw.cmd").read_text().strip() == "new-shim"
+    assert (venv / "cli-state").read_text().strip() == "new-cli"
+    assert f"STOPS={1 if was_running else 0}" in completed.stdout
+    assert f"STARTS={1 if was_running else 0}" in completed.stdout
+    assert not list(home.glob(".install-backup.*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+@pytest.mark.parametrize("failure_phase", ["replace", "cli", "validation", "restart"])
+def test_paired_transaction_failure_restores_all_artifacts(
+    tmp_path: Path, failure_phase: str
+) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    home = tmp_path / ".defenseclaw"
+    venv = home / ".venv"
+    install = tmp_path / "bin"
+    staged = tmp_path / "staged"
+    venv.mkdir(parents=True)
+    install.mkdir()
+    staged.mkdir()
+    (venv / "cli-state").write_text("old-cli")
+    old_values = {
+        "defenseclaw-gateway.exe": "old-gateway",
+        "defenseclaw-hook.exe": "old-hook",
+        "defenseclaw.cmd": "old-shim",
+    }
+    for name, value in old_values.items():
+        (install / name).write_text(value)
+    new_gateway = staged / "gateway.exe"
+    new_hook = staged / "hook.exe"
+    new_gateway.write_text("new-gateway")
+    new_hook.write_text("new-hook")
+    command = _transaction_functions() + rf"""
+$ErrorActionPreference = 'Stop'
+$DefenseClawHome = '{_ps_quote(home)}'
+$Venv = '{_ps_quote(venv)}'
+$InstallDir = '{_ps_quote(install)}'
+$failPhase = '{failure_phase}'
+$script:running = $true
+$script:replaceCount = 0
+$script:startCount = 0
+$artifacts = [pscustomobject]@{{
+    Gateway = '{_ps_quote(new_gateway)}'
+    Hook = '{_ps_quote(new_hook)}'
+    Wheel = '{_ps_quote(staged / 'cli.whl')}'
+    GatewayVersion = 'fixture'
+}}
+function Get-ManagedGatewayProcess {{
+    if ($script:running) {{ return [pscustomobject]@{{ PID = 44 }} }}
+    return $null
+}}
+function Stop-ManagedGateway {{ $script:running = $false; return $true }}
+function Wait-GatewayFileRelease {{}}
+function Replace-ManagedInstallFile {{
+    param([string]$Source, [string]$Target, [string]$InstallRoot)
+    [System.IO.File]::Copy($Source, $Target, $true)
+    $script:replaceCount++
+    if ($failPhase -eq 'replace' -and $script:replaceCount -eq 2) {{ throw 'replace failed' }}
+}}
+function Install-Cli {{
+    Set-Content -LiteralPath (Join-Path $Venv 'cli-state') -Value 'new-cli'
+    if ($failPhase -eq 'cli') {{ throw 'cli failed' }}
+}}
+function Publish-CliLauncher {{
+    Set-Content -LiteralPath (Join-Path $InstallDir 'defenseclaw.cmd') -Value 'new-shim'
+}}
+function Test-PairedInstalledState {{
+    if ($failPhase -eq 'validation') {{ throw 'validation failed' }}
+}}
+function Start-ManagedGateway {{
+    $script:startCount++
+    $script:running = $true
+    if ($failPhase -eq 'restart' -and $script:startCount -eq 1) {{ throw 'restart failed' }}
+}}
+function Write-Warn2 {{ param([string]$Msg) }}
+function Write-Ok {{ param([string]$Msg) Write-Output "SUCCESS=$Msg" }}
+try {{ Invoke-PairedInstallTransaction -Artifacts $artifacts }} catch {{
+    Write-Output "ERROR=$($_.Exception.Message)"
+}}
+Write-Output "STARTS=$script:startCount"
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ERROR=Install failed during" in completed.stdout
+    assert "SUCCESS=" not in completed.stdout
+    for name, value in old_values.items():
+        assert (install / name).read_text().strip() == value
+    assert (venv / "cli-state").read_text().strip() == "old-cli"
+    assert "STARTS=1" in completed.stdout or "STARTS=2" in completed.stdout
+    assert not list(home.glob(".install-backup.*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_call_operator_sets_explicit_success_and_failure_status() -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    success = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            f"& '{_ps_quote(INSTALL_PS1)}' -Help; Write-Output \"STATUS=$LASTEXITCODE\"",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert success.returncode == 0, success.stderr
+    assert "STATUS=0" in success.stdout
+
+    failure_command = rf"""
+try {{ & '{_ps_quote(INSTALL_PS1)}' -Connector invalid }} catch {{ Write-Output 'CAUGHT=true' }}
+Write-Output "STATUS=$LASTEXITCODE"
+"""
+    failure = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", failure_command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert failure.returncode == 0, failure.stderr
+    assert "CAUGHT=true" in failure.stdout
+    assert "STATUS=1" in failure.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")
