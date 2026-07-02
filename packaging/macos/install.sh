@@ -247,16 +247,22 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     fi
 
     log "  [${c}] preparing userspace"
-    prepare_userspace_for "${c}" "${TARGET_HOME}"
+    if ! prepare_userspace_for "${c}" "${TARGET_HOME}"; then
+      warn "  [${c}] refused to prepare userspace (symlinked or non-dir path); skipping"
+      continue
+    fi
     # Match the ownership of any newly created files to the target user.
-    chown -R "${TARGET_UID}:${TARGET_GID}" \
-      "${TARGET_HOME}/.${c%code}" 2>/dev/null || true
-    # Special-case naming (claudecode -> .claude, codex -> .codex, cursor -> .cursor).
+    # -h so we chown the entry itself and never follow symlinks (defense
+    # in depth alongside ensure_safe_userspace_path in the lib helpers).
     case "${c}" in
-      claudecode) chown -R "${TARGET_UID}:${TARGET_GID}" "${TARGET_HOME}/.claude" 2>/dev/null || true;;
-      codex)      chown -R "${TARGET_UID}:${TARGET_GID}" "${TARGET_HOME}/.codex"  2>/dev/null || true;;
-      cursor)     chown -R "${TARGET_UID}:${TARGET_GID}" "${TARGET_HOME}/.cursor" 2>/dev/null || true;;
+      claudecode) DC_AGENT_DIR="${TARGET_HOME}/.claude";;
+      codex)      DC_AGENT_DIR="${TARGET_HOME}/.codex";;
+      cursor)     DC_AGENT_DIR="${TARGET_HOME}/.cursor";;
+      *)          DC_AGENT_DIR="";;
     esac
+    if [[ -n "${DC_AGENT_DIR}" && -d "${DC_AGENT_DIR}" && ! -L "${DC_AGENT_DIR}" ]]; then
+      find "${DC_AGENT_DIR}" -exec chown -h "${TARGET_UID}:${TARGET_GID}" {} + 2>/dev/null || true
+    fi
 
     AGENT_VER="${AGENT_VERSION}"
     if [[ -z "${AGENT_VER}" ]]; then
