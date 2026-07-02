@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -36,6 +37,242 @@ import click
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
+
+_WINDOWS_LAUNCHER_EXTENSIONS = (".com", ".exe", ".bat", ".cmd")
+_CLAWHUB_OUTPUT_LIMIT = 16 * 1024
+
+
+def _windows_environment(name: str, default: str = "") -> str:
+    for key, value in os.environ.items():
+        if key.casefold() == name.casefold():
+            return value
+    return default
+
+
+def _windows_launcher_extensions(pathext: str | None = None) -> tuple[str, ...]:
+    """Return PATHEXT's safe executable subset, preserving its precedence."""
+    raw = pathext if pathext is not None else _windows_environment("PATHEXT")
+    requested = [item.strip().lower() for item in raw.split(";") if item.strip()]
+    ordered = [item if item.startswith(".") else f".{item}" for item in requested]
+    safe = [item for item in ordered if item in _WINDOWS_LAUNCHER_EXTENSIONS]
+    for extension in _WINDOWS_LAUNCHER_EXTENSIONS:
+        if extension not in safe:
+            safe.append(extension)
+    return tuple(safe)
+
+
+def _case_insensitive_child(directory: str, filename: str) -> str | None:
+    """Resolve one regular directory entry without executing or importing it."""
+    try:
+        entries = {entry.name.casefold(): entry for entry in os.scandir(directory)}
+    except OSError:
+        return None
+    entry = entries.get(filename.casefold())
+    if entry is None:
+        return None
+    try:
+        if not entry.is_file():
+            return None
+    except OSError:
+        return None
+    return os.path.abspath(entry.path)
+
+
+def _resolve_windows_launcher(
+    binary: str,
+    *,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> str | None:
+    """Resolve a binary using Windows/PATHEXT semantics, never extensionless.
+
+    npm installs both a Unix shell wrapper and Windows launchable siblings in
+    ``node_modules/.bin``.  Only the allowlisted PATHEXT suffixes are eligible;
+    their configured order is honored, with COM/EXE/BAT/CMD as deterministic
+    fallbacks when PATHEXT is absent or incomplete.
+    """
+    directory, filename = os.path.split(binary)
+    directories: list[str]
+    if directory:
+        directories = [directory]
+    else:
+        path_value = search_path if search_path is not None else _windows_environment("PATH")
+        separator = ";" if ";" in path_value or os.pathsep == ";" else os.pathsep
+        directories = [item.strip().strip('"') for item in path_value.split(separator) if item.strip()]
+
+    _base, extension = os.path.splitext(filename)
+    extensions = _windows_launcher_extensions(pathext)
+    if extension:
+        if extension.lower() not in extensions:
+            return None
+        candidate_names = [filename]
+    else:
+        candidate_names = [f"{filename}{item}" for item in extensions]
+
+    for path_entry in directories:
+        directory_path = os.path.abspath(path_entry or os.curdir)
+        for candidate_name in candidate_names:
+            found = _case_insensitive_child(directory_path, candidate_name)
+            if found:
+                return found
+    return None
+
+
+def _resolve_command(binary: str, *, local_first: bool = False) -> str | None:
+    """Resolve an absolute executable path with platform-native semantics."""
+    if os.name == "nt":
+        if local_first:
+            local = os.path.join(os.getcwd(), "node_modules", ".bin", binary)
+            found = _resolve_windows_launcher(local)
+            if found:
+                return found
+        return _resolve_windows_launcher(binary)
+
+    if local_first:
+        local = os.path.join(os.getcwd(), "node_modules", ".bin", binary)
+        if os.path.isfile(local) and os.access(local, os.X_OK):
+            return os.path.abspath(local)
+    found = shutil.which(binary)
+    return os.path.abspath(found) if found else None
+
+
+def _trusted_windows_command_processor() -> str:
+    """Return the system-owned command processor used only for CMD/BAT shims."""
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length <= 0 or length >= len(buffer):
+        raise OSError("Windows system directory is unavailable")
+    command_processor = os.path.abspath(os.path.join(buffer.value, "cmd.exe"))
+    if not os.path.isfile(command_processor):
+        raise OSError("trusted Windows command processor was not found")
+    return command_processor
+
+
+def _cmd_environment_value(value: str) -> str:
+    """Validate a value for quoted expansion by a fixed, non-user batch script."""
+    if any(character in value for character in ('"', "\r", "\n", "\x00")):
+        raise ValueError("Windows launcher arguments cannot contain quotes or line breaks")
+    # Expansion happens once inside quotes with delayed expansion disabled.
+    # The control script intentionally does not use CALL, which would trigger
+    # a second expansion pass over percent signs and carets.
+    return value
+
+
+def _bounded_pipe_reader(pipe: Any, sink: bytearray) -> None:
+    try:
+        while chunk := pipe.read(8192):
+            remaining = _CLAWHUB_OUTPUT_LIMIT - len(sink)
+            if remaining > 0:
+                sink.extend(chunk[:remaining])
+    finally:
+        pipe.close()
+
+
+def _run_clawhub_process(
+    argv: list[str],
+    *,
+    timeout: int,
+    cwd: str | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run an untrusted ClawHub launcher with bounded captured output.
+
+    CMD/BAT files are interpreted by the trusted system ``cmd.exe``.  The
+    command script is fixed text and all external values travel through a
+    private environment after validation, so user input is never interpolated
+    into a shell command string.  Delayed expansion is disabled and the child
+    starts from an owned temporary working directory before the fixed script
+    changes to the explicitly supplied staging directory.
+    """
+    import tempfile
+
+    if not argv or not os.path.isabs(argv[0]):
+        raise OSError("ClawHub launcher could not be resolved to an absolute path")
+
+    child_argv = list(argv)
+    child_env = os.environ.copy()
+    launch_cwd = os.path.abspath(cwd) if cwd else None
+    stdin_data = input_text.encode("utf-8") if input_text is not None else None
+
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-clawhub-launch-") as control_dir:
+        if os.name == "nt" and os.path.splitext(argv[0])[1].lower() in {".cmd", ".bat"}:
+            command_processor = _trusted_windows_command_processor()
+            child_env["DEFENSECLAW_CLAWHUB_LAUNCHER"] = _cmd_environment_value(argv[0])
+            child_env["DEFENSECLAW_CLAWHUB_CWD"] = _cmd_environment_value(launch_cwd or control_dir)
+            placeholders: list[str] = []
+            for index, argument in enumerate(argv[1:]):
+                key = f"DEFENSECLAW_CLAWHUB_ARG_{index}"
+                child_env[key] = _cmd_environment_value(argument)
+                placeholders.append(f'"%{key}%"')
+            script_path = os.path.join(control_dir, "launch.cmd")
+            script = (
+                "@echo off\r\n"
+                'cd /d "%DEFENSECLAW_CLAWHUB_CWD%" || exit /b 1\r\n'
+                '"%DEFENSECLAW_CLAWHUB_LAUNCHER%" ' + " ".join(placeholders) + "\r\n"
+            )
+            with open(script_path, "x", encoding="ascii", newline="") as handle:
+                handle.write(script)
+            child_argv = [command_processor, "/d", "/v:off", "/s", "/c", "launch.cmd"]
+            launch_cwd = control_dir
+        elif launch_cwd is None:
+            launch_cwd = control_dir
+
+        process = subprocess.Popen(
+            child_argv,
+            cwd=launch_cwd,
+            env=child_env,
+            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        stdout = bytearray()
+        stderr = bytearray()
+        readers = [
+            threading.Thread(target=_bounded_pipe_reader, args=(process.stdout, stdout), daemon=True),
+            threading.Thread(target=_bounded_pipe_reader, args=(process.stderr, stderr), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+        if stdin_data is not None:
+            assert process.stdin is not None
+            process.stdin.write(stdin_data)
+            process.stdin.close()
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            for reader in readers:
+                reader.join()
+
+    return subprocess.CompletedProcess(
+        argv,
+        returncode,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def _external_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    detail = (result.stderr or result.stdout).strip()
+    if not detail:
+        return f"exit status {result.returncode}"
+    detail = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "?", detail)
+    detail = re.sub(
+        r"(?i)\b(token|secret|password|authorization|api[_-]?key)\b(\s*[:=]\s*)(\S+)",
+        r"\1\2<redacted>",
+        detail,
+    )
+    if len(detail.encode("utf-8")) >= _CLAWHUB_OUTPUT_LIMIT:
+        detail += "\n[output truncated]"
+    return detail
+
+
 
 
 @click.group()
@@ -79,17 +316,20 @@ def _resolve_clawhub_search_argv(query: str, allow_remote_fetch: bool) -> list[s
     re-opens the original fetch-and-execute-on-search exposure; it exists only
     as an explicit, documented operator decision.
     """
-    local = shutil.which("clawhub")
+    local = _resolve_command("clawhub", local_first=True)
     if local:
         return [local, "search", query]
+    npx = _resolve_command("npx")
+    if not npx:
+        raise OSError("neither a launchable clawhub nor npx executable was found")
     if allow_remote_fetch:
         # Explicit operator opt-in: npx may fetch+execute clawhub from the
         # network. This re-opens the F-1481 supply-chain exposure by design.
-        return ["npx", "clawhub", "search", query]
+        return [npx, "clawhub", "search", query]
     # Default: never let npx silently fetch+execute from the network. With
     # --no-install npx uses only an already-cached package and errors out if it
     # would have to download one.
-    return ["npx", "--no-install", "clawhub", "search", query]
+    return [npx, "--no-install", "clawhub", "search", query]
 
 
 def _clawhub_unavailable(stderr: str) -> bool:
@@ -112,22 +352,23 @@ def _clawhub_unavailable(stderr: str) -> bool:
 
 def _clawhub_args(*args: str) -> list[str]:
     """Prefer a real clawhub binary; fall back to npx for on-demand installs."""
-    local_bin = os.path.join(os.getcwd(), "node_modules", ".bin", "clawhub")
-    if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
-        return [local_bin, *args]
-    found = shutil.which("clawhub")
+    found = _resolve_command("clawhub", local_first=True)
     if found:
         return [found, *args]
-    return ["npx", "clawhub", *args]
+    npx = _resolve_command("npx")
+    if npx:
+        return [npx, "clawhub", *args]
+    raise OSError("neither a launchable clawhub nor npx executable was found")
 
 
 @skill.command()
 @click.argument("query")
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
 @click.option(
-    "--allow-remote-fetch", is_flag=True,
+    "--allow-remote-fetch",
+    is_flag=True,
     help="Permit npx to fetch+execute the clawhub package from the network "
-         "(supply-chain risk — see docs). Default: use a local/cached clawhub only.",
+    "(supply-chain risk — see docs). Default: use a local/cached clawhub only.",
 )
 @pass_ctx
 def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool) -> None:
@@ -149,16 +390,13 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
       defenseclaw skill search database --json
       defenseclaw skill search wiki --allow-remote-fetch
     """
-    argv = _resolve_clawhub_search_argv(query, allow_remote_fetch)
     try:
-        result = subprocess.run(
-            argv,
-            capture_output=True, text=True, timeout=30,
-        )
-    except FileNotFoundError:
+        argv = _resolve_clawhub_search_argv(query, allow_remote_fetch)
+        result = _run_clawhub_process(argv, timeout=30)
+    except (OSError, ValueError) as exc:
         click.echo(
             "error: clawhub not found — install the clawhub binary, or install "
-            "Node.js (npx) and pass --allow-remote-fetch to fetch it",
+            f"Node.js (npx) and pass --allow-remote-fetch to fetch it ({exc})",
             err=True,
         )
         raise SystemExit(1)
@@ -3760,29 +3998,81 @@ def _skill_install_targets(
 
 def _find_clawhub_staged_skill(stage_dir: str, skill_name: str) -> str | None:
     """Find the skill directory produced by ``clawhub install`` in a staging cwd."""
+    stage_root = os.path.realpath(stage_dir)
     candidates = [
         os.path.join(stage_dir, "skills", skill_name),
         os.path.join(stage_dir, skill_name),
     ]
     for candidate in candidates:
-        if os.path.isdir(candidate):
-            return candidate
+        if not os.path.isdir(candidate) or _is_path_alias(candidate):
+            continue
+        candidate_root = os.path.realpath(candidate)
+        if not _path_is_within(stage_root, candidate_root):
+            continue
+        if _validate_staged_skill_tree(candidate_root):
+            return candidate_root
     return None
 
 
+def _is_path_alias(path: str) -> bool:
+    if os.path.islink(path):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    return bool(isjunction and isjunction(path))
+
+
+def _path_is_within(root: str, candidate: str) -> bool:
+    try:
+        return os.path.normcase(os.path.commonpath([root, candidate])) == os.path.normcase(root)
+    except ValueError:
+        return False
+
+
+def _validate_staged_skill_tree(skill_root: str) -> bool:
+    """Accept only a real SKILL.md tree with no symlink/reparse escapes."""
+    manifest = os.path.join(skill_root, "SKILL.md")
+    if not os.path.isfile(manifest) or _is_path_alias(manifest):
+        return False
+    for current_root, directories, filenames in os.walk(skill_root, followlinks=False):
+        if not _path_is_within(skill_root, os.path.realpath(current_root)):
+            return False
+        for name in [*directories, *filenames]:
+            entry = os.path.join(current_root, name)
+            if _is_path_alias(entry):
+                return False
+    return True
+
+
 def _copy_skill_tree_to_connector(
-    source_path: str, install_root: str, skill_name: str, *, force: bool,
+    source_path: str,
+    install_root: str,
+    skill_name: str,
+    *,
+    force: bool,
 ) -> str:
+    if os.path.basename(skill_name) != skill_name or not _CLAWHUB_NAME_RE.fullmatch(skill_name):
+        click.echo("error: invalid ClawHub skill identity", err=True)
+        raise SystemExit(1)
+    if not _validate_staged_skill_tree(source_path):
+        click.echo("error: staged ClawHub skill contains an unsafe path alias", err=True)
+        raise SystemExit(1)
+    if os.path.lexists(install_root) and _is_path_alias(install_root):
+        click.echo("error: connector skill directory is a path alias", err=True)
+        raise SystemExit(1)
+    os.makedirs(install_root, exist_ok=True)
     target_path = os.path.join(install_root, skill_name)
     real_root = os.path.realpath(install_root)
     real_target = os.path.realpath(target_path)
-    if not (real_target == real_root or real_target.startswith(real_root + os.sep)):
+    if not _path_is_within(real_root, real_target) or real_target == real_root:
         click.echo("error: resolved install path escapes the connector skill directory", err=True)
         raise SystemExit(1)
 
     if os.path.realpath(source_path) == real_target:
         return target_path
-    if os.path.exists(target_path):
+    if os.path.lexists(target_path):
+        if _is_path_alias(target_path):
+            click.echo("error: existing connector skill destination is a path alias", err=True)
+            raise SystemExit(1)
         if not force:
             click.echo(
                 f"error: skill {skill_name!r} already exists at {target_path}; pass --force to replace it",
@@ -3790,8 +4080,7 @@ def _copy_skill_tree_to_connector(
             )
             raise SystemExit(1)
         shutil.rmtree(target_path)
-    os.makedirs(install_root, exist_ok=True)
-    shutil.copytree(source_path, target_path)
+    shutil.copytree(source_path, target_path, symlinks=True)
     return target_path
 
 
@@ -3802,7 +4091,7 @@ def _rollback_skill_install_paths(paths: list[str]) -> None:
             continue
         seen.add(path)
         try:
-            if os.path.isdir(path) and not os.path.islink(path):
+            if os.path.isdir(path) and not _is_path_alias(path):
                 shutil.rmtree(path)
         except OSError as exc:
             click.echo(
@@ -3979,7 +4268,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
     from defenseclaw.enforce.admission import evaluate_admission
 
     skill_name = os.path.basename(name)
-    if not skill_name or not _CLAWHUB_NAME_RE.match(skill_name):
+    if skill_name != name or not skill_name or not _CLAWHUB_NAME_RE.fullmatch(skill_name):
         click.echo(f"error: invalid ClawHub skill name {name!r}", err=True)
         raise SystemExit(2)
 
@@ -4104,16 +4393,22 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
 
 
 def _run_clawhub_install(skill_name: str, force: bool, cwd: str | None = None) -> None:
-    args = _clawhub_args("install", skill_name)
-    if force:
-        args.append("--force")
     try:
-        subprocess.run(args, check=True, timeout=300, cwd=cwd)
+        args = _clawhub_args("install", skill_name)
+        if force:
+            args.append("--force")
+        result = _run_clawhub_process(args, timeout=300, cwd=cwd)
     except subprocess.TimeoutExpired:
         click.echo("error: clawhub install timed out after 300s", err=True)
         raise SystemExit(1)
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        click.echo(f"error: clawhub install failed: {exc}", err=True)
+    except (OSError, ValueError) as exc:
+        click.echo(f"error: could not launch clawhub install: {exc}", err=True)
+        raise SystemExit(1)
+    if result.returncode != 0:
+        click.echo(
+            f"error: clawhub install failed: {_external_failure_detail(result)}",
+            err=True,
+        )
         raise SystemExit(1)
 
 
@@ -4125,18 +4420,23 @@ def _run_clawhub_uninstall(skill_name: str, cwd: str | None = None) -> None:
     already exiting non-zero — but we surface the error to the
     operator so they can manually remediate.
     """
-    args = _clawhub_args("uninstall", skill_name)
     try:
-        subprocess.run(args, check=False, timeout=120, cwd=cwd, input="y\n", text=True)
+        args = _clawhub_args("uninstall", skill_name)
+        result = _run_clawhub_process(args, timeout=120, cwd=cwd, input_text="y\n")
     except subprocess.TimeoutExpired:
         click.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — "
-            "manual cleanup may be required",
+            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — manual cleanup may be required",
             err=True,
         )
-    except (FileNotFoundError, OSError) as exc:
+    except (OSError, ValueError) as exc:
         click.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — "
-            "manual cleanup may be required",
+            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — manual cleanup may be required",
             err=True,
         )
+    else:
+        if result.returncode != 0:
+            click.echo(
+                f"[install] warning: clawhub uninstall of {skill_name!r} failed: "
+                f"{_external_failure_detail(result)} — manual cleanup may be required",
+                err=True,
+            )
