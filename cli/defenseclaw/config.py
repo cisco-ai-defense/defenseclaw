@@ -37,7 +37,7 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths
+from defenseclaw import connector_paths, credential_provenance
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
@@ -4503,6 +4503,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     even when not exported in the user's shell profile.
     """
     env_path = os.path.join(data_dir, ".env")
+    credential_provenance.begin_dotenv_load(data_dir, env_path)
+    seen_keys: set[str] = set()
     try:
         with open(env_path) as f:
             for line in f:
@@ -4513,8 +4515,17 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 key, value = key.strip(), value.strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                     value = value[1:-1]
-                if key and key not in os.environ:
-                    os.environ[key] = value
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    injected = key not in os.environ
+                    if injected:
+                        os.environ[key] = value
+                    credential_provenance.note_dotenv_candidate(
+                        data_dir,
+                        key,
+                        value,
+                        injected=injected,
+                    )
     except FileNotFoundError:
         pass
     except OSError as exc:
