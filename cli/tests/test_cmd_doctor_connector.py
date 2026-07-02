@@ -270,6 +270,8 @@ class TestCheckConnectorHooks(unittest.TestCase):
     def _cursor_runtime_case(self, tmp: str, *, mode: str, fail_closed: bool, legacy_native: bool = False):
         runtime_dir = os.path.join(tmp, "DefenseClaw Hooks")
         os.makedirs(runtime_dir, exist_ok=True)
+        data_dir = os.path.join(tmp, "data")
+        os.makedirs(data_dir, exist_ok=True)
         if legacy_native:
             runtime = os.path.join(runtime_dir, "defenseclaw-hook.exe")
             with open(runtime, "wb") as fh:
@@ -303,8 +305,23 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 fh,
             )
         cfg = MagicMock()
+        cfg.data_dir = data_dir
         cfg.guardrail.effective_mode.return_value = mode
         cfg.guardrail.effective_hook_fail_mode.return_value = "closed" if fail_closed else "open"
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "connectors": {
+                        "cursor": {
+                            "locations": {
+                                "hook_script_paths": [runtime],
+                                "hook_config_paths": [hooks_path],
+                            }
+                        }
+                    }
+                },
+                fh,
+            )
         return cfg, hooks_path, runtime
 
     def test_cursor_doctor_validates_configured_windows_adapter(self) -> None:
@@ -329,6 +346,47 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertIn("mode=observe", r.checks[-1]["detail"])
         self.assertIn("failClosed=false", r.checks[-1]["detail"])
         self.assertNotIn("inspect-tool.sh", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_rejects_unmanaged_windows_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+            )
+            managed_runtime = os.path.join(tmp, "data", "hooks", "cursor-hook.ps1")
+            os.makedirs(os.path.dirname(managed_runtime), exist_ok=True)
+            with open(managed_runtime, "w", encoding="utf-8") as fh:
+                fh.write("# managed adapter placeholder\n")
+            with open(os.path.join(cfg.data_dir, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "cursor": {
+                                "locations": {
+                                    "hook_script_paths": [managed_runtime],
+                                    "hook_config_paths": [hooks_path],
+                                }
+                            }
+                        }
+                    },
+                    fh,
+                )
+            r = _DoctorResult()
+            with patch("defenseclaw.commands.cmd_doctor._probe_cursor_windows_runtime") as probe:
+                _check_cursor_configured_runtime(
+                    cfg,
+                    hooks_path,
+                    "Cursor hooks",
+                    r,
+                    platform_name="nt",
+                    probe_runtime=True,
+                )
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("outside the managed DefenseClaw hook path", r.checks[-1]["detail"])
+        self.assertIn(runtime, r.checks[-1]["detail"])
+        probe.assert_not_called()
 
     def test_cursor_doctor_rejects_legacy_direct_windows_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
