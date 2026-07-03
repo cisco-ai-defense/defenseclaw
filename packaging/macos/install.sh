@@ -147,7 +147,16 @@ dscl_ensure_record() {
 
 # dscl_ensure_prop RECORD PROP VALUE — sets a property on a dscl record
 # to a specific value, treating "already has this exact value" as success.
-# Uses -create when the property is unset, -change when it needs updating.
+#
+# We try `-create` first with fallback to `-change`: on some macOS
+# versions `dscl -create record prop value` returns eDSRecordAlreadyExists
+# when the record itself already exists (even though the property might
+# be unset), so we can't rely on read-then-create-or-change. Instead:
+#
+#   1. If the current value already matches, no-op.
+#   2. Otherwise try `-create`. Success → done.
+#   3. If -create failed with eDSRecordAlreadyExists, use `-change`.
+#      -change tolerates a missing old value by passing empty.
 dscl_ensure_prop() {
   local record="$1"
   local prop="$2"
@@ -157,11 +166,22 @@ dscl_ensure_prop() {
   if [[ "${current}" == "${value}" ]]; then
     return 0
   fi
-  if [[ -z "${current}" ]]; then
-    dscl "${DS_NODE}" -create "${record}" "${prop}" "${value}"
-  else
-    dscl "${DS_NODE}" -change "${record}" "${prop}" "${current}" "${value}"
+
+  local err rc=0
+  err="$(dscl "${DS_NODE}" -create "${record}" "${prop}" "${value}" 2>&1)" || rc=$?
+  if (( rc == 0 )); then
+    return 0
   fi
+
+  if [[ "${err}" == *eDSRecordAlreadyExists* ]]; then
+    # Property exists — swap value in place. Passing an empty current
+    # value tells dscl to overwrite whatever is there.
+    dscl "${DS_NODE}" -change "${record}" "${prop}" "${current}" "${value}"
+    return $?
+  fi
+
+  printf '%s\n' "${err}" >&2
+  return "${rc}"
 }
 
 # ensure_service_user NAME — idempotently creates a hidden macOS system
