@@ -57,6 +57,12 @@ PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
 LAUNCHD_LABEL="com.defenseclaw.gateway"
 GATEWAY_BIN="${INSTALL_PREFIX}/bin/defenseclaw-gateway"
 
+# macOS convention is a hidden system user prefixed with an underscore.
+# We create this if it doesn't exist. Admins can override via
+# --service-user; the plist we ship gets rewritten to match.
+SERVICE_USER="_defenseclaw"
+SERVICE_GROUP="_defenseclaw"
+
 TARGET_USER=""
 AGENT_VERSION=""
 
@@ -65,6 +71,47 @@ AGENT_VERSION=""
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# find_free_system_uid — returns an unused UID in the System range so we
+# don't collide with an admin's existing service user. macOS reserves
+# < 500 for the OS; we scan 400..499 and pick the first free slot.
+find_free_system_uid() {
+  local candidate
+  for candidate in $(seq 400 499); do
+    if ! dscl . -search /Users UniqueID "${candidate}" 2>/dev/null | grep -q .; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ensure_service_user NAME — idempotently creates a hidden macOS system
+# user + group so the LaunchDaemon has a real principal to drop into.
+# No-op when the user already exists. Uses the same convention as
+# Apple's own service users (_ prefix, hidden, /var/empty home,
+# /usr/bin/false shell).
+ensure_service_user() {
+  local name="$1"
+  if dscl . -read "/Users/${name}" >/dev/null 2>&1; then
+    log "  service user ${name} already exists"
+    return 0
+  fi
+  local uid
+  uid="$(find_free_system_uid)" || die "no free UID in 400..499 for service user ${name}"
+  log "  creating service user ${name} (uid=${uid})"
+  # Group first so the user's PrimaryGroupID resolves at create time.
+  dscl . -create "/Groups/${name}"           || die "create group ${name} failed"
+  dscl . -create "/Groups/${name}" PrimaryGroupID "${uid}" || die "set group ${name} gid failed"
+  dscl . -create "/Users/${name}"            || die "create user ${name} failed"
+  dscl . -create "/Users/${name}" UserShell /usr/bin/false
+  dscl . -create "/Users/${name}" RealName  "DefenseClaw Service"
+  dscl . -create "/Users/${name}" UniqueID  "${uid}"
+  dscl . -create "/Users/${name}" PrimaryGroupID "${uid}"
+  dscl . -create "/Users/${name}" NFSHomeDirectory /var/empty
+  # IsHidden keeps the user out of the login window and account list.
+  dscl . -create "/Users/${name}" IsHidden 1
+}
 
 # shellcheck source=lib/installer_lib.sh
 . "${SCRIPT_DIR}/lib/installer_lib.sh"
@@ -83,6 +130,8 @@ Gateway options:
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
+  --service-user NAME       macOS service user for the daemon (default: _defenseclaw).
+                            Created via dscl if missing. Also used as the group.
   --skip-build              Reuse an existing gateway binary (no rebuild)
   --skip-launchd            Install files but don't bootstrap/enable launchd
 
@@ -110,6 +159,7 @@ while [[ $# -gt 0 ]]; do
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
     --plist)            PLIST_SRC="${2:?}"; shift 2;;
+    --service-user)     SERVICE_USER="${2:?}"; SERVICE_GROUP="${2:?}"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
     --skip-launchd)     SKIP_LAUNCHD="true"; shift;;
     --user)             TARGET_USER="${2:?}"; shift 2;;
@@ -219,8 +269,29 @@ render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTIO
 chown root:wheel "${CONFIG_PATH}"
 chmod 0640 "${CONFIG_PATH}"
 
+log "ensuring service user ${SERVICE_USER}"
+ensure_service_user "${SERVICE_USER}"
+
+log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP}"
+# Config stays root-owned (managed_enterprise trust check requires it),
+# but runtime state (audit DB, tokens, guardian state, logs) is owned
+# by the service user so the daemon can write to it.
+chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${SUPPORT_DIR}" "${LOGS_DIR}"
+# Re-tighten config ownership: the recursive chown above walked into
+# it, so put it back to root:wheel 0640.
+chown root:wheel "${CONFIG_PATH}"
+chmod 0640 "${CONFIG_PATH}"
+
 log "installing LaunchDaemon plist -> ${PLIST_DST}"
 install -o root -g wheel -m 0644 "${PLIST_SRC}" "${PLIST_DST}"
+
+# Rewrite the plist's UserName / GroupName to match the actual service
+# user we ensured above. plutil is on every macOS install.
+log "wiring plist to service user ${SERVICE_USER}"
+/usr/bin/plutil -replace UserName  -string "${SERVICE_USER}"  "${PLIST_DST}" \
+  || die "failed to set UserName in ${PLIST_DST}"
+/usr/bin/plutil -replace GroupName -string "${SERVICE_GROUP}" "${PLIST_DST}" \
+  || die "failed to set GroupName in ${PLIST_DST}"
 
 if [[ "${SKIP_LAUNCHD}" == "true" ]]; then
   log "skipping launchctl bootstrap (--skip-launchd)"
