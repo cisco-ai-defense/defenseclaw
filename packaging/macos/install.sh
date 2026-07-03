@@ -29,9 +29,23 @@ DEFAULT_API_PORT="18970"
 DISABLE_REDACTION="false"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd 2>/dev/null || echo "${SCRIPT_DIR}")"
 BINARY_SRC=""
-PLIST_SRC="${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"
+# Plist lookup order:
+#   1. --plist / DEFENSECLAW_PLIST_SRC  (explicit override)
+#   2. next to the script            (standalone-bundle layout)
+#   3. under the repo tree           (dev-tree layout)
+PLIST_SRC=""
+for _candidate in \
+  "${DEFENSECLAW_PLIST_SRC:-}" \
+  "${SCRIPT_DIR}/com.defenseclaw.gateway.plist" \
+  "${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"; do
+  if [[ -n "${_candidate}" && -f "${_candidate}" ]]; then
+    PLIST_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
 SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
@@ -67,8 +81,9 @@ Gateway options:
                                       --connector cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
   --disable-redaction       Disable redaction in audit/sinks (default: on)
-  --binary PATH             Use prebuilt binary instead of 'go build'
-  --skip-build              Reuse ./defenseclaw-gateway in the repo (no rebuild)
+  --binary PATH             Use prebuilt binary (default: alongside install.sh)
+  --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
+  --skip-build              Reuse an existing gateway binary (no rebuild)
   --skip-launchd            Install files but don't bootstrap/enable launchd
 
 Per-user hook wiring:
@@ -94,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --port)             API_PORT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
+    --plist)            PLIST_SRC="${2:?}"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
     --skip-launchd)     SKIP_LAUNCHD="true"; shift;;
     --user)             TARGET_USER="${2:?}"; shift 2;;
@@ -149,11 +165,25 @@ if [[ -n "${TARGET_USER}" ]]; then
     die "could not resolve home for --user ${TARGET_USER}"
 fi
 
-# Resolve the binary
+# Resolve the binary. Lookup order matches PLIST_SRC:
+#   1. --binary                              (explicit override)
+#   2. ${SCRIPT_DIR}/defenseclaw-gateway     (standalone bundle)
+#   3. ${REPO_ROOT}/defenseclaw-gateway      (dev tree)
+#   4. `go build` from ${REPO_ROOT}/cmd/defenseclaw  (dev-tree fallback)
 if [[ -z "${BINARY_SRC}" ]]; then
-  BINARY_SRC="${REPO_ROOT}/defenseclaw-gateway"
+  if [[ -x "${SCRIPT_DIR}/defenseclaw-gateway" ]]; then
+    BINARY_SRC="${SCRIPT_DIR}/defenseclaw-gateway"
+    SKIP_BUILD="true"
+  elif [[ -x "${REPO_ROOT}/defenseclaw-gateway" ]]; then
+    BINARY_SRC="${REPO_ROOT}/defenseclaw-gateway"
+  else
+    BINARY_SRC="${REPO_ROOT}/defenseclaw-gateway"
+  fi
 fi
 if [[ "${SKIP_BUILD}" != "true" && ! -x "${BINARY_SRC}" ]]; then
+  if [[ ! -d "${REPO_ROOT}/cmd/defenseclaw" ]]; then
+    die "binary not found at ${BINARY_SRC} and no repo tree at ${REPO_ROOT}/cmd/defenseclaw to build from — ship the gateway binary next to install.sh, or pass --binary PATH"
+  fi
   command -v go >/dev/null 2>&1 || die "go not in PATH; install Go or pass --binary"
   log "building gateway from ${REPO_ROOT}/cmd/defenseclaw"
   ( cd "${REPO_ROOT}" && go build -o defenseclaw-gateway ./cmd/defenseclaw )
