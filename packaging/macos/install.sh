@@ -75,10 +75,16 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 # find_free_system_uid — returns an unused UID in the System range so we
 # don't collide with an admin's existing service user. macOS reserves
 # < 500 for the OS; we scan 400..499 and pick the first free slot.
+#
+# Uses a single `dscl -list` to enumerate all in-use UIDs, which is much
+# faster than issuing 100 -search calls. On a laptop with a network
+# directory attached, the per-candidate probe form could take 30s+.
 find_free_system_uid() {
+  local in_use
+  in_use="$(dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}')"
   local candidate
   for candidate in $(seq 400 499); do
-    if ! dscl . -search /Users UniqueID "${candidate}" 2>/dev/null | grep -q .; then
+    if ! printf '%s\n' "${in_use}" | grep -qxF "${candidate}"; then
       printf '%s' "${candidate}"
       return 0
     fi
@@ -187,11 +193,15 @@ ensure_service_user() {
   local uid=""
   if [[ -n "${existing_gid}" ]]; then
     uid="${existing_gid}"
+    log "  reusing existing gid=${uid}"
   elif [[ -n "${existing_uid}" ]]; then
     uid="${existing_uid}"
+    log "  reusing existing uid=${uid}"
   else
+    log "  scanning UIDs 400..499 for a free slot"
     uid="$(find_free_system_uid)" \
       || die "no free UID in 400..499 for service user ${name}"
+    log "  picked free uid=${uid}"
   fi
 
   log "  ensuring group ${name} (gid=${uid})"
