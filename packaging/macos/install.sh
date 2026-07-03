@@ -86,31 +86,77 @@ find_free_system_uid() {
   return 1
 }
 
+# dscl_read_prop RECORD PROP — echoes the value of a single dscl property
+# or empty when the record/property doesn't exist. Handles the "AttrName:
+# value" one-liner shape dscl -read returns.
+dscl_read_prop() {
+  local record="$1"
+  local prop="$2"
+  dscl . -read "${record}" "${prop}" 2>/dev/null \
+    | awk -v p="${prop}:" 'index($0, p) == 1 { $1=""; sub(/^ /, ""); print; exit }'
+}
+
 # ensure_service_user NAME — idempotently creates a hidden macOS system
 # user + group so the LaunchDaemon has a real principal to drop into.
-# No-op when the user already exists. Uses the same convention as
-# Apple's own service users (_ prefix, hidden, /var/empty home,
-# /usr/bin/false shell).
+# Handles three states cleanly:
+#   1. Neither user nor group exist        → create both, sharing a fresh UID
+#   2. Group exists (orphan from a prior)  → adopt its existing GID for the user
+#   3. Both exist                          → no-op, just log
+#
+# Uses Apple's convention for hidden system users: '_' prefix, /var/empty
+# home, /usr/bin/false shell, IsHidden=1.
 ensure_service_user() {
   local name="$1"
-  if dscl . -read "/Users/${name}" >/dev/null 2>&1; then
-    log "  service user ${name} already exists"
+
+  local user_exists="no" group_exists="no"
+  dscl . -read "/Users/${name}"  >/dev/null 2>&1 && user_exists="yes"
+  dscl . -read "/Groups/${name}" >/dev/null 2>&1 && group_exists="yes"
+
+  # Fully provisioned already — nothing to do.
+  if [[ "${user_exists}" == "yes" && "${group_exists}" == "yes" ]]; then
+    log "  service user ${name} already provisioned"
     return 0
   fi
-  local uid
-  uid="$(find_free_system_uid)" || die "no free UID in 400..499 for service user ${name}"
-  log "  creating service user ${name} (uid=${uid})"
-  # Group first so the user's PrimaryGroupID resolves at create time.
-  dscl . -create "/Groups/${name}"           || die "create group ${name} failed"
-  dscl . -create "/Groups/${name}" PrimaryGroupID "${uid}" || die "set group ${name} gid failed"
-  dscl . -create "/Users/${name}"            || die "create user ${name} failed"
-  dscl . -create "/Users/${name}" UserShell /usr/bin/false
-  dscl . -create "/Users/${name}" RealName  "DefenseClaw Service"
-  dscl . -create "/Users/${name}" UniqueID  "${uid}"
-  dscl . -create "/Users/${name}" PrimaryGroupID "${uid}"
-  dscl . -create "/Users/${name}" NFSHomeDirectory /var/empty
-  # IsHidden keeps the user out of the login window and account list.
-  dscl . -create "/Users/${name}" IsHidden 1
+
+  # Resolve the UID/GID to use. Prefer the group's existing GID if the
+  # group is already there (Case 2), otherwise pick a free UID.
+  local gid=""
+  if [[ "${group_exists}" == "yes" ]]; then
+    gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
+  fi
+  local uid="${gid}"
+  if [[ -z "${uid}" ]]; then
+    uid="$(find_free_system_uid)" \
+      || die "no free UID in 400..499 for service user ${name}"
+  fi
+
+  # Create group first when missing, so the user's PrimaryGroupID resolves
+  # at create time. `dscl -create /Groups/X` on a non-existent record
+  # creates it; the same call on an existing record errors with
+  # eDSRecordAlreadyExists — the early-return above prevents that.
+  if [[ "${group_exists}" == "no" ]]; then
+    log "  creating group ${name} (gid=${uid})"
+    dscl . -create "/Groups/${name}" \
+      || die "create group ${name} failed"
+    dscl . -create "/Groups/${name}" PrimaryGroupID "${uid}" \
+      || die "set group ${name} gid failed"
+    dscl . -create "/Groups/${name}" RealName "DefenseClaw Service Group" \
+      || warn "  set group ${name} RealName failed (non-fatal)"
+  else
+    log "  group ${name} already exists (gid=${uid}); reusing"
+  fi
+
+  if [[ "${user_exists}" == "no" ]]; then
+    log "  creating user ${name} (uid=${uid})"
+    dscl . -create "/Users/${name}" \
+      || die "create user ${name} failed"
+    dscl . -create "/Users/${name}" UserShell        /usr/bin/false
+    dscl . -create "/Users/${name}" RealName         "DefenseClaw Service"
+    dscl . -create "/Users/${name}" UniqueID         "${uid}"
+    dscl . -create "/Users/${name}" PrimaryGroupID   "${uid}"
+    dscl . -create "/Users/${name}" NFSHomeDirectory /var/empty
+    dscl . -create "/Users/${name}" IsHidden         1
+  fi
 }
 
 # shellcheck source=lib/installer_lib.sh
