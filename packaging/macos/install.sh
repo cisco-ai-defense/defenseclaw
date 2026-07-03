@@ -551,12 +551,29 @@ ensure_service_user "${SERVICE_USER}"
 
 log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP} (uid=${SERVICE_UID} gid=${SERVICE_GID})"
 # Only RUNTIME_DIR + LOGS_DIR get service-user ownership. SUPPORT_DIR
-# itself and CONFIG_PATH stay root:wheel so the managed_enterprise
+# itself and CONFIG_PATH stay root-owned so the managed_enterprise
 # config trust check (which walks every ancestor of config.yaml)
 # accepts them.
 [[ -n "${SERVICE_UID}" && -n "${SERVICE_GID}" ]] \
   || die "service uid/gid unset after ensure_service_user (internal bug)"
 chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${LOGS_DIR}"
+
+# SUPPORT_DIR stays owned by root, but the service user needs group
+# traverse (x) access so launchd can chdir into
+# ${SUPPORT_DIR}/runtime as its WorkingDirectory. Without this the
+# daemon exits with EX_CONFIG before opening stdout/stderr — we can't
+# even see a log line explaining what happened.
+#
+# The trust check refuses (mode & 0o022) — group-WRITE or other-WRITE
+# bits — but group-execute (0o010) is fine. chgrp to the service group
+# and keep mode 0750: root has full access, service group has rx only,
+# world has nothing.
+chgrp "${SERVICE_GID}" "${SUPPORT_DIR}"
+chmod 0750 "${SUPPORT_DIR}"
+# Also make config.yaml readable by the service group (daemon needs
+# to read it). Owner stays root, mode 0640 (owner rw, group r, other 0).
+chgrp "${SERVICE_GID}" "${CONFIG_PATH}"
+chmod 0640 "${CONFIG_PATH}"
 
 log "installing LaunchDaemon plist -> ${PLIST_DST}"
 install -o root -g wheel -m 0644 "${PLIST_SRC}" "${PLIST_DST}"
