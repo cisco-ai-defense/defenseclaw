@@ -105,6 +105,29 @@ dscl_read_prop() {
 #
 # Uses Apple's convention for hidden system users: '_' prefix, /var/empty
 # home, /usr/bin/false shell, IsHidden=1.
+# SERVICE_UID / SERVICE_GID are populated by ensure_service_user for
+# downstream chown calls. macOS's userdb cache can lag several seconds
+# behind OpenDirectory after a `dscl -create`, so using numeric IDs is
+# more reliable than relying on getpwnam/getgrnam right after creation.
+SERVICE_UID=""
+SERVICE_GID=""
+
+# wait_for_id_resolves NAME [max_seconds] — polls until getpwnam sees the
+# user in the running process's cache, up to max_seconds. Returns 0 on
+# resolution, non-zero on timeout.
+wait_for_id_resolves() {
+  local name="$1"
+  local max="${2:-5}"
+  local deadline=$(( $(date +%s) + max ))
+  while (( $(date +%s) < deadline )); do
+    if id -u "${name}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 ensure_service_user() {
   local name="$1"
 
@@ -112,9 +135,11 @@ ensure_service_user() {
   dscl . -read "/Users/${name}"  >/dev/null 2>&1 && user_exists="yes"
   dscl . -read "/Groups/${name}" >/dev/null 2>&1 && group_exists="yes"
 
-  # Fully provisioned already — nothing to do.
+  # Fully provisioned already — read the IDs and return.
   if [[ "${user_exists}" == "yes" && "${group_exists}" == "yes" ]]; then
     log "  service user ${name} already provisioned"
+    SERVICE_UID="$(dscl_read_prop "/Users/${name}"  UniqueID)"
+    SERVICE_GID="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
     return 0
   fi
 
@@ -156,6 +181,16 @@ ensure_service_user() {
     dscl . -create "/Users/${name}" PrimaryGroupID   "${uid}"
     dscl . -create "/Users/${name}" NFSHomeDirectory /var/empty
     dscl . -create "/Users/${name}" IsHidden         1
+  fi
+
+  SERVICE_UID="${uid}"
+  SERVICE_GID="${uid}"
+
+  # Wait for the OpenDirectory cache to see the new user. Downstream
+  # chown/find commands go through getpwnam and can otherwise fail with
+  # "illegal user name" for a few seconds after creation.
+  if ! wait_for_id_resolves "${name}" 5; then
+    warn "  ${name} still not resolvable via id(1) after 5s — chown will fall back to numeric UID"
   fi
 }
 
@@ -318,11 +353,15 @@ chmod 0640 "${CONFIG_PATH}"
 log "ensuring service user ${SERVICE_USER}"
 ensure_service_user "${SERVICE_USER}"
 
-log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP}"
+log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP} (uid=${SERVICE_UID} gid=${SERVICE_GID})"
 # Config stays root-owned (managed_enterprise trust check requires it),
 # but runtime state (audit DB, tokens, guardian state, logs) is owned
-# by the service user so the daemon can write to it.
-chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${SUPPORT_DIR}" "${LOGS_DIR}"
+# by the service user so the daemon can write to it. Use numeric IDs so
+# the chown doesn't depend on OpenDirectory cache warm-up — dscl -create
+# writes are async and getpwnam can be stale for several seconds.
+[[ -n "${SERVICE_UID}" && -n "${SERVICE_GID}" ]] \
+  || die "service uid/gid unset after ensure_service_user (internal bug)"
+chown -R "${SERVICE_UID}:${SERVICE_GID}" "${SUPPORT_DIR}" "${LOGS_DIR}"
 # Re-tighten config ownership: the recursive chown above walked into
 # it, so put it back to root:wheel 0640.
 chown root:wheel "${CONFIG_PATH}"
