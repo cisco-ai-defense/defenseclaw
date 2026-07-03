@@ -174,10 +174,20 @@ dscl_ensure_prop() {
   fi
 
   if [[ "${err}" == *eDSRecordAlreadyExists* ]]; then
-    # Property exists — swap value in place. Passing an empty current
-    # value tells dscl to overwrite whatever is there.
-    dscl "${DS_NODE}" -change "${record}" "${prop}" "${current}" "${value}"
-    return $?
+    # Record already exists. The property may or may not be present.
+    # Try -change first (works when the attribute is already there); if
+    # dscl reports eDSAttributeNotFound, fall back to -append.
+    local err2 rc2=0
+    err2="$(dscl "${DS_NODE}" -change "${record}" "${prop}" "${current}" "${value}" 2>&1)" || rc2=$?
+    if (( rc2 == 0 )); then
+      return 0
+    fi
+    if [[ "${err2}" == *eDSAttributeNotFound* ]]; then
+      dscl "${DS_NODE}" -append "${record}" "${prop}" "${value}"
+      return $?
+    fi
+    printf '%s\n' "${err2}" >&2
+    return "${rc2}"
   fi
 
   printf '%s\n' "${err}" >&2
