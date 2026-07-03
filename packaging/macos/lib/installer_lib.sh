@@ -218,6 +218,13 @@ prepare_userspace_for() {
 # render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR CONN... -> stdout
 # Renders the full config.yaml. Pure stdout, no file writes.
 # Extra args after SUPPORT_DIR are the full connector list (primary + others).
+#
+# SUPPORT_DIR holds config.yaml at its root (root:wheel 0640) — the
+# managed_enterprise trust check walks every ancestor and refuses group-
+# or other-writable dirs, so SUPPORT_DIR itself must be root-owned 0750.
+# Runtime state (audit DB, tokens, guardian state) lives in
+# ${SUPPORT_DIR}/runtime which is chown'd to the service user during
+# install. data_dir/audit_db point at that runtime subdir.
 render_config() {
   local mode="$1"
   local primary="$2"
@@ -226,14 +233,15 @@ render_config() {
   local support_dir="$5"
   shift 5
   local -a connectors=("$@")
+  local runtime_dir="${support_dir}/runtime"
 
   cat <<EOF
 config_version: 6
 deployment_mode: managed_enterprise
 
-data_dir: "${support_dir}"
-audit_db: "${support_dir}/audit.db"
-judge_bodies_db: "${support_dir}/judge_bodies.db"
+data_dir: "${runtime_dir}"
+audit_db: "${runtime_dir}/audit.db"
+judge_bodies_db: "${runtime_dir}/judge_bodies.db"
 
 gateway:
   api_bind: 127.0.0.1

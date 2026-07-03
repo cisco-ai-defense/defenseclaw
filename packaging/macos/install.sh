@@ -523,7 +523,15 @@ install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}/bin"
 install    -o root -g wheel -m 0755 "${BINARY_SRC}" "${GATEWAY_BIN}"
 
 log "creating support dirs"
+# SUPPORT_DIR is root:wheel 0750 — the config file at its root has to
+# be trust-checked, and the check walks every ancestor requiring
+# root ownership and no group/other write bits.
 install -d -o root -g wheel -m 0750 "${SUPPORT_DIR}"
+# RUNTIME_DIR lives INSIDE SUPPORT_DIR (matching what render_config
+# points data_dir at). It's chown'd to the service user after we
+# ensure the user exists — see below.
+RUNTIME_DIR="${SUPPORT_DIR}/runtime"
+install -d -o root -g wheel -m 0750 "${RUNTIME_DIR}"
 install -d -o root -g wheel -m 0750 "${LOGS_DIR}"
 
 CONFIG_PATH="${SUPPORT_DIR}/config.yaml"
@@ -542,18 +550,13 @@ log "ensuring service user ${SERVICE_USER}"
 ensure_service_user "${SERVICE_USER}"
 
 log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP} (uid=${SERVICE_UID} gid=${SERVICE_GID})"
-# Config stays root-owned (managed_enterprise trust check requires it),
-# but runtime state (audit DB, tokens, guardian state, logs) is owned
-# by the service user so the daemon can write to it. Use numeric IDs so
-# the chown doesn't depend on OpenDirectory cache warm-up — dscl -create
-# writes are async and getpwnam can be stale for several seconds.
+# Only RUNTIME_DIR + LOGS_DIR get service-user ownership. SUPPORT_DIR
+# itself and CONFIG_PATH stay root:wheel so the managed_enterprise
+# config trust check (which walks every ancestor of config.yaml)
+# accepts them.
 [[ -n "${SERVICE_UID}" && -n "${SERVICE_GID}" ]] \
   || die "service uid/gid unset after ensure_service_user (internal bug)"
-chown -R "${SERVICE_UID}:${SERVICE_GID}" "${SUPPORT_DIR}" "${LOGS_DIR}"
-# Re-tighten config ownership: the recursive chown above walked into
-# it, so put it back to root:wheel 0640.
-chown root:wheel "${CONFIG_PATH}"
-chmod 0640 "${CONFIG_PATH}"
+chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${LOGS_DIR}"
 
 log "installing LaunchDaemon plist -> ${PLIST_DST}"
 install -o root -g wheel -m 0644 "${PLIST_SRC}" "${PLIST_DST}"
@@ -638,20 +641,30 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
       warn "  [${c}] refused to prepare userspace (symlinked or non-dir path); skipping"
       continue
     fi
-    # Match the ownership of any newly created files to the target user.
-    # -h so we chown the entry itself and never follow symlinks (defense
-    # in depth alongside ensure_safe_userspace_path in the lib helpers).
+    # Match ownership on JUST the files DefenseClaw just pre-created.
+    # A recursive chown over ~/.codex or ~/.cursor is wrong: those
+    # dirs may contain unrelated user state (Codex ships a signed
+    # `computer-use/*.app` bundle, Cursor stores signed extensions),
+    # and SIP-protected files in those trees will fail chown with
+    # "Operation not permitted" even as root.
+    #
+    # We only touch what prepare_userspace_for could have written:
+    # the connector's hook config file + its parent .<agent> dir.
     case "${c}" in
-      claudecode) DC_AGENT_DIR="${TARGET_HOME}/.claude";;
-      codex)      DC_AGENT_DIR="${TARGET_HOME}/.codex";;
-      cursor)     DC_AGENT_DIR="${TARGET_HOME}/.cursor";;
-      *)          DC_AGENT_DIR="";;
+      claudecode) DC_AGENT_TARGETS=( "${TARGET_HOME}/.claude" "${TARGET_HOME}/.claude/settings.json" );;
+      codex)      DC_AGENT_TARGETS=( "${TARGET_HOME}/.codex"  "${TARGET_HOME}/.codex/config.toml" );;
+      cursor)     DC_AGENT_TARGETS=( "${TARGET_HOME}/.cursor" "${TARGET_HOME}/.cursor/hooks.json" );;
+      *)          DC_AGENT_TARGETS=();;
     esac
-    if [[ -n "${DC_AGENT_DIR}" && -d "${DC_AGENT_DIR}" && ! -L "${DC_AGENT_DIR}" ]]; then
-      if ! find "${DC_AGENT_DIR}" -exec chown -h "${TARGET_UID}:${TARGET_GID}" {} +; then
-        die "[${c}] failed to set ownership on ${DC_AGENT_DIR}"
+    for path in "${DC_AGENT_TARGETS[@]}"; do
+      # Skip symlinks (guarded upstream by ensure_safe_userspace_path)
+      # and missing paths. Any real chown failure aborts the connector.
+      if [[ -e "${path}" && ! -L "${path}" ]]; then
+        if ! chown -h "${TARGET_UID}:${TARGET_GID}" "${path}"; then
+          die "[${c}] failed to set ownership on ${path}"
+        fi
       fi
-    fi
+    done
 
     AGENT_VER="${AGENT_VERSION}"
     if [[ -z "${AGENT_VER}" ]]; then
