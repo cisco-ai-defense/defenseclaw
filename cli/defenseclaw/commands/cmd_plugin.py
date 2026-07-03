@@ -1139,7 +1139,11 @@ class _PluginInstallTransaction:
                 stage = os.path.join(plan["root"], f".dclaw-stage-{plugin_name}-{os.getpid()}")
                 if os.path.lexists(stage):
                     raise PluginIdentityError(f"staging path already exists: {stage}")
+                # Preserve links during staging so a raced-in link is copied as
+                # a link and rejected below, rather than followed outside the
+                # source tree.
                 shutil.copytree(source_path, stage, symlinks=True)
+                _reject_linked_tree(stage)
                 plan["stage"] = stage
         except Exception:
             tx.rollback()

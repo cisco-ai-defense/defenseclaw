@@ -1273,6 +1273,44 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertEqual(mock_scan.call_count, 2)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_rejects_link_added_during_staging(self, mock_scan):
+        probe_target = os.path.join(self.tmp_dir, "symlink-probe-target")
+        probe_link = os.path.join(self.tmp_dir, "symlink-probe")
+        with open(probe_target, "w", encoding="utf-8") as fh:
+            fh.write("probe\n")
+        try:
+            os.symlink(probe_target, probe_link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+        finally:
+            if os.path.lexists(probe_link):
+                os.unlink(probe_link)
+
+        real_copytree = shutil.copytree
+
+        def copytree_with_late_link(src, dst, *args, **kwargs):
+            result = real_copytree(src, dst, *args, **kwargs)
+            outside = os.path.join(self.tmp_dir, "late-link-target")
+            with open(outside, "w", encoding="utf-8") as fh:
+                fh.write("outside\n")
+            os.symlink(outside, os.path.join(dst, "late-link"))
+            return result
+
+        src = os.path.realpath(self._create_plugin_dir("racy"))
+        codex_manifest_dir = os.path.join(src, ".codex-plugin")
+        os.makedirs(codex_manifest_dir)
+        with open(os.path.join(codex_manifest_dir, "plugin.json"), "w", encoding="utf-8") as fh:
+            json.dump({"id": "racy"}, fh)
+
+        with patch("defenseclaw.commands.cmd_plugin.shutil.copytree", side_effect=copytree_with_late_link):
+            result = self.invoke(["install", src, "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("linked entry", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_root, "racy")))
+        mock_scan.assert_not_called()
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_connector_narrows_materialization(self, mock_scan):
         mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
         src = self._create_plugin_dir("narrow")
