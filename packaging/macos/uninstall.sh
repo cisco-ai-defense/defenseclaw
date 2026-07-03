@@ -215,19 +215,22 @@ if [[ "${PURGE}" == "true" ]]; then
   # one (prefixed with an underscore per the install.sh convention). We
   # refuse to delete an unprefixed name — an admin who used a custom
   # unprefixed user probably shares it with another service.
+  # Pin to /Local/Default like install.sh does. Otherwise a Mac bound to
+  # an unreachable network directory (AD/LDAP/managed OD) can hang or
+  # ENETUNREACH us on the read/delete calls.
   if [[ -n "${SERVICE_USER}" && "${SERVICE_USER}" == _* ]]; then
-    if dscl . -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
+    if dscl /Local/Default -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
       log "removing service user ${SERVICE_USER}"
-      dscl . -delete "/Users/${SERVICE_USER}"  2>/dev/null || \
+      dscl /Local/Default -delete "/Users/${SERVICE_USER}"  2>/dev/null || \
         warn "failed to delete /Users/${SERVICE_USER}"
-      dscl . -delete "/Groups/${SERVICE_USER}" 2>/dev/null || \
+      dscl /Local/Default -delete "/Groups/${SERVICE_USER}" 2>/dev/null || \
         warn "failed to delete /Groups/${SERVICE_USER} (may already be gone)"
     else
       log "service user ${SERVICE_USER} not present; skipping"
     fi
   elif [[ -n "${SERVICE_USER}" ]]; then
     warn "service user '${SERVICE_USER}' does not start with '_'; refusing to auto-delete"
-    warn "  delete it manually if it was created for DefenseClaw: sudo dscl . -delete /Users/${SERVICE_USER}"
+    warn "  delete it manually if it was created for DefenseClaw: sudo dscl /Local/Default -delete /Users/${SERVICE_USER}"
   fi
 
   if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" && -d "${TARGET_HOME}/.defenseclaw" ]]; then
