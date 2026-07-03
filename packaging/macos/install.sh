@@ -717,6 +717,17 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     fi
   done
 
+  # The CLI subcommands ran as root and created audit.db / judge_bodies.db
+  # + their -wal/-shm sidecars in RUNTIME_DIR. Even though RUNTIME_DIR's
+  # ownership is defenseclaw:defenseclaw, the newly-written files
+  # inherit the running uid/gid (root:defenseclaw) with mode 0644 — so
+  # the daemon (running as defenseclaw) can READ but not WRITE the audit
+  # DB when it comes back up. Result: every hook evaluation runs, but
+  # the audit row silently drops. Fix by re-chowning after every CLI
+  # invocation completes.
+  log "  re-chowning runtime files created by CLI migrations"
+  chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}"
+
   log "  resuming LaunchDaemon"
   launchctl bootstrap system "${PLIST_DST}"
   launchctl enable "system/${LAUNCHD_LABEL}"
