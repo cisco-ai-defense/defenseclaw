@@ -96,6 +96,47 @@ dscl_read_prop() {
     | awk -v p="${prop}:" 'index($0, p) == 1 { $1=""; sub(/^ /, ""); print; exit }'
 }
 
+# dscl_ensure_record RECORD — creates a dscl record idempotently.
+# `dscl -create` will return eDSRecordAlreadyExists when the record is
+# already there; that's exactly the state we want, so we treat it as
+# success. Any other error is fatal. macOS's OpenDirectory can also be
+# temporarily inconsistent (a -read says "not there" while a subsequent
+# -create says "already there") for a few seconds after a prior create,
+# so this helper is more reliable than gating on -read.
+dscl_ensure_record() {
+  local record="$1"
+  local err
+  err="$(dscl . -create "${record}" 2>&1)"
+  local rc=$?
+  if (( rc == 0 )); then
+    return 0
+  fi
+  if [[ "${err}" == *eDSRecordAlreadyExists* ]]; then
+    return 0
+  fi
+  printf '%s\n' "${err}" >&2
+  return "${rc}"
+}
+
+# dscl_ensure_prop RECORD PROP VALUE — sets a property on a dscl record
+# to a specific value, treating "already has this exact value" as success.
+# Uses -create when the property is unset, -change when it needs updating.
+dscl_ensure_prop() {
+  local record="$1"
+  local prop="$2"
+  local value="$3"
+  local current
+  current="$(dscl_read_prop "${record}" "${prop}")"
+  if [[ "${current}" == "${value}" ]]; then
+    return 0
+  fi
+  if [[ -z "${current}" ]]; then
+    dscl . -create "${record}" "${prop}" "${value}"
+  else
+    dscl . -change "${record}" "${prop}" "${current}" "${value}"
+  fi
+}
+
 # ensure_service_user NAME — idempotently creates a hidden macOS system
 # user + group so the LaunchDaemon has a real principal to drop into.
 # Handles three states cleanly:
@@ -131,66 +172,55 @@ wait_for_id_resolves() {
 ensure_service_user() {
   local name="$1"
 
-  local user_exists="no" group_exists="no"
-  dscl . -read "/Users/${name}"  >/dev/null 2>&1 && user_exists="yes"
-  dscl . -read "/Groups/${name}" >/dev/null 2>&1 && group_exists="yes"
+  # Peek at the current state, but don't gate on it — OpenDirectory is
+  # eventually consistent so a read-then-create pattern can race. Every
+  # dscl call below uses dscl_ensure_* helpers that are safe under
+  # eDSRecordAlreadyExists.
+  local existing_gid existing_uid
+  existing_gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
+  existing_uid="$(dscl_read_prop "/Users/${name}"  UniqueID)"
 
-  # Fully provisioned already — read the IDs and return.
-  if [[ "${user_exists}" == "yes" && "${group_exists}" == "yes" ]]; then
-    log "  service user ${name} already provisioned"
-    SERVICE_UID="$(dscl_read_prop "/Users/${name}"  UniqueID)"
-    SERVICE_GID="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
-    return 0
-  fi
-
-  # Resolve the UID/GID to use. Prefer the group's existing GID if the
-  # group is already there (Case 2), otherwise pick a free UID.
-  local gid=""
-  if [[ "${group_exists}" == "yes" ]]; then
-    gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
-  fi
-  local uid="${gid}"
-  if [[ -z "${uid}" ]]; then
+  # Decide the id to use:
+  #   - reuse an existing UID/GID whenever we have one (avoids fighting
+  #     OD if either record is present)
+  #   - otherwise, allocate a free UID and use it for both
+  local uid=""
+  if [[ -n "${existing_gid}" ]]; then
+    uid="${existing_gid}"
+  elif [[ -n "${existing_uid}" ]]; then
+    uid="${existing_uid}"
+  else
     uid="$(find_free_system_uid)" \
       || die "no free UID in 400..499 for service user ${name}"
   fi
 
-  # Create group first when missing, so the user's PrimaryGroupID resolves
-  # at create time. `dscl -create /Groups/X` on a non-existent record
-  # creates it; the same call on an existing record errors with
-  # eDSRecordAlreadyExists — the early-return above prevents that.
-  if [[ "${group_exists}" == "no" ]]; then
-    log "  creating group ${name} (gid=${uid})"
-    dscl . -create "/Groups/${name}" \
-      || die "create group ${name} failed"
-    dscl . -create "/Groups/${name}" PrimaryGroupID "${uid}" \
-      || die "set group ${name} gid failed"
-    dscl . -create "/Groups/${name}" RealName "DefenseClaw Service Group" \
-      || warn "  set group ${name} RealName failed (non-fatal)"
-  else
-    log "  group ${name} already exists (gid=${uid}); reusing"
-  fi
+  log "  ensuring group ${name} (gid=${uid})"
+  dscl_ensure_record "/Groups/${name}" \
+    || die "create group ${name} failed"
+  dscl_ensure_prop   "/Groups/${name}" PrimaryGroupID "${uid}" \
+    || die "set group ${name} gid failed"
+  dscl_ensure_prop   "/Groups/${name}" RealName "DefenseClaw Service Group" \
+    || warn "  set group ${name} RealName failed (non-fatal)"
 
-  if [[ "${user_exists}" == "no" ]]; then
-    log "  creating user ${name} (uid=${uid})"
-    dscl . -create "/Users/${name}" \
-      || die "create user ${name} failed"
-    dscl . -create "/Users/${name}" UserShell        /usr/bin/false
-    dscl . -create "/Users/${name}" RealName         "DefenseClaw Service"
-    dscl . -create "/Users/${name}" UniqueID         "${uid}"
-    dscl . -create "/Users/${name}" PrimaryGroupID   "${uid}"
-    dscl . -create "/Users/${name}" NFSHomeDirectory /var/empty
-    dscl . -create "/Users/${name}" IsHidden         1
-  fi
+  log "  ensuring user ${name} (uid=${uid})"
+  dscl_ensure_record "/Users/${name}" \
+    || die "create user ${name} failed"
+  dscl_ensure_prop   "/Users/${name}" UserShell        /usr/bin/false
+  dscl_ensure_prop   "/Users/${name}" RealName         "DefenseClaw Service"
+  dscl_ensure_prop   "/Users/${name}" UniqueID         "${uid}"
+  dscl_ensure_prop   "/Users/${name}" PrimaryGroupID   "${uid}"
+  dscl_ensure_prop   "/Users/${name}" NFSHomeDirectory /var/empty
+  dscl_ensure_prop   "/Users/${name}" IsHidden         1
 
   SERVICE_UID="${uid}"
   SERVICE_GID="${uid}"
 
   # Wait for the OpenDirectory cache to see the new user. Downstream
   # chown/find commands go through getpwnam and can otherwise fail with
-  # "illegal user name" for a few seconds after creation.
+  # "illegal user name" for a few seconds after creation. Non-fatal —
+  # the chown site uses numeric IDs so it works regardless.
   if ! wait_for_id_resolves "${name}" 5; then
-    warn "  ${name} still not resolvable via id(1) after 5s — chown will fall back to numeric UID"
+    warn "  ${name} still not resolvable via id(1) after 5s — using numeric UID for chown"
   fi
 }
 
