@@ -23,7 +23,7 @@
     <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
     <string>managed_enterprise</string>
     <key>DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR</key>
-    <string>/Library/Application Support/DefenseClaw/runtime/hook-guardian-state</string>
+    <string>/Library/Application Support/DefenseClaw/runtime-hook-guardian</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

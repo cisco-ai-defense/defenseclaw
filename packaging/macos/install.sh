@@ -531,7 +531,15 @@ install -d -o root -g wheel -m 0750 "${SUPPORT_DIR}"
 # points data_dir at). It's chown'd to the service user after we
 # ensure the user exists — see below.
 RUNTIME_DIR="${SUPPORT_DIR}/runtime"
+# GUARDIAN_AUTH_DIR is the hook guardian's authorization state dir.
+# managed.HookGuardianAuthorizationDir() computes this as
+# `${data_dir}-hook-guardian` when DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR
+# isn't set — we mirror that default so the daemon (which does
+# have the env var set via the plist) and the CLI (invoked without
+# it) both resolve to the same path.
+GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/runtime-hook-guardian"
 install -d -o root -g wheel -m 0750 "${RUNTIME_DIR}"
+install -d -o root -g wheel -m 0750 "${GUARDIAN_AUTH_DIR}"
 install -d -o root -g wheel -m 0750 "${LOGS_DIR}"
 
 CONFIG_PATH="${SUPPORT_DIR}/config.yaml"
@@ -556,7 +564,7 @@ log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP} (uid=${SERVICE_UI
 # accepts them.
 [[ -n "${SERVICE_UID}" && -n "${SERVICE_GID}" ]] \
   || die "service uid/gid unset after ensure_service_user (internal bug)"
-chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${LOGS_DIR}"
+chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${GUARDIAN_AUTH_DIR}" "${LOGS_DIR}"
 
 # SUPPORT_DIR stays owned by root, but the service user needs group
 # traverse (x) access so launchd can chdir into
