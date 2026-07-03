@@ -229,13 +229,26 @@ wait_for_id_resolves() {
 ensure_service_user() {
   local name="$1"
 
-  # Peek at the current state, but don't gate on it — OpenDirectory is
-  # eventually consistent so a read-then-create pattern can race. Every
-  # dscl call below uses dscl_ensure_* helpers that are safe under
-  # eDSRecordAlreadyExists.
+  # Detect a corrupt half-state from a prior failed install: a record
+  # exists but its PrimaryGroupID / UniqueID is neither present nor
+  # settable (dscl -create says "already exists", -change says "not
+  # found", -append also says "already exists"). If we can even *read*
+  # the record shell but can't read the ID, delete the record and let
+  # us start clean.
   local existing_gid existing_uid
   existing_gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
   existing_uid="$(dscl_read_prop "/Users/${name}"  UniqueID)"
+
+  if [[ -z "${existing_gid}" ]] && dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
+    log "  group ${name} record present but PrimaryGroupID missing; hard-resetting"
+    dscl "${DS_NODE}" -delete "/Groups/${name}" 2>/dev/null || \
+      die "failed to reset corrupt group ${name}; run: sudo dscl /Local/Default -delete /Groups/${name}"
+  fi
+  if [[ -z "${existing_uid}" ]] && dscl "${DS_NODE}" -read "/Users/${name}" >/dev/null 2>&1; then
+    log "  user ${name} record present but UniqueID missing; hard-resetting"
+    dscl "${DS_NODE}" -delete "/Users/${name}" 2>/dev/null || \
+      die "failed to reset corrupt user ${name}; run: sudo dscl /Local/Default -delete /Users/${name}"
+  fi
 
   # Decide the id to use:
   #   - reuse an existing UID/GID whenever we have one (avoids fighting
