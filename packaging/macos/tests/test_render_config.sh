@@ -8,7 +8,9 @@ t_single_connector() {
 
   assert_contains "${out}" "config_version: 6"                  "config_version present"
   assert_contains "${out}" "deployment_mode: managed_enterprise" "managed_enterprise mode"
-  assert_contains "${out}" "data_dir: \"/Library/Application Support/DefenseClaw\"" "data_dir quoted"
+  assert_contains "${out}" "data_dir: \"/Library/Application Support/DefenseClaw/runtime\"" "data_dir points at runtime subdir (config-adjacent path stays root-only)"
+  assert_contains "${out}" "audit_db: \"/Library/Application Support/DefenseClaw/runtime/audit.db\"" "audit_db under runtime"
+  assert_contains "${out}" "judge_bodies_db: \"/Library/Application Support/DefenseClaw/runtime/judge_bodies.db\"" "judge_bodies_db under runtime"
   assert_contains "${out}" "api_port: 18970"                    "api_port"
   assert_contains "${out}" "disable_redaction: false"           "redaction disabled flag"
   assert_contains "${out}" "mode: action"                       "guardrail mode"
@@ -32,6 +34,22 @@ t_multi_connector() {
   assert_contains "${out}" "    codex:"               "codex entry under connectors"
   assert_contains "${out}" "disable_redaction: true"  "redaction explicit opt-out"
   assert_contains "${out}" "mode: observe"            "observe mode"
+}
+
+t_runtime_paths_disjoint_from_config_parent() {
+  # Regression guard: the managed_enterprise trust check walks every
+  # ancestor of config.yaml and requires each to be root-owned with
+  # no group/other write bits. That means data_dir CANNOT be the same
+  # directory that holds config.yaml (installer needs to chown it to
+  # the service user). Assert the renderer places data_dir strictly
+  # BELOW the support dir.
+  local out support runtime
+  support="/Library/Application Support/DefenseClaw"
+  runtime="${support}/runtime"
+  out="$(render_config observe cursor 18970 false "${support}" cursor)"
+  assert_contains "${out}" "data_dir: \"${runtime}\"" "data_dir under support"
+  # If data_dir was ever set back to support itself, trust check fails.
+  assert_not_contains "${out}" "data_dir: \"${support}\"" "data_dir MUST NOT equal support dir"
 }
 
 t_redaction_pass_through_on() {
@@ -75,6 +93,7 @@ t_yaml_parses() {
 
 run_case "single-connector config"  t_single_connector
 run_case "multi-connector config"   t_multi_connector
+run_case "runtime paths under support (trust-check invariant)" t_runtime_paths_disjoint_from_config_parent
 run_case "renderer pass-through: redaction on"  t_redaction_pass_through_on
 run_case "renderer pass-through: redaction off" t_redaction_pass_through_off
 run_case "rendered YAML parses"     t_yaml_parses

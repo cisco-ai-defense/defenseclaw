@@ -13,17 +13,17 @@
   <key>GroupName</key>
   <string>_defenseclaw</string>
   <key>WorkingDirectory</key>
-  <string>/Library/Application Support/DefenseClaw</string>
+  <string>/Library/Application Support/DefenseClaw/runtime</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>DEFENSECLAW_HOME</key>
-    <string>/Library/Application Support/DefenseClaw</string>
+    <string>/Library/Application Support/DefenseClaw/runtime</string>
     <key>DEFENSECLAW_CONFIG</key>
     <string>/Library/Application Support/DefenseClaw/config.yaml</string>
     <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
     <string>managed_enterprise</string>
     <key>DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR</key>
-    <string>/Library/Application Support/DefenseClaw/hook-guardian-state</string>
+    <string>/Library/Application Support/DefenseClaw/runtime/hook-guardian-state</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
