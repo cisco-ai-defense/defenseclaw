@@ -213,6 +213,19 @@ prepare_userspace_for() {
   esac
 }
 
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    prepare-userspace)
+      shift
+      prepare_userspace_for "$@"
+      ;;
+    *)
+      echo "usage: $0 prepare-userspace CONNECTOR HOME" >&2
+      exit 64
+      ;;
+  esac
+fi
+
 # ---- config rendering --------------------------------------------------
 
 # render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR CONN... -> stdout

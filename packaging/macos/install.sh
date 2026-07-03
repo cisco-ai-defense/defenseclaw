@@ -55,6 +55,12 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=lib/installer_lib.sh
 . "${SCRIPT_DIR}/lib/installer_lib.sh"
 
+prepare_userspace_for_target() {
+  local connector="$1"
+  sudo -H -u "${TARGET_USER}" env HOME="${TARGET_HOME}" \
+    /bin/bash "${SCRIPT_DIR}/lib/installer_lib.sh" prepare-userspace "${connector}" "${TARGET_HOME}"
+}
+
 usage() {
   cat <<EOF
 Usage: sudo $0 [options]
@@ -260,7 +266,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     fi
 
     log "  [${c}] preparing userspace"
-    if ! prepare_userspace_for "${c}" "${TARGET_HOME}"; then
+    if ! prepare_userspace_for_target "${c}"; then
       warn "  [${c}] refused to prepare userspace (symlinked or non-dir path); skipping"
       continue
     fi
