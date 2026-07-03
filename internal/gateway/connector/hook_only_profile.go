@@ -85,6 +85,13 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 			if in.AdditionalContext != "" {
 				output = map[string]interface{}{"continue": true, "permission": "allow", "agent_message": in.AdditionalContext}
 			}
+		default:
+			// Cursor's hook script is fail-closed: an empty stdout is
+			// treated as a hook failure and blocks the tool call. Every
+			// benign prompt hits this path when action=allow with no
+			// additional context, so we must always emit an explicit
+			// allow envelope for cursor.
+			output = map[string]interface{}{"continue": true, "permission": "allow"}
 		}
 	case "windsurf":
 		if in.Action == "block" {
