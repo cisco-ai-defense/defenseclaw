@@ -19,7 +19,7 @@ This configures the guardrail proxy, installs the DefenseClaw OpenClaw plugin,
 and installs the separate InsightClaw OpenClaw plugin with:
 
 ```bash
-openclaw plugins install insightclaw
+openclaw plugins install @outshift-open/insightclaw
 ```
 
 DefenseClaw patches `~/.openclaw/openclaw.json` after installation so

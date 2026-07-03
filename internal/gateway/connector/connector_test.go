@@ -736,7 +736,7 @@ func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
 	}
 	installs, _ := plugins["installs"].(map[string]interface{})
 	insightInstall, _ := installs["insightclaw"].(map[string]interface{})
-	if insightInstall == nil || insightInstall["source"] != "npm" || insightInstall["sourcePath"] != "insightclaw" {
+	if insightInstall == nil || insightInstall["source"] != "npm" || insightInstall["sourcePath"] != "@outshift-open/insightclaw" {
 		t.Errorf("plugins.installs.insightclaw not installed as npm source, got %v", insightInstall)
 	}
 	// Unrelated sections untouched.

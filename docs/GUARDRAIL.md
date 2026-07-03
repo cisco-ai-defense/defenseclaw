@@ -469,10 +469,10 @@ DefenseClaw fetch interceptor plugin. During OpenClaw connector setup,
 DefenseClaw installs it through OpenClaw's plugin manager:
 
 ```bash
-openclaw plugins install insightclaw
+openclaw plugins install @outshift-open/insightclaw
 ```
 
-Use the OpenClaw command rather than `npm install insightclaw`: OpenClaw's
+Use the OpenClaw command rather than `npm install @outshift-open/insightclaw`: OpenClaw's
 installer places the package where the gateway expects plugins and records the
 plugin metadata it needs to load it. DefenseClaw then patches
 `~/.openclaw/openclaw.json` to ensure `insightclaw` is enabled, allowed, and

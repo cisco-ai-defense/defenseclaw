@@ -58,17 +58,18 @@ const openClawPlaceholderName = ".placeholder"
 
 const defenseClawOpenClawPluginID = "defenseclaw"
 const insightClawOpenClawPluginID = "insightclaw"
-const insightClawNPMSource = "insightclaw"
+const insightClawNPMSource = "@outshift-open/insightclaw"
 
 var defaultInsightClawConfig = map[string]interface{}{
-	"captureContent":       true,
-	"endpoint":             "http://172.17.0.1:4318",
-	"metrics":              true,
-	"protocol":             "http",
-	"serviceName":          "openclaw-gateway",
-	"spanCache":            true,
-	"spanCacheVerboseLogs": false,
-	"traces":               true,
+	"captureContent":           true,
+	"endpoint":                 "http://172.17.0.1:4318",
+	"metrics":                  true,
+	"protocol":                 "http",
+	"serviceName":              "openclaw-gateway",
+	"spanCache":                true,
+	"spanCacheVerboseLogs":     false,
+	"traces":                   true,
+	"emitIoaObserveAttributes": true,
 }
 
 // openClawExtensionAvailable returns true when the embedded OpenClaw
