@@ -259,32 +259,31 @@ ensure_service_user() {
   fi
 
   if [[ "${needs_reset}" == "yes" ]]; then
-    # We're in the corrupt state DIAGNOSED on live install:
-    # /var/db/dslocal/nodes/Default/groups/_defenseclaw.plist exists
-    # on disk but its record is missing PrimaryGroupID. Every dscl
-    # write path (create/change/append) then fights that ghost record,
-    # and dscl -delete "succeeds" without actually removing the plist.
+    # Recovering the corrupt "record exists but attribute is missing"
+    # state. dscl can't fix what dscl (or a killed install) created,
+    # and /var/db/dslocal/nodes/Default is SIP-protected on modern
+    # macOS so `rm` returns "Operation not permitted" even as root.
     #
-    # The only reliable recovery is to rm the on-disk plist file
-    # directly and force opendirectoryd to reload. dscl is the wrong
-    # tool here — we're fixing the state that dscl itself created.
-    for plist in \
-      "/var/db/dslocal/nodes/Default/users/${name}.plist" \
-      "/var/db/dslocal/nodes/Default/groups/${name}.plist"; do
-      if [[ -f "${plist}" ]]; then
-        log "  removing on-disk ghost plist: ${plist}"
-        rm -f "${plist}" || die "failed to remove ${plist} (should be running as root)"
-      fi
-    done
+    # The tools that CAN modify SIP-protected local directory records
+    # are the ones that route through opendirectoryd's authenticated
+    # API: dseditgroup for groups, sysadminctl for users. Both were
+    # verified in a live diagnostic:
+    #
+    #   sudo dseditgroup -o delete _defenseclaw  → exit 0, record gone
+    #   sudo sysadminctl -deleteUser _defenseclaw → deletes if present
+    if [[ "${group_shell_present}" == "yes" ]]; then
+      log "  resetting group ${name} via dseditgroup"
+      /usr/sbin/dseditgroup -o delete "${name}" >/dev/null 2>&1 || \
+        warn "  dseditgroup -o delete ${name} failed"
+    fi
+    if [[ "${user_shell_present}" == "yes" ]]; then
+      log "  resetting user ${name} via sysadminctl"
+      /usr/sbin/sysadminctl -deleteUser "${name}" >/dev/null 2>&1 || \
+        warn "  sysadminctl -deleteUser ${name} failed"
+    fi
 
-    # Force opendirectoryd to reload from disk. Without this it will
-    # keep serving the cached ghost record.
-    /usr/bin/killall -HUP opendirectoryd 2>/dev/null || true
-    /usr/bin/dscacheutil -flushcache 2>/dev/null || true
-
-    # Wait for opendirectoryd to actually re-read. HUP is asynchronous;
-    # a subsequent dscl -read of the deleted record should return
-    # eDSRecordNotFound within a second.
+    # dseditgroup / sysadminctl already synchronize opendirectoryd, so
+    # no cache-flush dance needed. Just verify the reset actually took.
     local settle=0
     while (( settle < 5 )); do
       if ! dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 && \
@@ -299,12 +298,12 @@ ensure_service_user() {
     existing_gid=""
     existing_uid=""
 
-    # If the record STILL exists after the disk + cache reset, we're
-    # dealing with a network directory or something we can't fix
-    # from here. Bail with an actionable error.
+    # If the record STILL exists after that, it's coming from a
+    # network directory / MDM push that we can't manage locally.
+    # Bail with an actionable error.
     if dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 || \
        dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
-      die "cannot reset ${name} — record is not in /Local/Default and comes from a directory service we can't manage. Pass --service-user with a different name (e.g. --service-user _defenseclaw2)"
+      die "cannot reset ${name} — record survives dseditgroup/sysadminctl and is likely coming from a directory service (AD/LDAP/MDM). Pass --service-user with a different name (e.g. --service-user _defenseclaw2)"
     fi
   fi
 
@@ -327,14 +326,34 @@ ensure_service_user() {
   fi
 
   log "  ensuring group ${name} (gid=${uid})"
-  dscl_ensure_record "/Groups/${name}" \
-    || die "create group ${name} failed"
-  dscl_ensure_prop   "/Groups/${name}" PrimaryGroupID "${uid}" \
-    || die "set group ${name} gid failed"
-  dscl_ensure_prop   "/Groups/${name}" RealName "DefenseClaw Service Group" \
-    || warn "  set group ${name} RealName failed (non-fatal)"
+  # Use dseditgroup rather than dscl for group creation. On modern
+  # macOS (SIP enabled) dscl -create /Local/Default -create /Groups/X
+  # writes a plist under /var/db/dslocal — which is SIP-protected.
+  # dscl "succeeds" but the write can be partially dropped, leaving
+  # a phantom record with RecordName but no PrimaryGroupID. That's
+  # exactly the corruption pattern the reset block above cleans up.
+  #
+  # dseditgroup routes through opendirectoryd's authenticated API,
+  # which has entitlements to write SIP-protected records atomically
+  # and correctly.
+  if ! dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
+    /usr/sbin/dseditgroup -o create -i "${uid}" -r "DefenseClaw Service Group" "${name}" \
+      || die "dseditgroup -o create ${name} failed"
+  fi
+  # Verify the group ended up with the right GID (dseditgroup ignores
+  # -i if a group with the same name already exists in another node).
+  local actual_gid
+  actual_gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
+  if [[ "${actual_gid}" != "${uid}" ]]; then
+    die "group ${name} exists but PrimaryGroupID=${actual_gid:-<unset>} does not match target ${uid}"
+  fi
 
   log "  ensuring user ${name} (uid=${uid})"
+  # For users, sysadminctl is the SIP-safe primitive, but it requires
+  # a password argument and creates a full account. dscl still works
+  # for creating a hidden system user because Users/ plists in
+  # /var/db/dslocal are less restrictive than Groups/. We validate
+  # the write after each dscl call.
   dscl_ensure_record "/Users/${name}" \
     || die "create user ${name} failed"
   dscl_ensure_prop   "/Users/${name}" UserShell        /usr/bin/false

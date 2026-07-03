@@ -240,44 +240,28 @@ if [[ "${PURGE}" == "true" ]]; then
   # an unreachable network directory (AD/LDAP/managed OD) can hang or
   # ENETUNREACH us on the read/delete calls.
   if [[ -n "${SERVICE_USER}" && "${SERVICE_USER}" == _* ]]; then
-    # Two-tier delete:
-    #   1. rm the on-disk plists FIRST — this is the authoritative
-    #      state. On a corrupt install (record has RecordName but no
-    #      PrimaryGroupID), dscl -delete "succeeds" without removing
-    #      the plist, which is exactly what stranded the ghost record
-    #      that broke the earlier reinstall on the live box.
-    #   2. dscl -delete afterward to clear whatever's still in
-    #      opendirectoryd's cache.
-    #   3. killall -HUP opendirectoryd so it re-reads from disk.
-    dscl_removed_count=0
+    # SIP protects /var/db/dslocal, so `rm plist` returns "Operation
+    # not permitted" even for root. Use the SIP-safe official tools:
+    # dseditgroup for groups, sysadminctl for users. Both route through
+    # opendirectoryd's authenticated API and atomically clean up the
+    # on-disk plists.
+    removed_any=no
 
-    for plist in \
-      "/var/db/dslocal/nodes/Default/users/${SERVICE_USER}.plist" \
-      "/var/db/dslocal/nodes/Default/groups/${SERVICE_USER}.plist"; do
-      if [[ -f "${plist}" ]]; then
-        log "removing on-disk plist ${plist}"
-        rm -f "${plist}"
-        dscl_removed_count=$((dscl_removed_count + 1))
-      fi
-    done
+    if dscl /Local/Default -read "/Groups/${SERVICE_USER}" >/dev/null 2>&1; then
+      log "removing group ${SERVICE_USER} via dseditgroup"
+      /usr/sbin/dseditgroup -o delete "${SERVICE_USER}" >/dev/null 2>&1 && \
+        removed_any=yes || warn "dseditgroup delete ${SERVICE_USER} failed"
+    fi
+    if dscl /Local/Default -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
+      log "removing user ${SERVICE_USER} via sysadminctl"
+      /usr/sbin/sysadminctl -deleteUser "${SERVICE_USER}" >/dev/null 2>&1 && \
+        removed_any=yes || warn "sysadminctl deleteUser ${SERVICE_USER} failed"
+    fi
 
-    # sysadminctl for good measure (it can also remove a user's
-    # home dir if one somehow got created; ours never does).
-    /usr/sbin/sysadminctl -deleteUser "${SERVICE_USER}" 2>/dev/null || true
-
-    # Now try dscl -delete on whatever remained in the cache. These
-    # are advisory: the disk truth is already gone above.
-    for record in "/Users/${SERVICE_USER}" "/Groups/${SERVICE_USER}"; do
-      dscl /Local/Default -delete "${record}" 2>/dev/null || true
-    done
-
-    # Force opendirectoryd to reload from the new on-disk state.
-    if (( dscl_removed_count > 0 )); then
-      /usr/bin/killall -HUP opendirectoryd 2>/dev/null || true
-      /usr/bin/dscacheutil -flushcache 2>/dev/null || true
-      log "removed ${SERVICE_USER} service principal (${dscl_removed_count} plist(s))"
+    if [[ "${removed_any}" == "yes" ]]; then
+      log "removed ${SERVICE_USER} service principal"
     else
-      log "no ${SERVICE_USER} plist(s) to remove"
+      log "no ${SERVICE_USER} records to remove"
     fi
   elif [[ -n "${SERVICE_USER}" ]]; then
     warn "service user '${SERVICE_USER}' does not start with '_'; refusing to auto-delete"
