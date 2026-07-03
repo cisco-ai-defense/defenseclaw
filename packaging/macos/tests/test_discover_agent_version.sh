@@ -58,13 +58,21 @@ t_claudecode_no_install_returns_empty() {
   assert_eq "${got}" "" "claudecode with no CLI/extensions returns empty"
 }
 
-t_codex_no_install_returns_empty() {
-  # Codex probe no longer exec's the CLI. With no metadata file present
-  # under the tmp HOME's npm dirs, the function must return empty.
+t_codex_no_home_metadata_uses_system_or_empty() {
+  # With no metadata under the tmp HOME, the probe falls through to
+  # /opt/homebrew/Caskroom/codex etc. On a CI/dev box without codex
+  # installed anywhere, that returns empty. On a dev box with codex
+  # installed, we get a real version (that's fine — the point of
+  # discover_agent_version is to find one when it exists). Both are
+  # valid; assert the shape rather than the specific value.
   local home; home="$(mktest_tmp)"
   local got
   got="$(without_host_agent_bins discover_agent_version codex "${home}" 2>/dev/null || true)"
-  assert_eq "${got}" "" "codex with no metadata returns empty"
+  # Either empty, or a plausible version string (semver-ish).
+  if [[ -n "${got}" && ! "${got}" =~ ^[0-9]+\.[0-9]+ ]]; then
+    _fail "codex probe returned unexpected non-empty non-version: ${got}"
+    return 1
+  fi
 }
 
 t_codex_from_user_npm_metadata() {
@@ -88,6 +96,6 @@ t_unknown_connector() {
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
-run_case "codex without install"             t_codex_no_install_returns_empty
+run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "unknown connector returns empty"   t_unknown_connector

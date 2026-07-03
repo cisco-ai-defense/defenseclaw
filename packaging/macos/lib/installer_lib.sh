@@ -102,9 +102,13 @@ discover_agent_version() {
   local home="$2"
   case "${connector}" in
     codex)
-      # Codex-cli is distributed via npm. If a user-writable global
-      # install exposes a package.json, read it. We deliberately do NOT
-      # exec `codex --version` because install.sh calls this as root.
+      # Codex-cli is a Rust binary, not npm. We probe metadata paths
+      # first (safe, no exec), then fall back to `codex --version`
+      # exec'd AS THE TARGET USER via `sudo -u`. Running the user's
+      # own codex binary as their identity is not a privilege
+      # escalation — install.sh's outer sudo drops privileges for this
+      # subprocess, matching the security posture of the hook
+      # guardian's connector.Setup call.
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
@@ -114,6 +118,25 @@ discover_agent_version() {
         local v; v="$(_read_json_version "${pkg}")"
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
+      # Homebrew cask keeps the binary under Caskroom with a version
+      # in the path itself: /opt/homebrew/Caskroom/codex/<version>/...
+      local caskroom
+      for caskroom in /opt/homebrew/Caskroom/codex /usr/local/Caskroom/codex; do
+        if [[ -d "${caskroom}" ]]; then
+          local ver
+          ver="$(ls -1 "${caskroom}" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+' | sort -V | tail -1)"
+          if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
+        fi
+      done
+      # Last resort: exec codex --version as the target user (not as
+      # root). Requires TARGET_USER to be known to the caller.
+      if [[ -n "${DEFENSECLAW_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
+        local vraw
+        vraw="$(sudo -n -u "${DEFENSECLAW_TARGET_USER}" codex --version 2>/dev/null | head -1 || true)"
+        # Codex prints "codex-cli X.Y.Z"; take just the version token.
+        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
+        if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
+      fi
       ;;
     claudecode)
       # Claude Code ships both as a standalone npm CLI (has a

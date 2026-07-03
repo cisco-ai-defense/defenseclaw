@@ -64,7 +64,7 @@ t_install_help_documents_service_user() {
   local out
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--service-user NAME"    "service-user flag documented"
-  assert_contains "${out}" "_defenseclaw"            "default service user shown"
+  assert_contains "${out}" "default: defenseclaw"    "default service user shown"
 }
 
 t_uninstall_help_documents_service_user() {
