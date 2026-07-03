@@ -80,13 +80,20 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 # faster than issuing 100 -search calls. On a laptop with a network
 # directory attached, the per-candidate probe form could take 30s+.
 find_free_system_uid() {
-  local in_use
+  local in_use_uids in_use_gids in_use
   # Query /Local/Default explicitly — using `.` (the meta-node) makes
   # dscl walk every attached directory (AD/LDAP/OD), which can hang or
   # return ENETUNREACH on a Mac bound to an unreachable domain. Service
   # users only ever live in /Local/Default, so this is both faster and
   # safer.
-  in_use="$(dscl /Local/Default -list /Users UniqueID 2>/dev/null | awk '{print $2}')"
+  #
+  # Check BOTH /Users UIDs and /Groups GIDs — since our service user
+  # uses the same numeric ID for both, we can't pick a value that's
+  # taken by either. Missing this check produced a live install failure
+  # where UID 400 was free but GID 400 was taken by an unrelated group.
+  in_use_uids="$(dscl /Local/Default -list /Users  UniqueID       2>/dev/null | awk '{print $2}')"
+  in_use_gids="$(dscl /Local/Default -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}')"
+  in_use="$(printf '%s\n%s\n' "${in_use_uids}" "${in_use_gids}" | sort -u)"
   local candidate
   for candidate in $(seq 400 499); do
     if ! printf '%s\n' "${in_use}" | grep -qxF "${candidate}"; then
