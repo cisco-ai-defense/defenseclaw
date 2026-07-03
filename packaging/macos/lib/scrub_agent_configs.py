@@ -81,12 +81,32 @@ def scrub_cursor(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]
     return True, None
 
 
+# DefenseClaw-owned keys in Claude Code's settings.json env block.
+# Kept in sync with claudeCodeOtelEnvKeys in
+# internal/gateway/connector/claudecode.go.
+CLAUDE_MANAGED_ENV_KEYS = frozenset({
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "DEFENSECLAW_FAIL_MODE",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_LOGS_EXPORTER",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_LOG_USER_PROMPTS",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_SERVICE_NAME",
+})
+
+
 def scrub_claudecode(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
     """Drop DefenseClaw entries from ~/.claude/settings.json.
 
     Shape: { "hooks": { "<event>": [ {"hooks":[{entry}, ...]}, ... ] } }
     Nested one level deeper than Cursor's; otherwise the same idea.
-    Also strips a top-level "env" block that's DefenseClaw-only.
+    Also strips DefenseClaw-owned keys from the top-level "env" block
+    (kept in sync with claudeCodeOtelEnvKeys in the Go connector), and
+    strips any additional env value that references our data-dir markers.
+    Non-DefenseClaw env entries are preserved.
     """
     with open(path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -115,6 +135,16 @@ def scrub_claudecode(path: str, markers: tuple[str, ...]) -> tuple[bool, str | N
                 hooks[event] = kept_groups
             else:
                 del hooks[event]
+    env = cfg.get("env")
+    if isinstance(env, dict):
+        for key in list(env.keys()):
+            if key in CLAUDE_MANAGED_ENV_KEYS:
+                del env[key]
+                continue
+            if looks_owned(env[key], markers):
+                del env[key]
+        if not env:
+            del cfg["env"]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, sort_keys=True)
         f.write("\n")
@@ -141,6 +171,11 @@ def scrub_claudecode(path: str, markers: tuple[str, ...]) -> tuple[bool, str | N
 
 
 TOML_TOP_LEVEL_RE = re.compile(r"^\[([^\[\].\s]+)\]\s*$")
+# Any TOML table header: simple `[name]`, dotted `[projects.foo]`, or
+# array-of-tables `[[array.of.tables]]`. Used to bound the "section
+# references DefenseClaw" scan so a matched marker inside `[hooks]`
+# can't accidentally swallow the next unrelated section.
+TOML_TABLE_HEADER_RE = re.compile(r"^\s*\[\[?[^\[\]]+\]\]?\s*$")
 
 
 def scrub_codex(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
@@ -172,7 +207,12 @@ def scrub_codex(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
         while j < n:
             line = lines[j]
             stripped = line.strip()
-            if stripped.startswith("[") and TOML_TOP_LEVEL_RE.match(stripped):
+            # Stop at ANY table header — simple, dotted, or array-of-tables.
+            # A simple `[name]` regex would let a dotted `[projects.foo]`
+            # slip through and be considered part of the [hooks] body,
+            # which would then be deleted if [hooks] happened to reference
+            # DefenseClaw. That would delete unrelated user state.
+            if TOML_TABLE_HEADER_RE.match(stripped):
                 break
             if any(m in line for m in markers):
                 matched = True

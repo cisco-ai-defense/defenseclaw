@@ -34,6 +34,7 @@ PURGE="false"
 ASSUME_YES="false"
 TARGET_USER=""
 KEEP_AGENT_CONFIGS="false"
+SCRUB_FAILED="false"
 
 # ---- helpers ------------------------------------------------------------
 
@@ -91,8 +92,9 @@ if [[ "${PURGE}" == "true" ]]; then
   fi
   if [[ -n "${TARGET_USER}" ]]; then
     TARGET_HOME="$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-    TARGET_UID="$(id -u "${TARGET_USER}" 2>/dev/null || echo "")"
-    TARGET_GID="$(id -g "${TARGET_USER}" 2>/dev/null || echo "")"
+    if [[ -z "${TARGET_HOME}" || ! -d "${TARGET_HOME}" ]]; then
+      die "could not resolve home for --user ${TARGET_USER} (dscl returned '${TARGET_HOME}'); refusing to purge without a valid target"
+    fi
   fi
   if [[ "${ASSUME_YES}" != "true" ]]; then
     printf '[uninstall] --purge will DELETE:\n'
@@ -133,6 +135,8 @@ fi
 # we delete ~/.defenseclaw/hooks/*-hook.sh. The scrub runs as the target
 # user (drop privileges via sudo -u) so file ownership is preserved.
 
+PY="$(command -v python3 || printf '/usr/bin/python3')"
+
 scrub_agent_config() {
   local connector="$1"
   local cfg="$2"
@@ -141,19 +145,23 @@ scrub_agent_config() {
   fi
   if [[ ! -f "${SCRUB_PY}" ]]; then
     warn "scrub helper missing: ${SCRUB_PY}; skipping ${cfg}"
+    SCRUB_FAILED="true"
     return 0
   fi
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
   if [[ -n "${TARGET_USER:-}" && $(id -u "${TARGET_USER}" 2>/dev/null) != "0" ]]; then
-    sudo -u "${TARGET_USER}" /usr/bin/python3 "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    sudo -u "${TARGET_USER}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
   else
-    /usr/bin/python3 "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
   fi
   case "${rc}" in
     0) ;;
     2) ;;  # file missing — fine
-    *) warn "  scrub exited ${rc} for ${cfg} (left unmodified)";;
+    *)
+      warn "  scrub exited ${rc} for ${cfg} (left unmodified)"
+      SCRUB_FAILED="true"
+      ;;
   esac
 }
 
@@ -188,6 +196,13 @@ if [[ "${PURGE}" == "true" ]]; then
   done
 
   if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" && -d "${TARGET_HOME}/.defenseclaw" ]]; then
+    if [[ "${SCRUB_FAILED}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
+      # We're about to delete the hook scripts, but at least one agent
+      # config still references them. Deleting now would leave every
+      # future agent tool call fail-closed (exit 127 → block). Refuse
+      # rather than paint the operator into that corner.
+      die "one or more agent-config scrubs failed; refusing to delete ${TARGET_HOME}/.defenseclaw (rerun with --keep-agent-configs to force the delete, then repair or reinstall)"
+    fi
     log "purging ${TARGET_HOME}/.defenseclaw"
     rm -rf "${TARGET_HOME}/.defenseclaw"
     if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then

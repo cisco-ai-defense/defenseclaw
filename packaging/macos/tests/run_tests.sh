@@ -121,7 +121,16 @@ run_case() {
     printf 'CASE  %s :: %s\n' "${CUR_TEST_FILE}" "${name}"
   fi
   local before_fail=${TEST_FAIL_COUNT}
-  if "$@"; then : ; fi
+  # Capture the case's exit status. If the function returns non-zero but
+  # never recorded a failure via _fail (typo'd name, mkdir/cd blew up,
+  # bare `if` with no `else` under `set -u`, etc.), treat that as a
+  # failure — the earlier "silently pass on non-zero" behavior masked
+  # broken tests that never actually asserted anything.
+  local rc=0
+  "$@" || rc=$?
+  if (( rc != 0 )) && (( TEST_FAIL_COUNT == before_fail )); then
+    _fail "case '${name}' exited with status ${rc} but recorded no assertion"
+  fi
   if [[ ${TEST_FAIL_COUNT} -eq ${before_fail} ]]; then
     TEST_OK_COUNT=$((TEST_OK_COUNT + 1))
     if [[ "${VERBOSE}" == "true" ]]; then

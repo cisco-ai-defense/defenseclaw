@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# discover_agent_version: per-connector probing.
-# We stage a fake Cursor extension under a tmp HOME to drive the claudecode
-# extension-fallback path without touching real installs.
+# discover_agent_version: per-connector metadata probing.
+#
+# The lib never execs agent binaries (see the security note in
+# installer_lib.sh:discover_agent_version), so all cases are driven from
+# staged tmpdirs / bundle files — no host-agent leakage possible.
 . "${PKG_DIR}/lib/installer_lib.sh"
 
-without_host_claude() {
-  local fakebin; fakebin="$(mktest_tmp)"
-  cat > "${fakebin}/claude" <<'SH'
+# Wrapper that masks any host `claude` / `codex` CLI on PATH. We used
+# to need this because the lib exec'd those binaries; keeping it around
+# guards against a regression where a future CLI probe reintroduces the
+# code-exec surface.
+without_host_agent_bins() {
+  local fakebin
+  fakebin="$(mktest_tmp)"
+  local bin
+  for bin in claude codex; do
+    cat > "${fakebin}/${bin}" <<'SH'
 #!/usr/bin/env bash
 exit 127
 SH
-  chmod 0700 "${fakebin}/claude"
+    chmod 0700 "${fakebin}/${bin}"
+  done
   PATH="${fakebin}:${PATH}" "$@"
 }
 
@@ -23,7 +33,7 @@ t_claudecode_via_cursor_extension() {
 JSON
 
   local got
-  got="$(without_host_claude discover_agent_version claudecode "${home}")"
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
   assert_eq "${got}" "2.1.195" "claudecode version from Cursor extension"
 }
 
@@ -36,33 +46,37 @@ t_claudecode_via_vscode_extension() {
 JSON
 
   local got
-  got="$(without_host_claude discover_agent_version claudecode "${home}")"
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
   assert_eq "${got}" "2.0.99" "claudecode version from VS Code extension"
 }
 
 t_claudecode_no_install_returns_empty() {
-  # Use a tmp HOME with no extensions and override PATH so 'claude' CLI
-  # is not findable. We can't reliably hide a real /usr/local/bin/claude
-  # so we just assert the function doesn't error or echo a stale value.
+  # Empty tmp HOME + no CLI on PATH → empty version, cleanly.
   local home; home="$(mktest_tmp)"
   local got
-  # When claude CLI is on PATH this returns a real version; that's fine.
-  # The assertion is: the function returns cleanly (no syntax error / crash).
-  got="$(discover_agent_version claudecode "${home}" 2>/dev/null || true)"
-  # Nothing to assert; presence of CLI on host makes this nondeterministic.
-  if [[ "${VERBOSE:-false}" == "true" ]]; then
-    printf '  info  claudecode-on-empty-host got=%q\n' "${got}"
-  fi
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "claudecode with no CLI/extensions returns empty"
 }
 
-t_codex_unknown_returns_empty() {
-  # If codex CLI isn't installed, function returns empty. If it IS installed,
-  # we just observe it returns something non-empty. Either is fine.
+t_codex_no_install_returns_empty() {
+  # Codex probe no longer exec's the CLI. With no metadata file present
+  # under the tmp HOME's npm dirs, the function must return empty.
+  local home; home="$(mktest_tmp)"
   local got
-  got="$(discover_agent_version codex "$(mktest_tmp)" 2>/dev/null || true)"
-  if [[ "${VERBOSE:-false}" == "true" ]]; then
-    printf '  info  codex got=%q\n' "${got}"
-  fi
+  got="$(without_host_agent_bins discover_agent_version codex "${home}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "codex with no metadata returns empty"
+}
+
+t_codex_from_user_npm_metadata() {
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@openai/codex"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@openai/codex", "version": "0.142.0" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version codex "${home}")"
+  assert_eq "${got}" "0.142.0" "codex version from user-npm metadata"
 }
 
 t_unknown_connector() {
@@ -74,5 +88,6 @@ t_unknown_connector() {
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
-run_case "codex graceful when missing"       t_codex_unknown_returns_empty
+run_case "codex without install"             t_codex_no_install_returns_empty
+run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "unknown connector returns empty"   t_unknown_connector
