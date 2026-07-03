@@ -229,25 +229,70 @@ wait_for_id_resolves() {
 ensure_service_user() {
   local name="$1"
 
-  # Detect a corrupt half-state from a prior failed install: a record
-  # exists but its PrimaryGroupID / UniqueID is neither present nor
-  # settable (dscl -create says "already exists", -change says "not
-  # found", -append also says "already exists"). If we can even *read*
-  # the record shell but can't read the ID, delete the record and let
-  # us start clean.
+  # Detect a corrupt half-state from a prior failed install: dscl says
+  # the record exists (-create → eDSRecordAlreadyExists) but its
+  # PrimaryGroupID/UniqueID is neither readable (-read empty) nor
+  # settable (-change → eDSAttributeNotFound, -append → also
+  # eDSRecordAlreadyExists). This can happen when opendirectoryd's
+  # in-memory state got out of sync with the on-disk /var/db/dslocal
+  # plist during a prior interrupted install.
+  #
+  # Recovery: use sysadminctl -deleteUser / dscl -delete to hard-reset
+  # BOTH records, then flush opendirectoryd's cache so subsequent
+  # dscl -create calls see a clean slate.
   local existing_gid existing_uid
   existing_gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
   existing_uid="$(dscl_read_prop "/Users/${name}"  UniqueID)"
 
-  if [[ -z "${existing_gid}" ]] && dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
-    log "  group ${name} record present but PrimaryGroupID missing; hard-resetting"
-    dscl "${DS_NODE}" -delete "/Groups/${name}" 2>/dev/null || \
-      die "failed to reset corrupt group ${name}; run: sudo dscl /Local/Default -delete /Groups/${name}"
-  fi
-  if [[ -z "${existing_uid}" ]] && dscl "${DS_NODE}" -read "/Users/${name}" >/dev/null 2>&1; then
+  local user_shell_present group_shell_present
+  dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 && user_shell_present=yes  || user_shell_present=no
+  dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1 && group_shell_present=yes || group_shell_present=no
+
+  local needs_reset=no
+  if [[ "${user_shell_present}" == "yes" && -z "${existing_uid}" ]]; then
     log "  user ${name} record present but UniqueID missing; hard-resetting"
-    dscl "${DS_NODE}" -delete "/Users/${name}" 2>/dev/null || \
-      die "failed to reset corrupt user ${name}; run: sudo dscl /Local/Default -delete /Users/${name}"
+    needs_reset=yes
+  fi
+  if [[ "${group_shell_present}" == "yes" && -z "${existing_gid}" ]]; then
+    log "  group ${name} record present but PrimaryGroupID missing; hard-resetting"
+    needs_reset=yes
+  fi
+
+  if [[ "${needs_reset}" == "yes" ]]; then
+    # sysadminctl is macOS's higher-level user API; it handles the
+    # cache/plist synchronization more reliably than raw dscl.
+    if [[ "${user_shell_present}" == "yes" ]]; then
+      /usr/sbin/sysadminctl -deleteUser "${name}" 2>/dev/null || \
+        dscl "${DS_NODE}" -delete "/Users/${name}" 2>/dev/null || true
+    fi
+    if [[ "${group_shell_present}" == "yes" ]]; then
+      # No sysadminctl equivalent for groups; use dscl directly.
+      dscl "${DS_NODE}" -delete "/Groups/${name}" 2>/dev/null || true
+    fi
+
+    # Flush opendirectoryd's cache so subsequent dscl calls don't see
+    # the phantom record we just deleted.
+    /usr/bin/dscacheutil -flushcache 2>/dev/null || true
+    /usr/bin/killall -HUP opendirectoryd 2>/dev/null || true
+    sleep 1
+
+    # Reset the state trackers so the fresh-provision path runs.
+    existing_gid=""
+    existing_uid=""
+
+    # If the record STILL exists after all that, the plist file
+    # itself is corrupt. Bail with an actionable message rather than
+    # loop forever.
+    if dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 || \
+       dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
+      die "cannot reset corrupt ${name} records — manually run:
+    sudo dscl /Local/Default -delete /Users/${name}
+    sudo dscl /Local/Default -delete /Groups/${name}
+    sudo rm -f /var/db/dslocal/nodes/Default/users/${name}.plist
+    sudo rm -f /var/db/dslocal/nodes/Default/groups/${name}.plist
+    sudo killall -HUP opendirectoryd
+    ...then re-run install.sh"
+    fi
   fi
 
   # Decide the id to use:

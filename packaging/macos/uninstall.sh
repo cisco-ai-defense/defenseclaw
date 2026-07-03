@@ -53,6 +53,9 @@ Options:
                           ${SUPPORT_DIR}  (config + audit DB)
                           ${LOGS_DIR}                       (gateway logs)
                           ~/.defenseclaw/ for the target user (hook scripts)
+                          /Users/_defenseclaw + /Groups/_defenseclaw dscl
+                              records (service principal — deleted even if
+                              only half-provisioned by a prior failed run)
                         AND scrub DefenseClaw entries from:
                           ~/.codex/config.toml
                           ~/.claude/settings.json
@@ -137,9 +140,20 @@ fi
 
 if launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
   log "stopping LaunchDaemon (${LAUNCHD_LABEL})"
+  # Try both bootout forms (target vs plist path); either works and
+  # both are safe when the target is already gone.
   launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || \
     launchctl bootout system "${PLIST_DST}" 2>/dev/null || \
     warn "bootout failed; the daemon may already be stopped"
+
+  # Wait briefly for launchd to fully release the service so a
+  # subsequent install can bootstrap without seeing "already loaded".
+  settle=0
+  while (( settle < 5 )); do
+    launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || break
+    sleep 1
+    settle=$((settle + 1))
+  done
 else
   log "daemon not loaded; skipping bootout"
 fi
@@ -215,22 +229,66 @@ if [[ "${PURGE}" == "true" ]]; then
   # one (prefixed with an underscore per the install.sh convention). We
   # refuse to delete an unprefixed name — an admin who used a custom
   # unprefixed user probably shares it with another service.
+  #
+  # Delete both /Users and /Groups records regardless of which reads
+  # succeed. Prior failed installs can leave a half-provisioned record
+  # (e.g. record exists with no PrimaryGroupID) where dscl -read fails
+  # but the record still needs cleanup — so we delete unconditionally
+  # when the name is underscore-prefixed.
+  #
   # Pin to /Local/Default like install.sh does. Otherwise a Mac bound to
   # an unreachable network directory (AD/LDAP/managed OD) can hang or
   # ENETUNREACH us on the read/delete calls.
   if [[ -n "${SERVICE_USER}" && "${SERVICE_USER}" == _* ]]; then
-    if dscl /Local/Default -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
-      log "removing service user ${SERVICE_USER}"
-      dscl /Local/Default -delete "/Users/${SERVICE_USER}"  2>/dev/null || \
-        warn "failed to delete /Users/${SERVICE_USER}"
-      dscl /Local/Default -delete "/Groups/${SERVICE_USER}" 2>/dev/null || \
-        warn "failed to delete /Groups/${SERVICE_USER} (may already be gone)"
-    else
-      log "service user ${SERVICE_USER} not present; skipping"
+    # 1. Try sysadminctl for the user (higher-level API, handles cache
+    #    sync). Falls through to dscl -delete for the group and for any
+    #    residue sysadminctl doesn't clear.
+    /usr/sbin/sysadminctl -deleteUser "${SERVICE_USER}" 2>/dev/null || true
+
+    dscl_removed_count=0
+    for record in "/Users/${SERVICE_USER}" "/Groups/${SERVICE_USER}"; do
+      # -delete returns 0 for both "removed" and (some versions) "not
+      # present". Capture stderr to distinguish.
+      dscl_err=""
+      dscl_rc=0
+      dscl_err="$(dscl /Local/Default -delete "${record}" 2>&1)" || dscl_rc=$?
+      if (( dscl_rc == 0 )); then
+        log "removed dscl record ${record}"
+        dscl_removed_count=$((dscl_removed_count + 1))
+      elif [[ "${dscl_err}" == *eDSRecordNotFound* ]]; then
+        log "dscl record ${record} not present; skipping"
+      else
+        warn "failed to delete ${record}: ${dscl_err}"
+      fi
+    done
+
+    # 2. Nuke on-disk plists directly, in case opendirectoryd's state is
+    #    out of sync with disk (this is what caused ghost records
+    #    surviving repeated dscl -delete on the live install).
+    for plist in \
+      "/var/db/dslocal/nodes/Default/users/${SERVICE_USER}.plist" \
+      "/var/db/dslocal/nodes/Default/groups/${SERVICE_USER}.plist"; do
+      if [[ -f "${plist}" ]]; then
+        log "removing on-disk plist ${plist}"
+        rm -f "${plist}"
+        dscl_removed_count=$((dscl_removed_count + 1))
+      fi
+    done
+
+    # 3. Flush caches so a subsequent install sees a truly clean slate.
+    if (( dscl_removed_count > 0 )); then
+      /usr/bin/dscacheutil -flushcache 2>/dev/null || true
+      /usr/bin/killall -HUP opendirectoryd 2>/dev/null || true
+    fi
+
+    if (( dscl_removed_count == 0 )); then
+      log "no ${SERVICE_USER} records to remove"
     fi
   elif [[ -n "${SERVICE_USER}" ]]; then
     warn "service user '${SERVICE_USER}' does not start with '_'; refusing to auto-delete"
-    warn "  delete it manually if it was created for DefenseClaw: sudo dscl /Local/Default -delete /Users/${SERVICE_USER}"
+    warn "  delete it manually if it was created for DefenseClaw:"
+    warn "    sudo dscl /Local/Default -delete /Users/${SERVICE_USER}"
+    warn "    sudo dscl /Local/Default -delete /Groups/${SERVICE_USER}"
   fi
 
   if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" && -d "${TARGET_HOME}/.defenseclaw" ]]; then
