@@ -51,13 +51,46 @@ t_install_warns_unsupported_connector() {
 t_install_requires_root() {
   # As non-root, after arg parsing the script must die on the root check.
   if [[ $EUID -eq 0 ]]; then
-    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (running as root)\n'; fi
+    [[ "${VERBOSE:-false}" == "true" ]] && printf '  skip (running as root)\n'
     return 0
   fi
   local out rc=0
   out="$("${INSTALL_SH}" --connector codex 2>&1)" || rc=$?
   assert_status "${rc}" 1 "non-root should exit non-zero"
   assert_contains "${out}" "must run as root" "explains root requirement"
+}
+
+t_install_default_redaction_is_on() {
+  # Parse install.sh's own defaults section directly so we're asserting
+  # the actual install-time contract, not just what render_config emits
+  # when handed a value. If a future edit flips this back to
+  # "true" (redaction off by default), this test catches it before
+  # anything ships.
+  local default
+  default="$(awk '
+    /^DISABLE_REDACTION=/ {
+      # DISABLE_REDACTION="false"
+      match($0, /"([^"]+)"/, m)
+      print m[1]
+      exit
+    }' "${INSTALL_SH}" 2>/dev/null)"
+  # awk on macOS has no `match` capture — fall back to a portable parse.
+  if [[ -z "${default}" ]]; then
+    default="$(grep -E '^DISABLE_REDACTION=' "${INSTALL_SH}" | head -1 \
+      | sed -E 's/^DISABLE_REDACTION="?([^"]+)"?.*/\1/')"
+  fi
+  assert_eq "${default}" "false" "install.sh DISABLE_REDACTION default is false (redaction ON)"
+}
+
+t_install_bad_port_exits_nonzero() {
+  local out rc=0
+  out="$("${INSTALL_SH}" --port 99999 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "out-of-range --port should exit non-zero"
+  assert_contains "${out}" "--port must be" "explains port range"
+  rc=0
+  out="$("${INSTALL_SH}" --port foo 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "non-numeric --port should exit non-zero"
+  assert_contains "${out}" "--port must be" "explains port must be numeric"
 }
 
 t_uninstall_help() {
@@ -77,7 +110,7 @@ t_uninstall_unknown_flag() {
 
 t_uninstall_requires_root() {
   if [[ $EUID -eq 0 ]]; then
-    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (running as root)\n'; fi
+    [[ "${VERBOSE:-false}" == "true" ]] && printf '  skip (running as root)\n'
     return 0
   fi
   local out rc=0
@@ -90,8 +123,10 @@ run_case "install --help"                 t_install_help
 run_case "install --mode garbage"         t_install_bad_mode_exits_nonzero
 run_case "install --bogus"                t_install_unknown_flag_exits_nonzero
 run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_nonzero
+run_case "install --port out-of-range"    t_install_bad_port_exits_nonzero
 run_case "install unsupported connector"  t_install_warns_unsupported_connector
 run_case "install non-root rejected"      t_install_requires_root
+run_case "install default redaction on"   t_install_default_redaction_is_on
 run_case "uninstall --help"               t_uninstall_help
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

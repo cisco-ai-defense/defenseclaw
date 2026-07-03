@@ -25,6 +25,11 @@ parse_connectors() {
   if [[ -z "${raw}" ]]; then
     return 1
   fi
+  # Reject leading/trailing/consecutive commas explicitly; `read -ra`
+  # would silently drop a bare trailing empty field.
+  case "${raw}" in
+    ,*|*,|*,,*) return 1;;
+  esac
   local -a out=()
   local IFS=','
   read -ra out <<< "${raw}"
@@ -37,6 +42,12 @@ parse_connectors() {
   for c in "${out[@]}"; do
     c="$(printf '%s' "${c}" | tr '[:upper:]' '[:lower:]' | awk '{$1=$1};1')"
     if [[ -z "${c}" ]]; then
+      return 1
+    fi
+    # Restrict to a YAML-safe key charset. Anything else would be
+    # rendered raw into config.yaml where it could break the parser
+    # or, worse, inject unrelated keys.
+    if [[ ! "${c}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
       return 1
     fi
     printf '%s\n' "${c}"
@@ -66,38 +77,62 @@ home_perms_ok() {
 # ---- agent version discovery -------------------------------------------
 
 # discover_agent_version CONNECTOR HOME -> echoes the agent version or "".
-# Reads HOME-relative files; never executes installed agents under sudo.
-discover_agent_version() {
-  local connector="$1"
-  local home="$2"
-  case "${connector}" in
-    codex)
-      if command -v codex >/dev/null 2>&1; then
-        codex --version 2>/dev/null | head -1 || true
-      fi
-      ;;
-    claudecode)
-      if command -v claude >/dev/null 2>&1; then
-        local v
-        v="$(claude --version 2>/dev/null | head -1 || true)"
-        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
-      fi
-      local ext_pkg
-      for ext_pkg in \
-        "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
-        "${home}"/.vscode/extensions/anthropic.claude-code-*/package.json; do
-        [[ -f "${ext_pkg}" ]] || continue
-        /usr/bin/python3 -c '
+#
+# Metadata-only: reads files under HOME or under signed system app bundles
+# and never executes user-installed agent binaries. install.sh runs as root,
+# so invoking $PATH-resolved `codex` / `claude` / etc. would be a
+# privilege-escalation surface — the caller must pass --agent-version
+# explicitly for connectors that don't ship a stable metadata file.
+_read_json_version() {
+  local path="$1"
+  local py
+  py="$(command -v python3 || echo /usr/bin/python3)"
+  "${py}" -c '
 import json, sys
 try:
   with open(sys.argv[1]) as f:
     print(json.load(f).get("version",""))
 except Exception:
   pass
-' "${ext_pkg}" 2>/dev/null && return
+' "${path}" 2>/dev/null
+}
+
+discover_agent_version() {
+  local connector="$1"
+  local home="$2"
+  case "${connector}" in
+    codex)
+      # Codex-cli is distributed via npm. If a user-writable global
+      # install exposes a package.json, read it. We deliberately do NOT
+      # exec `codex --version` because install.sh calls this as root.
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
+        /usr/local/lib/node_modules/@openai/codex/package.json \
+        /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        local v; v="$(_read_json_version "${pkg}")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      done
+      ;;
+    claudecode)
+      # Claude Code ships both as a standalone npm CLI (has a
+      # package.json we can read) and as a Cursor / VS Code extension.
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json \
+        /usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json \
+        /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/package.json \
+        "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
+        "${home}"/.vscode/extensions/anthropic.claude-code-*/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        local v; v="$(_read_json_version "${pkg}")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;
     cursor)
+      # Cursor.app is a signed macOS bundle; read the Info.plist rather
+      # than exec'ing the binary. PlistBuddy is an Apple system tool.
       if [[ -f /Applications/Cursor.app/Contents/Info.plist ]]; then
         /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
           /Applications/Cursor.app/Contents/Info.plist 2>/dev/null || true

@@ -47,34 +47,61 @@ t_dispatch_via_helper() {
   assert_file_exists "${home}/.claude/settings.json"
 }
 
-t_rejects_symlinked_agent_dir() {
+# Symlink-rejection matrix: for each connector, we exercise both
+# the directory-symlink and file-symlink attack surfaces, and after
+# rejection we verify the symlink target was never written to.
+
+# Helper: run prep(<dir>), assert exit=1, verify target untouched.
+_assert_symlink_dir_rejected() {
+  local prep="$1"     # function name
+  local subdir="$2"   # e.g. .codex
+  local leaf="$3"     # e.g. config.toml
   local home target status
   home="$(mktest_tmp)"
   target="$(mktest_tmp)"
-  ln -s "${target}" "${home}/.codex"
-  prepare_codex_userspace "${home}"
+  ln -s "${target}" "${home}/${subdir}"
+  "${prep}" "${home}"
   status=$?
-  assert_status "${status}" 1 "symlinked .codex rejected"
-  if [[ -e "${target}/config.toml" ]]; then
-    _fail "symlink target was written through"
+  assert_status "${status}" 1 "symlinked ${subdir} rejected"
+  if [[ -e "${target}/${leaf}" ]]; then
+    _fail "symlink target ${target}/${leaf} was written through"
   fi
 }
 
-t_rejects_symlinked_config_file() {
+# Helper: for a file-symlink, stage a canary in the target; prep must
+# refuse and the canary must remain unchanged.
+_assert_symlink_file_rejected() {
+  local prep="$1"     # function name
+  local subdir="$2"
+  local leaf="$3"
+  local canary="$4"   # sentinel content
   local home target status
   home="$(mktest_tmp)"
-  target="$(mktest_tmp)/settings.json"
-  mkdir -p "${home}/.claude"
-  printf '{}\n' > "${target}"
-  ln -s "${target}" "${home}/.claude/settings.json"
-  prepare_claudecode_userspace "${home}"
+  target="$(mktest_tmp)/${leaf}"
+  mkdir -p "${home}/${subdir}" "$(dirname "${target}")"
+  printf '%s\n' "${canary}" > "${target}"
+  ln -s "${target}" "${home}/${subdir}/${leaf}"
+  "${prep}" "${home}"
   status=$?
-  assert_status "${status}" 1 "symlinked settings.json rejected"
+  assert_status "${status}" 1 "symlinked ${subdir}/${leaf} rejected"
+  local now; now="$(cat "${target}")"
+  assert_eq "${now}" "${canary}" "symlink target ${target} untouched"
 }
+
+t_codex_rejects_symlink_dir()      { _assert_symlink_dir_rejected  prepare_codex_userspace      .codex   config.toml; }
+t_codex_rejects_symlink_file()     { _assert_symlink_file_rejected prepare_codex_userspace      .codex   config.toml   "USER_CANARY_CODEX"; }
+t_claudecode_rejects_symlink_dir() { _assert_symlink_dir_rejected  prepare_claudecode_userspace .claude  settings.json; }
+t_claudecode_rejects_symlink_file(){ _assert_symlink_file_rejected prepare_claudecode_userspace .claude  settings.json '{"user":"canary"}'; }
+t_cursor_rejects_symlink_dir()     { _assert_symlink_dir_rejected  prepare_cursor_userspace     .cursor  hooks.json; }
+t_cursor_rejects_symlink_file()    { _assert_symlink_file_rejected prepare_cursor_userspace     .cursor  hooks.json    '{"user":"canary"}'; }
 
 run_case "codex userspace pre-create + idempotent" t_codex_creates
 run_case "claudecode userspace pre-create"         t_claudecode_creates
 run_case "cursor userspace pre-create"             t_cursor_creates
 run_case "prepare_userspace_for dispatch"          t_dispatch_via_helper
-run_case "symlinked agent dir rejected"            t_rejects_symlinked_agent_dir
-run_case "symlinked config file rejected"          t_rejects_symlinked_config_file
+run_case "codex rejects symlinked .codex dir"      t_codex_rejects_symlink_dir
+run_case "codex rejects symlinked config.toml"     t_codex_rejects_symlink_file
+run_case "claudecode rejects symlinked .claude dir" t_claudecode_rejects_symlink_dir
+run_case "claudecode rejects symlinked settings.json" t_claudecode_rejects_symlink_file
+run_case "cursor rejects symlinked .cursor dir"    t_cursor_rejects_symlink_dir
+run_case "cursor rejects symlinked hooks.json"     t_cursor_rejects_symlink_file

@@ -109,6 +109,10 @@ case "${MODE}" in
   *) die "--mode must be 'observe' or 'action' (got: ${MODE})";;
 esac
 
+if [[ ! "${API_PORT}" =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
+  die "--port must be an integer between 1 and 65535 (got: ${API_PORT})"
+fi
+
 CONNECTOR_LINES="$(parse_connectors "${CONNECTOR}")" || \
   die "--connector has an empty entry (check the comma list)"
 CONNECTORS=()
@@ -199,14 +203,23 @@ log "loading LaunchDaemon"
 launchctl bootstrap system "${PLIST_DST}"
 launchctl enable "system/${LAUNCHD_LABEL}"
 
+wait_for_launchd_running() {
+  local deadline=$(( $(date +%s) + 15 ))
+  while (( $(date +%s) < deadline )); do
+    if launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | grep -qE '^[[:space:]]+state = running'; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 log "waiting for gateway to come up"
-SETTLE_DEADLINE=$(( $(date +%s) + 15 ))
-while (( $(date +%s) < SETTLE_DEADLINE )); do
-  if launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | grep -qE '^[[:space:]]+state = running'; then
-    break
-  fi
-  sleep 1
-done
+if ! wait_for_launchd_running; then
+  warn "gateway did not reach running state within 15s; recent stderr:"
+  tail -20 "${LOGS_DIR}/gateway.err.log" 2>/dev/null | sed 's/^/    /' >&2 || true
+  die "${LAUNCHD_LABEL} failed to start; see ${LOGS_DIR}/gateway.err.log"
+fi
 
 # ---- per-user hook wiring ----------------------------------------------
 
@@ -261,7 +274,9 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
       *)          DC_AGENT_DIR="";;
     esac
     if [[ -n "${DC_AGENT_DIR}" && -d "${DC_AGENT_DIR}" && ! -L "${DC_AGENT_DIR}" ]]; then
-      find "${DC_AGENT_DIR}" -exec chown -h "${TARGET_UID}:${TARGET_GID}" {} + 2>/dev/null || true
+      if ! find "${DC_AGENT_DIR}" -exec chown -h "${TARGET_UID}:${TARGET_GID}" {} +; then
+        die "[${c}] failed to set ownership on ${DC_AGENT_DIR}"
+      fi
     fi
 
     AGENT_VER="${AGENT_VERSION}"
@@ -290,13 +305,11 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   log "  resuming LaunchDaemon"
   launchctl bootstrap system "${PLIST_DST}"
   launchctl enable "system/${LAUNCHD_LABEL}"
-  SETTLE_DEADLINE=$(( $(date +%s) + 15 ))
-  while (( $(date +%s) < SETTLE_DEADLINE )); do
-    if launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | grep -qE '^[[:space:]]+state = running'; then
-      break
-    fi
-    sleep 1
-  done
+  if ! wait_for_launchd_running; then
+    warn "gateway did not resume within 15s; recent stderr:"
+    tail -20 "${LOGS_DIR}/gateway.err.log" 2>/dev/null | sed 's/^/    /' >&2 || true
+    die "${LAUNCHD_LABEL} failed to resume after per-user wiring"
+  fi
 fi
 
 # ---- summary ------------------------------------------------------------
