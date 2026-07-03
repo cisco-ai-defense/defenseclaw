@@ -60,8 +60,8 @@ GATEWAY_BIN="${INSTALL_PREFIX}/bin/defenseclaw-gateway"
 # macOS convention is a hidden system user prefixed with an underscore.
 # We create this if it doesn't exist. Admins can override via
 # --service-user; the plist we ship gets rewritten to match.
-SERVICE_USER="_defenseclaw"
-SERVICE_GROUP="_defenseclaw"
+SERVICE_USER="defenseclaw"
+SERVICE_GROUP="defenseclaw"
 
 TARGET_USER=""
 AGENT_VERSION=""
@@ -399,7 +399,7 @@ Gateway options:
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
-  --service-user NAME       macOS service user for the daemon (default: _defenseclaw).
+  --service-user NAME       macOS service user for the daemon (default: defenseclaw).
                             Created via dscl if missing. Also used as the group.
   --skip-build              Reuse an existing gateway binary (no rebuild)
   --skip-launchd            Install files but don't bootstrap/enable launchd
@@ -685,7 +685,10 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
 
     AGENT_VER="${AGENT_VERSION}"
     if [[ -z "${AGENT_VER}" ]]; then
-      AGENT_VER="$(discover_agent_version "${c}" "${TARGET_HOME}" || true)"
+      # Expose TARGET_USER to the lib so its Codex fallback can exec
+      # `codex --version` as the user (not as root).
+      AGENT_VER="$(DEFENSECLAW_TARGET_USER="${TARGET_USER}" \
+        discover_agent_version "${c}" "${TARGET_HOME}" || true)"
     fi
     if [[ -z "${AGENT_VER}" ]]; then
       warn "  [${c}] could not auto-detect agent version; skipping. Resume with:"

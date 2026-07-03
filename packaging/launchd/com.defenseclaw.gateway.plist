@@ -9,9 +9,9 @@
     <string>/Library/DefenseClaw/bin/defenseclaw-gateway</string>
   </array>
   <key>UserName</key>
-  <string>_defenseclaw</string>
+  <string>defenseclaw</string>
   <key>GroupName</key>
-  <string>_defenseclaw</string>
+  <string>defenseclaw</string>
   <key>WorkingDirectory</key>
   <string>/Library/Application Support/DefenseClaw/runtime</string>
   <key>EnvironmentVariables</key>

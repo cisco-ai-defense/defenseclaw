@@ -23,11 +23,11 @@ t_plist_contains_managed_paths() {
   assert_contains "${body}" "<key>RunAtLoad</key>"                         "RunAtLoad set"
 }
 
-t_plist_service_user_is_hidden_convention() {
-  # The shipped plist must reference a service user prefixed with an
-  # underscore, matching Apple's convention for hidden system users
-  # (Rooms for reject-and-fix by admins who set --service-user, but
-  # never a raw "defenseclaw" that macOS won't know how to resolve).
+t_plist_service_user_matches_gateway_expectation() {
+  # The gateway binary hardcodes trustedRuntimeOwner to look up a user
+  # literally named "defenseclaw" (see internal/managed/trust_unix.go).
+  # The shipped plist MUST reference that exact name or the daemon will
+  # reject the managed_enterprise data_dir trust check on boot.
   local plist="${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"
   local uname gname
   if ! command -v plutil >/dev/null 2>&1; then
@@ -35,8 +35,8 @@ t_plist_service_user_is_hidden_convention() {
   fi
   uname="$(plutil -extract UserName  raw "${plist}" 2>/dev/null || true)"
   gname="$(plutil -extract GroupName raw "${plist}" 2>/dev/null || true)"
-  assert_eq "${uname:0:1}" "_" "shipped plist UserName starts with _ (got: ${uname})"
-  assert_eq "${gname:0:1}" "_" "shipped plist GroupName starts with _ (got: ${gname})"
+  assert_eq "${uname}" "defenseclaw" "shipped plist UserName is 'defenseclaw' (got: ${uname})"
+  assert_eq "${gname}" "defenseclaw" "shipped plist GroupName is 'defenseclaw' (got: ${gname})"
 }
 
 t_install_lib_syntax() {
@@ -167,7 +167,7 @@ t_bundle_without_binary_and_no_repo_dies() {
 
 run_case "plist exists and lints"     t_plist_exists_and_parses
 run_case "plist references managed paths" t_plist_contains_managed_paths
-run_case "plist service user is _-prefixed" t_plist_service_user_is_hidden_convention
+run_case "plist service user matches gateway expectation" t_plist_service_user_matches_gateway_expectation
 run_case "installer_lib.sh syntax"    t_install_lib_syntax
 run_case "install.sh syntax"          t_install_sh_syntax
 run_case "uninstall.sh syntax"        t_uninstall_sh_syntax

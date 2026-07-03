@@ -29,7 +29,11 @@ SUPPORT_DIR="/Library/Application Support/DefenseClaw"
 LOGS_DIR="/Library/Logs/DefenseClaw"
 PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
 LAUNCHD_LABEL="com.defenseclaw.gateway"
-SERVICE_USER_DEFAULT="_defenseclaw"
+SERVICE_USER_DEFAULT="defenseclaw"
+# Names we recognize as DefenseClaw-owned and safe to auto-delete on
+# --purge. Matches the hostname the gateway binary hardcodes in
+# trustedRuntimeOwner (see internal/managed/trust_unix.go).
+SERVICE_USER_KNOWN=(defenseclaw)
 
 PURGE="false"
 ASSUME_YES="false"
@@ -53,7 +57,7 @@ Options:
                           ${SUPPORT_DIR}  (config + audit DB)
                           ${LOGS_DIR}                       (gateway logs)
                           ~/.defenseclaw/ for the target user (hook scripts)
-                          /Users/_defenseclaw + /Groups/_defenseclaw dscl
+                          /Users/defenseclaw + /Groups/defenseclaw dscl
                               records (service principal — deleted even if
                               only half-provisioned by a prior failed run)
                         AND scrub DefenseClaw entries from:
@@ -67,7 +71,7 @@ Options:
                         you intend to immediately reinstall.
   --user USER           Per-user cleanup target for --purge (default: \$SUDO_USER)
   --service-user NAME   macOS service user to delete on --purge
-                        (default: read from the installed plist, else _defenseclaw)
+                        (default: read from the installed plist, else defenseclaw)
   -y, --yes             Don't prompt for --purge confirmation
   -h, --help            Show this help
 
@@ -239,7 +243,16 @@ if [[ "${PURGE}" == "true" ]]; then
   # Pin to /Local/Default like install.sh does. Otherwise a Mac bound to
   # an unreachable network directory (AD/LDAP/managed OD) can hang or
   # ENETUNREACH us on the read/delete calls.
-  if [[ -n "${SERVICE_USER}" && "${SERVICE_USER}" == _* ]]; then
+  # Auto-delete only if the service user matches one of our known
+  # installer names — never delete a random admin-configured user
+  # sharing the SERVICE_USER slot.
+  is_known="no"
+  for known in "${SERVICE_USER_KNOWN[@]}"; do
+    if [[ "${SERVICE_USER}" == "${known}" ]]; then
+      is_known="yes"; break
+    fi
+  done
+  if [[ -n "${SERVICE_USER}" && "${is_known}" == "yes" ]]; then
     # SIP protects /var/db/dslocal, so `rm plist` returns "Operation
     # not permitted" even for root. Use the SIP-safe official tools:
     # dseditgroup for groups, sysadminctl for users. Both route through
@@ -264,7 +277,7 @@ if [[ "${PURGE}" == "true" ]]; then
       log "no ${SERVICE_USER} records to remove"
     fi
   elif [[ -n "${SERVICE_USER}" ]]; then
-    warn "service user '${SERVICE_USER}' does not start with '_'; refusing to auto-delete"
+    warn "service user '${SERVICE_USER}' is not one of the known DefenseClaw installer names (${SERVICE_USER_KNOWN[*]}); refusing to auto-delete"
     warn "  delete it manually if it was created for DefenseClaw:"
     warn "    sudo dscl /Local/Default -delete /Users/${SERVICE_USER}"
     warn "    sudo dscl /Local/Default -delete /Groups/${SERVICE_USER}"
