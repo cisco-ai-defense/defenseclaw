@@ -31,7 +31,7 @@ endif
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test \
+        packaging-macos-test packaging-macos-bundle \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -500,6 +500,64 @@ gateway-test: sync-openclaw-extension
 # launchctl and are safe to run on any macOS or Linux dev host.
 packaging-macos-test:
 	packaging/macos/tests/run_tests.sh
+
+# packaging-macos-bundle assembles a shippable folder + tarball containing
+# the prebuilt gateway binary alongside the install / uninstall scripts.
+# The bundle is fully self-contained — no repo tree required at install
+# time. Layout:
+#
+#   defenseclaw-macos-$(VERSION)-$(GOOS)-$(GOARCH)/
+#     defenseclaw-gateway              (binary)
+#     install.sh                       (calls the binary next to it)
+#     uninstall.sh
+#     com.defenseclaw.gateway.plist    (installed to /Library/LaunchDaemons)
+#     lib/installer_lib.sh
+#     lib/scrub_agent_configs.py
+#     README.md                        (short usage)
+#
+# Ships as dist/defenseclaw-macos-$(VERSION)-$(GOOS)-$(GOARCH).tar.gz.
+#
+# Overrides: GOOS/GOARCH cross-compile the gateway.
+BUNDLE_GOOS  ?= darwin
+BUNDLE_GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
+BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
+
+packaging-macos-bundle:
+	@[ "$(BUNDLE_GOOS)" = "darwin" ] || { \
+	  echo "packaging-macos-bundle: BUNDLE_GOOS must be 'darwin' (got '$(BUNDLE_GOOS)')" >&2; exit 1; }
+	@[ "$(BUNDLE_GOARCH)" = "amd64" ] || [ "$(BUNDLE_GOARCH)" = "arm64" ] || { \
+	  echo "packaging-macos-bundle: BUNDLE_GOARCH must be amd64 or arm64 (got '$(BUNDLE_GOARCH)')" >&2; exit 1; }
+	@echo "==> packaging macOS bundle: $(BUNDLE_NAME)"
+	@rm -rf "$(BUNDLE_DIR)"
+	@mkdir -p "$(BUNDLE_DIR)/lib"
+	@echo "==> building gateway ($(BUNDLE_GOOS)/$(BUNDLE_GOARCH))"
+	@GOOS=$(BUNDLE_GOOS) GOARCH=$(BUNDLE_GOARCH) CGO_ENABLED=1 \
+	    go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway" ./cmd/defenseclaw
+	@chmod 0755 "$(BUNDLE_DIR)/defenseclaw-gateway"
+	@echo "==> copying installer scripts"
+	@cp packaging/macos/install.sh    "$(BUNDLE_DIR)/install.sh"
+	@cp packaging/macos/uninstall.sh  "$(BUNDLE_DIR)/uninstall.sh"
+	@cp packaging/macos/lib/installer_lib.sh          "$(BUNDLE_DIR)/lib/installer_lib.sh"
+	@cp packaging/macos/lib/scrub_agent_configs.py    "$(BUNDLE_DIR)/lib/scrub_agent_configs.py"
+	@cp packaging/launchd/com.defenseclaw.gateway.plist "$(BUNDLE_DIR)/com.defenseclaw.gateway.plist"
+	@chmod 0755 "$(BUNDLE_DIR)/install.sh" "$(BUNDLE_DIR)/uninstall.sh"
+	@chmod 0755 "$(BUNDLE_DIR)/lib/installer_lib.sh" "$(BUNDLE_DIR)/lib/scrub_agent_configs.py"
+	@chmod 0644 "$(BUNDLE_DIR)/com.defenseclaw.gateway.plist"
+	@echo "==> writing README"
+	@scripts/write-macos-bundle-readme.sh \
+	    "$(BUNDLE_DIR)/README.md" \
+	    "$(VERSION)" \
+	    "$(BUNDLE_GOOS)" \
+	    "$(BUNDLE_GOARCH)"
+	@echo "==> creating tarball"
+	@( cd $(DIST_DIR) && tar -czf $(BUNDLE_NAME).tar.gz $(BUNDLE_NAME) )
+	@( cd $(DIST_DIR) && shasum -a 256 $(BUNDLE_NAME).tar.gz > $(BUNDLE_NAME).tar.gz.sha256 )
+	@echo ""
+	@echo "==> bundle ready:"
+	@echo "    $(BUNDLE_DIR)/"
+	@echo "    $(DIST_DIR)/$(BUNDLE_NAME).tar.gz"
+	@echo "    $(DIST_DIR)/$(BUNDLE_NAME).tar.gz.sha256"
 
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
