@@ -109,11 +109,18 @@ DS_NODE="/Local/Default"
 # dscl_read_prop RECORD PROP — echoes the value of a single dscl property
 # or empty when the record/property doesn't exist. Handles the "AttrName:
 # value" one-liner shape dscl -read returns.
+#
+# NOTE: we swallow non-zero from `dscl -read` (record-not-found returns
+# rc=1) so this helper is safe to use inside command substitutions under
+# `set -o pipefail`. Callers check the returned value for emptiness.
 dscl_read_prop() {
   local record="$1"
   local prop="$2"
-  dscl "${DS_NODE}" -read "${record}" "${prop}" 2>/dev/null \
+  local raw
+  raw="$(dscl "${DS_NODE}" -read "${record}" "${prop}" 2>/dev/null || true)"
+  printf '%s\n' "${raw}" \
     | awk -v p="${prop}:" 'index($0, p) == 1 { $1=""; sub(/^ /, ""); print; exit }'
+  return 0
 }
 
 # dscl_ensure_record RECORD — creates a dscl record idempotently.
