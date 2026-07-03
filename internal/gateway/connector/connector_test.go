@@ -1024,7 +1024,7 @@ func requireOpenClawExtensionBundle(t *testing.T) {
 func stubInsightClawInstall(t *testing.T, ocHome string) {
 	t.Helper()
 	orig := execOpenClawPluginInstall
-	execOpenClawPluginInstall = func(_ context.Context, pluginName string) ([]byte, error) {
+	execOpenClawPluginInstall = func(_ context.Context, pluginName string, _ []string) ([]byte, error) {
 		if pluginName != insightClawNPMSource {
 			return nil, fmt.Errorf("unexpected plugin install: %s", pluginName)
 		}

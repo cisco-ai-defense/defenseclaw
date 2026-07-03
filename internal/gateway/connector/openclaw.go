@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // openClawExtensionFS holds the runtime files of the DefenseClaw OpenClaw
@@ -256,8 +257,16 @@ func installOpenClawExtension(ctx context.Context, ocHome string, enablePluginAp
 	return nil
 }
 
-var execOpenClawPluginInstall = func(ctx context.Context, pluginName string) ([]byte, error) {
+// openClawPluginInstallTimeout is the maximum time allowed for
+// `openclaw plugins install` to complete. NPM installs can be slow on
+// first run but should never need more than two minutes on a healthy
+// network; cap it so a hung registry does not stall gateway setup
+// indefinitely.
+const openClawPluginInstallTimeout = 2 * time.Minute
+
+var execOpenClawPluginInstall = func(ctx context.Context, pluginName string, env []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "openclaw", "plugins", "install", pluginName)
+	cmd.Env = env
 	return cmd.CombinedOutput()
 }
 
@@ -266,7 +275,34 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	if openClawPluginDirLooksUsable(installDir) {
 		return nil
 	}
-	out, err := execOpenClawPluginInstall(ctx, insightClawNPMSource)
+
+	// Preflight: give a clear error when the CLI is not on PATH rather than
+	// letting the exec fail with a cryptic "file not found" message.
+	if _, err := exec.LookPath("openclaw"); err != nil {
+		return fmt.Errorf("openclaw CLI not found on PATH — install OpenClaw before running setup: %w", err)
+	}
+
+	// Build the child environment, forwarding OPENCLAW_HOME when the
+	// caller has overridden the home directory (e.g. in tests or custom
+	// deployments). Without this the CLI installs into its own default
+	// home while openClawHome() points somewhere else, so the post-install
+	// existence check always fails.
+	env := os.Environ()
+	if ocHome != filepath.Join(userHomeDir(), ".openclaw") {
+		// Remove any existing OPENCLAW_HOME entry then append the override.
+		filtered := env[:0]
+		for _, e := range env {
+			if !strings.HasPrefix(e, "OPENCLAW_HOME=") {
+				filtered = append(filtered, e)
+			}
+		}
+		env = append(filtered, "OPENCLAW_HOME="+ocHome)
+	}
+
+	installCtx, cancel := context.WithTimeout(ctx, openClawPluginInstallTimeout)
+	defer cancel()
+
+	out, err := execOpenClawPluginInstall(installCtx, insightClawNPMSource, env)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {

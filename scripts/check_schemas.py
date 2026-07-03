@@ -449,7 +449,14 @@ def check_insightclaw_metrics_catalog(doc: dict) -> bool:
             )
             ok = False
 
-        if not isinstance(item.get("attributes", {}), dict):
+        if "attributes" not in item:
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name} missing attributes",
+                file=sys.stderr,
+            )
+            ok = False
+        elif not isinstance(item.get("attributes"), dict):
             print(
                 f"check_schemas: otel/insightclaw-metrics.schema.json: "
                 f"{name}.attributes must be an object",
