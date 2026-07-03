@@ -240,31 +240,17 @@ if [[ "${PURGE}" == "true" ]]; then
   # an unreachable network directory (AD/LDAP/managed OD) can hang or
   # ENETUNREACH us on the read/delete calls.
   if [[ -n "${SERVICE_USER}" && "${SERVICE_USER}" == _* ]]; then
-    # 1. Try sysadminctl for the user (higher-level API, handles cache
-    #    sync). Falls through to dscl -delete for the group and for any
-    #    residue sysadminctl doesn't clear.
-    /usr/sbin/sysadminctl -deleteUser "${SERVICE_USER}" 2>/dev/null || true
-
+    # Two-tier delete:
+    #   1. rm the on-disk plists FIRST — this is the authoritative
+    #      state. On a corrupt install (record has RecordName but no
+    #      PrimaryGroupID), dscl -delete "succeeds" without removing
+    #      the plist, which is exactly what stranded the ghost record
+    #      that broke the earlier reinstall on the live box.
+    #   2. dscl -delete afterward to clear whatever's still in
+    #      opendirectoryd's cache.
+    #   3. killall -HUP opendirectoryd so it re-reads from disk.
     dscl_removed_count=0
-    for record in "/Users/${SERVICE_USER}" "/Groups/${SERVICE_USER}"; do
-      # -delete returns 0 for both "removed" and (some versions) "not
-      # present". Capture stderr to distinguish.
-      dscl_err=""
-      dscl_rc=0
-      dscl_err="$(dscl /Local/Default -delete "${record}" 2>&1)" || dscl_rc=$?
-      if (( dscl_rc == 0 )); then
-        log "removed dscl record ${record}"
-        dscl_removed_count=$((dscl_removed_count + 1))
-      elif [[ "${dscl_err}" == *eDSRecordNotFound* ]]; then
-        log "dscl record ${record} not present; skipping"
-      else
-        warn "failed to delete ${record}: ${dscl_err}"
-      fi
-    done
 
-    # 2. Nuke on-disk plists directly, in case opendirectoryd's state is
-    #    out of sync with disk (this is what caused ghost records
-    #    surviving repeated dscl -delete on the live install).
     for plist in \
       "/var/db/dslocal/nodes/Default/users/${SERVICE_USER}.plist" \
       "/var/db/dslocal/nodes/Default/groups/${SERVICE_USER}.plist"; do
@@ -275,14 +261,23 @@ if [[ "${PURGE}" == "true" ]]; then
       fi
     done
 
-    # 3. Flush caches so a subsequent install sees a truly clean slate.
-    if (( dscl_removed_count > 0 )); then
-      /usr/bin/dscacheutil -flushcache 2>/dev/null || true
-      /usr/bin/killall -HUP opendirectoryd 2>/dev/null || true
-    fi
+    # sysadminctl for good measure (it can also remove a user's
+    # home dir if one somehow got created; ours never does).
+    /usr/sbin/sysadminctl -deleteUser "${SERVICE_USER}" 2>/dev/null || true
 
-    if (( dscl_removed_count == 0 )); then
-      log "no ${SERVICE_USER} records to remove"
+    # Now try dscl -delete on whatever remained in the cache. These
+    # are advisory: the disk truth is already gone above.
+    for record in "/Users/${SERVICE_USER}" "/Groups/${SERVICE_USER}"; do
+      dscl /Local/Default -delete "${record}" 2>/dev/null || true
+    done
+
+    # Force opendirectoryd to reload from the new on-disk state.
+    if (( dscl_removed_count > 0 )); then
+      /usr/bin/killall -HUP opendirectoryd 2>/dev/null || true
+      /usr/bin/dscacheutil -flushcache 2>/dev/null || true
+      log "removed ${SERVICE_USER} service principal (${dscl_removed_count} plist(s))"
+    else
+      log "no ${SERVICE_USER} plist(s) to remove"
     fi
   elif [[ -n "${SERVICE_USER}" ]]; then
     warn "service user '${SERVICE_USER}' does not start with '_'; refusing to auto-delete"

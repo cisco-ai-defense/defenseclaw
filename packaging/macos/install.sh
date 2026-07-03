@@ -259,39 +259,52 @@ ensure_service_user() {
   fi
 
   if [[ "${needs_reset}" == "yes" ]]; then
-    # sysadminctl is macOS's higher-level user API; it handles the
-    # cache/plist synchronization more reliably than raw dscl.
-    if [[ "${user_shell_present}" == "yes" ]]; then
-      /usr/sbin/sysadminctl -deleteUser "${name}" 2>/dev/null || \
-        dscl "${DS_NODE}" -delete "/Users/${name}" 2>/dev/null || true
-    fi
-    if [[ "${group_shell_present}" == "yes" ]]; then
-      # No sysadminctl equivalent for groups; use dscl directly.
-      dscl "${DS_NODE}" -delete "/Groups/${name}" 2>/dev/null || true
-    fi
+    # We're in the corrupt state DIAGNOSED on live install:
+    # /var/db/dslocal/nodes/Default/groups/_defenseclaw.plist exists
+    # on disk but its record is missing PrimaryGroupID. Every dscl
+    # write path (create/change/append) then fights that ghost record,
+    # and dscl -delete "succeeds" without actually removing the plist.
+    #
+    # The only reliable recovery is to rm the on-disk plist file
+    # directly and force opendirectoryd to reload. dscl is the wrong
+    # tool here — we're fixing the state that dscl itself created.
+    for plist in \
+      "/var/db/dslocal/nodes/Default/users/${name}.plist" \
+      "/var/db/dslocal/nodes/Default/groups/${name}.plist"; do
+      if [[ -f "${plist}" ]]; then
+        log "  removing on-disk ghost plist: ${plist}"
+        rm -f "${plist}" || die "failed to remove ${plist} (should be running as root)"
+      fi
+    done
 
-    # Flush opendirectoryd's cache so subsequent dscl calls don't see
-    # the phantom record we just deleted.
-    /usr/bin/dscacheutil -flushcache 2>/dev/null || true
+    # Force opendirectoryd to reload from disk. Without this it will
+    # keep serving the cached ghost record.
     /usr/bin/killall -HUP opendirectoryd 2>/dev/null || true
-    sleep 1
+    /usr/bin/dscacheutil -flushcache 2>/dev/null || true
+
+    # Wait for opendirectoryd to actually re-read. HUP is asynchronous;
+    # a subsequent dscl -read of the deleted record should return
+    # eDSRecordNotFound within a second.
+    local settle=0
+    while (( settle < 5 )); do
+      if ! dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 && \
+         ! dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+      settle=$((settle + 1))
+    done
 
     # Reset the state trackers so the fresh-provision path runs.
     existing_gid=""
     existing_uid=""
 
-    # If the record STILL exists after all that, the plist file
-    # itself is corrupt. Bail with an actionable message rather than
-    # loop forever.
+    # If the record STILL exists after the disk + cache reset, we're
+    # dealing with a network directory or something we can't fix
+    # from here. Bail with an actionable error.
     if dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 || \
        dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
-      die "cannot reset corrupt ${name} records — manually run:
-    sudo dscl /Local/Default -delete /Users/${name}
-    sudo dscl /Local/Default -delete /Groups/${name}
-    sudo rm -f /var/db/dslocal/nodes/Default/users/${name}.plist
-    sudo rm -f /var/db/dslocal/nodes/Default/groups/${name}.plist
-    sudo killall -HUP opendirectoryd
-    ...then re-run install.sh"
+      die "cannot reset ${name} — record is not in /Local/Default and comes from a directory service we can't manage. Pass --service-user with a different name (e.g. --service-user _defenseclaw2)"
     fi
   fi
 
