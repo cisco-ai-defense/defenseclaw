@@ -29,12 +29,14 @@ SUPPORT_DIR="/Library/Application Support/DefenseClaw"
 LOGS_DIR="/Library/Logs/DefenseClaw"
 PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
 LAUNCHD_LABEL="com.defenseclaw.gateway"
+SERVICE_USER_DEFAULT="_defenseclaw"
 
 PURGE="false"
 ASSUME_YES="false"
 TARGET_USER=""
 KEEP_AGENT_CONFIGS="false"
 SCRUB_FAILED="false"
+SERVICE_USER=""
 
 # ---- helpers ------------------------------------------------------------
 
@@ -61,6 +63,8 @@ Options:
                         that fail-close every agent tool call. Use only if
                         you intend to immediately reinstall.
   --user USER           Per-user cleanup target for --purge (default: \$SUDO_USER)
+  --service-user NAME   macOS service user to delete on --purge
+                        (default: read from the installed plist, else _defenseclaw)
   -y, --yes             Don't prompt for --purge confirmation
   -h, --help            Show this help
 
@@ -75,11 +79,23 @@ while [[ $# -gt 0 ]]; do
     --purge)               PURGE="true"; shift;;
     --keep-agent-configs)  KEEP_AGENT_CONFIGS="true"; shift;;
     --user)                TARGET_USER="${2:?}"; shift 2;;
+    --service-user)        SERVICE_USER="${2:?}"; shift 2;;
     -y|--yes)              ASSUME_YES="true"; shift;;
     -h|--help)             usage; exit 0;;
     *) die "unknown flag: $1 (try --help)";;
   esac
 done
+
+# Resolve which service user to delete on --purge. Precedence:
+#   1. --service-user flag
+#   2. UserName in the installed plist (matches whatever install.sh set)
+#   3. _defenseclaw default
+if [[ -z "${SERVICE_USER}" ]]; then
+  if [[ -f "${PLIST_DST}" ]]; then
+    SERVICE_USER="$(/usr/bin/plutil -extract UserName raw "${PLIST_DST}" 2>/dev/null || true)"
+  fi
+  SERVICE_USER="${SERVICE_USER:-${SERVICE_USER_DEFAULT}}"
+fi
 
 # ---- preflight ----------------------------------------------------------
 
@@ -194,6 +210,25 @@ if [[ "${PURGE}" == "true" ]]; then
       rm -rf "${d}"
     fi
   done
+
+  # Remove the service user + group if it looks like a DefenseClaw-created
+  # one (prefixed with an underscore per the install.sh convention). We
+  # refuse to delete an unprefixed name — an admin who used a custom
+  # unprefixed user probably shares it with another service.
+  if [[ -n "${SERVICE_USER}" && "${SERVICE_USER}" == _* ]]; then
+    if dscl . -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
+      log "removing service user ${SERVICE_USER}"
+      dscl . -delete "/Users/${SERVICE_USER}"  2>/dev/null || \
+        warn "failed to delete /Users/${SERVICE_USER}"
+      dscl . -delete "/Groups/${SERVICE_USER}" 2>/dev/null || \
+        warn "failed to delete /Groups/${SERVICE_USER} (may already be gone)"
+    else
+      log "service user ${SERVICE_USER} not present; skipping"
+    fi
+  elif [[ -n "${SERVICE_USER}" ]]; then
+    warn "service user '${SERVICE_USER}' does not start with '_'; refusing to auto-delete"
+    warn "  delete it manually if it was created for DefenseClaw: sudo dscl . -delete /Users/${SERVICE_USER}"
+  fi
 
   if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" && -d "${TARGET_HOME}/.defenseclaw" ]]; then
     if [[ "${SCRUB_FAILED}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then

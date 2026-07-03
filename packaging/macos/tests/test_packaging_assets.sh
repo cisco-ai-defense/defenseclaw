@@ -23,6 +23,22 @@ t_plist_contains_managed_paths() {
   assert_contains "${body}" "<key>RunAtLoad</key>"                         "RunAtLoad set"
 }
 
+t_plist_service_user_is_hidden_convention() {
+  # The shipped plist must reference a service user prefixed with an
+  # underscore, matching Apple's convention for hidden system users
+  # (Rooms for reject-and-fix by admins who set --service-user, but
+  # never a raw "defenseclaw" that macOS won't know how to resolve).
+  local plist="${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"
+  local uname gname
+  if ! command -v plutil >/dev/null 2>&1; then
+    return 0
+  fi
+  uname="$(plutil -extract UserName  raw "${plist}" 2>/dev/null || true)"
+  gname="$(plutil -extract GroupName raw "${plist}" 2>/dev/null || true)"
+  assert_eq "${uname:0:1}" "_" "shipped plist UserName starts with _ (got: ${uname})"
+  assert_eq "${gname:0:1}" "_" "shipped plist GroupName starts with _ (got: ${gname})"
+}
+
 t_install_lib_syntax() {
   local rc=0
   bash -n "${PKG_DIR}/lib/installer_lib.sh" 2>&1 || rc=$?
@@ -59,6 +75,30 @@ t_scrub_py_exists_and_executable() {
   assert_file_exists "${PKG_DIR}/lib/scrub_agent_configs.py"
   if [[ ! -x "${PKG_DIR}/lib/scrub_agent_configs.py" ]]; then
     _fail "scrub_agent_configs.py missing +x"
+    return 1
+  fi
+}
+
+t_install_has_service_user_helper() {
+  # We can't invoke dscl in tests (needs root, mutates system state), so
+  # instead we lock in the contract: install.sh must define an
+  # ensure_service_user function and its execution path must actually
+  # call ensure_service_user before touching the LaunchDaemon plist.
+  local body
+  body="$(cat "${PKG_DIR}/install.sh")"
+  assert_contains "${body}" "ensure_service_user()"       "ensure_service_user function defined"
+  assert_contains "${body}" "ensure_service_user \""      "ensure_service_user is invoked"
+  # ensure_service_user must run before we bootstrap launchd, otherwise
+  # launchd will spawn a service whose UserName references a missing user.
+  local user_line boot_line
+  user_line=$(grep -n 'ensure_service_user "'  "${PKG_DIR}/install.sh" | head -1 | cut -d: -f1)
+  boot_line=$(grep -n 'launchctl bootstrap system "\${PLIST_DST}"' "${PKG_DIR}/install.sh" | head -1 | cut -d: -f1)
+  if [[ -z "${user_line}" || -z "${boot_line}" ]]; then
+    _fail "could not locate ensure_service_user or launchctl bootstrap line"
+    return 1
+  fi
+  if (( user_line >= boot_line )); then
+    _fail "ensure_service_user (line ${user_line}) must run before launchctl bootstrap (line ${boot_line})"
     return 1
   fi
 }
@@ -127,6 +167,7 @@ t_bundle_without_binary_and_no_repo_dies() {
 
 run_case "plist exists and lints"     t_plist_exists_and_parses
 run_case "plist references managed paths" t_plist_contains_managed_paths
+run_case "plist service user is _-prefixed" t_plist_service_user_is_hidden_convention
 run_case "installer_lib.sh syntax"    t_install_lib_syntax
 run_case "install.sh syntax"          t_install_sh_syntax
 run_case "uninstall.sh syntax"        t_uninstall_sh_syntax
@@ -134,5 +175,6 @@ run_case "install.sh executable"      t_install_sh_is_executable
 run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
 run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
 run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
+run_case "install.sh has ensure_service_user + calls it before launchd" t_install_has_service_user_helper
 run_case "bundle layout: plist + binary resolve locally" t_bundle_layout_resolves_locally
 run_case "bundle without binary + no repo dies"          t_bundle_without_binary_and_no_repo_dies

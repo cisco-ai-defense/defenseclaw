@@ -60,6 +60,19 @@ t_install_requires_root() {
   assert_contains "${out}" "must run as root" "explains root requirement"
 }
 
+t_install_help_documents_service_user() {
+  local out
+  out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
+  assert_contains "${out}" "--service-user NAME"    "service-user flag documented"
+  assert_contains "${out}" "_defenseclaw"            "default service user shown"
+}
+
+t_uninstall_help_documents_service_user() {
+  local out
+  out="$("${UNINSTALL_SH}" --help 2>&1)" || _fail "uninstall --help should exit 0"
+  assert_contains "${out}" "--service-user NAME"    "uninstall service-user flag documented"
+}
+
 t_install_default_redaction_is_on() {
   # Parse install.sh's own defaults section directly so we're asserting
   # the actual install-time contract, not just what render_config emits
@@ -120,6 +133,8 @@ t_uninstall_requires_root() {
 }
 
 run_case "install --help"                 t_install_help
+run_case "install service-user documented" t_install_help_documents_service_user
+run_case "uninstall service-user documented" t_uninstall_help_documents_service_user
 run_case "install --mode garbage"         t_install_bad_mode_exits_nonzero
 run_case "install --bogus"                t_install_unknown_flag_exits_nonzero
 run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_nonzero
