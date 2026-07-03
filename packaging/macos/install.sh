@@ -81,7 +81,12 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 # directory attached, the per-candidate probe form could take 30s+.
 find_free_system_uid() {
   local in_use
-  in_use="$(dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}')"
+  # Query /Local/Default explicitly — using `.` (the meta-node) makes
+  # dscl walk every attached directory (AD/LDAP/OD), which can hang or
+  # return ENETUNREACH on a Mac bound to an unreachable domain. Service
+  # users only ever live in /Local/Default, so this is both faster and
+  # safer.
+  in_use="$(dscl /Local/Default -list /Users UniqueID 2>/dev/null | awk '{print $2}')"
   local candidate
   for candidate in $(seq 400 499); do
     if ! printf '%s\n' "${in_use}" | grep -qxF "${candidate}"; then
@@ -92,13 +97,22 @@ find_free_system_uid() {
   return 1
 }
 
+# DS_NODE is the dscl node the service-user helpers target.
+#
+# We deliberately pin to /Local/Default instead of the meta-node `.` so
+# that a Mac bound to an unreachable network directory (AD / LDAP /
+# managed OD) doesn't hang or ENETUNREACH us during install. Service
+# users always live in the local node — network directory users would
+# never be candidates for the DefenseClaw daemon principal.
+DS_NODE="/Local/Default"
+
 # dscl_read_prop RECORD PROP — echoes the value of a single dscl property
 # or empty when the record/property doesn't exist. Handles the "AttrName:
 # value" one-liner shape dscl -read returns.
 dscl_read_prop() {
   local record="$1"
   local prop="$2"
-  dscl . -read "${record}" "${prop}" 2>/dev/null \
+  dscl "${DS_NODE}" -read "${record}" "${prop}" 2>/dev/null \
     | awk -v p="${prop}:" 'index($0, p) == 1 { $1=""; sub(/^ /, ""); print; exit }'
 }
 
@@ -112,7 +126,7 @@ dscl_read_prop() {
 dscl_ensure_record() {
   local record="$1"
   local err
-  err="$(dscl . -create "${record}" 2>&1)"
+  err="$(dscl "${DS_NODE}" -create "${record}" 2>&1)"
   local rc=$?
   if (( rc == 0 )); then
     return 0
@@ -137,9 +151,9 @@ dscl_ensure_prop() {
     return 0
   fi
   if [[ -z "${current}" ]]; then
-    dscl . -create "${record}" "${prop}" "${value}"
+    dscl "${DS_NODE}" -create "${record}" "${prop}" "${value}"
   else
-    dscl . -change "${record}" "${prop}" "${current}" "${value}"
+    dscl "${DS_NODE}" -change "${record}" "${prop}" "${current}" "${value}"
   fi
 }
 
