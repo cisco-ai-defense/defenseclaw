@@ -218,6 +218,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     prepare-userspace)
       shift
       prepare_userspace_for "$@"
+      exit $?
       ;;
     *)
       echo "usage: $0 prepare-userspace CONNECTOR HOME" >&2

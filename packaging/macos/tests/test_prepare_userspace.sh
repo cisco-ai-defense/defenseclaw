@@ -54,6 +54,19 @@ t_dispatch_via_lib_subcommand() {
   assert_file_mode "${home}/.cursor/hooks.json" "600"
 }
 
+t_dispatch_via_lib_subcommand_rejects_symlink() {
+  local home target status
+  home="$(mktest_tmp)"
+  target="$(mktest_tmp)"
+  ln -s "${target}" "${home}/.cursor"
+  /bin/bash "${PKG_DIR}/lib/installer_lib.sh" prepare-userspace cursor "${home}"
+  status=$?
+  assert_status "${status}" 1 "installer_lib prepare-userspace rejects symlinked .cursor"
+  if [[ -e "${target}/hooks.json" ]]; then
+    _fail "symlink target ${target}/hooks.json was written through"
+  fi
+}
+
 # Symlink-rejection matrix: for each connector, we exercise both
 # the directory-symlink and file-symlink attack surfaces, and after
 # rejection we verify the symlink target was never written to.
@@ -107,6 +120,7 @@ run_case "claudecode userspace pre-create"         t_claudecode_creates
 run_case "cursor userspace pre-create"             t_cursor_creates
 run_case "prepare_userspace_for dispatch"          t_dispatch_via_helper
 run_case "installer_lib prepare-userspace dispatch" t_dispatch_via_lib_subcommand
+run_case "installer_lib prepare-userspace rejects symlink" t_dispatch_via_lib_subcommand_rejects_symlink
 run_case "codex rejects symlinked .codex dir"      t_codex_rejects_symlink_dir
 run_case "codex rejects symlinked config.toml"     t_codex_rejects_symlink_file
 run_case "claudecode rejects symlinked .claude dir" t_claudecode_rejects_symlink_dir
