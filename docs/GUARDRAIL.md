@@ -480,7 +480,7 @@ configured for the local OpenTelemetry collector:
 
 ```json
 {
-  "captureContent": true,
+  "captureContent": false,
   "endpoint": "http://172.17.0.1:4318",
   "metrics": true,
   "protocol": "http",

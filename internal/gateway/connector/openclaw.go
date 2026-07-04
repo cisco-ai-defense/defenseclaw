@@ -62,7 +62,7 @@ const insightClawOpenClawPluginID = "insightclaw"
 const insightClawNPMSource = "@outshift-open/insightclaw"
 
 var defaultInsightClawConfig = map[string]interface{}{
-	"captureContent":           true,
+	"captureContent":           false,
 	"endpoint":                 "http://172.17.0.1:4318",
 	"metrics":                  true,
 	"protocol":                 "http",

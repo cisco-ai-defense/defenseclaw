@@ -1023,6 +1023,13 @@ func requireOpenClawExtensionBundle(t *testing.T) {
 
 func stubInsightClawInstall(t *testing.T, ocHome string) {
 	t.Helper()
+	binDir := t.TempDir()
+	fakeOpenClaw := filepath.Join(binDir, "openclaw")
+	if err := os.WriteFile(fakeOpenClaw, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake openclaw CLI: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	orig := execOpenClawPluginInstall
 	execOpenClawPluginInstall = func(_ context.Context, pluginName string, _ []string) ([]byte, error) {
 		if pluginName != insightClawNPMSource {

@@ -23,8 +23,8 @@ openclaw plugins install @outshift-open/insightclaw
 ```
 
 DefenseClaw patches `~/.openclaw/openclaw.json` after installation so
-InsightClaw emits telemetry to the local OpenTelemetry collector at
-`http://172.17.0.1:4318`.
+InsightClaw emits metrics and traces to the local OpenTelemetry collector at
+`http://172.17.0.1:4318` without capturing prompt or completion content by default.
 
 If you've already run `init` before, it will skip what's already present.
 
