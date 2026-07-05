@@ -30,7 +30,7 @@
       * <home>\.local\bin\defenseclaw.cmd          (CLI shim)
 
     and adds that bin dir to the user PATH. Only Python + uv are required; no Go,
-    Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
+    Node.js, or git. Connector-specific wiring (Codex CLI or Claude Code) is done
     by the cross-platform CLI via `defenseclaw init` / `quickstart`.
 
     Layout matches scripts/install.sh and `defenseclaw upgrade`: binaries land in
@@ -85,23 +85,14 @@ $Venv = Join-Path $DefenseClawHome ".venv"
 # `defenseclaw upgrade` (which replaces the gateway there). The venv stays under
 # DEFENSECLAW_HOME so a custom home still relocates the heavy CLI environment.
 $InstallDir = Join-Path $env:USERPROFILE ".local\bin"
-# Native-Windows release surface. Keep this in sync with
-# cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT. Hermes is
-# intentionally selectable but labelled preview; proxy/WSL-only connectors are
-# rejected by this installer.
+# Certified native-Windows x64 release surface. Keep this in sync with
+# cli/defenseclaw/platform_support.py WINDOWS_SUPPORTED_CONNECTORS.
 $ConnectorChoices = @(
     "codex",
     "claudecode",
-    "hermes",
-    "cursor",
-    "windsurf",
-    "geminicli",
-    "copilot",
-    "antigravity",
-    "opencode",
     "none"
 )
-$HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
+$HookConnectors = @()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -565,8 +556,8 @@ function Get-Arch {
     $raw = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     switch ($raw.ToUpper()) {
         "AMD64" { $arch = "amd64" }
-        "ARM64" { $arch = "arm64" }
-        "X86"   { Die "32-bit Windows is not supported (need amd64 or arm64)." }
+        "ARM64" { Die "Windows ARM64 is not certified for this release; use certified Windows x64 (amd64)." }
+        "X86"   { Die "32-bit Windows is not supported (need x64/amd64)." }
         default { Die "Unsupported architecture: $raw" }
     }
     Write-Ok "Windows ($arch)"
@@ -1423,7 +1414,7 @@ function Select-Connector {
     if ($Yes) { $script:PickedConnector = "none"; return }
 
     Write-Step "Pick agent connector"
-    Write-Info "DefenseClaw can guard several agent frameworks. Pick one to integrate now;"
+    Write-Info "DefenseClaw certifies two connectors on native Windows x64. Pick one to integrate now;"
     Write-Info "you can switch later with 'defenseclaw init --connector <name>'."
     Write-Host ""
     $i = 1
@@ -1431,13 +1422,6 @@ function Select-Connector {
         switch ($v) {
             "codex"       { Write-Host "    $i) codex       - Codex CLI native hooks" }
             "claudecode"  { Write-Host "    $i) claudecode  - Claude Code native hooks" }
-            "cursor"      { Write-Host "    $i) cursor      - Cursor IDE native hooks (CLI remains WSL-only)" }
-            "windsurf"    { Write-Host "    $i) windsurf    - Windsurf native hooks" }
-            "geminicli"   { Write-Host "    $i) geminicli   - Gemini CLI native hooks" }
-            "copilot"     { Write-Host "    $i) copilot     - GitHub Copilot native hooks" }
-            "antigravity" { Write-Host "    $i) antigravity - Antigravity native hooks" }
-            "opencode"    { Write-Host "    $i) opencode    - OpenCode native JavaScript bridge" }
-            "hermes"      { Write-Host "    $i) hermes      - Hermes native hooks (preview)" }
             "none"        { Write-Host "    $i) none        - install gateway/CLI only; pick later" }
         }
         $i++

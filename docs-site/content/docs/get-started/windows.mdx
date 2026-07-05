@@ -1,38 +1,32 @@
 ---
 title: Native Windows
-description: Install and operate DefenseClaw directly on Windows with PowerShell, native agent hooks, multi-connector setup, and Windows-specific troubleshooting. No WSL required.
+description: Install and operate DefenseClaw on certified native Windows x64 with PowerShell. WSL is unsupported.
 keywords:
   - DefenseClaw Windows
   - DefenseClaw PowerShell
   - native Windows agent hooks
   - DefenseClaw Windows install
-  - DefenseClaw without WSL
+  - DefenseClaw Windows x64
 ---
 
-DefenseClaw runs directly on 64-bit Windows. Native agents send lifecycle events
+DefenseClaw's certified Windows release runs directly on native Windows x64. Certified agents send lifecycle events
 to the local DefenseClaw gateway through their Windows hook surfaces. Observe
 mode records decisions; action mode can return blocking or approval decisions
 before supported actions run.
 
 <Callout>
-This is a **native Windows** integration. DefenseClaw does not install, configure,
-or protect agents inside WSL, and it does not require Git Bash, `jq`, or a POSIX
-shell for its hook path.
+This is a **native Windows x64** integration. **WSL is unsupported.** DefenseClaw
+does not install, configure, or protect agents inside WSL. The certified hook
+path does not require Git Bash, `jq`, or a POSIX shell.
 </Callout>
 
 ## Connector support
 
-| Agent | Setup name | Status on native Windows | Important detail |
+| Agent | Setup name | Release status on native Windows x64 | Important detail |
 | --- | --- | --- | --- |
-| Codex CLI | `codex` | supported | Native Codex hooks. |
-| Claude Code | `claudecode` | supported | Follow Claude Code's Git for Windows prerequisite. |
-| Cursor | `cursor` | supported | Cursor IDE hooks only; Cursor CLI remains WSL-only. |
-| Windsurf | `windsurf` | supported | Native Cascade hooks. |
-| Gemini CLI | `geminicli` | supported | Native Gemini CLI hooks. |
-| GitHub Copilot CLI | `copilot` | supported | Upstream Windows hooks require PowerShell 7+. |
-| Antigravity | `antigravity` | supported | Native local hooks. |
-| OpenCode | `opencode` | supported | JavaScript bridge; it does not invoke the hook executable. |
-| Hermes | `hermes` | preview | Pending live end-to-end validation of the native DefenseClaw integration. |
+| Codex CLI | `codex` | certified | Native Codex hooks. |
+| Claude Code | `claudecode` | certified | Follow Claude Code's Git for Windows prerequisite. |
+| Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity, OpenCode, Hermes | — | not certified | Separate Windows certification is required. Hermes remains preview; preview is not certification. |
 
 OpenHands, OmniGent, OpenClaw, and ZeptoClaw are not supported on native
 Windows. OpenHands is WSL-only; OmniGent has no supported native terminal and
@@ -42,7 +36,7 @@ from Windows pickers and rejected by scripted setup.
 
 ## Requirements
 
-- 64-bit Windows on amd64 or arm64. The installer rejects x86.
+- Native Windows x64 (`amd64`). Windows ARM64 requires separate certification; x86 is unsupported.
 - Windows PowerShell 5.1+ or PowerShell 7+.
 - Internet access to GitHub Releases and the `uv` installer.
 - A supported agent installed natively for the same Windows user.
@@ -71,7 +65,7 @@ Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
 & $Installer -Version $Version
 ```
 
-The installer downloads the ZIP for the current architecture, verifies release
+The installer downloads `defenseclaw_<version>_windows_amd64.zip`, verifies release
 checksums when a matching entry is available, installs the CLI and gateway, and
 offers a native connector picker.
 
@@ -81,7 +75,7 @@ offers a native connector picker.
 
 ### Configure one or more agents
 
-For a guided setup, including discovery of every installed native connector:
+For guided setup of certified installed connectors:
 
 ```powershell
 defenseclaw init
@@ -162,13 +156,13 @@ defenseclaw setup codex --mode action
 defenseclaw setup remove codex
 ```
 
-One gateway can protect several native hook connectors. For scripted setup,
+One gateway can protect both certified native hook connectors. For scripted setup,
 repeat `--connector`:
 
 ```powershell
 defenseclaw setup `
   --connector codex `
-  --connector cursor `
+  --connector claudecode `
   --mode observe `
   --restart `
   --yes
@@ -208,9 +202,10 @@ defenseclaw upgrade
 defenseclaw doctor
 ```
 
-Native Windows is hook-only. The OpenClaw/ZeptoClaw guardrail proxy is not
-available, and `defenseclaw init --sandbox` is Linux-only. Inventory, scanners,
-audit storage, alerts, and the TUI remain available. The TUI accepts Windows
+Native Windows is hook-only. Sandbox, enterprise hooks, OpenHands, OmniGent,
+OpenClaw, ZeptoClaw, the bundled local observability and Splunk shell stacks,
+and native desktop toasts are unsupported on Windows. Remote observability
+sinks are separate. Inventory, scanners, audit storage, alerts, and the TUI remain available. The TUI accepts Windows
 arrow-key sequences and falls back to numbered prompts when a console cannot
 redraw safely.
 
@@ -235,7 +230,7 @@ redraw safely.
   <Accordion title="A connector is missing from the picker">
     Confirm it is installed natively for the same Windows user and run
     `defenseclaw doctor`. Unsupported and WSL-only connectors are intentionally
-    hidden. Hermes appears with a preview warning.
+    hidden. Other connectors require separate certification.
   </Accordion>
   <Accordion title="Scanner commands are reported missing">
     Re-run `defenseclaw init`, then `defenseclaw doctor`. DefenseClaw checks the

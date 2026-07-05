@@ -41,38 +41,33 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 
 ### Windows support
 
-On **native Windows**, DefenseClaw is **hook-only**. The current Windows
-connector scope deliberately excludes WSL and requires both the upstream agent
-and the complete DefenseClaw hook path to run directly on Windows.
+On **native Windows x64**, DefenseClaw is **hook-only**. **WSL is unsupported.**
+Windows ARM64 requires separate certification.
 
 Follow the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
 for prerequisites, PowerShell installation, connector setup, verification,
 upgrades, and troubleshooting.
 
-- **Supported:** Codex, Claude Code, Cursor IDE hooks, Windsurf, Gemini CLI,
-  Copilot CLI, Antigravity, and OpenCode.
-- **Preview:** Hermes, pending live end-to-end validation of the DefenseClaw
-  native integration.
-- **Unsupported:** OpenHands and OmniGent. OpenHands CLI requires WSL;
-  OmniGent has no supported native Windows terminal/sandbox path.
+- **Certified:** Codex CLI and Claude Code.
+- **Not certified:** Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity,
+  OpenCode, and Hermes. These require separate certification; Hermes is preview,
+  which is not the same as certified.
+- **Unsupported:** OpenHands, OmniGent, OpenClaw, and ZeptoClaw.
 
-Supported command-hook connectors invoke the native, no-console
-`defenseclaw-hook.exe --connector <name> --event <event>` launcher; OpenCode
-loads its JavaScript bridge plugin and calls the gateway over HTTP directly.
-DefenseClaw's hook entrypoint does not add a WSL, Git Bash, `jq`, or POSIX-shell
+Certified command-hook connectors invoke the native, no-console
+`defenseclaw-hook.exe --connector <name> --event <event>` launcher.
+DefenseClaw's hook entrypoint does not add a Git Bash, `jq`, or POSIX-shell
 dependency; upstream agent prerequisites still apply (for example, Claude
-Code's native Windows setup requires Git for Windows). Cursor support here means
-the Windows IDE hook surface; Cursor's separate CLI remains WSL-only.
-
-WSL availability is tracked for upstream research in
-[`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md), but it is not part of the current
-DefenseClaw Windows support or release-certification scope. A connector that
-only works through WSL does not qualify as Windows-supported.
+Code's native Windows setup requires Git for Windows).
 
 The proxy connectors **OpenClaw** and **ZeptoClaw** are **not supported on
 Windows**: they require the local guardrail proxy, which DefenseClaw does not
 host there. They are hidden from the TUI/CLI connector pickers and rejected by
 setup on Windows with a clear error. Use them on macOS or Linux instead.
+
+Sandbox, enterprise hooks, bundled local observability/Splunk shell stacks, and
+native desktop toasts are also unsupported on Windows. This does not change
+their documented macOS/Linux support.
 
 ## Splunk Terms And Scope For The Local Preset
 

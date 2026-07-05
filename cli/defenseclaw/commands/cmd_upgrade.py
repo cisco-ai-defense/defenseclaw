@@ -401,6 +401,13 @@ def _detect_platform() -> tuple[str, str]:
         ux.err(f"Unsupported OS: {system}", indent="  ")
         raise SystemExit(1)
 
+    if system == "windows" and arch != "amd64":
+        ux.err(
+            "Windows ARM64 is not certified for this release; use certified Windows x64 (amd64).",
+            indent="  ",
+        )
+        raise SystemExit(1)
+
     return system, arch
 
 

@@ -994,6 +994,17 @@ class TestGatewayWindowsArchive(unittest.TestCase):
              patch("platform.machine", return_value="AMD64"):
             self.assertEqual(_detect_platform(), ("windows", "amd64"))
 
+    def test_detect_platform_rejects_uncertified_windows_arm64(self):
+        with patch("platform.system", return_value="Windows"), \
+             patch("platform.machine", return_value="ARM64"), \
+             self.assertRaises(SystemExit):
+            _detect_platform()
+
+    def test_detect_platform_preserves_linux_arm64(self):
+        with patch("platform.system", return_value="Linux"), \
+             patch("platform.machine", return_value="ARM64"):
+            self.assertEqual(_detect_platform(), ("linux", "arm64"))
+
     def test_download_gateway_extracts_exe_from_zip(self):
         with TemporaryDirectory() as tmp:
 

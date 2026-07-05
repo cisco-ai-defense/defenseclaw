@@ -12,8 +12,8 @@
 
 Windows support is not a boolean derived from connector topology.  A native
 agent/runtime and a DefenseClaw integration that can be wired without WSL are
-both required.  The resulting status is one of ``supported``, ``preview``, or
-``unsupported`` and always carries an operator-facing reason.
+both required. The resulting status is one of ``supported``, ``preview``,
+``not_certified``, or ``unsupported`` and always carries a reason.
 
 DefenseClaw runs hook-only on Windows: agents invoke the native Go hook
 entrypoint (``defenseclaw-hook``) directly, and there is no Windows
@@ -35,10 +35,11 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlparse
 
-SupportStatus = Literal["supported", "preview", "unsupported"]
+SupportStatus = Literal["supported", "preview", "not_certified", "unsupported"]
 
 SUPPORTED: SupportStatus = "supported"
 PREVIEW: SupportStatus = "preview"
+NOT_CERTIFIED: SupportStatus = "not_certified"
 UNSUPPORTED: SupportStatus = "unsupported"
 
 PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
@@ -58,50 +59,47 @@ class ConnectorPlatformSupport:
     @property
     def available(self) -> bool:
         """Whether setup/presentation may offer this connector."""
-        return self.status != UNSUPPORTED
+        return self.status in {SUPPORTED, PREVIEW}
 
 
-# Keep in exact parity with the Go ``windowsConnectorSupport`` map.  Cursor is
-# intentionally supported because DefenseClaw configures Cursor IDE hooks; the
-# separate ``cursor-agent`` CLI remains WSL-only and is not installed or wired
-# by native Windows setup.
+# Keep in exact parity with the Go ``windowsConnectorSupport`` map. A working
+# upstream Windows binary is not sufficient for DefenseClaw certification.
 WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     "codex": ConnectorPlatformSupport(
         SUPPORTED,
-        "Codex CLI and the DefenseClaw hook entrypoint run natively on Windows.",
+        "Codex CLI and the DefenseClaw hook entrypoint are certified on native Windows x64.",
     ),
     "claudecode": ConnectorPlatformSupport(
         SUPPORTED,
-        "Claude Code supports native Windows with Git for Windows and native hooks.",
+        "Claude Code with Git for Windows and native hooks is certified on native Windows x64.",
     ),
     "cursor": ConnectorPlatformSupport(
-        SUPPORTED,
-        "Cursor IDE hooks run natively on Windows; Cursor CLI remains WSL-only.",
+        NOT_CERTIFIED,
+        "The DefenseClaw Cursor integration has not completed native Windows x64 certification.",
     ),
     "windsurf": ConnectorPlatformSupport(
-        SUPPORTED,
-        "Windsurf documents native Windows Cascade hooks.",
+        NOT_CERTIFIED,
+        "The DefenseClaw Windsurf integration has not completed native Windows x64 certification.",
     ),
     "geminicli": ConnectorPlatformSupport(
-        SUPPORTED,
-        "Gemini CLI documents native Windows command hooks and PowerShell execution.",
+        NOT_CERTIFIED,
+        "The DefenseClaw Gemini CLI integration has not completed native Windows x64 certification.",
     ),
     "copilot": ConnectorPlatformSupport(
-        SUPPORTED,
-        "GitHub Copilot CLI documents Windows hook execution through PowerShell.",
+        NOT_CERTIFIED,
+        "The DefenseClaw GitHub Copilot CLI integration has not completed native Windows x64 certification.",
     ),
     "antigravity": ConnectorPlatformSupport(
-        SUPPORTED,
-        "Antigravity runs natively on Windows and exposes local JSON hooks.",
+        NOT_CERTIFIED,
+        "The DefenseClaw Antigravity integration has not completed native Windows x64 certification.",
     ),
     "opencode": ConnectorPlatformSupport(
-        SUPPORTED,
-        "OpenCode runs directly on Windows and loads the JavaScript bridge plugin without shell shims.",
+        NOT_CERTIFIED,
+        "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
     ),
     "hermes": ConnectorPlatformSupport(
-        PREVIEW,
-        "Hermes supports native Windows upstream, but DefenseClaw's native "
-        "Windows hook integration remains preview pending live end-to-end validation.",
+        NOT_CERTIFIED,
+        "The DefenseClaw Hermes integration remains preview and has not completed native Windows x64 certification.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -127,8 +125,27 @@ WINDOWS_SUPPORTED_CONNECTORS: frozenset[str] = frozenset(
 WINDOWS_PREVIEW_CONNECTORS: frozenset[str] = frozenset(
     name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == PREVIEW
 )
+WINDOWS_NOT_CERTIFIED_CONNECTORS: frozenset[str] = frozenset(
+    name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == NOT_CERTIFIED
+)
 WINDOWS_UNSUPPORTED_CONNECTORS: frozenset[str] = frozenset(
     name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == UNSUPPORTED
+)
+
+WINDOWS_CERTIFIED_ARCHITECTURES: frozenset[str] = frozenset({"amd64"})
+WINDOWS_NOT_CERTIFIED_ARCHITECTURES: frozenset[str] = frozenset({"arm64"})
+WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
+    {
+        "sandbox",
+        "enterprise-hooks",
+        "openhands",
+        "omnigent",
+        "openclaw",
+        "zeptoclaw",
+        "local-observability-shell-stack",
+        "splunk-shell-stack",
+        "native-desktop-toasts",
+    }
 )
 
 
@@ -159,17 +176,16 @@ def connector_platform_support(
 ) -> ConnectorPlatformSupport:
     """Return the status and reason for *name* on *os_name*.
 
-    Unknown/plugin connectors preserve the pre-Windows-gate behavior and are
-    treated as supported.  Plugin-specific validation remains the plugin's
-    responsibility.
+    Unknown/plugin connectors require separate native Windows certification.
+    macOS and Linux preserve their historical supported behavior.
     """
     resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
     if resolved_os == "windows":
         return WINDOWS_CONNECTOR_SUPPORT.get(
             name,
             ConnectorPlatformSupport(
-                SUPPORTED,
-                "No native Windows restriction is registered for this plugin connector.",
+                NOT_CERTIFIED,
+                "This connector has not completed native Windows x64 certification.",
             ),
         )
     return ConnectorPlatformSupport(
@@ -191,8 +207,8 @@ def connector_support_reason(name: str, os_name: str | None = None) -> str:
 def connector_supported_on_os(name: str, os_name: str | None = None) -> bool:
     """Report whether *name* may be offered/used on *os_name*.
 
-    Preview connectors are deliberately available; unsupported connectors are
-    hidden from pickers and rejected by explicit setup commands.
+    Preview connectors are deliberately available. Not-certified and
+    unsupported connectors are hidden from pickers and rejected by setup.
     """
     return connector_platform_support(name, os_name).available
 

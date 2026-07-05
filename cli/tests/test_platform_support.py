@@ -31,11 +31,13 @@ from defenseclaw.commands.cmd_setup import (
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext
 from defenseclaw.platform_support import (
+    NOT_CERTIFIED,
     PREVIEW,
     PROXY_CONNECTORS,
     SUPPORTED,
     UNSUPPORTED,
     WINDOWS_CONNECTOR_SUPPORT,
+    WINDOWS_NOT_CERTIFIED_CONNECTORS,
     WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
     WINDOWS_UNSUPPORTED_CONNECTORS,
@@ -59,28 +61,23 @@ from defenseclaw.tui.services.cli_choices import (
 
 from tests.helpers import cleanup_app, make_app_context
 
-WINDOWS_SUPPORTED = {
-    "codex",
-    "claudecode",
-    "cursor",
-    "windsurf",
-    "geminicli",
-    "copilot",
-    "antigravity",
-    "opencode",
+WINDOWS_SUPPORTED = {"codex", "claudecode"}
+WINDOWS_PREVIEW: set[str] = set()
+WINDOWS_NOT_CERTIFIED = {
+    "cursor", "windsurf", "geminicli", "copilot", "antigravity", "opencode", "hermes"
 }
-WINDOWS_PREVIEW = {"hermes"}
 WINDOWS_UNSUPPORTED = {"openhands", "omnigent", "openclaw", "zeptoclaw"}
-ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_UNSUPPORTED
+ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
 
 
 def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
     assert set(WINDOWS_CONNECTOR_SUPPORT) == ALL_CONNECTORS
     assert set(WINDOWS_SUPPORTED_CONNECTORS) == WINDOWS_SUPPORTED
     assert set(WINDOWS_PREVIEW_CONNECTORS) == WINDOWS_PREVIEW
+    assert set(WINDOWS_NOT_CERTIFIED_CONNECTORS) == WINDOWS_NOT_CERTIFIED
     assert set(WINDOWS_UNSUPPORTED_CONNECTORS) == WINDOWS_UNSUPPORTED
     for name, support in WINDOWS_CONNECTOR_SUPPORT.items():
-        assert support.status in {SUPPORTED, PREVIEW, UNSUPPORTED}, name
+        assert support.status in {SUPPORTED, PREVIEW, NOT_CERTIFIED, UNSUPPORTED}, name
         assert support.reason.strip(), name
 
     go_source = (
@@ -93,6 +90,7 @@ def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
     go_status = {
         SUPPORTED: "PlatformSupported",
         PREVIEW: "PlatformPreview",
+        NOT_CERTIFIED: "PlatformNotCertified",
         UNSUPPORTED: "PlatformUnsupported",
     }
     for name, support in WINDOWS_CONNECTOR_SUPPORT.items():
@@ -122,15 +120,18 @@ def test_windows_statuses_and_availability() -> None:
         assert connector_platform_support(name, "windows").status == PREVIEW
         assert connector_preview_on_os(name, "windows") is True
         assert connector_supported_on_os(name, "windows") is True
+    for name in WINDOWS_NOT_CERTIFIED:
+        assert connector_platform_support(name, "windows").status == NOT_CERTIFIED
+        assert connector_supported_on_os(name, "windows") is False
     for name in WINDOWS_UNSUPPORTED:
         assert connector_platform_support(name, "windows").status == UNSUPPORTED
         assert connector_supported_on_os(name, "windows") is False
 
 
-def test_cursor_reason_distinguishes_native_ide_from_wsl_only_cli() -> None:
-    reason = connector_platform_support("cursor", "windows").reason
-    assert "IDE hooks" in reason
-    assert "CLI remains WSL-only" in reason
+def test_unknown_windows_connector_requires_certification() -> None:
+    support = connector_platform_support("plugin-example", "windows")
+    assert support.status == NOT_CERTIFIED
+    assert support.available is False
 
 
 def test_non_windows_behavior_is_unchanged() -> None:
@@ -141,9 +142,9 @@ def test_non_windows_behavior_is_unchanged() -> None:
             assert support.available
 
 
-def test_supported_connectors_preserves_order_and_keeps_preview() -> None:
+def test_supported_connectors_preserves_order_and_certified_windows_scope() -> None:
     ordered = ["openclaw", "codex", "hermes", "openhands", "claudecode"]
-    assert supported_connectors(ordered, "windows") == ["codex", "hermes", "claudecode"]
+    assert supported_connectors(ordered, "windows") == ["codex", "claudecode"]
     assert supported_connectors(ordered, "linux") == ordered
 
 
@@ -230,19 +231,13 @@ def test_all_connector_lists_share_one_taxonomy() -> None:
 
 
 def test_windows_views_hide_unsupported_and_mark_hermes_preview() -> None:
-    expected = WINDOWS_SUPPORTED | WINDOWS_PREVIEW
+    expected = WINDOWS_SUPPORTED
     assert set(supported_connector_choices("windows")) == expected
     assert set(visible_connector_choices("windows")) == expected
 
     win_modes = visible_mode_picker_choices("windows")
     assert {choice.wire for choice in win_modes} == expected
-    hermes = next(choice for choice in win_modes if choice.wire == "hermes")
-    assert hermes.label == "Hermes (preview)"
-    assert "preview" in hermes.tagline.lower()
-    assert connector_platform_support("hermes", "windows").reason == (
-        "Hermes supports native Windows upstream, but DefenseClaw's native "
-        "Windows hook integration remains preview pending live end-to-end validation."
-    )
+    assert all("preview" not in choice.label.lower() for choice in win_modes)
 
 
 def test_non_windows_views_are_unfiltered() -> None:

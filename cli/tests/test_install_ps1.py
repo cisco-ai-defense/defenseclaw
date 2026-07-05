@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 from defenseclaw.platform_support import (
-    WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
 )
 
@@ -157,10 +156,8 @@ def test_windows_installer_offers_only_native_connector_surface() -> None:
 
     choices_block = text.split("$ConnectorChoices = @(", 1)[1].split(")", 1)[0]
     choices = set(re.findall(r'"([a-z]+)"', choices_block))
-    assert choices == WINDOWS_SUPPORTED_CONNECTORS | WINDOWS_PREVIEW_CONNECTORS | {"none"}
-
-    assert "Hermes native hooks (preview)" in text
-    assert "Cursor IDE native hooks (CLI remains WSL-only)" in text
+    assert choices == WINDOWS_SUPPORTED_CONNECTORS | {"none"}
+    assert "Windows ARM64 is not certified" in text
     assert "function Install-OpenClaw" not in text
 
 

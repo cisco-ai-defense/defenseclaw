@@ -11,6 +11,8 @@ keywords:
 
 `defenseclaw setup local-observability` brings up a full local OpenTelemetry stack and wires the gateway to it in one shot. It's what the project itself uses for development, demos, and rule-pack tuning.
 
+<Callout type="warning">The bundled shell/Compose stack is supported on macOS and Linux and is unsupported on Windows. Windows operators can use supported remote OTLP, HEC, or webhook sinks instead.</Callout>
+
 <Video
   src="local-observability"
   caption="defenseclaw setup local-observability up — five containers come up, the gateway picks up the new OTLP endpoint, and Grafana dashboards populate live."

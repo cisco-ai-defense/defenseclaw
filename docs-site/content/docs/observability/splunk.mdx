@@ -12,6 +12,8 @@ keywords:
 
 DefenseClaw ships a single command — `defenseclaw setup splunk` — with three independent pipelines you can mix and match:
 
+<Callout type="warning">The local `--logs` shell/Compose stack is unsupported on Windows. Remote Splunk Enterprise HEC and Splunk Observability Cloud are separate pipelines.</Callout>
+
 | Pipeline | Use case | What it does |
 | --- | --- | --- |
 | `--logs` | Local demo / dev | Brings up Splunk Free in Docker, installs the bundled local-mode app, sends events via HEC |

@@ -118,7 +118,7 @@ func (r *Registry) Available() []ConnectorInfo {
 		// /v1/connectors never surface a path that cannot run here. Retain
 		// preview connectors with explicit metadata for presentation consumers.
 		support := ConnectorSupportOnHostOS(c.Name())
-		if support.Status == PlatformUnsupported {
+		if support.Status != PlatformSupported && support.Status != PlatformPreview {
 			continue
 		}
 		out = append(out, ConnectorInfo{
@@ -133,7 +133,7 @@ func (r *Registry) Available() []ConnectorInfo {
 	}
 	for _, c := range r.plugins {
 		support := ConnectorSupportOnHostOS(c.Name())
-		if support.Status == PlatformUnsupported {
+		if support.Status != PlatformSupported && support.Status != PlatformPreview {
 			continue
 		}
 		out = append(out, ConnectorInfo{
