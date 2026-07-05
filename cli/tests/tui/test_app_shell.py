@@ -1729,6 +1729,74 @@ async def test_successful_first_run_command_deactivates_embedded_setup() -> None
 
 
 @pytest.mark.asyncio
+async def test_cancelled_command_has_one_explicit_terminal_ui_state(monkeypatch) -> None:
+    app = DefenseClawTUI()
+    finish_calls: list[tuple[int, bool]] = []
+    original_finish = app.activity_model.finish_entry
+
+    async def fake_run(binary: str, args: tuple[str, ...], **_kwargs: object):
+        yield CommandEvent("start", " ".join((binary, *args)))
+        yield CommandEvent("output", "partial output")
+        yield CommandEvent("done", exit_code=130, duration=0.02, cancelled=True)
+
+    def tracked_finish(exit_code: int, *args, cancelled: bool = False, **kwargs) -> None:
+        finish_calls.append((exit_code, cancelled))
+        original_finish(exit_code, *args, cancelled=cancelled, **kwargs)
+
+    app.executor.run = fake_run  # type: ignore[method-assign]
+    monkeypatch.setattr(app.activity_model, "finish_entry", tracked_finish)
+
+    async with app.run_test(size=(150, 44)) as pilot:
+        await app._run_command("defenseclaw", ("doctor",))  # noqa: SLF001
+        await pilot.pause()
+
+        entry = app.activity_model.entries[-1]
+        assert finish_calls == [(130, True)]
+        assert entry.done is True
+        assert entry.cancelled is True
+        assert entry.status_label.startswith("cancelled")
+        assert entry.output == ["partial output"]
+        assert app.command_running is False
+        assert app._strip_state == "cancelled"  # noqa: SLF001
+        assert app._strip_summary == "cancelled by operator"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_waits_for_executor_terminal_event(monkeypatch) -> None:
+    app = DefenseClawTUI()
+    app.activity_model.add_entry("defenseclaw doctor")
+    app.command_running = True
+    app.command_label = "defenseclaw doctor"
+
+    async def fake_cancel() -> bool:
+        return True
+
+    monkeypatch.setattr(app.executor, "cancel", fake_cancel)
+    monkeypatch.setattr(app, "_set_status", lambda _message: None)
+    monkeypatch.setattr(app, "_refresh_hint", lambda: None)
+    await app._cancel_running_command()  # noqa: SLF001
+
+    assert app.activity_model.entries[-1].done is False
+    assert app.command_running is True
+
+
+@pytest.mark.asyncio
+async def test_app_shutdown_cancels_executor(monkeypatch) -> None:
+    app = DefenseClawTUI()
+    calls: list[bool] = []
+
+    async def fake_cancel() -> bool:
+        calls.append(True)
+        return False
+
+    monkeypatch.setattr(app.executor, "cancel", fake_cancel)
+    async with app.run_test(size=(120, 35)):
+        pass
+
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
 async def test_audit_clickable_filter_controls() -> None:
     audit = AuditPanelModel()
     audit.set_events(

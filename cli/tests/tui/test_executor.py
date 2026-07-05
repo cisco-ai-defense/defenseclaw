@@ -16,8 +16,10 @@ import ast
 import asyncio
 import inspect
 import os
+import signal
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import defenseclaw.tui.app as app_module
@@ -25,6 +27,7 @@ import pytest
 from defenseclaw.tui.executor import (
     CommandExecutor,
     captured_subprocess_kwargs,
+    managed_subprocess_kwargs,
     resolve_subprocess_argv,
 )
 
@@ -125,6 +128,15 @@ def test_captured_subprocess_flags_match_platform() -> None:
         assert kwargs == {}
 
 
+def test_managed_subprocess_is_suspended_only_on_windows() -> None:
+    kwargs = managed_subprocess_kwargs()
+
+    if os.name == "nt":
+        assert kwargs == {"creationflags": subprocess.CREATE_NO_WINDOW | 0x00000004}
+    else:
+        assert kwargs == {}
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows console allocation behavior")
 @pytest.mark.asyncio
 async def test_executor_captured_child_has_no_windows_console() -> None:
@@ -155,6 +167,7 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
             return b""
 
     class Process:
+        pid = 1
         stdin = None
         stdout = EmptyStdout()
         returncode = 0
@@ -171,7 +184,7 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     events = [
         event
-        async for event in CommandExecutor(use_pty=False).run(
+        async for event in CommandExecutor(use_pty=False, process_tree_factory=lambda _pid: None).run(
             "defenseclaw",
             ("doctor",),
         )
@@ -185,10 +198,245 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
             "doctor",
         )
     ]
-    assert seen_kwargs[0].get("creationflags") == captured_subprocess_kwargs().get(
-        "creationflags"
-    )
+    assert seen_kwargs[0].get("creationflags") == managed_subprocess_kwargs().get("creationflags")
     assert events[-1].exit_code == 0
+
+
+async def _collect(executor: CommandExecutor, args: tuple[str, ...]):
+    return [event async for event in executor.run(sys.executable, args)]
+
+
+async def _wait_until_running(executor: CommandExecutor) -> None:
+    for _ in range(200):
+        if executor.is_running:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("subprocess did not start")
+
+
+@pytest.mark.asyncio
+async def test_cancel_is_idempotent_and_emits_one_cancelled_completion() -> None:
+    executor = CommandExecutor(use_pty=False, cancel_grace=0.05)
+    collect = asyncio.create_task(_collect(executor, ("-u", "-c", "import time; print('ready'); time.sleep(60)")))
+    await _wait_until_running(executor)
+
+    await asyncio.gather(executor.cancel(), executor.cancel(), executor.cancel())
+    events = await asyncio.wait_for(collect, timeout=5)
+
+    done = [event for event in events if event.kind == "done"]
+    assert len(done) == 1
+    assert done[0].cancelled is True
+    assert done[0].exit_code == 130
+    assert executor.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_exit_is_a_noop() -> None:
+    executor = CommandExecutor(use_pty=False)
+    events = await _collect(executor, ("-c", "print('finished')"))
+
+    accepted = await executor.cancel()
+
+    assert accepted is False
+    assert len([event for event in events if event.kind == "done"]) == 1
+    assert events[-1].cancelled is False
+    assert events[-1].exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_natural_exit_race_has_one_terminal_result() -> None:
+    executor = CommandExecutor(use_pty=False, cancel_grace=0.05)
+    collect = asyncio.create_task(_collect(executor, ("-c", "import time; time.sleep(0.03)")))
+    await _wait_until_running(executor)
+    await asyncio.sleep(0.02)
+
+    await executor.cancel()
+    events = await collect
+
+    done = [event for event in events if event.kind == "done"]
+    assert len(done) == 1
+    assert (done[0].cancelled, done[0].exit_code) in {(True, 130), (False, 0)}
+
+
+@pytest.mark.asyncio
+async def test_injected_process_tree_uses_bounded_forced_path() -> None:
+    calls: list[tuple[float, float]] = []
+
+    class ForcedTree:
+        async def cancel(self, process, grace: float, force: float) -> None:
+            calls.append((grace, force))
+            process.kill()
+            await process.wait()
+
+        def close(self) -> None:
+            calls.append((-1.0, -1.0))
+
+    executor = CommandExecutor(
+        use_pty=False,
+        cancel_grace=0.01,
+        cancel_force=0.25,
+        process_tree_factory=lambda _pid: ForcedTree(),
+    )
+    collect = asyncio.create_task(_collect(executor, ("-c", "import time; time.sleep(60)")))
+    await _wait_until_running(executor)
+
+    await executor.cancel()
+    events = await collect
+
+    assert calls == [(0.01, 0.25), (-1.0, -1.0)]
+    assert events[-1].cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_process_tree_setup_failure_stops_command_without_side_effect() -> None:
+    def fail_tree(_pid: int):
+        raise OSError("job setup unavailable")
+
+    executor = CommandExecutor(use_pty=False, process_tree_factory=fail_tree)
+    events = await _collect(executor, ("-c", "import time; time.sleep(60)"))
+
+    assert [event.kind for event in events] == ["start", "output", "done"]
+    assert events[1].text.startswith("Failed to secure process tree:")
+    assert events[-1].exit_code == 1
+    assert events[-1].cancelled is False
+    assert executor.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_signal_cancellation_preserves_sigint_without_process_tree() -> None:
+    signals: list[int] = []
+
+    class Process:
+        returncode = None
+        stdin = None
+
+        def send_signal(self, sent: int) -> None:
+            signals.append(sent)
+            self.returncode = 42
+
+        async def wait(self) -> int:
+            return 42
+
+        def kill(self) -> None:
+            raise AssertionError("SIGINT graceful exit should not use kill fallback")
+
+    executor = CommandExecutor(use_pty=False, process_tree_factory=lambda _pid: None)
+    executor._process = Process()  # type: ignore[assignment]  # noqa: SLF001
+
+    accepted = await executor.cancel()
+
+    assert accepted is True
+    assert signals == [signal.SIGINT]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGINT regression")
+@pytest.mark.asyncio
+async def test_posix_cancel_preserves_sigint_before_fallback() -> None:
+    code = (
+        "import signal,sys,time; "
+        "signal.signal(signal.SIGINT, lambda *_: (print('got-sigint', flush=True), sys.exit(42))); "
+        "print('ready', flush=True); time.sleep(60)"
+    )
+    executor = CommandExecutor(use_pty=False, cancel_grace=1.0)
+    collect = asyncio.create_task(_collect(executor, ("-u", "-c", code)))
+    await _wait_until_running(executor)
+    await asyncio.sleep(0.05)
+
+    await executor.cancel()
+    events = await collect
+
+    assert "got-sigint" in [event.text for event in events if event.kind == "output"]
+    assert events[-1].cancelled is True
+    assert events[-1].exit_code == 130
+
+
+def _windows_pid_is_active(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        assert kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        return exit_code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows graceful cancellation")
+@pytest.mark.asyncio
+async def test_windows_cancel_first_attempts_graceful_stdin_close() -> None:
+    executor = CommandExecutor(use_pty=False, cancel_grace=1.0, cancel_force=1.0)
+    collect = asyncio.create_task(
+        _collect(
+            executor,
+            (
+                "-u",
+                "-c",
+                "import sys; print('ready',flush=True); sys.stdin.buffer.read(); print('eof',flush=True)",
+            ),
+        )
+    )
+    await _wait_until_running(executor)
+    await asyncio.sleep(0.05)
+
+    await executor.cancel()
+    events = await collect
+
+    output = [event.text.strip() for event in events if event.kind == "output"]
+    assert output == ["ready", "eof"]
+    assert events[-1].cancelled is True
+    assert events[-1].exit_code == 130
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows Job Object regression")
+@pytest.mark.asyncio
+async def test_windows_cancel_reaps_child_and_grandchild_tree(tmp_path: Path) -> None:
+    pid_file = tmp_path / "tree-pids.txt"
+    grandchild = "import time; time.sleep(60)"
+    child = (
+        "import pathlib,subprocess,sys,time; "
+        "time.sleep(0.1); "
+        f"p=subprocess.Popen([sys.executable,'-c',{grandchild!r}]); "
+        "pathlib.Path(sys.argv[1]).open('a').write(f'grandchild={p.pid}\\n'); "
+        "print('tree-ready',flush=True); time.sleep(60)"
+    )
+    root = (
+        "import pathlib,subprocess,sys,time; "
+        f"p=subprocess.Popen([sys.executable,'-u','-c',{child!r},sys.argv[1]]); "
+        "pathlib.Path(sys.argv[1]).write_text(f'root={__import__(\"os\").getpid()}\\nchild={p.pid}\\n'); "
+        "p.wait()"
+    )
+    executor = CommandExecutor(use_pty=False, cancel_grace=0.05, cancel_force=2.0)
+    collect = asyncio.create_task(_collect(executor, ("-u", "-c", root, str(pid_file))))
+    await _wait_until_running(executor)
+    for _ in range(300):
+        if pid_file.exists() and "grandchild=" in pid_file.read_text():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("child/grandchild tree did not become ready")
+
+    await asyncio.gather(executor.cancel(), executor.cancel())
+    events = await asyncio.wait_for(collect, timeout=5)
+    pids = [int(line.split("=", 1)[1]) for line in pid_file.read_text().splitlines()]
+
+    assert len([event for event in events if event.kind == "done"]) == 1
+    assert events[-1].cancelled is True
+    assert events[-1].exit_code == 130
+    assert all(not _windows_pid_is_active(pid) for pid in pids)
 
 
 @pytest.mark.asyncio

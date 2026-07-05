@@ -1373,12 +1373,13 @@ class DefenseClawTUI(App[None]):
             yield HintBar(id="hint")
             yield Static("", id="status")
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         # Signal background pollers to stop spawning fresh subprocess
         # workers; without this guard our 30 s / 60 s tickers can fire
         # during pytest teardown and leak "Event loop is closed"
         # warnings that flake the visual snapshot suite.
         self._app_shutting_down = True
+        await self.executor.cancel()
         # Best-effort final flush of session state so the next launch
         # keeps palette MRU, theme, filters, and per-panel cursors.
         try:
@@ -2429,15 +2430,25 @@ class DefenseClawTUI(App[None]):
                     next_hint = suggested_next_action(label, exit_code)
                     self.activity_model.finish_entry(
                         exit_code,
+                        cancelled=event.cancelled,
                         config_reloaded=config_reloaded,
                         restart_completed=restart_completed,
                         doctor_cache_refreshed=doctor_cache_refreshed,
                         suggested_next_action=next_hint,
                     )
-                    color = "#34D399" if event.exit_code == 0 else "#F87171"
-                    self._write_activity(f"[{color}]exit {event.exit_code}[/] in {event.duration:.2f}s")
-                    self._strip_finished(event.exit_code or 0, event.duration or 0.0)
-                    if event.exit_code == 0:
+                    if event.cancelled:
+                        self._write_activity(
+                            f"[#FBBF24]cancelled[/] in {event.duration:.2f}s"
+                        )
+                    else:
+                        color = "#34D399" if event.exit_code == 0 else "#F87171"
+                        self._write_activity(f"[{color}]exit {event.exit_code}[/] in {event.duration:.2f}s")
+                    self._strip_finished(
+                        event.exit_code or 0,
+                        event.duration or 0.0,
+                        cancelled=event.cancelled,
+                    )
+                    if event.exit_code == 0 and not event.cancelled:
                         await self._handle_successful_command(binary, args)
                     elif binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
                         # A setup-family run failed (non-zero exit). Clear the
@@ -6034,16 +6045,22 @@ class DefenseClawTUI(App[None]):
         if self._strip_state == "running":
             self._render_command_strip()
 
-    def _strip_finished(self, exit_code: int, duration: float) -> None:
+    def _strip_finished(
+        self, exit_code: int, duration: float, *, cancelled: bool = False
+    ) -> None:
         """Move running → success/failure. Strip stays until dismissed."""
 
-        self._strip_state = "success" if exit_code == 0 else "failure"
+        self._strip_state = (
+            "cancelled" if cancelled else ("success" if exit_code == 0 else "failure")
+        )
         self._strip_frozen_duration = duration
         # Build a one-line summary: for success use the last output line if
         # it's short and looks like a result, otherwise just acknowledge
         # exit code; for failure show the last (likely error) line so the
         # user sees the actual reason without leaving the panel.
-        if self._strip_state == "success":
+        if self._strip_state == "cancelled":
+            self._strip_summary = "cancelled by operator"
+        elif self._strip_state == "success":
             tail = self._strip_last_output
             self._strip_summary = (
                 tail if (tail and len(tail) <= 120) else "exit 0 · finished cleanly"
@@ -6056,13 +6073,15 @@ class DefenseClawTUI(App[None]):
         # guardrail`). Empty string means "no hint" — skip the footer
         # rather than rendering an awkward dangling separator.
         label = self._strip_label or "command"
-        hint = suggested_next_action(label, exit_code)
+        hint = "" if cancelled else suggested_next_action(label, exit_code)
         if hint:
             self._strip_summary = f"{self._strip_summary} · next: {hint}"
         # Fire a transient toast as well so operators on a different
         # panel still notice the result without having to switch back to
         # Activity. Strip is the persistent receipt; toast is the nudge.
-        if exit_code == 0:
+        if cancelled:
+            self.notify_toast("warn", f"{label} cancelled in {duration:.1f}s")
+        elif exit_code == 0:
             self.notify_toast("success", f"{label} finished in {duration:.1f}s")
         else:
             failure_msg = f"{label} failed (exit {exit_code}) — {self._strip_summary}"
@@ -6162,13 +6181,14 @@ class DefenseClawTUI(App[None]):
 
         panel.set_class(self._strip_state == "running", "running")
         panel.set_class(self._strip_state == "success", "success")
-        panel.set_class(self._strip_state == "failure", "failure")
+        panel.set_class(self._strip_state in {"failure", "cancelled"}, "failure")
         panel.set_class(self._strip_state == "rejected", "rejected")
 
         icon, icon_color, header_color = {
             "running": (self._SPINNER_FRAMES[self._strip_spinner_tick], TOKENS.accent_amber, TOKENS.accent_amber),
             "success": ("✓", TOKENS.accent_green, TOKENS.accent_green),
             "failure": ("✗", TOKENS.accent_red, TOKENS.accent_red),
+            "cancelled": ("■", TOKENS.accent_amber, TOKENS.accent_amber),
             "rejected": ("✗", TOKENS.accent_red, TOKENS.accent_red),
         }.get(self._strip_state, (" ", TOKENS.text_secondary, TOKENS.text_primary))
 
@@ -8779,13 +8799,10 @@ class DefenseClawTUI(App[None]):
         # release the matching wizard's "running…" badge if it was a
         # setup-family run.
         cancelled_label = self.command_label
-        await self.executor.cancel()
-        self.command_running = False
-        self.command_label = ""
-        self._command_started_at = 0.0
-        self.activity_model.finish_entry(130, cancelled=True)
-        self._write_activity("[#FBBF24]cancel requested[/]")
-        self._set_status("Cancel requested for running command.")
+        cancelled = await self.executor.cancel()
+        if not cancelled:
+            return
+        self._set_status("Running command cancelled.")
         # Map back to argv if the label looks like one of the setup
         # commands so the wizard table doesn't keep spinning after the
         # user explicitly cancelled. The label is the same string built
