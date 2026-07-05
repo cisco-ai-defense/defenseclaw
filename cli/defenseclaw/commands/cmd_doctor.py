@@ -54,6 +54,7 @@ from defenseclaw.doctor_gateway import (
     canonical_path,
     gateway_executable_name,
 )
+from defenseclaw.doctor_hooks import validate_windows_hook_registration
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
 from defenseclaw.scanner_binary import resolve_scanner_binary
@@ -366,10 +367,12 @@ def _registered_hook_script_paths(
                 if not isinstance(cmd, str) or script_name not in cmd:
                     continue
                 try:
-                    tokens = shlex.split(cmd)
+                    tokens = shlex.split(cmd, posix=os.name != "nt")
                 except ValueError:
                     tokens = [cmd]
                 match = next((tok for tok in tokens if script_name in tok), cmd)
+                if len(match) >= 2 and match[0] == match[-1] and match[0] in {'"', "'"}:
+                    match = match[1:-1]
                 paths.append(os.path.abspath(os.path.expanduser(match)))
 
     deduped: list[str] = []
@@ -1329,7 +1332,61 @@ def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     )
 
 
-def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
+def _check_windows_native_hooks(
+    cfg,
+    connector: str,
+    label: str,
+    r: _DoctorResult,
+    *,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
+    """Validate the command Windows setup actually registered, without running it."""
+    paths = _hook_health_paths_from_lock(cfg, connector)
+    if config_path is None:
+        config_path = (
+            paths[0]
+            if paths
+            else os.path.expanduser("~/.codex/config.toml" if connector == "codex" else "~/.claude/settings.json")
+        )
+    if install_root is None:
+        install_root = os.path.expanduser("~/.local/bin")
+    check = validate_windows_hook_registration(
+        connector=connector,
+        config_path=config_path,
+        data_dir=getattr(cfg, "data_dir", "") or "",
+        install_root=install_root,
+        search_path=os.environ.get("PATH", "") if search_path is None else search_path,
+        pathext=os.environ.get("PATHEXT", "") if pathext is None else pathext,
+    )
+    status = "pass" if check.healthy else "fail"
+    _emit(status, label, f"{check.state}: {check.detail}", r=r)
+
+
+def _check_claudecode_hooks(
+    cfg,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
+    if (platform_name or os.name) == "nt":
+        _check_windows_native_hooks(
+            cfg,
+            "claudecode",
+            "Claude Code hooks",
+            r,
+            config_path=config_path,
+            install_root=install_root,
+            search_path=search_path,
+            pathext=pathext,
+        )
+        return
     settings_path = os.path.expanduser("~/.claude/settings.json")
     if not os.path.isfile(settings_path):
         _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
@@ -1368,7 +1425,28 @@ def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
 
 
-def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
+def _check_codex_hooks(
+    cfg,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
+    if (platform_name or os.name) == "nt":
+        _check_windows_native_hooks(
+            cfg,
+            "codex",
+            "Codex hooks",
+            r,
+            config_path=config_path,
+            install_root=install_root,
+            search_path=search_path,
+            pathext=pathext,
+        )
+        return
     hook_dir = os.path.join(cfg.data_dir, "hooks")
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
     if os.path.isfile(hook_script):

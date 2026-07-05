@@ -1473,7 +1473,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
             self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
             result = _DoctorResult()
 
-            cmd_doctor._check_codex_hooks(cfg, result)
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix")
 
         freshness = [c for c in result.checks if c["label"] == "Codex hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
@@ -1524,7 +1524,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 "expanduser",
                 side_effect=lambda p: p.replace("~", home, 1) if p.startswith("~") else p,
             ):
-                cmd_doctor._check_claudecode_hooks(cfg, result)
+                cmd_doctor._check_claudecode_hooks(cfg, result, platform_name="posix")
 
         freshness = [c for c in result.checks if c["label"] == "Claude Code hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
