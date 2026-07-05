@@ -19,6 +19,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -26,6 +27,23 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+func processExecutableWindows(pid int) (string, error) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(h)
+	buffer := make([]uint16, 32768)
+	size := uint32(len(buffer))
+	if err := windows.QueryFullProcessImageName(h, 0, &buffer[0], &size); err != nil {
+		return "", err
+	}
+	if size == 0 {
+		return "", fmt.Errorf("empty executable path for pid %d", pid)
+	}
+	return windows.UTF16ToString(buffer[:size]), nil
+}
 
 func setSysProcAttr(cmd *exec.Cmd) {
 	// Detach the gateway so it outlives the launching process and console.

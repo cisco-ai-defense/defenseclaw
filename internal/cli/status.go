@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -112,8 +113,26 @@ func sidecarHealthURL(c *config.Config) string {
 	if c == nil {
 		c = config.DefaultConfig()
 	}
-	bind := gatewayBindHost(c)
-	return fmt.Sprintf("http://%s:%d/health", bind, c.Gateway.APIPort)
+	return "http://" + net.JoinHostPort(gatewayClientHost(c), strconv.Itoa(c.Gateway.APIPort)) + "/health"
+}
+
+func gatewayClientHost(c *config.Config) string {
+	bind := strings.Trim(strings.TrimSpace(gatewayBindHost(c)), "[]")
+	switch bind {
+	case "", "*", "0.0.0.0":
+		return "127.0.0.1"
+	case "::":
+		return "::1"
+	default:
+		return bind
+	}
+}
+
+func sidecarStatusURL(c *config.Config) string {
+	if c == nil {
+		c = config.DefaultConfig()
+	}
+	return "http://" + net.JoinHostPort(gatewayClientHost(c), strconv.Itoa(c.Gateway.APIPort)) + "/status"
 }
 
 // fetchSidecarHealth reads one complete, bounded health document. Keeping the

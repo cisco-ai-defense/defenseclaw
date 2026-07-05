@@ -17,11 +17,14 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -73,6 +76,29 @@ Equivalent to 'stop' followed by 'start'.`,
 	PersistentPreRunE: nil,
 }
 
+var (
+	startupListenerOwner            = daemon.ListenerOwnerPID
+	requireStartupListenerOwnership = runtime.GOOS == "windows"
+)
+
+type daemonState interface {
+	IsRunning() (bool, int)
+}
+
+type managedProcessIdentity interface {
+	HasManagedProcessIdentity(int) bool
+}
+
+type gatewayStatusEnvelope struct {
+	Health  gateway.HealthSnapshot `json:"health"`
+	Runtime struct {
+		PID     int    `json:"pid"`
+		DataDir string `json:"data_dir"`
+	} `json:"runtime"`
+}
+
+var errGatewayIdentityMismatch = errors.New("gateway identity mismatch")
+
 func init() {
 	// Override PersistentPreRunE to skip config/audit loading for daemon management commands
 	startCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
@@ -86,8 +112,14 @@ func init() {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	cfg, cfgErr := loadDaemonConfig(cmd)
+	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
-	if running, pid := d.IsRunning(); running {
+	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
+	if err != nil {
+		return err
+	}
+	if alreadyRunning {
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
@@ -99,24 +131,24 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	args := collectDaemonArgs(cmd)
 
 	startAttemptedAt := time.Now()
-	pid, err := d.Start(args)
+	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	cfg, cfgErr := config.Load()
-	if cfg == nil {
-		cfg = config.DefaultConfig()
-	}
+	cfg, cfgErr = loadDaemonConfig(cmd)
+	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
+	requirements.expectedPID = pid
+	requirements.token = func() string { return daemonGatewayToken(cfg) }
 	snap, ready, err := waitForStartedDaemon(
 		d,
 		pid,
-		&http.Client{Timeout: defaultReadinessHTTPTimeout},
-		sidecarHealthURL(cfg),
+		client,
+		sidecarStatusURL(cfg),
 		defaultStartReadinessTimeout,
 		defaultReadinessPollInterval,
-		daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt),
+		requirements,
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -172,11 +204,17 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	cfg, cfgErr := loadDaemonConfig(cmd)
+	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
-	// Stop the watchdog first so it doesn't fire false alarms during restart.
-	_ = runWatchdogStop(nil, nil)
-
-	if running, pid := d.IsRunning(); running {
+	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	if err != nil {
+		return err
+	}
+	if running {
+		// Stop the watchdog only after proving the configured listener is the
+		// managed instance. A foreign collision must have no side effects.
+		_ = runWatchdogStop(nil, nil)
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 		if err := d.Stop(defaultStopTimeout); err != nil {
 			fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -184,29 +222,32 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
+	if err := requireConfiguredPortFree(cfg); err != nil {
+		return fmt.Errorf("restart preflight: %w", err)
+	}
 
 	fmt.Print("Starting gateway sidecar daemon... ")
 
 	args := collectDaemonArgs(cmd)
 	startAttemptedAt := time.Now()
-	pid, err := d.Start(args)
+	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	cfg, cfgErr := config.Load()
-	if cfg == nil {
-		cfg = config.DefaultConfig()
-	}
+	cfg, cfgErr = loadDaemonConfig(cmd)
+	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
+	requirements.expectedPID = pid
+	requirements.token = func() string { return daemonGatewayToken(cfg) }
 	snap, ready, err := waitForStartedDaemon(
 		d,
 		pid,
-		&http.Client{Timeout: defaultReadinessHTTPTimeout},
-		sidecarHealthURL(cfg),
+		client,
+		sidecarStatusURL(cfg),
 		defaultStartReadinessTimeout,
 		defaultReadinessPollInterval,
-		daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt),
+		requirements,
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -291,11 +332,163 @@ type daemonReadinessRequirements struct {
 	telemetryEnabled bool
 	sinksEnabled     bool
 	startedNotBefore time.Time
+	expectedPID      int
+	expectedDataDir  string
+	token            func() string
+	listenerHost     string
+	listenerPort     int
+	listenerOwner    func(string, int) (int, error)
+	requireOwnership bool
+}
+
+func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
+	cfg, err := config.Load()
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	// The child receives these as flags, so startup verification must inspect
+	// the same effective endpoint instead of the on-disk defaults.
+	if sidecarHost != "" {
+		cfg.Gateway.APIBind = sidecarHost
+	}
+	if sidecarPort > 0 {
+		cfg.Gateway.APIPort = sidecarPort
+	}
+	return cfg, err
+}
+
+func daemonGatewayToken(cfg *config.Config) string {
+	if cfg != nil {
+		if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+			return token
+		}
+	}
+	paths := []string{filepath.Join(config.DefaultDataPath(), ".env")}
+	if cfg != nil && cfg.DataDir != "" {
+		paths = append(paths, filepath.Join(cfg.DataDir, ".env"))
+	}
+	for _, path := range paths {
+		env := readDotEnv(path)
+		for _, key := range []string{"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"} {
+			if token := strings.TrimSpace(env[key]); token != "" {
+				return token
+			}
+		}
+	}
+	return ""
+}
+
+func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
+	running, managedPID := d.IsRunning()
+	if !requireStartupListenerOwnership {
+		return running, managedPID, nil
+	}
+	ownerPID, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+	if errors.Is(err, daemon.ErrNoListener) {
+		if running {
+			return false, 0, fmt.Errorf("configured gateway port has no listener for managed PID %d", managedPID)
+		}
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("inspect configured gateway listener: %w", err)
+	}
+	if !running || managedPID != ownerPID {
+		return false, 0, fmt.Errorf(
+			"configured gateway port %d is occupied by foreign process PID %d",
+			cfg.Gateway.APIPort,
+			ownerPID,
+		)
+	}
+	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
+		return false, 0, fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", managedPID)
+	}
+	status, err := fetchSidecarStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
+	if err != nil {
+		return false, 0, fmt.Errorf("managed gateway listener authentication failed: %w", err)
+	}
+	if err := verifyGatewayRuntimeIdentity(status, managedPID, cfg.DataDir); err != nil {
+		return false, 0, err
+	}
+	return true, managedPID, nil
+}
+
+func requireConfiguredPortFree(cfg *config.Config) error {
+	if !requireStartupListenerOwnership {
+		return nil
+	}
+	pid, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+	if errors.Is(err, daemon.ErrNoListener) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
+}
+
+func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
+	var status gatewayStatusEnvelope
+	if strings.TrimSpace(token) == "" {
+		return status, fmt.Errorf("no gateway token is available yet")
+	}
+	req, err := http.NewRequest(http.MethodGet, addr, nil)
+	if err != nil {
+		return status, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-DefenseClaw-Token", token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return status, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return status, fmt.Errorf("%w: authenticated status returned %s", errGatewayIdentityMismatch, resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, gatewayHealthDocumentMaxBytes+1))
+	if err != nil {
+		return status, fmt.Errorf("read authenticated status: %w", err)
+	}
+	if len(body) > gatewayHealthDocumentMaxBytes {
+		return status, fmt.Errorf("authenticated status exceeds %d bytes", gatewayHealthDocumentMaxBytes)
+	}
+	if err := json.Unmarshal(body, &status); err != nil {
+		return status, fmt.Errorf("%w: parse authenticated status: %v", errGatewayIdentityMismatch, err)
+	}
+	return status, nil
+}
+
+func verifyGatewayRuntimeIdentity(status gatewayStatusEnvelope, expectedPID int, expectedDataDir string) error {
+	if status.Runtime.PID != expectedPID {
+		return fmt.Errorf("%w: authenticated runtime PID %d does not match managed PID %d", errGatewayIdentityMismatch, status.Runtime.PID, expectedPID)
+	}
+	if !sameGatewayDataDir(status.Runtime.DataDir, expectedDataDir) {
+		return fmt.Errorf("%w: authenticated runtime data directory does not match this configuration", errGatewayIdentityMismatch)
+	}
+	return nil
+}
+
+func sameGatewayDataDir(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
 }
 
 type daemonReadinessProcess interface {
 	IsRunning() (bool, int)
 	Stop(time.Duration) error
+}
+
+type attemptedProcessStopper interface {
+	StopStarted(int, time.Duration) error
 }
 
 // waitForStartedDaemon centralizes the readiness and fatal-startup cleanup
@@ -325,7 +518,13 @@ func waitForStartedDaemon(
 		return snap, ready, nil
 	}
 
-	if stopErr := d.Stop(defaultStopTimeout); stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
+	var stopErr error
+	if scoped, ok := d.(attemptedProcessStopper); ok {
+		stopErr = scoped.StopStarted(pid, defaultStopTimeout)
+	} else {
+		stopErr = d.Stop(defaultStopTimeout)
+	}
+	if stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
 		return snap, false, fmt.Errorf("%w; cleanup failed: %v", err, stopErr)
 	}
 	return snap, false, err
@@ -340,6 +539,11 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
 		telemetryEnabled: cfg.OTel.Enabled,
 		startedNotBefore: startedNotBefore,
+		expectedDataDir:  cfg.DataDir,
+		listenerHost:     gatewayBindHost(cfg),
+		listenerPort:     cfg.Gateway.APIPort,
+		listenerOwner:    startupListenerOwner,
+		requireOwnership: requireStartupListenerOwnership,
 	}
 	for _, sink := range cfg.AuditSinks {
 		requirements.sinksEnabled = requirements.sinksEnabled || sink.Enabled
@@ -374,6 +578,7 @@ func waitForGatewayReadiness(
 	deadline := time.Now().Add(timeout)
 	var lastSnap gateway.HealthSnapshot
 	var lastProbeErr error
+	identityVerified := false
 
 	for {
 		if processRunning != nil && !processRunning() {
@@ -386,7 +591,36 @@ func waitForGatewayReadiness(
 			return lastSnap, false, fmt.Errorf("gateway process exited before readiness")
 		}
 
-		snap, err := fetchSidecarHealth(client, healthURL)
+		var snap gateway.HealthSnapshot
+		var err error
+		if requirements.expectedPID > 0 {
+			token := ""
+			if requirements.token != nil {
+				token = requirements.token()
+			}
+			var status gatewayStatusEnvelope
+			status, err = fetchSidecarStatus(client, healthURL, token)
+			if err == nil {
+				err = verifyGatewayRuntimeIdentity(status, requirements.expectedPID, requirements.expectedDataDir)
+				snap = status.Health
+			}
+			if err == nil && requirements.requireOwnership {
+				ownerPID, ownerErr := requirements.listenerOwner(requirements.listenerHost, requirements.listenerPort)
+				switch {
+				case errors.Is(ownerErr, daemon.ErrNoListener):
+					err = ownerErr
+				case ownerErr != nil:
+					return lastSnap, false, fmt.Errorf("inspect gateway listener ownership: %w", ownerErr)
+				case ownerPID != requirements.expectedPID:
+					return lastSnap, false, fmt.Errorf("%w: configured listener PID %d does not match launched PID %d", errGatewayIdentityMismatch, ownerPID, requirements.expectedPID)
+				}
+			}
+			if err == nil {
+				identityVerified = true
+			}
+		} else {
+			snap, err = fetchSidecarHealth(client, healthURL)
+		}
 		if err == nil {
 			lastSnap = snap
 			lastProbeErr = nil
@@ -397,13 +631,28 @@ func waitForGatewayReadiness(
 			if ready {
 				return snap, true, nil
 			}
+		} else if errors.Is(err, errGatewayIdentityMismatch) {
+			return lastSnap, false, err
 		} else {
 			lastProbeErr = err
+		}
+		if processRunning != nil && !processRunning() {
+			return lastSnap, false, fmt.Errorf("gateway process exited during readiness verification")
 		}
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return lastSnap, false, nil
+			// A live, authenticated process whose PID, data home, start
+			// identity, and listener ownership were proven may continue its
+			// existing STARTING contract when optional subsystems are slow.
+			// We never allow that compatibility path before identity proof.
+			if requirements.expectedPID == 0 || identityVerified {
+				return lastSnap, false, nil
+			}
+			if lastProbeErr != nil {
+				return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout (last probe: %v)", lastProbeErr)
+			}
+			return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout")
 		}
 		delay := pollInterval
 		if remaining < delay {

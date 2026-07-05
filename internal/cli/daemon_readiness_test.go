@@ -92,10 +92,11 @@ func TestWaitForGatewayReadinessLeavesSlowLiveProcessStarting(t *testing.T) {
 }
 
 type fakeReadinessProcess struct {
-	running   bool
-	pid       int
-	stopCalls int
-	stopErr   error
+	running    bool
+	pid        int
+	stopCalls  int
+	stopErr    error
+	stoppedPID int
 }
 
 func (p *fakeReadinessProcess) IsRunning() (bool, int) {
@@ -104,6 +105,12 @@ func (p *fakeReadinessProcess) IsRunning() (bool, int) {
 
 func (p *fakeReadinessProcess) Stop(time.Duration) error {
 	p.stopCalls++
+	return p.stopErr
+}
+
+func (p *fakeReadinessProcess) StopStarted(pid int, _ time.Duration) error {
+	p.stopCalls++
+	p.stoppedPID = pid
 	return p.stopErr
 }
 
@@ -127,7 +134,7 @@ func TestWaitForStartedDaemonDoesNotStopSlowLiveProcess(t *testing.T) {
 		t.Fatalf("waitForStartedDaemon() ready = %v, error = %v", ready, err)
 	}
 	if process.stopCalls != 0 {
-		t.Fatalf("Stop() calls = %d, want 0 for a slow live process", process.stopCalls)
+		t.Fatalf("scoped stop calls = %d, want none", process.stopCalls)
 	}
 }
 
@@ -154,6 +161,9 @@ func TestWaitForStartedDaemonStopsProcessOnFatalReadinessError(t *testing.T) {
 	}
 	if process.stopCalls != 1 {
 		t.Fatalf("Stop() calls = %d, want 1 for a fatal readiness error", process.stopCalls)
+	}
+	if process.stoppedPID != 42 {
+		t.Fatalf("StopStarted() PID = %d, want only launched PID 42", process.stoppedPID)
 	}
 }
 

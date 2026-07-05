@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -281,6 +282,16 @@ func TestVerifyProcessCurrentPID(t *testing.T) {
 	}
 }
 
+func TestHasManagedProcessIdentityRejectsLegacyPIDRecord(t *testing.T) {
+	d := New(t.TempDir())
+	if err := os.WriteFile(d.pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d.HasManagedProcessIdentity(os.Getpid()) {
+		t.Fatal("legacy PID record must not prove managed startup identity")
+	}
+}
+
 func TestVerifyProcessWrongExecutable(t *testing.T) {
 	d := New(t.TempDir())
 
@@ -291,7 +302,7 @@ func TestVerifyProcessWrongExecutable(t *testing.T) {
 	}
 
 	switch runtime.GOOS {
-	case "linux", "darwin":
+	case "linux", "darwin", "windows":
 		if runtime.GOOS == "darwin" {
 			if _, err := processExecutableDarwin(os.Getpid()); err != nil {
 				t.Skipf("darwin process inspection unavailable in this environment: %v", err)
@@ -356,7 +367,7 @@ func TestVerifyProcessDarwinRejectsBadPID(t *testing.T) {
 // to match. We simulate this by recording an identity that intentionally
 // disagrees with the current process's live identity.
 func TestVerifyProcessRejectsMismatchedStartIdentity(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		t.Skipf("test not applicable on %s", runtime.GOOS)
 	}
 	d := New(t.TempDir())

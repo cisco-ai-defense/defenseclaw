@@ -59,6 +59,7 @@ type Daemon struct {
 	dataDir string
 	pidFile string
 	logFile string
+	started pidInfo
 }
 
 func New(dataDir string) *Daemon {
@@ -132,6 +133,18 @@ func (d *Daemon) IsRunning() (bool, int) {
 	return true, info.PID
 }
 
+// HasManagedProcessIdentity requires the complete PID record written by current
+// daemon versions and revalidates both executable and kernel start identity.
+// Legacy bare-PID records remain usable for stop/status compatibility but are
+// not strong enough to prove that an occupied API port is the expected daemon.
+func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
+	info, err := d.readPIDInfo()
+	if err != nil || info.PID != pid || info.Executable == "" || info.StartIdentity == "" {
+		return false
+	}
+	return d.verifyProcess(info)
+}
+
 // verifyProcess returns true when the live process at info.PID is the SAME
 // process recorded in the PID file (executable AND start identity match),
 // false when either signal indicates PID reuse, and true when neither signal
@@ -180,6 +193,15 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 			if !strings.HasSuffix(comm, exeBase) && comm != exeBase {
 				return false
 			}
+		}
+		return true
+	case "windows":
+		exePath, err := processExecutableWindows(info.PID)
+		if err != nil {
+			return false
+		}
+		if info.Executable != "" && !strings.EqualFold(filepath.Clean(exePath), filepath.Clean(info.Executable)) {
+			return false
 		}
 		return true
 	default:
@@ -343,6 +365,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: write pid: %w", err)
 	}
+	d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
 
 	// Close our copy of the file descriptors — the child holds its own dup'd
 	// fds now, and keeping these open in the parent only delays GC once the
@@ -482,6 +505,49 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 
 	_ = os.Remove(d.pidFile)
 	return nil
+}
+
+// StopStarted terminates only the child launched by this Daemon value. It is
+// used for failed startup rollback so a replaced PID file can never redirect
+// cleanup toward a foreign process.
+func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
+	info := d.started
+	if info.PID != pid || !d.verifyProcess(info) {
+		return ErrNotRunning
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("daemon: find started process %d: %w", pid, err)
+	}
+	if err := sendTermSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("daemon: stop started process: %w", err)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !processExists(pid) {
+			d.removePIDFileIfStarted(info)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = sendKillSignal(proc)
+	time.Sleep(100 * time.Millisecond)
+	if processExists(pid) {
+		return ErrStopTimeout
+	}
+	d.removePIDFileIfStarted(info)
+	return nil
+}
+
+func (d *Daemon) removePIDFileIfStarted(started pidInfo) {
+	current, err := d.readPIDInfo()
+	if err != nil || current.PID != started.PID {
+		return
+	}
+	if started.StartIdentity != "" && current.StartIdentity != started.StartIdentity {
+		return
+	}
+	_ = os.Remove(d.pidFile)
 }
 
 func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
