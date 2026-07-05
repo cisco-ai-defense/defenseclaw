@@ -227,9 +227,10 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		exe = ""
 	}
 	pidFile, err := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{
-		PID:        os.Getpid(),
-		Executable: exe,
-		StartTime:  time.Now().Unix(),
+		PID:           os.Getpid(),
+		Executable:    exe,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: watchdogProcessStartIdentity(os.Getpid()),
 	})
 	if err != nil {
 		return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
@@ -643,9 +644,10 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 // PID owned by an unrelated process. See S3.HIGH_BUG "Stale watchdog PID
 // file can stop an unrelated process".
 type watchdogPIDInfo struct {
-	PID        int    `json:"pid"`
-	Executable string `json:"executable,omitempty"`
-	StartTime  int64  `json:"start_time,omitempty"`
+	PID           int    `json:"pid"`
+	Executable    string `json:"executable,omitempty"`
+	StartTime     int64  `json:"start_time,omitempty"`
+	StartIdentity string `json:"start_identity,omitempty"`
 }
 
 // writeWatchdogPIDInfo truncates f and writes info as JSON, flushing to

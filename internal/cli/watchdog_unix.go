@@ -44,6 +44,8 @@ func watchdogProcessAlive(_ int, proc *os.Process) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
+func watchdogProcessStartIdentity(_ int) string { return "" }
+
 func watchdogTerminate(proc *os.Process) error {
 	return proc.Signal(syscall.SIGTERM)
 }

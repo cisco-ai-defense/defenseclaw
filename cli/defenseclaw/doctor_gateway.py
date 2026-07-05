@@ -46,6 +46,7 @@ class PIDRecord:
     pid: int = 0
     executable: str = ""
     start_identity: str = ""
+    start_time: str = ""
     reason: str = ""
 
 
@@ -123,11 +124,13 @@ def read_pid_record(path: str) -> PIDRecord:
         return PIDRecord("malformed", reason="PID file contains an invalid PID")
     executable = payload.get("executable", "")
     start_identity = payload.get("start_identity", "")
+    start_time = payload.get("start_time", "")
     return PIDRecord(
         "ok",
         pid=pid,
         executable=executable if isinstance(executable, str) else "",
         start_identity=start_identity if isinstance(start_identity, str) else "",
+        start_time=str(start_time) if isinstance(start_time, (str, int)) else "",
     )
 
 

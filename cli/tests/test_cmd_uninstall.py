@@ -97,6 +97,17 @@ class BuildPlanTests(unittest.TestCase):
         self.assertFalse(plan.remove_plugin)
         self.assertNotIn("openclaw", plan.connectors)
 
+    def test_non_windows_gateway_path_preserves_path_resolution(self):
+        with patch.object(cmd_uninstall.shutil, "which", return_value="/usr/local/bin/defenseclaw-gateway"):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=False,
+                binaries=False,
+                revert_openclaw=False,
+                remove_plugin=False,
+                platform_name="linux",
+            )
+        self.assertEqual(plan.gateway_path, "/usr/local/bin/defenseclaw-gateway")
+
 
 class UninstallCommandTests(unittest.TestCase):
     def test_dry_run_does_not_execute(self):
@@ -134,6 +145,17 @@ class UninstallCommandTests(unittest.TestCase):
 
 
 class ResetCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        (Path(self._tmp.name) / ".venv").mkdir()
+        patcher = patch(
+            "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+            return_value=self._tmp.name,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_reset_yes_executes_plan_with_wipe_and_keep_plugin(self):
         runner = CliRunner()
         captured = {}
@@ -167,6 +189,244 @@ class ResetCommandTests(unittest.TestCase):
         self.assertIn("data removal: failed", result.output)
         self.assertIn("locked native module", result.output)
         self.assertNotIn("Reset complete", result.output)
+
+
+class WindowsOwnedCleanupTests(unittest.TestCase):
+    def test_windows_plan_freezes_exact_owned_launchers(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"USERPROFILE": tmp}, clear=False),
+            patch.object(cmd_uninstall.config_module, "default_data_path", return_value=Path(tmp) / ".defenseclaw"),
+        ):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=True,
+                revert_openclaw=False,
+                remove_plugin=False,
+                platform_name="win32",
+            )
+
+        self.assertEqual(
+            tuple(Path(path).name for path in plan.binary_targets),
+            ("defenseclaw.cmd", "defenseclaw-gateway.exe", "defenseclaw-hook.exe"),
+        )
+        self.assertEqual(plan.managed_venv, os.path.join(plan.data_dir, ".venv"))
+        self.assertNotIn("defenseclaw.exe", tuple(Path(path).name for path in plan.binary_targets))
+
+    def test_binary_only_removes_exact_targets_and_preserves_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bin"
+            root.mkdir()
+            targets = tuple(
+                str(root / name)
+                for name in (
+                    "defenseclaw.cmd",
+                    "defenseclaw-gateway.exe",
+                    "defenseclaw-hook.exe",
+                )
+            )
+            for target in targets:
+                Path(target).write_text("owned", encoding="utf-8")
+            managed_venv = Path(tmp) / ".defenseclaw" / ".venv"
+            Path(targets[0]).write_text(
+                f'@echo off\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\n',
+                encoding="ascii",
+            )
+            unrelated = root / "defenseclaw.exe"
+            unrelated.write_text("foreign", encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                install_root=str(root),
+                gateway_path=str(root / "defenseclaw-gateway.exe"),
+                binary_targets=targets,
+                remove_binaries=True,
+                managed_venv=str(managed_venv),
+            )
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(unrelated.is_file())
+            self.assertFalse(any(Path(path).exists() for path in targets))
+            cmd_uninstall._remove_binaries(plan)
+            self.assertTrue(unrelated.is_file())
+
+    def test_binary_failure_propagates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bin"
+            root.mkdir()
+            target = root / "defenseclaw.cmd"
+            managed_venv = Path(tmp) / ".defenseclaw" / ".venv"
+            target.write_text(
+                f'@echo off\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\n',
+                encoding="ascii",
+            )
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                install_root=str(root),
+                gateway_path=str(root / "defenseclaw-gateway.exe"),
+                binary_targets=(str(target),),
+                remove_binaries=True,
+                managed_venv=str(managed_venv),
+            )
+            with patch.object(cmd_uninstall.os, "unlink", side_effect=PermissionError("locked")):
+                with patch.object(cmd_uninstall.time, "sleep"), self.assertRaises(OSError):
+                    cmd_uninstall._remove_binaries(plan)
+
+    def test_same_named_unrelated_windows_files_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bin"
+            root.mkdir()
+            targets = tuple(
+                str(root / name) for name in ("defenseclaw.cmd", "defenseclaw-gateway.exe", "defenseclaw-hook.exe")
+            )
+            for target in targets:
+                Path(target).write_text("foreign", encoding="ascii")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                install_root=str(root),
+                managed_venv=str(Path(tmp) / ".defenseclaw" / ".venv"),
+                gateway_path=str(root / "defenseclaw-gateway.exe"),
+                binary_targets=targets,
+                remove_binaries=True,
+            )
+
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(all(Path(target).is_file() for target in targets))
+
+    def test_reparse_binary_target_is_rejected_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bin"
+            outside = Path(tmp) / "outside.cmd"
+            root.mkdir()
+            outside.write_text("foreign", encoding="utf-8")
+            target = root / "defenseclaw.cmd"
+            try:
+                target.symlink_to(outside)
+            except OSError:
+                self.skipTest("file symlinks unavailable")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                install_root=str(root),
+                gateway_path=str(root / "defenseclaw-gateway.exe"),
+                binary_targets=(str(target),),
+                remove_binaries=True,
+            )
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._remove_binaries(plan)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "foreign")
+
+    def test_reparse_connector_backup_is_rejected_before_teardown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            marker = data_dir / "connector_backups" / "codex" / "config.toml.json"
+            outside = Path(tmp) / "outside.json"
+            marker.parent.mkdir(parents=True)
+            outside.write_text("foreign", encoding="utf-8")
+            try:
+                marker.symlink_to(outside)
+            except OSError:
+                self.skipTest("file symlinks unavailable")
+            plan = cmd_uninstall.UninstallPlan(data_dir=str(data_dir), connectors=("codex",))
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._validate_plan(plan)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "foreign")
+
+    def test_deferred_cleanup_is_scheduled_only_after_teardown(self):
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32",
+            install_root="C:\\Users\\test\\.local\\bin",
+            gateway_path="C:\\Users\\test\\.local\\bin\\defenseclaw-gateway.exe",
+            binary_targets=("C:\\Users\\test\\.local\\bin\\defenseclaw.cmd",),
+            data_dir="C:\\Users\\test\\.defenseclaw",
+            managed_venv="C:\\Users\\test\\.defenseclaw\\.venv",
+            remove_data_dir=True,
+            remove_binaries=True,
+            connectors=("codex",),
+        )
+        order = []
+        with (
+            patch.object(cmd_uninstall, "_validate_plan", side_effect=lambda _: order.append("validate")),
+            patch.object(cmd_uninstall, "_stop_gateway", side_effect=lambda _: order.append("stop")),
+            patch.object(cmd_uninstall, "_connector_teardown", side_effect=lambda _: order.append("teardown")),
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=True),
+            patch.object(
+                cmd_uninstall,
+                "_schedule_deferred_cleanup",
+                side_effect=lambda _: order.append("schedule") or "result.json",
+            ),
+        ):
+            result = cmd_uninstall._execute_plan(plan)
+
+        self.assertEqual(order, ["validate", "stop", "teardown", "schedule"])
+        self.assertEqual(result.phases[-1].status, "scheduled")
+        self.assertTrue(result.succeeded)
+
+    def test_deferred_scheduling_failure_is_nonzero_and_stops_cleanup(self):
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32",
+            data_dir="C:\\Users\\test\\.defenseclaw",
+            managed_venv="C:\\Users\\test\\.defenseclaw\\.venv",
+            remove_data_dir=True,
+        )
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_stop_gateway"),
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=True),
+            patch.object(
+                cmd_uninstall,
+                "_schedule_deferred_cleanup",
+                side_effect=click.ClickException("helper rejected plan"),
+            ),
+            patch.object(cmd_uninstall, "_remove_data_dir") as remove_data,
+        ):
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._execute_plan(plan)
+        remove_data.assert_not_called()
+
+    def test_windows_dry_run_renders_exact_targets_and_deferred_state(self):
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32",
+            data_dir="C:\\Users\\test\\.defenseclaw",
+            managed_venv=os.path.dirname(sys.executable),
+            remove_data_dir=True,
+            remove_binaries=True,
+            binary_targets=(
+                "C:\\Users\\test\\.local\\bin\\defenseclaw.cmd",
+                "C:\\Users\\test\\.local\\bin\\defenseclaw-gateway.exe",
+                "C:\\Users\\test\\.local\\bin\\defenseclaw-hook.exe",
+            ),
+        )
+        with (
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=True),
+            capture_click_output() as output,
+        ):
+            cmd_uninstall._render_plan(plan, dry_run=True)
+        rendered = output.getvalue()
+        for target in plan.binary_targets:
+            self.assertIn(target, rendered)
+        self.assertIn("deferred cleanup", rendered)
+
+    def test_windows_stop_uses_exact_gateway_and_waits_for_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = Path(tmp) / "defenseclaw-gateway.exe"
+            gateway.write_bytes(b"test")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                gateway_path=str(gateway),
+            )
+            completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            with (
+                patch.object(cmd_uninstall.subprocess, "run", return_value=completed) as run,
+                patch.object(cmd_uninstall, "_capture_managed_processes", return_value=[]) as capture,
+                patch.object(cmd_uninstall, "_wait_managed_processes") as wait,
+            ):
+                cmd_uninstall._stop_gateway(plan)
+        self.assertEqual(run.call_args_list[0].args[0], [str(gateway), "watchdog", "stop"])
+        self.assertEqual(run.call_args_list[1].args[0], [str(gateway), "stop"])
+        capture.assert_called_once_with(plan)
+        wait.assert_called_once_with([])
 
     def test_two_resets_do_not_invent_or_mutate_openclaw(self):
         runner = CliRunner()

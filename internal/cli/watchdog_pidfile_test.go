@@ -41,9 +41,10 @@ func TestWatchdogPIDFile_RoundTripJSON(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "watchdog.pid")
 	want := watchdogPIDInfo{
-		PID:        os.Getpid(),
-		Executable: "/some/path/defenseclaw-gateway",
-		StartTime:  time.Now().Unix(),
+		PID:           os.Getpid(),
+		Executable:    "/some/path/defenseclaw-gateway",
+		StartTime:     time.Now().Unix(),
+		StartIdentity: "opaque-kernel-identity",
 	}
 
 	f, err := acquireWatchdogPIDFile(pidPath, want)
@@ -56,7 +57,8 @@ func TestWatchdogPIDFile_RoundTripJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readWatchdogPIDInfo: %v", err)
 	}
-	if got.PID != want.PID || got.Executable != want.Executable || got.StartTime != want.StartTime {
+	if got.PID != want.PID || got.Executable != want.Executable || got.StartTime != want.StartTime ||
+		got.StartIdentity != want.StartIdentity {
 		t.Fatalf("round-trip mismatch: got=%+v want=%+v", got, want)
 	}
 

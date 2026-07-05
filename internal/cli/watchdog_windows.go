@@ -19,6 +19,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 
@@ -56,6 +57,19 @@ func watchdogProcessAlive(pid int, _ *os.Process) bool {
 	}
 	_ = windows.CloseHandle(h)
 	return true
+}
+
+func watchdogProcessStartIdentity(pid int) string {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(h) //nolint:errcheck -- read-only identity handle.
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &creation, &exit, &kernel, &user); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", creation.Nanoseconds())
 }
 
 func watchdogTerminate(proc *os.Process) error {
