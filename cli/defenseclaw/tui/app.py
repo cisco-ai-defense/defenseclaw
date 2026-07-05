@@ -8508,6 +8508,11 @@ class DefenseClawTUI(App[None]):
                 self.setup_model.active_wizard = SetupWizard(value)
                 return SetupPanelAction(True)
         if key in {"enter", "e", "space"}:
+            if not self.setup_model.wizard_available(self.setup_model.active_wizard):
+                return SetupPanelAction(
+                    True,
+                    hint=self.setup_model.wizard_unavailable_reason(self.setup_model.active_wizard),
+                )
             opened = self.setup_model.open_goal_menu(self.setup_model.active_wizard)
             if opened:
                 return SetupPanelAction(True, hint="Choose what you want to do.")

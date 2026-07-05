@@ -1074,7 +1074,7 @@ def test_webhook_wizard_enable_hmac_signing_gates_secret_env() -> None:
     assert "--secret-env" not in argv
 
 
-def test_splunk_wizard_pipeline_picker_maps_to_bool_flag_and_queues_dashboards() -> None:
+def test_splunk_wizard_pipeline_picker_maps_to_bool_flag_and_queues_dashboards(monkeypatch) -> None:
     """Splunk wizard now has a Pipeline picker (splunk-o11y / local-docker /
     enterprise / custom). The picker rewrites the pipeline bool flags so
     the operator only chooses one option in the guided form.
@@ -1089,6 +1089,7 @@ def test_splunk_wizard_pipeline_picker_maps_to_bool_flag_and_queues_dashboards()
         splunk_wizard_follow_up_intents,
     )
 
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     fields = wizard_form_defs(SetupWizard.SPLUNK)
     mode_field = next(field for field in fields if field.label == "Mode")
     assert tuple(mode_field.options) == SPLUNK_PIPELINE_OPTIONS
@@ -2094,7 +2095,7 @@ def test_wizard_state_summary_llm_reports_main_and_judge() -> None:
     assert wizard_state_summary(SetupWizard.CREDENTIALS, None) == ""
 
 
-def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
+def test_every_goal_opens_and_emits_only_real_cli_options(monkeypatch) -> None:
     """Selecting any goal of any wizard must build a valid argv.
 
     The TUI shells out to ``defenseclaw setup ...``; an unknown flag would
@@ -2107,6 +2108,7 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
     from click.testing import CliRunner
     from defenseclaw.commands import cmd_setup
 
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     runner = CliRunner()
     cfg = _guardrail_on_cfg("openclaw")
     for wizard in SetupWizard:

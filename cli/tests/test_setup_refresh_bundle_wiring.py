@@ -80,12 +80,18 @@ def _bridge_up_args(mock_run: MagicMock) -> list[str]:
 
 class TestSetupSplunkRefreshWiring(unittest.TestCase):
     def setUp(self) -> None:
+        self._local_stack_support = patch(
+            "defenseclaw.commands.cmd_setup.local_shell_stacks_supported",
+            return_value=True,
+        )
+        self._local_stack_support.start()
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
 
     def tearDown(self) -> None:
         import shutil
 
+        self._local_stack_support.stop()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     @patch(
@@ -292,12 +298,18 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
 
 class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
     def setUp(self) -> None:
+        self._local_stack_support = patch(
+            "defenseclaw.commands.cmd_setup_local_observability.local_shell_stacks_supported",
+            return_value=True,
+        )
+        self._local_stack_support.start()
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
 
     def tearDown(self) -> None:
         import shutil
 
+        self._local_stack_support.stop()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     @patch(

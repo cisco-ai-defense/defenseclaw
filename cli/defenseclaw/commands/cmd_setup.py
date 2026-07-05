@@ -81,6 +81,10 @@ from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
+from defenseclaw.platform_support import (
+    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    local_shell_stacks_supported,
+)
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
@@ -8847,6 +8851,13 @@ def setup_splunk(
     if ctx.invoked_subcommand is not None:
         return
 
+    # Gate every explicit local route before AppContext access, executable
+    # lookup, prompts, token generation, bundle refresh, or config writes.
+    # Remote O11y/HEC routes deliberately remain available on Windows.
+    local_route_requested = enable_logs or s3_export or show_credentials or (disable and enable_logs)
+    if local_route_requested and not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+
     app = ctx.find_object(AppContext)
     if app is None:
         raise click.ClickException("App context unavailable")
@@ -8988,9 +8999,12 @@ def _interactive_splunk_setup(
     click.echo("     No local infrastructure needed. Requires a Splunk O11y access token.")
     click.echo()
     click.echo("  2. Local Splunk (Logs)")
-    click.echo("     Spins up a local Splunk container via Docker in Free mode from day 1.")
-    click.echo("     Audit events are sent via HEC. Includes pre-built dashboards for DefenseClaw.")
-    click.echo("     Requires Docker.")
+    if local_shell_stacks_supported():
+        click.echo("     Spins up a local Splunk container via Docker in Free mode from day 1.")
+        click.echo("     Audit events are sent via HEC. Includes pre-built dashboards for DefenseClaw.")
+        click.echo("     Requires Docker.")
+    else:
+        click.echo(f"     {LOCAL_SHELL_STACKS_UNSUPPORTED_REASON}")
     click.echo()
     click.echo("  3. Splunk Enterprise (Remote HEC)")
     click.echo("     Sends audit events to an existing Splunk Enterprise HEC endpoint.")
@@ -9008,7 +9022,9 @@ def _interactive_splunk_setup(
         _interactive_o11y_dashboards(app)
         click.echo()
 
-    if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
+    if local_shell_stacks_supported() and click.confirm(
+        "  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False
+    ):
         did_logs = _interactive_logs(app)
 
     if click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False):
@@ -9149,6 +9165,8 @@ def _prompt_splunk_hec_token(current: str | None) -> str:
 
 
 def _interactive_logs(app: AppContext) -> bool:
+    if not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     click.echo()
     click.echo("  Local Splunk")
     click.echo("  ────────────")
@@ -9252,6 +9270,8 @@ def _setup_logs(
     aws_region: str | None = None,
     refresh_bundle: bool = True,
 ) -> bool:
+    if not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     if not _ensure_splunk_license_acceptance(
         accept_splunk_license=accept_splunk_license,
         non_interactive=non_interactive,
@@ -9697,6 +9717,8 @@ def _bootstrap_bridge(
     volumes survive ``down``, so user data is preserved) so the new
     bundle is what gets brought back up.
     """
+    if not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     env_file = _ensure_private_splunk_bridge_env(data_dir)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(data_dir, env_file=env_file)
@@ -9946,7 +9968,10 @@ def _disable_splunk(
     enterprise_only: bool,
     non_interactive: bool,
 ) -> None:
+    if logs_only and not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     disable_both = not o11y_only and not logs_only and not enterprise_only
+    manage_local = local_shell_stacks_supported()
 
     click.echo()
     click.echo("  Disabling Splunk integration...")
@@ -9978,6 +10003,8 @@ def _disable_splunk(
         for d in dests:
             if d.kind == "splunk_hec" and d.enabled:
                 is_local = _is_local_splunk_destination(d)
+                if is_local and not manage_local:
+                    continue
                 if not disable_both:
                     if logs_only and not is_local:
                         continue
@@ -9991,13 +10018,13 @@ def _disable_splunk(
                         disabled_enterprise = True
                 except ValueError:
                     continue
-        if disable_both or logs_only:
+        if (disable_both or logs_only) and manage_local:
             suffix = "" if disabled_local else " (no active local sinks found)"
             click.echo(f"    Local Splunk (HEC): disabled{suffix}")
         if disable_both or enterprise_only:
             suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
             click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
-        if disable_both or logs_only:
+        if (disable_both or logs_only) and manage_local:
             _stop_bridge(app.cfg.data_dir)
 
     # Refresh in-memory cfg so callers (and tests) see the YAML state
@@ -10019,6 +10046,8 @@ def _disable_splunk(
 
 
 def _stop_bridge(data_dir: str) -> None:
+    if not local_shell_stacks_supported():
+        return
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
         return
@@ -10111,7 +10140,10 @@ def _print_splunk_status(app: AppContext) -> None:
     if sc.enabled:
         hec_label = "Local Splunk (HEC)" if _is_local_hec_endpoint(sc.hec_endpoint) else "Splunk Enterprise (HEC)"
         click.echo(f"  {hec_label}:")
-        click.echo("    Status:      enabled")
+        if _is_local_hec_endpoint(sc.hec_endpoint) and not local_shell_stacks_supported():
+            click.echo("    Status:      unsupported on native Windows")
+        else:
+            click.echo("    Status:      enabled")
         click.echo(f"    HEC:         {sc.hec_endpoint}")
         click.echo(f"    Index:       {sc.index}")
         click.echo(f"    Source:      {sc.source}")

@@ -19,6 +19,10 @@ from typing import Any, Literal
 
 from defenseclaw.connector_paths import hermes_config_path, hermes_home
 from defenseclaw.observability.display import redact_endpoint_for_display
+from defenseclaw.platform_support import (
+    is_local_shell_stack_destination,
+    local_shell_stacks_supported,
+)
 from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
 
@@ -1018,6 +1022,10 @@ class OverviewPanelModel:
                 name = str(item["name"])
                 preset = str(item.get("preset", "") or "")
                 kind = preset or "otlp"
+                local_unsupported = (
+                    not local_shell_stacks_supported()
+                    and is_local_shell_stack_destination(name=name, preset_id=preset, kind=kind)
+                )
                 signals = str(item.get("signals", "") or "none")
                 routing_label = ""
                 routing = item.get("routing")
@@ -1068,7 +1076,11 @@ class OverviewPanelModel:
                         target="otel",
                         scope=str(item.get("scope", "") or "process"),
                         kind=kind,
-                        state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        state=(
+                            "unsupported"
+                            if local_unsupported
+                            else "enabled" if bool(item.get("enabled", False)) else "disabled"
+                        ),
                         protocol=str(item.get("protocol", "") or "—"),
                         signals=signals,
                         endpoint=redact_endpoint_for_display(str(item.get("endpoint", "") or "—")),
@@ -1085,13 +1097,26 @@ class OverviewPanelModel:
                     str(item.get("endpoint") or item.get("url") or "—"),
                     hide_path=True,
                 )
+                raw_endpoint = str(item.get("endpoint") or item.get("url") or "")
+                local_unsupported = (
+                    not local_shell_stacks_supported()
+                    and is_local_shell_stack_destination(
+                        name=str(item.get("name", "")),
+                        kind=str(item.get("kind", "")),
+                        endpoint=raw_endpoint,
+                    )
+                )
                 rows.append(
                     ObservabilityDestinationRow(
                         name=str(item["name"]),
                         target="audit_sinks",
                         scope=str(item.get("scope", "") or "global"),
                         kind=str(item.get("kind", "") or "unknown"),
-                        state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        state=(
+                            "unsupported"
+                            if local_unsupported
+                            else "enabled" if bool(item.get("enabled", False)) else "disabled"
+                        ),
                         protocol=str(item.get("protocol", "") or "—"),
                         signals="audit-events",
                         endpoint=str(endpoint),

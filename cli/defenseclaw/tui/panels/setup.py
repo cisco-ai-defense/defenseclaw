@@ -22,6 +22,10 @@ from typing import Any, Literal
 
 from defenseclaw import config as dc_config
 from defenseclaw.notification_capabilities import desktop_notification_capability
+from defenseclaw.platform_support import (
+    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    local_shell_stacks_supported,
+)
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
@@ -482,8 +486,14 @@ class UninstallModalState:
 class SetupPanelModel:
     """Data-only Setup model. Textual widgets can bind to this without owning IO."""
 
-    def __init__(self, cfg: object | Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        cfg: object | Mapping[str, Any] | None = None,
+        *,
+        os_name: str | None = None,
+    ) -> None:
         self.config = cfg
+        self.os_name = os_name
         self.mode: SetupMode = "wizards"
         self.active_wizard = SetupWizard.CONNECTOR_SETUP
         self.active_section = 0
@@ -564,7 +574,12 @@ class SetupPanelModel:
                 command=WIZARD_COMMANDS[wizard],
                 description=WIZARD_DESCRIPTIONS[int(wizard)],
                 how_to=WIZARD_HOW_TO[int(wizard)],
-                status=self._formatted_wizard_status(wizard, now=now),
+                status=(
+                    "unsupported"
+                    if wizard == SetupWizard.LOCAL_OBSERVABILITY
+                    and not local_shell_stacks_supported(self.os_name)
+                    else self._formatted_wizard_status(wizard, now=now)
+                ),
             )
             for wizard in SetupWizard
         )
@@ -611,8 +626,22 @@ class SetupPanelModel:
             command=WIZARD_COMMANDS[wizard],
             description=WIZARD_DESCRIPTIONS[int(wizard)],
             how_to=WIZARD_HOW_TO[int(wizard)],
-            status=self._formatted_wizard_status(wizard, now=now),
+            status=(
+                "unsupported"
+                if wizard == SetupWizard.LOCAL_OBSERVABILITY
+                and not local_shell_stacks_supported(self.os_name)
+                else self._formatted_wizard_status(wizard, now=now)
+            ),
         )
+
+    def wizard_available(self, wizard: SetupWizard | int) -> bool:
+        return not (
+            SetupWizard(wizard) == SetupWizard.LOCAL_OBSERVABILITY
+            and not local_shell_stacks_supported(self.os_name)
+        )
+
+    def wizard_unavailable_reason(self, wizard: SetupWizard | int) -> str:
+        return "" if self.wizard_available(wizard) else LOCAL_SHELL_STACKS_UNSUPPORTED_REASON
 
     def section_labels(self) -> tuple[SetupSectionLabel, ...]:
         return tuple(
@@ -1009,6 +1038,11 @@ class SetupPanelModel:
 
         if wizard is not None:
             self.active_wizard = SetupWizard(wizard)
+        if not self.wizard_available(self.active_wizard):
+            self.form_active = False
+            self.goal_active = False
+            self.form_error = LOCAL_SHELL_STACKS_UNSUPPORTED_REASON
+            return False
         self.goals = wizard_goals(self.active_wizard, self.config)
         if len(self.goals) <= 1:
             self.open_wizard_form(self.active_wizard, goal=self.goals[0] if self.goals else None)
@@ -2409,6 +2443,7 @@ def _splunk_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, .
             summary="Spin up a local Splunk via Docker for logs.",
             presets={"@Mode": "local-docker"},
             fields=("Mode", "Accept Splunk License", "Traces", "Metrics", "Logs Export"),
+            available_when=lambda _cfg: local_shell_stacks_supported(),
         ),
         WizardGoal(
             "enterprise",
@@ -4520,8 +4555,14 @@ def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tu
 SPLUNK_PIPELINE_OPTIONS: tuple[str, ...] = ("splunk-o11y", "local-docker", "enterprise", "custom")
 
 
-def splunk_wizard_fields() -> tuple[WizardFormField, ...]:
-    return (
+def splunk_wizard_fields(os_name: str | None = None) -> tuple[WizardFormField, ...]:
+    local_available = local_shell_stacks_supported(os_name)
+    options = (
+        SPLUNK_PIPELINE_OPTIONS
+        if local_available
+        else tuple(option for option in SPLUNK_PIPELINE_OPTIONS if option != "local-docker")
+    )
+    fields = (
         WizardFormField("Pipeline", "section"),
         WizardFormField(
             "Mode",
@@ -4529,7 +4570,7 @@ def splunk_wizard_fields() -> tuple[WizardFormField, ...]:
             "",
             value="splunk-o11y",
             default="splunk-o11y",
-            options=SPLUNK_PIPELINE_OPTIONS,
+            options=options,
         ),
         WizardFormField(
             "Apply Dashboards After",
@@ -4562,6 +4603,10 @@ def splunk_wizard_fields() -> tuple[WizardFormField, ...]:
         WizardFormField("Show Credentials", "bool", "--show-credentials", value="no", default="no"),
         WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
     )
+    if local_available:
+        return fields
+    local_labels = {"Enable Local Logs", "Accept Splunk License", "Show Credentials"}
+    return tuple(field for field in fields if field.label not in local_labels)
 
 
 def splunk_wizard_follow_up_intents(
@@ -4583,6 +4628,11 @@ def splunk_wizard_follow_up_intents(
 
 
 def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
+    preset_options = tuple(
+        preset
+        for preset, _ in OBSERVABILITY_PRESETS
+        if preset != "local-otlp" or local_shell_stacks_supported()
+    )
     fields: list[WizardFormField] = [
         WizardFormField(
             "Action",
@@ -4597,7 +4647,7 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
             "preset",
             value=preset_id,
             default=preset_id,
-            options=tuple(preset for preset, _ in OBSERVABILITY_PRESETS),
+            options=preset_options,
         ),
         WizardFormField("Name", "string", "--name", hint="Optional for add; required for enable/disable/remove."),
         WizardFormField("Enabled", "bool", "--enabled", "--disabled", value="yes", default="yes"),

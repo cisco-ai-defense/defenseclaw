@@ -50,6 +50,10 @@ from defenseclaw.bundle_refresh import (
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import local_observability_bridge_bin
+from defenseclaw.platform_support import (
+    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    local_shell_stacks_supported,
+)
 
 _PRESET_ID = "local-otlp"
 # Generic-OTLP preset id used to mint the matching ``audit_sinks`` entry
@@ -117,6 +121,8 @@ def local_observability(ctx: click.Context) -> None:
     local-observability`` matches the ergonomics of ``setup splunk
     --logs``.
     """
+    if not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     if ctx.invoked_subcommand is None:
         ctx.invoke(up_cmd)
 

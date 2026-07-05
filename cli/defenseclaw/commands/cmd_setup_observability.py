@@ -78,13 +78,15 @@ from defenseclaw.observability import (
     set_destination_enabled,
 )
 from defenseclaw.observability.display import redact_endpoint_for_display
-from defenseclaw.observability.writer import _NAME_RE as _SINK_NAME_RE
 
 # Per-connector (D5b) sink writes reuse the writer's preset-resolution,
 # sink-entry builder, and secret writer so the per-connector path never
 # drifts from the global ``apply_preset`` path. They are imported (not
 # re-implemented) because the writer module is outside this lane's edit
 # surface; the per-connector routing target is the only difference.
+from defenseclaw.observability.writer import (
+    _NAME_RE as _SINK_NAME_RE,
+)
 from defenseclaw.observability.writer import (
     _apply_secret,
     _build_sink_entry,
@@ -94,6 +96,11 @@ from defenseclaw.observability.writer import (
     _sink_endpoint,
     _sink_preset_id,
     _sink_protocol,
+)
+from defenseclaw.platform_support import (
+    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    is_local_shell_stack_destination,
+    local_shell_stacks_supported,
 )
 
 # All prompt keys across all presets. Exposed as Click options so the
@@ -197,6 +204,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
       # Interactive (default)
       defenseclaw setup observability add splunk-enterprise
     """
+    if preset_id.lower() == "local-otlp" and not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     preset = resolve_preset(preset_id.lower())
 
     raw_inputs: dict[str, str | None] = {
@@ -212,6 +221,20 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
     if not non_interactive:
         raw_inputs = _prompt_missing(preset, raw_inputs)
+
+    candidate_endpoint = str(raw_inputs.get("endpoint") or "")
+    candidate_host = str(raw_inputs.get("host") or "")
+    if (
+        not local_shell_stacks_supported()
+        and preset.id in {"splunk-hec", "splunk-enterprise"}
+        and is_local_shell_stack_destination(
+            kind="splunk_hec",
+            endpoint=candidate_endpoint or candidate_host,
+        )
+    ):
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+
+    if not non_interactive:
         if token_value is None:
             token_value = _prompt_secret(preset, app.cfg.data_dir)
 
@@ -337,6 +360,7 @@ def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
 def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Enable a destination (``name=otel`` targets the gateway exporter)."""
     connector_name = (connector or "").strip()
+    _gate_named_local_destination(app.cfg.data_dir, name, connector_name)
     try:
         if connector_name:
             result = _set_connector_sink_enabled(app.cfg.data_dir, connector_name, name, True)
@@ -355,6 +379,7 @@ def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
 def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Disable a destination."""
     connector_name = (connector or "").strip()
+    _gate_named_local_destination(app.cfg.data_dir, name, connector_name)
     try:
         if connector_name:
             result = _set_connector_sink_enabled(app.cfg.data_dir, connector_name, name, False)
@@ -379,6 +404,7 @@ def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
 def remove_cmd(app: AppContext, name: str, connector: str | None, yes: bool) -> None:
     """Delete a destination (``name=otel`` disables but preserves the block)."""
     connector_name = (connector or "").strip()
+    _gate_named_local_destination(app.cfg.data_dir, name, connector_name)
     label = f"{name!r}" + (f" (connector {connector_name})" if connector_name else "")
     if not yes and not click.confirm(f"  Remove destination {label}?", default=False):
         click.echo("  Aborted.")
@@ -417,6 +443,7 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
         for k in sorted(dests):
             click.echo(f"    - {k}", err=True)
         raise SystemExit(2)
+    _gate_local_destination(d)
     if not d.enabled:
         ux.warn(f"destination {name!r} is currently disabled.")
 
@@ -498,6 +525,11 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     # Build the equivalent audit_sinks entry.
     host = "localhost"
     endpoint = str(legacy.get("hec_endpoint", "") or "")
+    if (
+        not local_shell_stacks_supported()
+        and is_local_shell_stack_destination(kind="splunk_hec", endpoint=endpoint)
+    ):
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     if endpoint:
         parsed = urlparse(endpoint)
         if parsed.hostname:
@@ -947,12 +979,52 @@ def _print_destination_row(d: Destination) -> None:
     )
     if len(endpoint) > 54:
         endpoint = endpoint[:51] + "..."
+    enabled = "yes" if d.enabled else "no"
+    if _destination_platform_status(d) == "unsupported":
+        enabled = "unsupported"
     click.echo(
         f"  {ux.bold(f'{d.name:<28}')} {d.target:<12} {d.kind:<10} "
-        f"{('yes' if d.enabled else 'no'):<8} {(d.protocol or '-'):<10} "
+        f"{enabled:<11} {(d.protocol or '-'):<10} "
         f"{_destination_signals(d):<22} "
         f"{(d.preset_id or '-'):<18} {endpoint}"
     )
+
+
+def _gate_local_destination(destination: Destination) -> None:
+    if local_shell_stacks_supported():
+        return
+    if is_local_shell_stack_destination(
+        name=destination.name,
+        preset_id=destination.preset_id,
+        kind=destination.kind,
+        endpoint=destination.endpoint,
+    ):
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+
+
+def _destination_platform_status(destination: Destination) -> str:
+    if not local_shell_stacks_supported() and is_local_shell_stack_destination(
+        name=destination.name,
+        preset_id=destination.preset_id,
+        kind=destination.kind,
+        endpoint=destination.endpoint,
+    ):
+        return "unsupported"
+    return "supported"
+
+
+def _gate_named_local_destination(data_dir: str, name: str, connector: str) -> None:
+    if local_shell_stacks_supported():
+        return
+    destinations = (
+        _connector_destinations(data_dir, connector)
+        if connector
+        else list_destinations(data_dir)
+    )
+    for destination in destinations or ():
+        if destination.name == name:
+            _gate_local_destination(destination)
+            return
 
 
 def _dest_to_dict(d: Destination) -> dict[str, Any]:
@@ -961,6 +1033,7 @@ def _dest_to_dict(d: Destination) -> dict[str, Any]:
         "target": d.target,
         "kind": d.kind,
         "enabled": d.enabled,
+        "platform_status": _destination_platform_status(d),
         "preset_id": d.preset_id,
         "endpoint": d.endpoint,
         "protocol": d.protocol,

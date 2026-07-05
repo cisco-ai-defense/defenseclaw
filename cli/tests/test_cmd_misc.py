@@ -953,10 +953,16 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
 
 class TestSetupSplunkCommand(unittest.TestCase):
     def setUp(self):
+        self._local_stack_support = patch(
+            "defenseclaw.commands.cmd_setup.local_shell_stacks_supported",
+            return_value=True,
+        )
+        self._local_stack_support.start()
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
 
     def tearDown(self):
+        self._local_stack_support.stop()
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_setup_splunk_help(self):

@@ -33,6 +33,7 @@ import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
+from urllib.parse import urlparse
 
 SupportStatus = Literal["supported", "preview", "unsupported"]
 
@@ -41,6 +42,10 @@ PREVIEW: SupportStatus = "preview"
 UNSUPPORTED: SupportStatus = "unsupported"
 
 PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
+
+LOCAL_SHELL_STACKS_UNSUPPORTED_REASON = (
+    "Local observability and local Splunk are unsupported on native Windows."
+)
 
 
 @dataclass(frozen=True)
@@ -195,6 +200,36 @@ def connector_supported_on_os(name: str, os_name: str | None = None) -> bool:
 def connector_preview_on_os(name: str, os_name: str | None = None) -> bool:
     """Report whether *name* is available as a preview on *os_name*."""
     return connector_support_status(name, os_name) == PREVIEW
+
+
+def local_shell_stacks_supported(os_name: str | None = None) -> bool:
+    """Whether extensionless Bash-backed local telemetry stacks may run.
+
+    This is the authoritative capability boundary for both the bundled local
+    observability stack and the bundled local Splunk stack.  Keeping it in the
+    platform taxonomy makes CLI and TUI behavior injectable in tests without
+    probing executables or mutating operator state.
+    """
+
+    resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    return resolved_os != "windows"
+
+
+def is_local_shell_stack_destination(
+    *,
+    name: str = "",
+    preset_id: str = "",
+    kind: str = "",
+    endpoint: str = "",
+) -> bool:
+    """Classify config/runtime state owned by the unsupported local stacks."""
+
+    if preset_id == "local-otlp" or name in {"local-observability", "local-otlp-logs"}:
+        return True
+    if kind != "splunk_hec":
+        return False
+    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
+    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
 
 
 def supported_connectors(

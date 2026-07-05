@@ -155,7 +155,11 @@ def test_overview_telemetry_detail_lists_named_destinations() -> None:
     assert cards["telemetry"].detail == "2 destinations: local-observability, Galileo (100.0% delivered)"
 
 
-def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
+def test_overview_observability_rows_combine_otel_and_audit_sinks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.tui.services.overview_state.local_shell_stacks_supported",
+        lambda: True,
+    )
     model = _model()
     model.set_health(
         HealthSnapshot(

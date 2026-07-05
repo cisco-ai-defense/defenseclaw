@@ -736,6 +736,10 @@ def _print_observability_status(cfg) -> None:
     # configured observability (avoids the YAML read when possible).
     from defenseclaw.observability import list_destinations
     from defenseclaw.observability.presets import PRESETS
+    from defenseclaw.platform_support import (
+        is_local_shell_stack_destination,
+        local_shell_stacks_supported,
+    )
 
     try:
         destinations = list_destinations(cfg.data_dir)
@@ -750,17 +754,29 @@ def _print_observability_status(cfg) -> None:
 
     for d in destinations:
         label = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
-        state = ux._style("enabled", fg="green") if d.enabled else ux._style("disabled", fg="bright_black")
+        local_unsupported = (
+            not local_shell_stacks_supported()
+            and is_local_shell_stack_destination(
+                name=d.name,
+                preset_id=d.preset_id,
+                kind=d.kind,
+                endpoint=d.endpoint,
+            )
+        )
+        if local_unsupported:
+            state = ux._style("unsupported on native Windows", fg="yellow")
+        else:
+            state = ux._style("enabled", fg="green") if d.enabled else ux._style("disabled", fg="bright_black")
         target_tag = "otel" if d.target == "otel" else "sink"
         click.echo(f"    {ux.bold(f'{d.name:<26s}')}{ux.dim(f'[{target_tag}]')} {state}  {ux.dim('—')} {label}")
 
-        if d.target == "otel" and d.enabled:
+        if d.target == "otel" and d.enabled and not local_unsupported:
             enabled_signals = [s for s, on in d.signals.items() if on]
             if enabled_signals:
                 click.echo(f"      {ux.dim('signals:')} {', '.join(sorted(enabled_signals))}")
             if d.endpoint:
                 click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
-        elif d.enabled and d.endpoint:
+        elif d.enabled and d.endpoint and not local_unsupported:
             click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
 
 

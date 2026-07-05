@@ -1125,24 +1125,32 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertNotIn("Disable redaction?", result.output)
 
     def test_add_splunk_hec_then_disable(self) -> None:
-        r1 = self._invoke(
-            [
-                "add",
-                "splunk-hec",
-                "--non-interactive",
-                "--host",
-                "localhost",
-                "--port",
-                "8088",
-                "--token",
-                "hec-token",
-                "--name",
-                "splunk-hec-local",
-            ]
-        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            return_value=True,
+        ):
+            r1 = self._invoke(
+                [
+                    "add",
+                    "splunk-hec",
+                    "--non-interactive",
+                    "--host",
+                    "localhost",
+                    "--port",
+                    "8088",
+                    "--token",
+                    "hec-token",
+                    "--name",
+                    "splunk-hec-local",
+                ]
+            )
         self.assertEqual(r1.exit_code, 0, r1.output)
 
-        r2 = self._invoke(["disable", "splunk-hec-local"])
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            return_value=True,
+        ):
+            r2 = self._invoke(["disable", "splunk-hec-local"])
         self.assertEqual(r2.exit_code, 0, r2.output)
 
         dests = list_destinations(self.tmp)
