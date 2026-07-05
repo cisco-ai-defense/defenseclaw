@@ -19,15 +19,14 @@
 package notify
 
 import (
-	"fmt"
 	"io"
 	"os"
 )
 
 var fallbackWriter io.Writer = os.Stderr
 
-// sendPlatform on Windows writes to stderr. Native Windows toast
-// notifications require COM/WinRT which is out of scope for v1.
+// sendPlatform reports the unsupported native route. The common wrapper emits
+// the explicitly labelled terminal fallback without invoking a toast API.
 func sendPlatform(n Notification) error {
-	return fmt.Errorf("native notifications not supported on Windows")
+	return ErrDesktopUnsupported
 }

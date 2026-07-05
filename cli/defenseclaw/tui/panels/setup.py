@@ -21,6 +21,7 @@ from enum import IntEnum
 from typing import Any, Literal
 
 from defenseclaw import config as dc_config
+from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
@@ -1294,7 +1295,18 @@ def build_setup_sections(
         ConfigSection(
             "Notifications",
             (
-                _field(cfg, "Enabled", "notifications.enabled", "bool", hint="Master desktop notification switch."),
+                (
+                    _field(cfg, "Enabled", "notifications.enabled", "bool", hint="Master desktop notification switch.")
+                    if desktop_notification_capability(os_name).supported
+                    else ConfigField(
+                        "Enabled (native desktop unsupported on Windows)",
+                        "notifications.enabled",
+                        "header",
+                        str(get_config_value(cfg, "notifications.enabled", False)).lower(),
+                        str(get_config_value(cfg, "notifications.enabled", False)).lower(),
+                        hint="Read-only legacy setting; Windows toast delivery is inactive.",
+                    )
+                ),
                 _header(".. Categories .."),
                 _field(
                     cfg,
@@ -1348,7 +1360,11 @@ def build_setup_sections(
                     hint="Global notification rate cap.",
                 ),
             ),
-            "User-session desktop toasts for blocks, would-blocks, and HITL approvals.",
+            (
+                "User-session desktop toasts for blocks, would-blocks, and HITL approvals."
+                if desktop_notification_capability(os_name).supported
+                else "Native Windows desktop/toast notifications are unsupported; delivery is inactive."
+            ),
             "Restart the gateway after editing; the dispatcher snapshots config at boot.",
         ),
         ConfigSection(

@@ -79,6 +79,7 @@ from defenseclaw.connector_contracts import (
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
@@ -7228,12 +7229,20 @@ def setup_notifications(
     cfg = app.cfg
     nc = cfg.notifications
     current = bool(nc.enabled)
+    capability = desktop_notification_capability()
 
     normalized = action.strip().lower() if action else None
 
     if normalized == "status":
         ux.section("Notifications state")
-        click.echo(f"    {ux.dim('config (notifications.enabled):')} {'ON' if current else 'OFF'}")
+        click.echo(f"    {ux.dim('configured (notifications.enabled):')} {'ON' if current else 'OFF'}")
+        effective = capability.effective_enabled(current)
+        click.echo(f"    {ux.dim('native desktop delivery:')} {'ACTIVE' if effective else 'INACTIVE'}")
+        if not capability.supported:
+            click.echo(f"    {ux.dim('capability:')} UNSUPPORTED — {capability.unsupported_reason}")
+            if current:
+                click.echo("    Legacy configured ON is retained, but Windows toast delivery is not active.")
+            click.echo("    Delivery failures use a labelled terminal fallback; they are never desktop success.")
         click.echo(f"    {ux.dim('block_enforced:')} {'on' if nc.block_enforced else 'off'}")
         click.echo(f"    {ux.dim('block_would_block:')} {'on' if nc.block_would_block else 'off'}")
         click.echo(f"    {ux.dim('hitl_approval:')} {'on' if nc.hitl_approval else 'off'}")
@@ -7243,6 +7252,9 @@ def setup_notifications(
         click.echo(f"    {ux.dim('dedup_window:')} {nc.dedup_window or '30s'}")
         click.echo(f"    {ux.dim('max_per_minute:')} {nc.max_per_minute}")
         return
+
+    if not capability.supported and normalized != "off":
+        raise click.ClickException(capability.unsupported_reason)
 
     if normalized in ("on", "off"):
         desired = normalized == "on"
@@ -7267,6 +7279,7 @@ def setup_notifications(
     try:
         cfg.save()
     except OSError as exc:
+        nc.enabled = current
         ux.err(f"Failed to save config: {exc}")
         raise click.ClickException("config save failed") from exc
 
