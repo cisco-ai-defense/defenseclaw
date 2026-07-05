@@ -141,6 +141,7 @@ from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
+from defenseclaw.tui.windows_clipboard import ClipboardError, copy_windows_clipboard
 
 
 def _write_owner_only_text(path: Path, text: str, *, protect_parent: bool = False) -> None:
@@ -3707,42 +3708,49 @@ class DefenseClawTUI(App[None]):
     # without scrolling the TUI back to the start of a long run.
     # ------------------------------------------------------------------
 
-    def _clipboard_copy(self, text: str) -> tuple[bool, str]:
+    def _clipboard_copy(self, text: str, *, platform: str | None = None) -> tuple[bool, str]:
         """Push ``text`` to the OS clipboard, returning ``(ok, transport)``.
 
-        Tries the platform-appropriate command-line tool in order:
+        Windows uses the native Unicode clipboard API. Other platforms try
         pbcopy (macOS) → wl-copy (Wayland) → xclip → xsel (X11). If
-        none of those exist or all of them fail, we fall back to a
+        the native/API transport is unavailable, we fall back to a
         last-resort file at ``~/.defenseclaw/tui/last-copy.txt`` so
         operators on headless boxes still have *some* way to recover
         the payload. Failure here never crashes the TUI — the caller
         toasts the outcome.
         """
 
-        if not text:
-            return False, ""
-        candidates: tuple[tuple[str, tuple[str, ...]], ...] = (
-            ("pbcopy", ("pbcopy",)),
-            ("wl-copy", ("wl-copy",)),
-            ("xclip", ("xclip", "-selection", "clipboard")),
-            ("xsel", ("xsel", "--clipboard", "--input")),
-        )
-        payload = text.encode("utf-8", errors="replace")
-        for name, argv in candidates:
-            if shutil.which(argv[0]) is None:
-                continue
+        current_platform = os.name if platform is None else platform
+        if current_platform == "nt":
             try:
-                proc = subprocess.run(
-                    argv,
-                    input=payload,
-                    check=False,
-                    capture_output=True,
-                    timeout=4,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-            if proc.returncode == 0:
-                return True, name
+                copy_windows_clipboard(text)
+            except (ClipboardError, OSError):
+                pass
+            else:
+                return True, "Windows"
+        else:
+            candidates: tuple[tuple[str, tuple[str, ...]], ...] = (
+                ("pbcopy", ("pbcopy",)),
+                ("wl-copy", ("wl-copy",)),
+                ("xclip", ("xclip", "-selection", "clipboard")),
+                ("xsel", ("xsel", "--clipboard", "--input")),
+            )
+            payload = text.encode("utf-8", errors="replace")
+            for name, argv in candidates:
+                if shutil.which(argv[0]) is None:
+                    continue
+                try:
+                    proc = subprocess.run(
+                        argv,
+                        input=payload,
+                        check=False,
+                        capture_output=True,
+                        timeout=4,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if proc.returncode == 0:
+                    return True, name
         # File fallback: still useful — operators can ``cat`` it from
         # another shell. Mode 0600 so the contents stay scoped to the
         # current user; activity output frequently contains tokens
@@ -3800,14 +3808,14 @@ class DefenseClawTUI(App[None]):
                 # surface that so the operator knows where to ``cat`` from.
                 self.notify_toast(
                     "info",
-                    f"No clipboard tool found · wrote output to {transport[5:]}",
+                    f"Clipboard unavailable · wrote output to fallback file {transport[5:]}",
                 )
             else:
                 self.notify_toast("success", f"Copied last output to clipboard ({transport}).")
         else:
             self.notify_toast(
                 "error",
-                "Copy failed — install pbcopy / wl-copy / xclip and try again.",
+                "Clipboard unavailable and fallback write failed.",
             )
 
     def action_run_diagnose(self) -> None:
@@ -7974,20 +7982,21 @@ class DefenseClawTUI(App[None]):
             # said "Alert detail copied." but nothing actually landed
             # in the system clipboard — pure lie. Reusing the shared
             # ``_clipboard_copy`` helper means the alert ``y`` flow
-            # benefits from the same pbcopy → wl-copy → xclip → xsel
-            # → file fallback chain as the global ``Y`` binding.
+            # benefits from the same native/command transport and protected
+            # file fallback chain as the global ``Y`` binding.
             ok, transport = self._clipboard_copy(action.copy_text)
             if ok and not transport.startswith("file:"):
-                self.notify_toast("success", f"Copied alert detail ({transport}).")
+                message = f"Copied alert detail to clipboard ({transport})."
+                self.notify_toast("success", message)
             elif ok:
                 # File fallback — surface where the bytes went.
-                self.notify_toast("info", f"Wrote alert detail to {transport[5:]}.")
+                message = f"Wrote alert detail to fallback file {transport[5:]}."
+                self.notify_toast("info", message)
             else:
-                self.notify_toast(
-                    "error",
-                    "Copy failed — install pbcopy / wl-copy / xclip and try again.",
-                )
-        if action.hint:
+                message = "Clipboard unavailable and fallback write failed."
+                self.notify_toast("error", message)
+            self._set_status(message)
+        elif action.hint:
             self._set_status(action.hint)
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
