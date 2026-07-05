@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 from types import SimpleNamespace
 
@@ -30,7 +31,7 @@ from defenseclaw.commands import cmd_setup_observability as setup_writer
 from defenseclaw.observability import writer as observability_writer
 from defenseclaw.webhooks import writer as webhook_writer
 
-from tests.permissions import assert_owner_only_file, grant_everyone
+from tests.permissions import assert_owner_only_file, grant_everyone, set_known_windows_directory_acl
 
 _ATOMIC_WRITERS = [
     (
@@ -223,6 +224,42 @@ def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):
     assert calls == [(17, 0o600)]
 
 
+def test_private_atomic_write_can_preserve_operator_selected_parent(tmp_path):
+    parent = tmp_path / "operator-selected"
+    parent.mkdir(mode=0o755)
+    if os.name == "nt":
+        set_known_windows_directory_acl(parent, everyone_write=False)
+        before = file_permissions._windows_acl_snapshot(os.fspath(parent))
+    else:
+        before = parent.stat().st_mode & 0o777
+
+    target = parent / "private-export.json"
+    file_permissions.atomic_write_private_bytes(target, b"synthetic fixture", protect_parent=False)
+
+    after = (
+        file_permissions._windows_acl_snapshot(os.fspath(parent))
+        if os.name == "nt"
+        else parent.stat().st_mode & 0o777
+    )
+    assert after == before
+    assert_owner_only_file(target)
+
+
+def test_private_atomic_write_rejects_unsafe_unmanaged_parent(tmp_path):
+    parent = tmp_path / "unsafe-operator-parent"
+    parent.mkdir()
+    if os.name == "nt":
+        set_known_windows_directory_acl(parent, everyone_write=True)
+    else:
+        parent.chmod(0o777)
+    target = parent / "must-not-exist.json"
+
+    with pytest.raises(OSError, match="unsafe"):
+        file_permissions.atomic_write_private_bytes(target, b"synthetic fixture", protect_parent=False)
+
+    assert not target.exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACLs")
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize(
@@ -260,3 +297,120 @@ def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
         assert result is True
     assert target.is_file()
     assert_owner_only_file(target)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL preservation")
+@pytest.mark.allow_subprocess
+def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_path):
+    target = tmp_path / "stricter ACL 雪.json"
+    target.write_text("old", encoding="utf-8")
+    subprocess.run(
+        [
+            "icacls",
+            os.fspath(target),
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-3-4:F",
+            "*S-1-5-18:R",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    before = file_permissions._windows_acl_snapshot(os.fspath(target))
+
+    file_permissions.atomic_write_private_bytes(target, b"rewritten")
+
+    after = file_permissions._windows_acl_snapshot(os.fspath(target))
+    assert after == before
+    assert target.read_bytes() == b"rewritten"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows junction refusal")
+@pytest.mark.allow_subprocess
+def test_private_atomic_write_refuses_windows_junction_escape(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    junction = tmp_path / "junction"
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", os.fspath(junction), os.fspath(outside)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {result.stderr or result.stdout}")
+    try:
+        with pytest.raises(file_permissions.UnsafePathError, match="reparse point"):
+            file_permissions.atomic_write_private_bytes(junction / "escape.json", b"fixture")
+        assert list(outside.iterdir()) == []
+    finally:
+        os.rmdir(junction)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows deny ACE handling")
+@pytest.mark.allow_subprocess
+def test_private_atomic_rewrite_does_not_preserve_system_deny_ace(tmp_path):
+    target = tmp_path / "denied-system.json"
+    target.write_text("old", encoding="utf-8")
+    subprocess.run(
+        [
+            "icacls",
+            os.fspath(target),
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-3-4:F",
+            "*S-1-5-18:R",
+            "/deny",
+            "*S-1-5-18:F",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    file_permissions.atomic_write_private_bytes(target, b"rewritten")
+
+    assert file_permissions._windows_acl_has_required_access(target)
+    _owner, _null, entries = file_permissions._windows_acl_snapshot(os.fspath(target))
+    assert not any(mode == 3 and sid == "S-1-5-18" for _mask, mode, _inheritance, sid in entries)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows ownership policy")
+def test_private_directory_refuses_foreign_owner_without_acl_rewrite(monkeypatch):
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: ("S-1-5-21-foreign", False, []),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: "S-1-5-21-current")
+    monkeypatch.setattr(
+        file_permissions,
+        "_set_windows_owner_only_acl",
+        lambda _path: pytest.fail("foreign-owned directory DACL must not be rewritten"),
+    )
+
+    with pytest.raises(OSError, match="foreign-owned"):
+        file_permissions._protect_private_directory("synthetic")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory-swap lock")
+def test_private_atomic_write_holds_parent_against_directory_swap(tmp_path):
+    parent = tmp_path / "managed"
+    parent.mkdir()
+    moved = tmp_path / "moved"
+    swap_refused = False
+
+    def write(fd: int) -> None:
+        nonlocal swap_refused
+        try:
+            os.replace(parent, moved)
+        except OSError:
+            swap_refused = True
+        os.write(fd, b"synthetic fixture")
+
+    target = parent / "state.json"
+    file_permissions.atomic_write_private(target, write)
+
+    assert swap_refused is True
+    assert target.read_bytes() == b"synthetic fixture"
+    assert not moved.exists()

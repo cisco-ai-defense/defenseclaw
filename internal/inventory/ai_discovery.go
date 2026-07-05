@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -959,7 +960,10 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		}
 	}
 
-	_ = s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current})
+	if err := s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current}); err != nil {
+		stats.Errors++
+		stats.DetectorErrors["state_store"] = err.Error()
+	}
 
 	summary := AIDiscoverySummary{
 		ScanID:            scanID,
@@ -2928,32 +2932,12 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		}
 		state.Signals[fp] = stored
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".ai_discovery_state.*.tmp")
+	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	enc := json.NewEncoder(tmp)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(state); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
+	payload = append(payload, '\n')
+	return safefile.WritePrivate(s.path, payload)
 }
 
 // processNames is kept for backward compatibility with existing

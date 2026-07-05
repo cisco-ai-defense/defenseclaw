@@ -12,17 +12,21 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from defenseclaw import file_permissions
 from defenseclaw.config import RegistrySource
 from defenseclaw.db import Store
 from defenseclaw.models import Counts, Event
+from defenseclaw.tui import app as app_module
 from defenseclaw.tui.app import (
     _DEFENSECLAW_LOGO,
     DefenseClawTUI,
@@ -64,6 +68,7 @@ from defenseclaw.tui.services.tui_state import STATE_FILENAME
 from defenseclaw.tui.widgets.action_menu import ActionMenu
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from rich.text import Text
+from tests.permissions import assert_owner_only_file, set_known_windows_directory_acl
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
@@ -1768,9 +1773,32 @@ async def test_audit_export_writes_json_without_command_preview(tmp_path) -> Non
         assert "skill://alpha" in exported.read_text(encoding="utf-8")
         # F-0781: audit exports can carry sensitive identifiers, so the file
         # must be owner-only rather than world-readable under the umask.
-        assert (exported.stat().st_mode & 0o777) == 0o600
+        assert_owner_only_file(exported)
         assert "Audit exported" in app.status_text
         assert app.screen_stack[-1].__class__.__name__ != "CommandPreviewScreen"
+
+
+def test_audit_relative_escape_does_not_harden_shared_parent(tmp_path) -> None:
+    managed = tmp_path / "managed"
+    shared = tmp_path / "shared"
+    managed.mkdir()
+    shared.mkdir(mode=0o755)
+    if os.name == "nt":
+        set_known_windows_directory_acl(shared, everyone_write=False)
+        before = file_permissions._windows_acl_snapshot(os.fspath(shared))
+    else:
+        before = shared.stat().st_mode & 0o777
+
+    target = DefenseClawTUI(data_dir=managed)._export_audit(Path("../shared/export.json"))
+
+    after = (
+        file_permissions._windows_acl_snapshot(os.fspath(shared))
+        if os.name == "nt"
+        else shared.stat().st_mode & 0o777
+    )
+    assert target == shared / "export.json"
+    assert after == before
+    assert_owner_only_file(target)
 
 
 @pytest.mark.asyncio
@@ -2629,7 +2657,7 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         assert "ok" in contents
         # F-0782: activity output frequently contains tokens/secrets, so the
         # saved file must be owner-only (0600), not world-readable.
-        assert (saved[0].stat().st_mode & 0o777) == 0o600
+        assert_owner_only_file(saved[0])
 
 
 # ---------------------------------------------------------------------------
@@ -2859,17 +2887,102 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press("V")
         await pilot.pause()
-        app.data_dir = tmp_path
+        app.data_dir = tmp_path / "AI exports 雪"
         app._export_ai_discovery_snapshot()  # noqa: SLF001 - sync write, no await needed
         # Filename embeds a UTC timestamp so successive exports don't
         # silently overwrite each other.
-        matches = list(tmp_path.glob("defenseclaw-ai-usage-*.json"))
+        matches = list(app.data_dir.glob("defenseclaw-ai-usage-*.json"))
         assert len(matches) == 1, f"expected exactly one export, got {matches}"
         target = matches[0]
         body = json.loads(target.read_text())
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"
         assert body["signals"][0]["name"] == "openai-agent"
+        assert_owner_only_file(target)
+
+
+def _ai_export_app(data_dir, scan_id: str = "scan-1") -> DefenseClawTUI:
+    model = AIDiscoveryPanelModel()
+    model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            summary=AIUsageSummary(scan_id=scan_id, total_signals=1),
+            signals=(AIUsageSignal(name="sample-agent", vendor="Example", category="chat"),),
+        )
+    )
+    app = DefenseClawTUI(data_dir=data_dir, ai_discovery_model=model)
+    app._set_status = lambda text: setattr(app, "status_text", text)  # type: ignore[method-assign]  # noqa: SLF001
+    return app
+
+
+def test_ai_discovery_export_protection_failure_is_visible_and_has_no_side_effect(
+    monkeypatch, tmp_path
+) -> None:
+    app = _ai_export_app(tmp_path)
+
+    def fail(*_args, **_kwargs):
+        raise PermissionError("injected ACL protection failure")
+
+    monkeypatch.setattr(app_module, "atomic_write_private_bytes", fail)
+    app._export_ai_discovery_snapshot()  # noqa: SLF001
+
+    assert "AI export failed" in app.status_text
+    assert "injected ACL protection failure" in app.status_text
+    assert list(tmp_path.glob("defenseclaw-ai-usage-*.json")) == []
+
+
+def test_ai_discovery_export_atomic_collision_rewrites_privately(monkeypatch, tmp_path) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 5, 12, 34, 56, tzinfo=tz)
+
+    monkeypatch.setattr(app_module, "datetime", FrozenDateTime)
+    export_dir = tmp_path / "AI export collision 雪"
+    app = _ai_export_app(export_dir, "first-scan")
+    app._export_ai_discovery_snapshot()  # noqa: SLF001
+    app.ai_discovery_model.set_snapshot(
+        AIUsageSnapshot(enabled=True, summary=AIUsageSummary(scan_id="second-scan"))
+    )
+    app._export_ai_discovery_snapshot()  # noqa: SLF001
+
+    matches = list(export_dir.glob("defenseclaw-ai-usage-*.json"))
+    assert len(matches) == 1
+    assert json.loads(matches[0].read_text(encoding="utf-8"))["summary"]["scan_id"] == "second-scan"
+    assert list(export_dir.glob(".*.tmp")) == []
+    assert_owner_only_file(matches[0])
+
+
+def test_ai_discovery_export_refuses_symlinked_directory_without_escape(tmp_path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked-export-dir"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    app = _ai_export_app(linked)
+
+    app._export_ai_discovery_snapshot()  # noqa: SLF001
+
+    assert "AI export failed" in app.status_text
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL convergence")
+@pytest.mark.allow_subprocess
+def test_ai_discovery_export_removes_inherited_everyone_write_on_windows(tmp_path) -> None:
+    export_dir = tmp_path / "AI exports inherited ACL"
+    export_dir.mkdir()
+    set_known_windows_directory_acl(export_dir, everyone_write=True)
+    app = _ai_export_app(export_dir)
+
+    app._export_ai_discovery_snapshot()  # noqa: SLF001
+
+    matches = list(export_dir.glob("defenseclaw-ai-usage-*.json"))
+    assert len(matches) == 1
+    assert file_permissions.windows_acl_write_error(export_dir) is None
+    assert file_permissions.windows_acl_write_error(matches[0]) is None
 
 
 def test_safe_body_renderable_falls_back_on_invalid_style() -> None:

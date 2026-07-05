@@ -8,10 +8,9 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import time
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,7 +33,7 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__
 from defenseclaw import config as config_module
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
@@ -144,32 +143,9 @@ from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 
 
-def _write_owner_only_text(path: Path, text: str) -> None:
-    """Atomically write sensitive TUI output with a native owner-only ACL."""
-    fd = -1
-    tmp = ""
-    try:
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=path.parent,
-        )
-        set_file_mode(fd, tmp, 0o600)
-        stream = os.fdopen(fd, "w", encoding="utf-8")
-        fd = -1
-        with stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if fd != -1:
-            with suppress(OSError):
-                os.close(fd)
-        if tmp:
-            with suppress(OSError):
-                os.unlink(tmp)
+def _write_owner_only_text(path: Path, text: str, *, protect_parent: bool = False) -> None:
+    """Atomically write sensitive TUI output with the private policy ACL."""
+    atomic_write_private_bytes(path, text.encode("utf-8"), protect_parent=protect_parent)
 
 
 TOKENS = DEFAULT_TOKENS
@@ -3763,7 +3739,7 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-copy.txt"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            _write_owner_only_text(target, text)
+            _write_owner_only_text(target, text, protect_parent=True)
         except OSError:
             return False, ""
         return True, f"file:{target}"
@@ -3937,7 +3913,7 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-run.log"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            _write_owner_only_text(target, header + body + "\n")
+            _write_owner_only_text(target, header + body + "\n", protect_parent=True)
         except OSError as exc:
             self.notify_toast("error", f"Save failed: {exc}")
             return
@@ -3970,7 +3946,11 @@ class DefenseClawTUI(App[None]):
                 f"# {entry.status_label}\n"
                 f"# saved {datetime.now(timezone.utc).isoformat()}\n\n"
             )
-            _write_owner_only_text(target, header + "\n".join(entry.output) + "\n")
+            _write_owner_only_text(
+                target,
+                header + "\n".join(entry.output) + "\n",
+                protect_parent=self.data_dir is not None,
+            )
             # F-0782: command output frequently contains tokens/secrets, so
             # the saved transcript must be owner-only, not world-readable.
         except OSError as exc:
@@ -4039,10 +4019,10 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.cwd()) / f"defenseclaw-ai-usage-{stamp}.json"
         payload = asdict(snapshot)
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps(payload, indent=2, default=self._json_default),
-                encoding="utf-8",
+            atomic_write_private_bytes(
+                target,
+                json.dumps(payload, indent=2, default=self._json_default).encode("utf-8"),
+                protect_parent=self.data_dir is not None,
             )
         except OSError as exc:
             self._set_status(f"AI export failed: {exc}")
@@ -7373,6 +7353,9 @@ class DefenseClawTUI(App[None]):
         target = path or Path("defenseclaw-audit-export.json")
         if not target.is_absolute():
             target = (self.data_dir or Path.cwd()) / target
+        target = target.resolve(strict=False)
+        managed_data_dir = self.data_dir.resolve(strict=False) if self.data_dir is not None else None
+        protect_parent = managed_data_dir is not None and target.parent.is_relative_to(managed_data_dir)
         rows = []
         store = getattr(self.audit_model, "store", None)
         for event in self.audit_model.filtered:
@@ -7395,7 +7378,7 @@ class DefenseClawTUI(App[None]):
                 }
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        _write_owner_only_text(target, json.dumps(rows, indent=2))
+        _write_owner_only_text(target, json.dumps(rows, indent=2), protect_parent=protect_parent)
         # F-0781: audit exports can carry sensitive identifiers (targets,
         # actors, run ids), so the file must be owner-only rather than
         # world-readable under the operator's umask.

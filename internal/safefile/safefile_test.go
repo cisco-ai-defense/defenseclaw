@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -39,7 +40,7 @@ func TestWriteCreatesFile0600(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("file mode = %o; want 0600", mode)
 	}
 }
@@ -58,8 +59,28 @@ func TestWriteOverwritesExisting(t *testing.T) {
 		t.Errorf("got %q; want %q", got, "new")
 	}
 	info, _ := os.Stat(path)
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("file mode = %o; want 0600", mode)
+	}
+}
+
+func TestWriteDoesNotChangeSharedParentMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory-mode regression")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(filepath.Join(dir, "secret"), []byte("fixture")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("shared parent mode = %o, want preserved 750", got)
 	}
 }
 
@@ -107,7 +128,7 @@ func TestCreateExclusiveCreates0600(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	info, _ := os.Stat(path)
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("file mode = %o; want 0600", mode)
 	}
 }

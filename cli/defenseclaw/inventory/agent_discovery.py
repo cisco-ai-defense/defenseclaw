@@ -24,7 +24,6 @@ import ntpath
 import os
 import shutil
 import subprocess
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -49,6 +48,7 @@ from defenseclaw.connector_paths import (
     hermes_config_path,
     omnigent_config_path,
 )
+from defenseclaw.file_permissions import atomic_write_private_bytes
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -345,6 +345,9 @@ def discover_agents(
         )
     agents = {signal.name: signal for signal in signals}
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
+    # Cache persistence is deliberately best-effort: the freshly computed
+    # discovery result is authoritative and must still be returned when the
+    # optional acceleration cache cannot be protected or written.
     _write_cache(discovery, data_dir=data_dir)
     return discovery
 
@@ -1352,39 +1355,21 @@ def _write_cache(
     disc: AgentDiscovery,
     *,
     data_dir: str | os.PathLike[str] | None = None,
-) -> None:
+) -> bool:
     target_dir = Path(data_dir) if data_dir else default_data_path()
     path = _cache_path(data_dir=target_dir)
-    tmp_path = ""
     try:
-        os.makedirs(target_dir, mode=0o700, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".agent_discovery.",
-            suffix=".tmp",
-            dir=target_dir,
-        )
         payload = {
             "version": CACHE_SCHEMA_VERSION,
             "scanned_at": disc.scanned_at,
             "ttl_seconds": CACHE_TTL_SECONDS,
             "agents": {name: asdict(signal) for name, signal in disc.agents.items()},
         }
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, path)
-        tmp_path = ""
-    except Exception:
-        pass
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        atomic_write_private_bytes(path, body.encode("utf-8"))
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _cache_path(*, data_dir: str | os.PathLike[str] | None = None) -> Path:
