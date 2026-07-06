@@ -254,23 +254,42 @@ function extractHost(urlStr: string): string {
   }
 }
 
-/**
- * The ChatGPT/Codex OAuth backend is not an API-key provider. Routing it
- * through the local guardrail proxy strips OpenClaw's expected auth/model
- * handling before the request reaches the network, which breaks observe-mode
- * installs. Until the proxy has OAuth-aware support for this backend, degrade
- * these calls to explicit passthrough instead of failing the agent locally.
- */
-export function isChatGPTCodexOAuthBackendUrl(urlStr: string): boolean {
+export const DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV =
+  "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES";
+
+const CHATGPT_CODEX_RESPONSES_PATH = "/backend-api/codex/responses";
+
+function truthyEnv(name: string): boolean {
+  return (process.env[name] || "").trim().toLowerCase() === "1";
+}
+
+function isChatGPTCodexResponseBackendUrl(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
     return (
       parsed.hostname.toLowerCase() === "chatgpt.com" &&
-      parsed.pathname.startsWith("/backend-api/codex/")
+      (
+        parsed.pathname === CHATGPT_CODEX_RESPONSES_PATH ||
+        parsed.pathname.startsWith(`${CHATGPT_CODEX_RESPONSES_PATH}/`)
+      )
     );
   } catch {
     return false;
   }
+}
+
+/**
+ * The ChatGPT/Codex responses backend carries prompt/completion traffic, so it
+ * must stay on the guardrail path by default. Operators who explicitly prefer
+ * availability over inspection while OAuth-aware proxy support is missing can
+ * opt into an unguarded escape hatch with
+ * DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES=1.
+ */
+export function isChatGPTCodexOAuthBackendUrl(urlStr: string): boolean {
+  return (
+    isChatGPTCodexResponseBackendUrl(urlStr) &&
+    truthyEnv(DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV)
+  );
 }
 
 /**
@@ -857,6 +876,7 @@ export function createFetchInterceptor(
   let originalHttpRequest: typeof http.request | null = null;
   let originalHttpGet: typeof http.get | null = null;
   let egressReporter: EgressReporter | null = null;
+  let chatgptCodexPassthroughWarned = false;
 
   // Extract { host, path } from a URL string without throwing. Missing
   // pieces are tolerated so the caller's downstream fetch is never
@@ -874,6 +894,14 @@ export function createFetchInterceptor(
   }
 
   function reportChatGPTCodexOAuthPassthrough(urlStr: string): void {
+    if (!chatgptCodexPassthroughWarned) {
+      chatgptCodexPassthroughWarned = true;
+      console.warn(
+        `[defenseclaw] ${DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV}=1: ` +
+        `ChatGPT/Codex responses are being passed through unguarded: ${scrubUrlForLog(urlStr)}`,
+      );
+    }
+
     const hp = extractHostPath(urlStr);
     egressReporter?.report({
       targetHost: hp.host,

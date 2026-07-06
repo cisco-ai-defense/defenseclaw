@@ -26,6 +26,7 @@ import { createRequire } from "node:module";
 
 import {
   createFetchInterceptor,
+  DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
   isLLMUrl,
   hasLLMPathSuffix,
   isChatGPTCodexOAuthBackendUrl,
@@ -96,8 +97,48 @@ describe("isLLMUrl + Bedrock wildcard", () => {
 
 describe("ChatGPT Codex OAuth backend passthrough", () => {
   const guardrailPort = 14010;
+  let originalUnguardedEnv: string | undefined;
 
-  it("identifies only the ChatGPT Codex OAuth backend path", () => {
+  beforeEach(() => {
+    originalUnguardedEnv =
+      process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+    delete process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+  });
+
+  afterEach(() => {
+    if (originalUnguardedEnv === undefined) {
+      delete process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+    } else {
+      process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] =
+        originalUnguardedEnv;
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("does not treat ChatGPT Codex responses as passthrough by default", () => {
+    expect(
+      isChatGPTCodexOAuthBackendUrl(
+        "https://chatgpt.com/backend-api/codex/responses",
+      ),
+    ).toBe(false);
+    expect(
+      isChatGPTCodexOAuthBackendUrl(
+        "https://chatgpt.com/backend-api/codex/responses/stream",
+      ),
+    ).toBe(false);
+    expect(
+      isChatGPTCodexOAuthBackendUrl("https://chatgpt.com/backend-api/accounts"),
+    ).toBe(false);
+    expect(
+      isChatGPTCodexOAuthBackendUrl(
+        "https://evil.chatgpt.com/backend-api/codex/responses",
+      ),
+    ).toBe(false);
+  });
+
+  it("allows ChatGPT Codex response passthrough only with explicit opt-in", () => {
+    process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+
     expect(
       isChatGPTCodexOAuthBackendUrl(
         "https://chatgpt.com/backend-api/codex/responses",
@@ -118,7 +159,43 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
     ).toBe(false);
   });
 
-  it("passes through fetch calls to the ChatGPT Codex OAuth backend", async () => {
+  it("proxies fetch calls to ChatGPT Codex responses by default", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input: String(input), init });
+      return new Response("ok");
+    }) as typeof fetch;
+    const interceptor = createFetchInterceptor(guardrailPort);
+    interceptor.start();
+
+    try {
+      await fetch("https://chatgpt.com/backend-api/codex/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "openai/gpt-5.5", input: "ping" }),
+      });
+    } finally {
+      interceptor.stop();
+      globalThis.fetch = originalFetch;
+    }
+
+    const proxiedCall = calls.find(
+      (call) =>
+        call.input ===
+        `http://127.0.0.1:${guardrailPort}/backend-api/codex/responses`,
+    );
+    expect(proxiedCall).toBeDefined();
+    expect(new Headers(proxiedCall?.init?.headers).get("X-DC-Target-URL")).toBe(
+      "https://chatgpt.com",
+    );
+    expect(calls.map((call) => call.input)).not.toContain(
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+  });
+
+  it("passes through fetch calls only with explicit unguarded opt-in", async () => {
+    process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const originalFetch = globalThis.fetch;
     const calls: string[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -141,6 +218,11 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
     expect(calls).toContain("https://chatgpt.com/backend-api/codex/responses");
     expect(calls).not.toContain(
       `http://127.0.0.1:${guardrailPort}/backend-api/codex/responses`,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
+      ),
     );
   });
 });
