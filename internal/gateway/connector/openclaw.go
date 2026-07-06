@@ -270,6 +270,8 @@ var execOpenClawPluginInstall = func(ctx context.Context, pluginName string, env
 	return cmd.CombinedOutput()
 }
 
+var execLookPath = exec.LookPath
+
 func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	installDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
 	if openClawPluginDirLooksUsable(installDir) {
@@ -278,7 +280,7 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 
 	// Give a clear error when the CLI is not on PATH rather than
 	// letting the exec fail with a cryptic "file not found" message.
-	if _, err := exec.LookPath("openclaw"); err != nil {
+	if _, err := execLookPath("openclaw"); err != nil {
 		return fmt.Errorf("openclaw CLI not found on PATH — install OpenClaw before running setup: %w", err)
 	}
 
@@ -456,12 +458,8 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 		if insightInstall == nil {
 			insightInstall = map[string]interface{}{}
 		}
-		if _, ok := insightInstall["source"]; !ok {
-			insightInstall["source"] = "npm"
-		}
-		if _, ok := insightInstall["sourcePath"]; !ok {
-			insightInstall["sourcePath"] = insightClawNPMSource
-		}
+		insightInstall["source"] = "npm"
+		insightInstall["sourcePath"] = insightClawNPMSource
 		insightInstall["installPath"] = insightClawExtDir
 		installs[insightClawOpenClawPluginID] = insightInstall
 		plugins["installs"] = installs
@@ -622,6 +620,25 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 						if s, ok := v.(string); ok && s == insightClawOpenClawPluginID {
 							residual = append(residual, "openclaw.json allow list still contains insightclaw")
 						}
+					}
+				}
+				if load, ok := plugins["load"].(map[string]interface{}); ok {
+					if paths, ok := load["paths"].([]interface{}); ok {
+						for _, v := range paths {
+							s, ok := v.(string)
+							if !ok {
+								continue
+							}
+							if filepath.Clean(s) == filepath.Clean(insightExtDir) {
+								residual = append(residual, "openclaw.json load paths still contain insightclaw")
+								break
+							}
+						}
+					}
+				}
+				if installs, ok := plugins["installs"].(map[string]interface{}); ok {
+					if _, found := installs[insightClawOpenClawPluginID]; found {
+						residual = append(residual, "openclaw.json installs still contain insightclaw")
 					}
 				}
 			}

@@ -879,6 +879,40 @@ func TestPatchOpenClawConfig_PreservesDefenseClawPluginConfig(t *testing.T) {
 	}
 }
 
+func TestPatchOpenClawConfig_OverwritesInsightClawInstallMetadata(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{
+		"plugins": {
+			"installs": {
+				"insightclaw": {
+					"source": "file",
+					"sourcePath": "./vendor/insightclaw"
+				}
+			}
+		}
+	}`), 0o644)
+
+	if err := patchOpenClawConfig(configPath, filepath.Join(dir, "extensions", "defenseclaw"), false); err != nil {
+		t.Fatalf("patchOpenClawConfig: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("openclaw.json not valid JSON after patch: %v", err)
+	}
+	plugins := cfg["plugins"].(map[string]interface{})
+	installs := plugins["installs"].(map[string]interface{})
+	insightInstall := installs["insightclaw"].(map[string]interface{})
+	if insightInstall["source"] != "npm" {
+		t.Errorf("insightclaw install source = %v, want npm", insightInstall["source"])
+	}
+	if insightInstall["sourcePath"] != insightClawNPMSource {
+		t.Errorf("insightclaw install sourcePath = %v, want %v", insightInstall["sourcePath"], insightClawNPMSource)
+	}
+}
+
 func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 	requireOpenClawExtensionBundle(t)
 
@@ -1018,6 +1052,50 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 	}
 }
 
+func TestOpenClaw_VerifyClean_DetectsInsightClawLoadAndInstallResidue(t *testing.T) {
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	insightExtDir := filepath.Join(ocHome, "extensions", "insightclaw")
+	cfg := map[string]interface{}{
+		"plugins": map[string]interface{}{
+			"load": map[string]interface{}{"paths": []interface{}{insightExtDir}},
+			"installs": map[string]interface{}{
+				"insightclaw": map[string]interface{}{
+					"source":     "npm",
+					"sourcePath": insightClawNPMSource,
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	err = c.VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil {
+		t.Fatal("VerifyClean returned nil despite insightclaw residue")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "load paths still contain insightclaw") {
+		t.Fatalf("VerifyClean error missing insightclaw load-path residue: %v", err)
+	}
+	if !strings.Contains(got, "installs still contain insightclaw") {
+		t.Fatalf("VerifyClean error missing insightclaw install residue: %v", err)
+	}
+}
+
 func requireOpenClawExtensionBundle(t *testing.T) {
 	t.Helper()
 	if !OpenClawExtensionAvailable() {
@@ -1027,6 +1105,13 @@ func requireOpenClawExtensionBundle(t *testing.T) {
 
 func stubInsightClawInstall(t *testing.T, ocHome string) {
 	t.Helper()
+	origLookPath := execLookPath
+	execLookPath = func(file string) (string, error) {
+		if file == "openclaw" {
+			return "/usr/bin/openclaw", nil
+		}
+		return "", exec.ErrNotFound
+	}
 	orig := execOpenClawPluginInstall
 	execOpenClawPluginInstall = func(_ context.Context, pluginName string, _ []string) ([]byte, error) {
 		if pluginName != insightClawNPMSource {
@@ -1042,7 +1127,10 @@ func stubInsightClawInstall(t *testing.T, ocHome string) {
 		}
 		return []byte("installed insightclaw"), nil
 	}
-	t.Cleanup(func() { execOpenClawPluginInstall = orig })
+	t.Cleanup(func() {
+		execLookPath = origLookPath
+		execOpenClawPluginInstall = orig
+	})
 }
 
 func TestOpenClaw_Route(t *testing.T) {
