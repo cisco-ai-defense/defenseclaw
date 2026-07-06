@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -524,10 +525,56 @@ def test_command_runner_timeout_reaps_windows_grandchild(tmp_path: Path) -> None
     parent_code = (
         "import pathlib,subprocess,sys,time;"
         "p=subprocess.Popen([sys.executable,'-c',sys.argv[2]]);"
-        "pathlib.Path(sys.argv[1]).write_text(str(p.pid));"
+        "pathlib.Path(sys.argv[1]).write_text(str(p.pid),encoding='utf-8');"
         "time.sleep(30)"
     )
-    with pytest.raises(LocalStackError, match="timed out"):
+    real_popen = subprocess.Popen
+    readiness_timeout = 10.0
+
+    def popen_with_grandchild_handshake(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        real_wait = process.wait
+        gate_timeout = True
+
+        def wait(*, timeout=None):
+            nonlocal gate_timeout
+            if gate_timeout and timeout is not None:
+                gate_timeout = False
+                deadline = time.monotonic() + readiness_timeout
+                while time.monotonic() < deadline:
+                    try:
+                        if int(pid_file.read_text(encoding="utf-8")) > 0:
+                            break
+                    except (FileNotFoundError, OSError, ValueError):
+                        pass
+                    if process.poll() is not None:
+                        pytest.fail(
+                            "Windows timeout fixture parent exited before reporting "
+                            "the grandchild PID"
+                        )
+                    time.sleep(0.01)
+                else:
+                    pytest.fail(
+                        "Windows timeout fixture did not report a grandchild PID "
+                        f"within {readiness_timeout:g}s"
+                    )
+
+                # The real parent is still sleeping. A zero-duration wait now
+                # deterministically enters CommandRunner's timeout cleanup only
+                # after the grandchild has joined the inherited Job Object.
+                return real_wait(timeout=0)
+            return real_wait(timeout=timeout)
+
+        process.wait = wait
+        return process
+
+    with (
+        patch(
+            "defenseclaw.observability.local_stack.subprocess.Popen",
+            side_effect=popen_with_grandchild_handshake,
+        ),
+        pytest.raises(LocalStackError, match="timed out"),
+    ):
         CommandRunner().run(
             [sys.executable, "-c", parent_code, str(pid_file), child_code],
             timeout=0.5,
