@@ -282,22 +282,20 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 		return fmt.Errorf("openclaw CLI not found on PATH — install OpenClaw before running setup: %w", err)
 	}
 
-	// Build the child environment, forwarding OPENCLAW_HOME when the
-	// caller has overridden the home directory (e.g. in tests or custom
-	// deployments). Without this the CLI installs into its own default
-	// home while openClawHome() points somewhere else, so the post-install
-	// existence check always fails.
+	// Build the child environment and force OPENCLAW_HOME to match ocHome.
+	// openClawHome() is derived internally and does not read ambient
+	// OPENCLAW_HOME; without setting it here, the CLI can install into a
+	// different home than installDir expects, which makes post-install
+	// checks fail.
 	env := os.Environ()
-	if ocHome != filepath.Join(userHomeDir(), ".openclaw") {
-		// Remove any existing OPENCLAW_HOME entry then append the override.
-		filtered := env[:0]
-		for _, e := range env {
-			if !strings.HasPrefix(e, "OPENCLAW_HOME=") {
-				filtered = append(filtered, e)
-			}
+	// Remove any existing OPENCLAW_HOME entry then append the override.
+	filtered := env[:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "OPENCLAW_HOME=") {
+			filtered = append(filtered, e)
 		}
-		env = append(filtered, "OPENCLAW_HOME="+ocHome)
 	}
+	env = append(filtered, "OPENCLAW_HOME="+ocHome)
 
 	installCtx, cancel := context.WithTimeout(ctx, openClawPluginInstallTimeout)
 	defer cancel()
