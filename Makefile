@@ -519,21 +519,40 @@ packaging-macos-test:
 #
 # Overrides: GOOS/GOARCH cross-compile the gateway.
 BUNDLE_GOOS  ?= darwin
-BUNDLE_GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+# Universal (x86_64 + arm64 via lipo) is the default for macOS drops so the
+# packaging team ships one artifact for both Intel and Apple Silicon. Override
+# with BUNDLE_GOARCH=amd64 or =arm64 for a single-arch bundle.
+BUNDLE_GOARCH ?= universal
 BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 
 packaging-macos-bundle:
 	@[ "$(BUNDLE_GOOS)" = "darwin" ] || { \
 	  echo "packaging-macos-bundle: BUNDLE_GOOS must be 'darwin' (got '$(BUNDLE_GOOS)')" >&2; exit 1; }
-	@[ "$(BUNDLE_GOARCH)" = "amd64" ] || [ "$(BUNDLE_GOARCH)" = "arm64" ] || { \
-	  echo "packaging-macos-bundle: BUNDLE_GOARCH must be amd64 or arm64 (got '$(BUNDLE_GOARCH)')" >&2; exit 1; }
+	@[ "$(BUNDLE_GOARCH)" = "amd64" ] || [ "$(BUNDLE_GOARCH)" = "arm64" ] || [ "$(BUNDLE_GOARCH)" = "universal" ] || { \
+	  echo "packaging-macos-bundle: BUNDLE_GOARCH must be amd64, arm64, or universal (got '$(BUNDLE_GOARCH)')" >&2; exit 1; }
 	@echo "==> packaging macOS bundle: $(BUNDLE_NAME)"
 	@rm -rf "$(BUNDLE_DIR)"
 	@mkdir -p "$(BUNDLE_DIR)/lib"
-	@echo "==> building gateway ($(BUNDLE_GOOS)/$(BUNDLE_GOARCH))"
-	@GOOS=$(BUNDLE_GOOS) GOARCH=$(BUNDLE_GOARCH) CGO_ENABLED=1 \
-	    go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway" ./cmd/defenseclaw
+	@if [ "$(BUNDLE_GOARCH)" = "universal" ]; then \
+	  command -v lipo >/dev/null 2>&1 || { echo "packaging-macos-bundle: 'lipo' not found — universal builds must run on macOS with Xcode CLT" >&2; exit 1; }; \
+	  echo "==> building gateway (darwin/amd64)"; \
+	  GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 \
+	      go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway.amd64" ./cmd/defenseclaw; \
+	  echo "==> building gateway (darwin/arm64)"; \
+	  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+	      go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway.arm64" ./cmd/defenseclaw; \
+	  echo "==> lipo-creating universal binary"; \
+	  lipo -create -output "$(BUNDLE_DIR)/defenseclaw-gateway" \
+	      "$(BUNDLE_DIR)/defenseclaw-gateway.amd64" \
+	      "$(BUNDLE_DIR)/defenseclaw-gateway.arm64"; \
+	  rm -f "$(BUNDLE_DIR)/defenseclaw-gateway.amd64" "$(BUNDLE_DIR)/defenseclaw-gateway.arm64"; \
+	  lipo -info "$(BUNDLE_DIR)/defenseclaw-gateway"; \
+	else \
+	  echo "==> building gateway ($(BUNDLE_GOOS)/$(BUNDLE_GOARCH))"; \
+	  GOOS=$(BUNDLE_GOOS) GOARCH=$(BUNDLE_GOARCH) CGO_ENABLED=1 \
+	      go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway" ./cmd/defenseclaw; \
+	fi
 	@chmod 0755 "$(BUNDLE_DIR)/defenseclaw-gateway"
 	@echo "==> copying installer scripts"
 	@cp packaging/macos/install.sh    "$(BUNDLE_DIR)/install.sh"
