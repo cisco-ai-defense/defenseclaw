@@ -29,7 +29,7 @@ import {
   DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
   isLLMUrl,
   hasLLMPathSuffix,
-  isChatGPTCodexOAuthBackendUrl,
+  shouldPassthroughChatGPTCodexResponseBackendUrl,
   scrubUrlForLog,
   LLM_PATH_SUFFIXES,
 } from "../fetch-interceptor.js";
@@ -117,20 +117,22 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
 
   it("does not treat ChatGPT Codex responses as passthrough by default", () => {
     expect(
-      isChatGPTCodexOAuthBackendUrl(
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
         "https://chatgpt.com/backend-api/codex/responses",
       ),
     ).toBe(false);
     expect(
-      isChatGPTCodexOAuthBackendUrl(
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
         "https://chatgpt.com/backend-api/codex/responses/stream",
       ),
     ).toBe(false);
     expect(
-      isChatGPTCodexOAuthBackendUrl("https://chatgpt.com/backend-api/accounts"),
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
+        "https://chatgpt.com/backend-api/accounts",
+      ),
     ).toBe(false);
     expect(
-      isChatGPTCodexOAuthBackendUrl(
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
         "https://evil.chatgpt.com/backend-api/codex/responses",
       ),
     ).toBe(false);
@@ -140,20 +142,22 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
     process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
 
     expect(
-      isChatGPTCodexOAuthBackendUrl(
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
         "https://chatgpt.com/backend-api/codex/responses",
       ),
     ).toBe(true);
     expect(
-      isChatGPTCodexOAuthBackendUrl(
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
         "https://chatgpt.com/backend-api/codex/responses/stream",
       ),
     ).toBe(true);
     expect(
-      isChatGPTCodexOAuthBackendUrl("https://chatgpt.com/backend-api/accounts"),
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
+        "https://chatgpt.com/backend-api/accounts",
+      ),
     ).toBe(false);
     expect(
-      isChatGPTCodexOAuthBackendUrl(
+      shouldPassthroughChatGPTCodexResponseBackendUrl(
         "https://evil.chatgpt.com/backend-api/codex/responses",
       ),
     ).toBe(false);

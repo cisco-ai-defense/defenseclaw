@@ -285,7 +285,9 @@ function isChatGPTCodexResponseBackendUrl(urlStr: string): boolean {
  * opt into an unguarded escape hatch with
  * DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES=1.
  */
-export function isChatGPTCodexOAuthBackendUrl(urlStr: string): boolean {
+export function shouldPassthroughChatGPTCodexResponseBackendUrl(
+  urlStr: string,
+): boolean {
   return (
     isChatGPTCodexResponseBackendUrl(urlStr) &&
     truthyEnv(DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV)
@@ -893,7 +895,7 @@ export function createFetchInterceptor(
     }
   }
 
-  function reportChatGPTCodexOAuthPassthrough(urlStr: string): void {
+  function reportChatGPTCodexResponsePassthrough(urlStr: string): void {
     if (!chatgptCodexPassthroughWarned) {
       chatgptCodexPassthroughWarned = true;
       console.warn(
@@ -942,8 +944,8 @@ export function createFetchInterceptor(
         return originalFetch!(input, init);
       }
 
-      if (isChatGPTCodexOAuthBackendUrl(urlStr)) {
-        reportChatGPTCodexOAuthPassthrough(urlStr);
+      if (shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+        reportChatGPTCodexResponsePassthrough(urlStr);
         return originalFetch!(input, init);
       }
 
@@ -1177,8 +1179,8 @@ export function createFetchInterceptor(
     ): NodeClientRequest {
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
-      if (urlStr && isChatGPTCodexOAuthBackendUrl(urlStr)) {
-        reportChatGPTCodexOAuthPassthrough(urlStr);
+      if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+        reportChatGPTCodexResponsePassthrough(urlStr);
         return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
       }
 
