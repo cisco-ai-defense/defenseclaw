@@ -873,6 +873,19 @@ export function createFetchInterceptor(
     }
   }
 
+  function reportChatGPTCodexOAuthPassthrough(urlStr: string): void {
+    const hp = extractHostPath(urlStr);
+    egressReporter?.report({
+      targetHost: hp.host,
+      targetPath: hp.path,
+      bodyShape: "none",
+      looksLikeLLM: true,
+      branch: "passthrough",
+      decision: "allow",
+      reason: "chatgpt-codex-oauth-passthrough",
+    });
+  }
+
   function start(): void {
     if (originalFetch) return; // already started
     originalFetch = globalThis.fetch;
@@ -902,16 +915,7 @@ export function createFetchInterceptor(
       }
 
       if (isChatGPTCodexOAuthBackendUrl(urlStr)) {
-        const hp = extractHostPath(urlStr);
-        egressReporter?.report({
-          targetHost: hp.host,
-          targetPath: hp.path,
-          bodyShape: "none",
-          looksLikeLLM: true,
-          branch: "passthrough",
-          decision: "allow",
-          reason: "chatgpt-codex-oauth-passthrough",
-        });
+        reportChatGPTCodexOAuthPassthrough(urlStr);
         return originalFetch!(input, init);
       }
 
@@ -1146,16 +1150,7 @@ export function createFetchInterceptor(
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
       if (urlStr && isChatGPTCodexOAuthBackendUrl(urlStr)) {
-        const hp = extractHostPath(urlStr);
-        egressReporter?.report({
-          targetHost: hp.host,
-          targetPath: hp.path,
-          bodyShape: "none",
-          looksLikeLLM: true,
-          branch: "passthrough",
-          decision: "allow",
-          reason: "chatgpt-codex-oauth-passthrough",
-        });
+        reportChatGPTCodexOAuthPassthrough(urlStr);
         return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
       }
 
