@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -73,6 +74,14 @@ from tests.permissions import assert_owner_only_file, set_known_windows_director
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
+
+
+async def _wait_for_background(predicate, *, timeout: float = 8.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("timed out waiting for TUI background work")
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -216,9 +225,10 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
 
         sampled_render_calls = 0
 
-        def counted_sampled_render() -> None:
+        def counted_sampled_render(_reason: str = "") -> int:
             nonlocal sampled_render_calls
             sampled_render_calls += 1
+            return sampled_render_calls
 
         sampled_timer_calls = 0
 
@@ -228,7 +238,7 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
             callback()
             return object()
 
-        app._render_chrome = counted_sampled_render  # type: ignore[method-assign]
+        app._schedule_active_panel_refresh = counted_sampled_render  # type: ignore[method-assign]
         app.set_timer = immediate_sampled_timer  # type: ignore[method-assign]
         # Keep the mount-time interval from racing this direct sampler assertion on slow CI.
         app._periodic_refresh_running = True  # noqa: SLF001
@@ -1719,7 +1729,9 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
 
         (tmp_path / "gateway.log").write_text("line one\nline two\n", encoding="utf-8")
         app._periodic_refresh()  # noqa: SLF001 - deterministic live-refresh gate.
-        await pilot.pause()
+        await _wait_for_background(
+            lambda: app.query_one("#panel-table", DataTable).row_count == 2
+        )
 
         assert app.query_one("#panel-table", DataTable).row_count == 2
         assert app.overview_model.doctor is not None
@@ -6203,7 +6215,9 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
         await pilot.pause()
         assert app._connector_filter() == "codex"
         assert "Codex (codex)" in scope_text()
-        assert "Hook Calls (codex)" in metric_labels()
+        # The scope acknowledgement is immediate; metric content remains the
+        # last coherent snapshot until the deferred generation completes.
+        assert "Hook Calls (2 connectors)" in metric_labels()
         assert render_calls == 0
         assert deferred_calls == 1
 
@@ -6270,26 +6284,25 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         await pilot.pause()
 
         app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
-        render_calls = 0
+        body = app.query_one("#body", Static)
+        body_updates = 0
+        original_update = body.update
 
-        original_render_chrome = app._render_chrome
+        def counted_update(content: object = "") -> None:
+            nonlocal body_updates
+            body_updates += 1
+            original_update(content)
 
-        def counted_render_chrome() -> None:
-            nonlocal render_calls
-            render_calls += 1
-            original_render_chrome()
-
-        def immediate_timer(_delay: float, callback, **_kwargs: object) -> object:
-            callback()
-            return object()
-
-        app._render_chrome = counted_render_chrome  # type: ignore[method-assign]
-        app.set_timer = immediate_timer  # type: ignore[method-assign]
+        body.update = counted_update  # type: ignore[method-assign]
         app._overview_last_scroll_activity_at = 0.0
 
+        previous_generation = app._panel_render_generation  # noqa: SLF001
         app._periodic_refresh()
-        await pilot.pause()
-        assert render_calls == 0
+        await _wait_for_background(
+            lambda: app._overview_render_snapshot is not None  # noqa: SLF001
+            and app._overview_render_snapshot.generation > previous_generation  # noqa: SLF001
+        )
+        assert body_updates == 0
 
         store.events.append(
             Event(
@@ -6302,12 +6315,16 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
             )
         )
 
+        previous_generation = app._panel_render_generation  # noqa: SLF001
         app._periodic_refresh()
-        await pilot.pause()
+        await _wait_for_background(
+            lambda: app._overview_render_snapshot is not None  # noqa: SLF001
+            and app._overview_render_snapshot.generation > previous_generation  # noqa: SLF001
+        )
 
-        assert render_calls == 1
-        assert app._overview_connector_rows_signature_cache == app._overview_connector_rows_signature()
-        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert body_updates == 1
+        assert app._overview_render_snapshot is not None  # noqa: SLF001
+        rows = {row.connector: row for row in app._overview_render_snapshot.connector_rows}  # noqa: SLF001
         assert rows["claudecode"].blocks == 1
         assert rows["claudecode"].last_activity.endswith("ago")
 

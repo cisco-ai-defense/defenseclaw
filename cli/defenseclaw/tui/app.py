@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -232,6 +234,58 @@ PANELS = (
 
 PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
 PANEL_NAMES = {name for name, _key, _label in PANELS}
+
+
+@dataclass(frozen=True)
+class _PanelRenderSnapshot:
+    """Immutable, widget-free content prepared for one panel generation."""
+
+    generation: int
+    panel: str
+    body_text: str
+    body_renderable: RenderableType
+    table_columns: tuple[str, ...]
+    table_rows: tuple[tuple[str, ...], ...]
+    detail_text: str
+    chip_click_segments: tuple[tuple[int, int, str], ...]
+
+
+@dataclass(frozen=True)
+class _OverviewRenderSnapshot:
+    """One coherent Overview sample reused by every visible surface."""
+
+    generation: int
+    body_text: str
+    body_renderable: RenderableType
+    metrics: tuple[MetricDatum, ...]
+    connector_rows: tuple[ConnectorOverviewRow, ...]
+    enforcement: EnforcementCounts
+    body_signature: tuple[object, ...]
+    connector_rows_signature: tuple[object, ...]
+    live_data_signature: tuple[object, ...]
+    scope_text: str
+    skill_scanner_available: bool
+    audit_version: object | None
+    hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
+
+
+@dataclass(frozen=True)
+class _SignalRefreshSnapshot:
+    """Worker-loaded Alerts/Audit/Logs data, free of live sqlite handles."""
+
+    source_token: tuple[str, str]
+    alert_events: tuple[Any, ...]
+    scan_blocks: tuple[Any, ...]
+    egress_events: tuple[Any, ...]
+    audit_events: tuple[Any, ...]
+    audit_error: str
+    log_lines: tuple[tuple[str, tuple[str, ...]], ...]
+    log_errors: tuple[tuple[str, str], ...]
+    verdict_rows: tuple[Any, ...]
+    otel_rows: tuple[Any, ...]
+    log_refresh_signatures: tuple[tuple[str, object], ...]
+    doctor: DoctorCache | None
+    silent_bypass: int
 
 
 class _BodyStatic(Static):
@@ -842,6 +896,26 @@ class DefenseClawTUI(App[None]):
         self._overview_sampled_refresh_scheduled = False
         self._overview_connector_rows_signature_cache: tuple[object, ...] | None = None
         self._overview_live_data_signature_cache: tuple[object, ...] | None = None
+        # Panel navigation has two phases. The first mutates only lightweight
+        # chrome so Textual can paint the selected tab immediately. Content is
+        # prepared after that paint and applied only if this generation is
+        # still current. Per-panel lanes coalesce repeated refresh requests;
+        # Overview and Alerts can therefore prepare independently without a
+        # slow SQLite aggregate starving the other panel.
+        self._panel_render_generation = 0
+        self._panel_render_running: set[str] = set()
+        self._panel_render_pending: dict[str, tuple[int, DefenseClawTUI, tuple[str, object | None]]] = {}
+        self._panel_render_workers: dict[str, Any] = {}
+        self._panel_content_cache: dict[str, _PanelRenderSnapshot] = {}
+        self._overview_render_snapshot: _OverviewRenderSnapshot | None = None
+        self._applying_panel_snapshot = False
+        self._signal_refresh_running = False
+        self._signal_refresh_pending = False
+        # Cosmetic state writes are atomic but can still be slow on Windows
+        # when endpoint protection scans the replacement file. Keep in-memory
+        # unread/active-panel state synchronous, then debounce only the disk
+        # flush; on_unmount performs the crash-safe final attempt.
+        self._state_save_token = 0
         # Set while ``_render_panel_table`` programmatically restores the
         # DataTable cursor. Textual fires ``RowHighlighted`` for that move just
         # like a real keypress, and the handler would call the model's
@@ -1417,6 +1491,13 @@ class DefenseClawTUI(App[None]):
         # during pytest teardown and leak "Event loop is closed"
         # warnings that flake the visual snapshot suite.
         self._app_shutting_down = True
+        self._panel_render_generation += 1
+        self._panel_render_pending.clear()
+        for worker in tuple(self._panel_render_workers.values()):
+            try:
+                worker.cancel()
+            except Exception:  # noqa: BLE001 - teardown is best-effort.
+                pass
         await self.executor.cancel()
         # Best-effort final flush of session state so the next launch
         # keeps palette MRU, theme, filters, and per-panel cursors.
@@ -1755,10 +1836,9 @@ class DefenseClawTUI(App[None]):
         self.help_open = False
         if self.status_text.startswith("backend=textual  panel="):
             self.status_text = ""
-        self._render_chrome()
-        # Persist the operator's last-active panel + clear the "unread"
-        # badge for the panel they just opened. Best-effort: a failed
-        # write must never block the UI.
+        # Update the in-memory visit cursor before repainting the tab labels so
+        # the active panel's unread badge disappears in the acknowledgement
+        # frame. The atomic disk write is deliberately deferred below.
         try:
             self.state_store.set_active_panel(panel)
             self.state_store.mark_seen(panel)
@@ -1768,9 +1848,21 @@ class DefenseClawTUI(App[None]):
             # panel forever after the first visit.
             self.state_store.record_seen_count(panel, self._panel_total_count(panel))
             self.state = self.state_store.state
-            self.state_store.save()
         except Exception:  # noqa: BLE001 - persistence is cosmetic
             pass
+        self._schedule_state_save()
+
+        self._panel_render_generation += 1
+        generation = self._panel_render_generation
+        # This phase intentionally contains no model refresh, SQLite query,
+        # table row projection, or Rich dashboard construction. Returning to
+        # Textual now lets the selected tab and correct panel visibility paint
+        # on the next event-loop opportunity.
+        self._acknowledge_panel_switch(panel)
+        try:
+            self.call_after_refresh(self._start_deferred_panel_render, panel, generation)
+        except Exception:  # noqa: BLE001 - direct unit calls may not have an active loop.
+            self._start_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
         # Mirror Go TUI: catalog + inventory panels auto-load on first
@@ -1792,6 +1884,512 @@ class DefenseClawTUI(App[None]):
                 exclusive=False,
                 thread=False,
             )
+
+    def _schedule_state_save(self, *, delay: float = 0.25) -> None:
+        """Coalesce cosmetic state writes without weakening final persistence."""
+
+        self._state_save_token += 1
+        token = self._state_save_token
+
+        def save_if_current() -> None:
+            if token != self._state_save_token or getattr(self, "_app_shutting_down", False):
+                return
+            try:
+                self.state_store.save()
+            except Exception:  # noqa: BLE001 - session persistence is cosmetic.
+                pass
+
+        if not self.is_running:
+            save_if_current()
+            return
+        try:
+            self.set_timer(delay, save_if_current)
+        except Exception:  # noqa: BLE001 - outside a running app, save synchronously.
+            save_if_current()
+
+    def _acknowledge_panel_switch(self, panel: str) -> None:
+        """Paint only the tab, visibility, and already-cached panel content."""
+
+        try:
+            tabs = self.query_one("#tabs", Tabs)
+        except NoMatches:
+            return
+        tab_id = f"tab-{panel}"
+        if tabs.active != tab_id and tabs.query(f"#{tab_id}"):
+            self._suppressed_tab_activations[tab_id] = (
+                self._suppressed_tab_activations.get(tab_id, 0) + 1
+            )
+            tabs.active = tab_id
+        self._update_tab_labels()
+        try:
+            activity = self.query_one("#activity", RichLog)
+            body_widget = self.query_one("#body", Static)
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+            table = self.query_one("#panel-table", DataTable)
+            detail = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return
+
+        activity.set_class(panel != "activity", "hidden")
+        overview_visible = panel == "overview"
+        scroller.set_class(overview_visible, "overview-scroll")
+        self._render_panel_control_visibility()
+
+        cached_overview = self._overview_render_snapshot if overview_visible else None
+        cached_panel = self._panel_content_cache.get(panel)
+        expected_table_panel = (
+            self._last_table_signature[0]
+            if self._last_table_signature is not None and self._last_table_signature
+            else None
+        )
+
+        if cached_overview is not None:
+            self.body_text = cached_overview.body_text
+            body_widget.update(cached_overview.body_renderable)
+            self._last_body_signature = cached_overview.body_signature
+            self._set_overview_metrics_visible(True)
+            self._apply_overview_scope_text(cached_overview.scope_text)
+        elif cached_panel is not None:
+            self.body_text = cached_panel.body_text
+            self._chip_click_segments = list(cached_panel.chip_click_segments)
+            body_widget.update(cached_panel.body_renderable)
+            self._last_body_signature = (panel, False, cached_panel.body_text)
+        elif panel == "activity":
+            self.body_text = ""
+            body_widget.update("")
+            self._last_body_signature = (panel, False, "")
+        else:
+            label = next(label for name, _key, label in PANELS if name == panel)
+            loading = f"[bold #22D3EE]{label}[/]\n\nLoading current data…"
+            self.body_text = loading
+            body_widget.update(self._safe_body_renderable(loading))
+            self._last_body_signature = (panel, False, loading)
+
+        # Never expose another panel's rows or detail while the requested
+        # generation is preparing. If the retained table already belongs to
+        # this panel, reveal it immediately without clear/add_row churn.
+        if cached_panel is not None and expected_table_panel == panel and cached_panel.table_columns:
+            table.remove_class("hidden")
+        else:
+            table.add_class("hidden")
+        detail.add_class("hidden")
+
+        if not overview_visible:
+            self._set_overview_metrics_visible(False)
+            self._apply_overview_scope_text("")
+        self._render_command_strip()
+        acknowledgement_status = self.status_text or self._status_text()
+        self.status_text = acknowledgement_status
+        try:
+            self.query_one("#status", Static).update(
+                self._safe_body_renderable(acknowledgement_status)
+            )
+        except NoMatches:
+            pass
+
+    def _start_deferred_panel_render(self, panel: str, generation: int) -> None:
+        """Start content preparation only after the acknowledgement paint."""
+
+        if (
+            generation != self._panel_render_generation
+            or panel != self.active_panel
+            or self.help_open
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        if panel not in {"overview", "alerts", "audit", "logs"}:
+            self._render_chrome_if_generation(panel, generation)
+            return
+
+        # Synchronize cheap filter state after the acknowledgement frame, then
+        # copy the pure model inputs. Worker code never touches live widgets or
+        # mutable live model collections.
+        if panel in {"alerts", "audit", "logs"}:
+            self._sync_signal_connector_filters()
+        template = self._detached_render_context(panel)
+        store_source = self._worker_audit_store_source()
+        request = (generation, template, store_source)
+        if panel in self._panel_render_running:
+            self._panel_render_pending[panel] = request
+            return
+        self._launch_deferred_panel_render(panel, request)
+
+    def _render_chrome_if_generation(self, panel: str, generation: int) -> None:
+        if generation != self._panel_render_generation or panel != self.active_panel:
+            return
+        self._applying_panel_snapshot = True
+        try:
+            self._render_chrome()
+        finally:
+            self._applying_panel_snapshot = False
+
+    def _launch_deferred_panel_render(
+        self,
+        panel: str,
+        request: tuple[int, DefenseClawTUI, tuple[str, object | None]],
+    ) -> None:
+        generation, template, store_source = request
+        if generation != self._panel_render_generation or panel != self.active_panel:
+            return
+        self._panel_render_running.add(panel)
+        try:
+            worker = self.run_worker(
+                self._run_deferred_panel_render(panel, generation, template, store_source),
+                name=f"render-{panel}-{generation}",
+                group=f"panel-render-{panel}",
+                exclusive=False,
+                thread=False,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 - teardown may race worker creation.
+            self._panel_render_running.discard(panel)
+            return
+        self._panel_render_workers[panel] = worker
+
+    async def _run_deferred_panel_render(
+        self,
+        panel: str,
+        generation: int,
+        template: DefenseClawTUI,
+        store_source: tuple[str, object | None],
+    ) -> None:
+        try:
+            if panel == "overview":
+                snapshot: _OverviewRenderSnapshot | _PanelRenderSnapshot = await asyncio.to_thread(
+                    self._build_overview_render_snapshot,
+                    template,
+                    generation,
+                    store_source,
+                )
+            else:
+                snapshot = await asyncio.to_thread(
+                    self._build_panel_render_snapshot,
+                    template,
+                    panel,
+                    generation,
+                )
+            if isinstance(snapshot, _OverviewRenderSnapshot):
+                self._apply_overview_render_snapshot(snapshot)
+            else:
+                self._apply_panel_render_snapshot(snapshot)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - a panel must degrade, never WorkerFailed.
+            if generation == self._panel_render_generation and panel == self.active_panel:
+                self._set_status(f"{panel.title()} refresh deferred after transient error: {exc}")
+        finally:
+            self._panel_render_running.discard(panel)
+            self._panel_render_workers.pop(panel, None)
+            pending = self._panel_render_pending.pop(panel, None)
+            if pending is not None and not getattr(self, "_app_shutting_down", False):
+                pending_generation = pending[0]
+                if pending_generation == self._panel_render_generation and panel == self.active_panel:
+                    self.call_later(self._launch_deferred_panel_render, panel, pending)
+
+    def _detached_render_context(self, panel: str) -> DefenseClawTUI:
+        """Copy render inputs so worker computation cannot race live mutation."""
+
+        detached = copy.copy(self)
+        detached.active_panel = panel
+        detached.help_open = False
+        detached.body_text = ""
+        detached._table_columns = ()
+        detached._table_rows = ()
+        detached._chip_click_segments = []
+        detached._enforcement_inventory_requested = True
+
+        overview = OverviewPanelModel(copy.deepcopy(self.overview_model.cfg), version=self.overview_model.version)
+        overview.set_health(copy.deepcopy(self.overview_model.health))
+        overview.set_doctor_cache(copy.deepcopy(self.overview_model.doctor))
+        overview.set_enforcement_counts(self.overview_model.enforcement)
+        overview.set_silent_bypass_count(self.overview_model.silent_bypass)
+        overview.set_ai_usage(copy.deepcopy(self.overview_model.ai_usage))
+        overview.set_skill_scanner_available(self.overview_model.skill_scanner_available)
+        detached.overview_model = overview
+
+        alerts = copy.copy(self.alerts_model)
+        alerts.store = None
+        alerts.audit_events = list(self.alerts_model.audit_events)
+        alerts.scan_blocks = list(self.alerts_model.scan_blocks)
+        alerts.egress_events = list(self.alerts_model.egress_events)
+        alerts.expanded = set(self.alerts_model.expanded)
+        alerts.selected_ids = set(self.alerts_model.selected_ids)
+        alerts.filtered = list(self.alerts_model.filtered)
+        detached.alerts_model = alerts
+
+        audit = copy.copy(self.audit_model)
+        audit.store = None
+        audit.items = list(self.audit_model.items)
+        audit.filtered = list(self.audit_model.filtered)
+        detached.audit_model = audit
+
+        logs = copy.copy(self.logs_model)
+        logs.lines = {source: list(rows) for source, rows in self.logs_model.lines.items()}
+        logs.error_messages = dict(self.logs_model.error_messages)
+        logs.verdict_rows = list(self.logs_model.verdict_rows)
+        logs.otel_rows = list(self.logs_model.otel_rows)
+        logs.cursor = dict(self.logs_model.cursor)
+        logs.cursor_moved = dict(self.logs_model.cursor_moved)
+        logs.scroll = dict(self.logs_model.scroll)
+        logs._pause_baseline = dict(self.logs_model._pause_baseline)
+        logs._refresh_signatures = dict(self.logs_model._refresh_signatures)
+        logs._filtered_lines_cache = dict(self.logs_model._filtered_lines_cache)
+        detached.logs_model = logs
+
+        detached.inventory_model = copy.copy(self.inventory_model)
+        detached._connector_hook_event_stats_cache = None
+        detached._connector_hook_event_stats_loaded_at = 0.0
+        detached._overview_audit_version_cache = None
+        detached._overview_connector_rows_signature_cache = None
+        detached._overview_live_data_signature_cache = None
+        return detached
+
+    def _worker_audit_store_source(self) -> tuple[str, object | None]:
+        """Describe a worker-safe audit reader without sharing sqlite handles."""
+
+        store = getattr(self.audit_model, "store", None) or getattr(self.alerts_model, "store", None)
+        database = getattr(store, "db", None)
+        if isinstance(database, sqlite3.Connection):
+            try:
+                row = database.execute("PRAGMA database_list").fetchone()
+                path = str(row[2] or "") if row is not None else ""
+            except Exception:  # noqa: BLE001 - in-memory model rows remain available.
+                path = ""
+            return ("path", path or None)
+        # Pure Python test doubles are safe to share; real sqlite connections
+        # are handled above and are never crossed between threads.
+        return ("shared", store)
+
+    @staticmethod
+    def _worker_store_source_token(source: tuple[str, object | None]) -> tuple[str, str]:
+        kind, value = source
+        return (kind, str(value) if kind == "path" else str(id(value)))
+
+    @staticmethod
+    def _attach_worker_audit_store(
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> object | None:
+        kind, value = source
+        if kind == "path" and value:
+            from defenseclaw.db import Store
+
+            worker_store = Store(str(value))
+            detached.audit_model.store = worker_store
+            detached.alerts_model.store = worker_store
+            return worker_store
+        if kind == "shared" and value is not None:
+            detached.audit_model.store = value
+            detached.alerts_model.store = value
+        return None
+
+    def _build_overview_render_snapshot(
+        self,
+        detached: DefenseClawTUI,
+        generation: int,
+        store_source: tuple[str, object | None],
+    ) -> _OverviewRenderSnapshot:
+        """Build exactly one coherent Overview sample off the UI thread."""
+
+        worker_store = self._attach_worker_audit_store(detached, store_source)
+        try:
+            with detached._connector_hook_event_render_cache():
+                renderable = detached._overview_renderable()
+                metrics = detached._overview_metric_data()
+                connector_rows = tuple(detached._overview_connector_rows())
+                enforcement = detached._overview_session_enforcement_counts()
+                body_signature = detached._overview_body_signature()
+                connector_signature = detached._overview_connector_rows_signature()
+                live_signature = detached._overview_live_data_signature()
+                scope_text = detached._overview_connector_scope_text().strip()
+            return _OverviewRenderSnapshot(
+                generation=generation,
+                body_text=detached.body_text,
+                body_renderable=renderable,
+                metrics=metrics,
+                connector_rows=connector_rows,
+                enforcement=enforcement,
+                body_signature=body_signature,
+                connector_rows_signature=connector_signature,
+                live_data_signature=live_signature,
+                scope_text=scope_text,
+                skill_scanner_available=detached.overview_model.skill_scanner_available,
+                audit_version=detached._overview_audit_version_cache,
+                hook_stats=tuple(
+                    (
+                        connector,
+                        int(values.get("calls", 0)),
+                        int(values.get("blocks", 0)),
+                        int(values.get("alerts", 0)),
+                        values.get("newest"),
+                    )
+                    for connector, values in (
+                        detached._connector_hook_event_stats_cache or {}
+                    ).items()
+                ),
+            )
+        finally:
+            if worker_store is not None:
+                try:
+                    worker_store.close()
+                except Exception:  # noqa: BLE001 - reader teardown is best-effort.
+                    pass
+
+    @staticmethod
+    def _build_panel_render_snapshot(
+        detached: DefenseClawTUI,
+        panel: str,
+        generation: int,
+    ) -> _PanelRenderSnapshot:
+        """Project cached signal rows without touching Textual widgets."""
+
+        body_text = detached._body_text()
+        detail_text = detached._detail_text()
+        return _PanelRenderSnapshot(
+            generation=generation,
+            panel=panel,
+            body_text=body_text,
+            body_renderable=detached._safe_body_renderable(body_text),
+            table_columns=detached._table_columns,
+            table_rows=detached._table_rows,
+            detail_text=detail_text,
+            chip_click_segments=tuple(detached._chip_click_segments),
+        )
+
+    def _apply_panel_render_snapshot(self, snapshot: _PanelRenderSnapshot) -> None:
+        """Apply a prepared signal panel generation on Textual's UI thread."""
+
+        if (
+            snapshot.generation != self._panel_render_generation
+            or snapshot.panel != self.active_panel
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        try:
+            body_widget = self.query_one("#body", Static)
+        except NoMatches:
+            return
+        self._applying_panel_snapshot = True
+        try:
+            self.body_text = snapshot.body_text
+            self._chip_click_segments = list(snapshot.chip_click_segments)
+            body_signature = (snapshot.panel, False, snapshot.body_text)
+            if body_signature != self._last_body_signature:
+                body_widget.update(snapshot.body_renderable)
+                self._last_body_signature = body_signature
+            self._table_columns = snapshot.table_columns
+            self._table_rows = snapshot.table_rows
+            self._render_native_widgets()
+            self._render_panel_controls()
+            self._render_panel_table()
+            self._apply_detail_text(snapshot.detail_text)
+            self._render_command_strip()
+            self._set_status(self.status_text or self._status_text())
+            self._refresh_hint()
+            self._panel_content_cache[snapshot.panel] = snapshot
+        finally:
+            self._applying_panel_snapshot = False
+
+    def _apply_overview_render_snapshot(self, snapshot: _OverviewRenderSnapshot) -> None:
+        """Apply a coherent Overview generation, discarding stale workers."""
+
+        if (
+            snapshot.generation != self._panel_render_generation
+            or self.active_panel != "overview"
+            or self.help_open
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        try:
+            body_widget = self.query_one("#body", Static)
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return
+        self._applying_panel_snapshot = True
+        try:
+            current_scroll_y = float(scroller.scroll_y)
+            self.body_text = snapshot.body_text
+            if (
+                snapshot.body_signature != self._last_body_signature
+                or snapshot.connector_rows_signature != self._overview_connector_rows_signature_cache
+                or snapshot.live_data_signature != self._overview_live_data_signature_cache
+            ):
+                body_widget.update(snapshot.body_renderable)
+                current_scroll_y = self._restore_overview_scroll(scroller, current_scroll_y) or 0.0
+            self._last_body_signature = snapshot.body_signature
+            self._overview_connector_rows_signature_cache = snapshot.connector_rows_signature
+            self._overview_live_data_signature_cache = snapshot.live_data_signature
+            self._overview_last_render_scroll_y = current_scroll_y
+            self._overview_audit_version_cache = snapshot.audit_version
+            self._connector_hook_event_stats_cache = {
+                connector: {
+                    "calls": calls,
+                    "blocks": blocks,
+                    "alerts": alerts,
+                    "newest": newest,
+                }
+                for connector, calls, blocks, alerts, newest in snapshot.hook_stats
+            }
+            self._connector_hook_event_stats_loaded_at = monotonic()
+            self.overview_model.set_skill_scanner_available(snapshot.skill_scanner_available)
+            self._apply_overview_metric_snapshot(snapshot.metrics)
+            self._apply_overview_scope_text(snapshot.scope_text)
+            self._table_columns = ()
+            self._table_rows = ()
+            self._render_panel_controls()
+            self._render_panel_table()
+            self._apply_detail_text("")
+            self._render_command_strip()
+            self._set_status(self.status_text or self._status_text())
+            self._refresh_hint()
+            self._overview_render_snapshot = snapshot
+        finally:
+            self._applying_panel_snapshot = False
+
+    def _set_overview_metrics_visible(self, visible: bool) -> None:
+        try:
+            metrics = self.query_one("#overview-metrics", OverviewMetrics)
+        except NoMatches:
+            return
+        metrics.set_class(not visible, "hidden")
+
+    def _apply_overview_metric_snapshot(self, metrics_data: tuple[MetricDatum, ...]) -> None:
+        try:
+            metrics = self.query_one("#overview-metrics", OverviewMetrics)
+        except NoMatches:
+            return
+        visible = self.active_panel == "overview" and not self.help_open
+        metrics.set_class(not visible, "hidden")
+        if visible:
+            metrics.refresh_metrics(metrics_data)
+
+    def _apply_overview_scope_text(self, text: str) -> None:
+        try:
+            scope = self.query_one("#overview-scope", Static)
+        except NoMatches:
+            return
+        visible = self.active_panel == "overview" and not self.help_open and bool(text)
+        scope.set_class(not visible, "hidden")
+        if visible:
+            scope.update(self._safe_body_renderable(text))
+
+    def _apply_detail_text(self, detail: str) -> None:
+        try:
+            panel = self.query_one("#detail-panel", VerticalScroll)
+            body = self.query_one("#detail-panel-body", Static)
+        except NoMatches:
+            return
+        self.detail_text = detail
+        if not detail:
+            panel.add_class("hidden")
+            self._last_detail_signature = None
+            return
+        panel.remove_class("hidden")
+        signature = (self.active_panel, detail)
+        if signature != self._last_detail_signature:
+            body.update(self._safe_body_renderable(detail))
+            panel.scroll_home(animate=False)
+            self._last_detail_signature = signature
 
     def action_next_panel(self) -> None:
         visible = self._visible_panels()
@@ -2554,6 +3152,13 @@ class DefenseClawTUI(App[None]):
             self._refresh_hint()
 
     def _render_chrome(self) -> None:
+        if not self._applying_panel_snapshot:
+            # A direct render represents newer UI/model state than any queued
+            # background projection (for example a filter key pressed while an
+            # Alerts snapshot was computing). Invalidate that work before it
+            # can apply over the interaction.
+            self._panel_render_generation += 1
+            self._panel_render_pending.pop(self.active_panel, None)
         try:
             tabs = self.query_one("#tabs", Tabs)
         except NoMatches:
@@ -2666,6 +3271,17 @@ class DefenseClawTUI(App[None]):
         self._render_command_strip()
         self._set_status(self.status_text or self._status_text())
         self._refresh_hint()
+        if self.active_panel in {"alerts", "audit", "logs"} and not self.help_open:
+            self._panel_content_cache[self.active_panel] = _PanelRenderSnapshot(
+                generation=self._panel_render_generation,
+                panel=self.active_panel,
+                body_text=self.body_text,
+                body_renderable=self._safe_body_renderable(self.body_text),
+                table_columns=self._table_columns,
+                table_rows=self._table_rows,
+                detail_text=self.detail_text,
+                chip_click_segments=tuple(self._chip_click_segments),
+            )
 
     @staticmethod
     def _safe_body_renderable(content: str) -> Text:
@@ -3010,7 +3626,7 @@ class DefenseClawTUI(App[None]):
         if text:
             scope.update(self._safe_body_renderable(text))
 
-    def _render_panel_controls(self) -> None:
+    def _render_panel_control_visibility(self) -> None:
         overview = self.query_one("#overview-controls", Horizontal)
         alerts = self.query_one("#alerts-controls", Horizontal)
         audit = self.query_one("#audit-controls", Horizontal)
@@ -3066,6 +3682,9 @@ class DefenseClawTUI(App[None]):
         # buttons naturally disable because no row is selected.
         plugins.set_class(self.active_panel != "plugins" or self.help_open, "hidden")
         tools.set_class(self.active_panel != "tools" or self.help_open, "hidden")
+
+    def _render_panel_controls(self) -> None:
+        self._render_panel_control_visibility()
         # Stdin pipe is panel-scoped to Activity but command-state-scoped
         # to "executor is busy" — handle it after the per-panel sync so
         # the visibility check sees the freshest state.
@@ -5126,7 +5745,6 @@ class DefenseClawTUI(App[None]):
         overview_active = self.active_panel == "overview" and not self.help_open
         if overview_active:
             self._render_overview_scope_indicator()
-            self._render_overview_metrics()
             self._schedule_overview_deferred_render()
             return
         self._render_chrome()
@@ -5242,7 +5860,7 @@ class DefenseClawTUI(App[None]):
                 return
             if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
                 return
-            self._render_chrome()
+            self._schedule_active_panel_refresh("connector-filter")
 
         self.set_timer(0.2, render_if_current)
 
@@ -5264,9 +5882,30 @@ class DefenseClawTUI(App[None]):
             self._overview_sampled_refresh_scheduled = False
             if not self._overview_sampled_refresh_allowed(allow_scrolled=allow_scrolled):
                 return
-            self._render_chrome()
+            self._schedule_active_panel_refresh("overview-sample")
 
         self.set_timer(delay, refresh_if_still_allowed)
+
+    def _schedule_active_panel_refresh(self, reason: str = "") -> int:
+        """Invalidate/coalesce the active panel through the deferred pipeline.
+
+        External config refresh can call this after installing its new config
+        generation. The render generation is intentionally independent of the
+        config generation: whichever config update wins simply schedules the
+        latest immutable panel snapshot, and older work is discarded here.
+        """
+
+        del reason  # Reserved for diagnostics without coupling callers to logs.
+        if getattr(self, "_app_shutting_down", False):
+            return self._panel_render_generation
+        panel = self.active_panel
+        self._panel_render_generation += 1
+        generation = self._panel_render_generation
+        try:
+            self.call_after_refresh(self._start_deferred_panel_render, panel, generation)
+        except Exception:  # noqa: BLE001 - direct unit calls may lack a loop.
+            self._start_deferred_panel_render(panel, generation)
+        return generation
 
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
         """Resolve a click on the ``#body`` Static to a connector chip action.
@@ -7175,6 +7814,11 @@ class DefenseClawTUI(App[None]):
             lines.append(rich_escape(toolbar.filter_label))
         if toolbar.search_prompt:
             lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(toolbar.search_prompt)}[/]")
+        if self.audit_model.error_message:
+            lines.append(
+                f"[{TOKENS.accent_amber}]{rich_escape(self.audit_model.error_message)}; "
+                "showing the last successful snapshot.[/]"
+            )
         lines.append(
             "Search examples: severity:HIGH action:block target:skill run:<id>. "
             "Use Same target or Same run to correlate the selected event."
@@ -7385,9 +8029,12 @@ class DefenseClawTUI(App[None]):
         if not self._table_columns:
             with self._programmatic_table_update():
                 table.add_class("hidden")
-                table.clear(columns=True)
-                self._rendered_table_row_keys.clear()
-            self._last_table_signature = None
+            # Retain the hidden table and its signature. Overview/Activity do
+            # not own table rows, and clearing here forced an unchanged Alerts
+            # feed to rebuild all 500 rows merely because the operator glanced
+            # at Overview. A different table panel still rebuilds (its panel id
+            # changes the signature), while returning directly can reveal the
+            # cached table with no mutation at all.
             return
 
         # Idempotence guard: cursor-only changes and small streaming deltas
@@ -7404,6 +8051,7 @@ class DefenseClawTUI(App[None]):
             self.active_panel == "setup" and self.setup_model.form_active,
         )
         if signature == self._last_table_signature:
+            table.remove_class("hidden")
             return
 
         # A cursor move does not change table content. Keep Textual's
@@ -9507,10 +10155,14 @@ class DefenseClawTUI(App[None]):
         if len(self.screen_stack) > 1:
             return
         if self.active_panel == "overview" and not self.help_open:
-            # Audit statistics must continue advancing while /health is absent.
-            # Poll only the grouped aggregate here; the 500-row detail window
-            # is reloaded only when a changed aggregate schedules a repaint.
-            self._poll_overview_audit_stats()
+            # The worker-owned Overview snapshot checks the audit generation
+            # and grouped totals. Never touch the UI thread's sqlite handle in
+            # this timer turn: an external writer or transient lock must not
+            # delay the next keyboard/mouse event.
+            self._schedule_active_panel_refresh("periodic-audit")
+            return
+        if self.active_panel in {"alerts", "audit", "logs"} and not self.help_open:
+            self._schedule_signal_data_refresh()
             return
         self._periodic_refresh_running = True
         try:
@@ -9521,6 +10173,137 @@ class DefenseClawTUI(App[None]):
                 return
         finally:
             self._periodic_refresh_running = False
+
+    def _schedule_signal_data_refresh(self) -> None:
+        """Coalesce file/SQLite refreshes for Alerts, Audit, and Logs."""
+
+        if getattr(self, "_app_shutting_down", False):
+            return
+        if self._signal_refresh_running:
+            self._signal_refresh_pending = True
+            return
+        self._signal_refresh_running = True
+        detached = self._detached_render_context(self.active_panel)
+        source = self._worker_audit_store_source()
+        try:
+            worker = self.run_worker(
+                self._run_signal_data_refresh(detached, source),
+                name="signal-data-refresh",
+                group="signal-data-refresh",
+                exclusive=False,
+                thread=False,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 - teardown may race the timer.
+            self._signal_refresh_running = False
+            return
+        self._panel_render_workers["__signals__"] = worker
+
+    async def _run_signal_data_refresh(
+        self,
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> None:
+        try:
+            snapshot = await asyncio.to_thread(self._build_signal_refresh_snapshot, detached, source)
+            self._apply_signal_refresh_snapshot(snapshot)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - cached data remains visible.
+            if not getattr(self, "_app_shutting_down", False):
+                self._set_status(f"Signal refresh deferred after transient error: {exc}")
+        finally:
+            self._signal_refresh_running = False
+            self._panel_render_workers.pop("__signals__", None)
+            if self._signal_refresh_pending and not getattr(self, "_app_shutting_down", False):
+                self._signal_refresh_pending = False
+                self.call_later(self._schedule_signal_data_refresh)
+
+    def _build_signal_refresh_snapshot(
+        self,
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> _SignalRefreshSnapshot:
+        worker_store = self._attach_worker_audit_store(detached, source)
+        try:
+            detached.alerts_model.refresh()
+            detached.audit_model.refresh()
+            detached.logs_model.refresh()
+            detached._load_doctor_cache()
+            detached._load_silent_bypass_count()
+            return _SignalRefreshSnapshot(
+                source_token=self._worker_store_source_token(source),
+                alert_events=tuple(detached.alerts_model.audit_events),
+                scan_blocks=tuple(detached.alerts_model.scan_blocks),
+                egress_events=tuple(detached.alerts_model.egress_events),
+                audit_events=tuple(detached.audit_model.items),
+                audit_error=detached.audit_model.error_message,
+                log_lines=tuple(
+                    (source_name, tuple(rows))
+                    for source_name, rows in detached.logs_model.lines.items()
+                ),
+                log_errors=tuple(detached.logs_model.error_messages.items()),
+                verdict_rows=tuple(detached.logs_model.verdict_rows),
+                otel_rows=tuple(detached.logs_model.otel_rows),
+                log_refresh_signatures=tuple(detached.logs_model._refresh_signatures.items()),
+                doctor=detached.overview_model.doctor,
+                silent_bypass=detached.overview_model.silent_bypass,
+            )
+        finally:
+            if worker_store is not None:
+                try:
+                    worker_store.close()
+                except Exception:  # noqa: BLE001 - reader teardown is best-effort.
+                    pass
+
+    def _apply_signal_refresh_snapshot(self, snapshot: _SignalRefreshSnapshot) -> None:
+        """Install refreshed model data on the UI thread, preserving controls."""
+
+        if getattr(self, "_app_shutting_down", False):
+            return
+        if snapshot.source_token != self._worker_store_source_token(self._worker_audit_store_source()):
+            return
+        alerts = self.alerts_model
+        alert_sources_changed = (
+            tuple(alerts.audit_events) != snapshot.alert_events
+            or tuple(alerts.scan_blocks) != snapshot.scan_blocks
+            or tuple(alerts.egress_events) != snapshot.egress_events
+        )
+        if alert_sources_changed:
+            alerts.audit_events = list(snapshot.alert_events)
+            alerts.scan_blocks = list(snapshot.scan_blocks)
+            alerts.egress_events = list(snapshot.egress_events)
+            alerts._invalidate_row_caches()
+            alerts.apply_filter()
+
+        audit = self.audit_model
+        if tuple(audit.items) != snapshot.audit_events or audit.error_message != snapshot.audit_error:
+            audit.items = list(snapshot.audit_events)
+            audit.error_message = snapshot.audit_error
+            audit.apply_filter()
+
+        logs = self.logs_model
+        next_lines = {source: list(rows) for source, rows in snapshot.log_lines}
+        next_errors = dict(snapshot.log_errors)
+        if (
+            logs.lines != next_lines
+            or logs.error_messages != next_errors
+            or tuple(logs.verdict_rows) != snapshot.verdict_rows
+            or tuple(logs.otel_rows) != snapshot.otel_rows
+        ):
+            logs.lines = next_lines  # type: ignore[assignment]
+            logs.error_messages = next_errors  # type: ignore[assignment]
+            logs.verdict_rows = list(snapshot.verdict_rows)
+            logs.otel_rows = list(snapshot.otel_rows)
+            logs._refresh_signatures = dict(snapshot.log_refresh_signatures)
+            logs._filtered_lines_cache.clear()
+            logs._clamp_cursor()
+
+        self.overview_model.set_doctor_cache(snapshot.doctor)
+        self.overview_model.set_silent_bypass_count(snapshot.silent_bypass)
+        self._update_tab_labels()
+        if self.active_panel in {"alerts", "audit", "logs", "overview"} and not self.help_open:
+            self._schedule_active_panel_refresh("signal-data")
 
     def _poll_overview_audit_stats(self) -> None:
         """Invalidate/repaint Overview when persisted hook totals change."""
