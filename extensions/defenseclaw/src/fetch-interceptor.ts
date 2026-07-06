@@ -255,6 +255,25 @@ function extractHost(urlStr: string): string {
 }
 
 /**
+ * The ChatGPT/Codex OAuth backend is not an API-key provider. Routing it
+ * through the local guardrail proxy strips OpenClaw's expected auth/model
+ * handling before the request reaches the network, which breaks observe-mode
+ * installs. Until the proxy has OAuth-aware support for this backend, degrade
+ * these calls to explicit passthrough instead of failing the agent locally.
+ */
+export function isChatGPTCodexOAuthBackendUrl(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    return (
+      parsed.hostname.toLowerCase() === "chatgpt.com" &&
+      parsed.pathname.startsWith("/backend-api/codex/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Host-boundary domain match. A registered entry "api.openai.com"
  * matches the exact host "api.openai.com" and any subdomain
  * ("staging.api.openai.com") but NOT a suffix injection like
@@ -882,6 +901,20 @@ export function createFetchInterceptor(
         return originalFetch!(input, init);
       }
 
+      if (isChatGPTCodexOAuthBackendUrl(urlStr)) {
+        const hp = extractHostPath(urlStr);
+        egressReporter?.report({
+          targetHost: hp.host,
+          targetPath: hp.path,
+          bodyShape: "none",
+          looksLikeLLM: true,
+          branch: "passthrough",
+          decision: "allow",
+          reason: "chatgpt-codex-oauth-passthrough",
+        });
+        return originalFetch!(input, init);
+      }
+
       // Layer 0: the known-provider allowlist is cheap and path-free.
       const knownLLM = isLLMUrl(urlStr, guardrailPort);
       let shouldIntercept = knownLLM;
@@ -1111,6 +1144,20 @@ export function createFetchInterceptor(
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+
+      if (urlStr && isChatGPTCodexOAuthBackendUrl(urlStr)) {
+        const hp = extractHostPath(urlStr);
+        egressReporter?.report({
+          targetHost: hp.host,
+          targetPath: hp.path,
+          bodyShape: "none",
+          looksLikeLLM: true,
+          branch: "passthrough",
+          decision: "allow",
+          reason: "chatgpt-codex-oauth-passthrough",
+        });
+        return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
 
       // Path-only shape detection for https.request — the body is
       // written via req.write after this call returns, so peeking is

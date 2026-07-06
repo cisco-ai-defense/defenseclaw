@@ -151,6 +151,37 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
     expect(opts.port).toBe(guardrailPort);
   });
 
+  it("passes through ChatGPT Codex OAuth backend requests instead of proxying them", () => {
+    let passthroughCalled = false;
+    const passthrough = ((..._args: unknown[]) => {
+      passthroughCalled = true;
+      return {
+        on: () => undefined,
+        end: () => undefined,
+        write: () => undefined,
+        destroy: () => undefined,
+      } as unknown as ReturnType<typeof https.request>;
+    }) as typeof https.request;
+
+    interceptor.stop();
+    https.request = passthrough;
+    interceptor = createFetchInterceptor(guardrailPort);
+    interceptor.start();
+
+    https.request(
+      {
+        host: "chatgpt.com",
+        method: "POST",
+        path: "/backend-api/codex/responses",
+        headers: { Authorization: "Bearer oauth-token" },
+      } as unknown as Parameters<typeof https.request>[0],
+      () => undefined,
+    );
+
+    expect(captured).toHaveLength(0);
+    expect(passthroughCalled).toBe(true);
+  });
+
   it("stamps X-DefenseClaw-* correlation headers from getCorrelationHeaders", () => {
     // Regression for v7: intercepted LLM traffic must carry the plugin's
     // correlation envelope so the guardrail proxy can stamp agent_id,

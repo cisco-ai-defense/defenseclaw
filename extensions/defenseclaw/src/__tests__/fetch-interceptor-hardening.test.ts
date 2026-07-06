@@ -28,6 +28,7 @@ import {
   createFetchInterceptor,
   isLLMUrl,
   hasLLMPathSuffix,
+  isChatGPTCodexOAuthBackendUrl,
   scrubUrlForLog,
   LLM_PATH_SUFFIXES,
 } from "../fetch-interceptor.js";
@@ -90,6 +91,57 @@ describe("isLLMUrl + Bedrock wildcard", () => {
     expect(hasLLMPathSuffix(
       "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3/invoke",
     )).toBe(true);
+  });
+});
+
+describe("ChatGPT Codex OAuth backend passthrough", () => {
+  const guardrailPort = 14010;
+
+  it("identifies only the ChatGPT Codex OAuth backend path", () => {
+    expect(
+      isChatGPTCodexOAuthBackendUrl(
+        "https://chatgpt.com/backend-api/codex/responses",
+      ),
+    ).toBe(true);
+    expect(
+      isChatGPTCodexOAuthBackendUrl(
+        "https://chatgpt.com/backend-api/codex/responses/stream",
+      ),
+    ).toBe(true);
+    expect(
+      isChatGPTCodexOAuthBackendUrl("https://chatgpt.com/backend-api/accounts"),
+    ).toBe(false);
+    expect(
+      isChatGPTCodexOAuthBackendUrl(
+        "https://evil.chatgpt.com/backend-api/codex/responses",
+      ),
+    ).toBe(false);
+  });
+
+  it("passes through fetch calls to the ChatGPT Codex OAuth backend", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response("ok");
+    }) as typeof fetch;
+    const interceptor = createFetchInterceptor(guardrailPort);
+    interceptor.start();
+
+    try {
+      await fetch("https://chatgpt.com/backend-api/codex/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "openai/gpt-5.5", input: "ping" }),
+      });
+    } finally {
+      interceptor.stop();
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(calls).toContain("https://chatgpt.com/backend-api/codex/responses");
+    expect(calls).not.toContain(
+      `http://127.0.0.1:${guardrailPort}/backend-api/codex/responses`,
+    );
   });
 });
 
