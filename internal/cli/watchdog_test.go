@@ -486,7 +486,6 @@ func TestWatchdogDispatchesOneOutageAndOneRecovery(t *testing.T) {
 		Enabled:         true,
 		CooldownSeconds: intPtr(0),
 	}})
-	defer webhooks.Close()
 
 	var probes atomic.Int32
 	healthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -503,7 +502,9 @@ func TestWatchdogDispatchesOneOutageAndOneRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Millisecond)
 	defer cancel()
 	runWatchdogLoop(ctx, healthSrv.URL, 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, webhooks, nil)
-	time.Sleep(50 * time.Millisecond)
+	// Dispatch is asynchronous. Close deterministically drains every accepted
+	// delivery, avoiding a scheduler-dependent sleep before the assertion.
+	webhooks.Close()
 
 	mu.Lock()
 	defer mu.Unlock()

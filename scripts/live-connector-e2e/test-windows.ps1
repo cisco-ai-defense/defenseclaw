@@ -63,9 +63,17 @@ try {
     $requestId = [guid]::NewGuid().ToString()
     $fixtureEvents = @(
         @{ connector = 'codex'; request_id = $requestId; event_type = 'verdict'; verdict = @{ action = 'block' } },
+        @{ connector = 'codex'; request_id = $requestId; event_type = 'hook_decision'; hook_decision = @{ connector = 'codex'; action = 'allow'; raw_action = 'block'; mode = 'observe'; would_block = $true; enforced = $false; rule_ids = @('CMD-WIN-REMOVE-ITEM-RF') } },
         @{ connector = 'codex'; request_id = $requestId; event_type = 'tool_invocation' }
     ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
     [IO.File]::WriteAllText($jsonl, ($fixtureEvents -join [Environment]::NewLine) + [Environment]::NewLine)
+    $liveWriter = [IO.File]::Open($jsonl, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $sharedText = Read-SharedText $jsonl
+        Assert-True ($sharedText -match 'hook_decision') 'diagnostics can read a live writer-owned JSONL'
+    } finally {
+        $liveWriter.Dispose()
+    }
     $pythonCode = 'import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute("create table audit_events(request_id text)");c.execute("insert into audit_events(request_id) values (?)",(sys.argv[2],));c.commit();c.close()'
     & python.exe -c $pythonCode $database $requestId
     if ($LASTEXITCODE -ne 0) { throw 'failed to create disposable audit fixture' }
@@ -73,6 +81,8 @@ try {
     Assert-True ($LASTEXITCODE -eq 0) 'mock audit correlation'
     Assert-True (Test-ConnectorEvent $jsonl 'codex' 0) 'connector event seam'
     Assert-True (Test-BlockVerdict $jsonl 0) 'block verdict seam'
+    $hookDecision = Get-LatestHookDecision $jsonl 'codex' 0
+    Assert-True ($null -ne $hookDecision -and $hookDecision.raw_action -eq 'block' -and $hookDecision.would_block) 'hook decision raw block and would-block seam'
     Assert-True (Test-OtlpEvent $jsonl 'codex' 0) 'OTLP evidence seam'
 
     $nativeWorkflowText = [IO.File]::ReadAllText($nativeWorkflow)
@@ -90,7 +100,29 @@ try {
     Assert-True ($nativeWorkflowText -notmatch 'continue-on-error') 'required Windows jobs are not advisory'
     Assert-True ($nativeWorkflowText -notmatch 'shell:\s*bash') 'dedicated Windows workflow never selects Bash'
     Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
+    Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
+    foreach ($testName in @(
+        'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
+        'TestWriteWindowsPreservesStricterExistingDACL',
+        'TestWindowsWriteLikeAccess',
+        'TestWindowsTrustedOwner',
+        'TestRejectUntrustedWindowsWriteACEs',
+        'TestHookAPITokenWindowsRejectsUntrustedDirectoryACL',
+        'TestHookAPITokenWindowsAllowsReadOnlyUnsupportedAllowACE',
+        'TestHookAPITokenWindowsAllowsInheritOnlyCreatorOwnerTemplate',
+        'TestHookAPITokenWindowsAllowsOwnerRightsACE',
+        'TestHookAPITokenWindowsRejectsDirectCreatorOwnerACE',
+        'TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor',
+        'TestHookAPITokenWindowsAllowsGenericWriteOnSharedAncestor',
+        'TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor',
+        'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor'
+    )) {
+        Assert-True ($nativeWorkflowText -match [regex]::Escape($testName)) "native Windows Go DACL step reaches $testName"
+    }
+    Assert-True ($nativeWorkflowText -match '''test'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
     Assert-True ($nativeWorkflowText -match 'go'', ''test'', ''\.\/\.\.\.''' -or $nativeWorkflowText -match "'test', './\.\.\.'") 'full Go suite is required'
+    Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
+    Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests', '-q'") 'complete Python suite is required'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'doctor'', ''--json-output' -and $nativeHarnessText -match 'skill'', ''scan' -and $nativeHarnessText -match 'mcp'', ''scan') 'installed artifact smoke covers doctor and scanners'
@@ -108,8 +140,26 @@ try {
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
-    Assert-True ($harnessText -notmatch '(?i)\.sh\b|\bwsl\b|git bash|/bin/') 'native harness has no Unix harness dependency'
+    Assert-True ($harnessText -notmatch '(?i)\bwsl(?:\.exe)?\b|git bash|/bin/|Get-Command\s+(?:jq|tail|curl)|Invoke-Tool\s+''(?:jq|tail|curl)''') 'native harness has no WSL, Git Bash, or Unix utility dependency'
     Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
+    foreach ($rule in @(
+        'CMD-WIN-REMOVE-ITEM-RF', 'CMD-WIN-RMDIR-SQ', 'CMD-WIN-IWR-IEX', 'CMD-WIN-REG-PERSIST',
+        'PATH-WIN-AWS-CREDS', 'PATH-WIN-GIT-CREDS', 'PATH-WIN-CREDENTIAL-MANAGER'
+    )) {
+        Assert-True ($harnessText.Contains($rule)) "required Windows dangerous-command corpus contains $rule"
+    }
+    Assert-True ($harnessText -match "Invoke-DangerousCommandCorpus observe" -and $harnessText -match "Invoke-DangerousCommandCorpus action") 'connector contract executes dangerous-command corpus in observe and action modes'
+    Assert-True ($harnessText -match 'raw_action' -and $harnessText -match 'would_block' -and $harnessText -match 'enforced') 'dangerous-command contract asserts raw and enforced decisions'
+    foreach ($enterpriseOperation in @('install', 'reconcile', 'watch')) {
+        Assert-True ($harnessText -match 'enterprise-hooks:\$\(\$command\.Name\):native-rejection' -and $harnessText.Contains("Name = '$enterpriseOperation'")) "built enterprise hooks $enterpriseOperation rejection is required"
+    }
+    Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks rejection is bounded, exit 1, and checks an unchanged tree'
+    Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
+    Assert-True ($harnessText -match 'obsolete shell-hook guidance for native Windows') 'Doctor connector contract rejects obsolete shell guidance'
+    Assert-True ($harnessText -match 'function Wait-Gateway\(\[int\]\$Timeout = 90\)' -and $harnessText -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)') 'gateway readiness uses bounded Windows-native status probes'
+    Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and $harnessText -match 'obsolete gateway launcher' -and $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) 'Doctor connector contract rejects a tampered registered hook command with exit 1'
+    Assert-True ($harnessText -match 'WriteAllBytes\(\$configPath, \$originalConfig\)' -and $harnessText -match 'doctor:windows-hook-recovery') 'Doctor connector contract restores the registration byte-for-byte and validates recovery'
+    Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome' -and $harnessText -match 'HomeRoot must be contained by StateRoot') 'connector contract keeps the installed runtime and agent home in one disposable ownership root'
     $unpinned = [regex]::Matches($nativeWorkflowText, '(?m)^\s*-?\s*uses:\s*[^@\s]+@(?![0-9a-f]{40}\b)')
     $unpinnedText = @($unpinned | ForEach-Object { $_.Value }) -join ', '
     Assert-True ($unpinned.Count -eq 0) "external actions must be SHA-pinned: $unpinnedText"

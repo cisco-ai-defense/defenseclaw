@@ -145,12 +145,19 @@ class WindowsHookDoctorTests(unittest.TestCase):
         check = self._validate("claudecode", config)
         self.assertEqual(check.state, "healthy", check.detail)
 
-    def test_missing_registration_is_classified_and_has_native_repair(self) -> None:
-        missing = self.root / "missing.toml"
-        check = self._validate("codex", missing)
-        self.assertEqual(check.state, "missing")
-        self.assertIn("setup codex --yes --restart", check.detail)
-        self.assertNotRegex(check.detail.lower(), r"\.sh|chmod|bash|wsl")
+    def test_missing_registrations_have_only_native_repair_guidance(self) -> None:
+        for connector, filename, repair in (
+            ("codex", "missing.toml", "setup codex --yes --restart"),
+            ("claudecode", "missing.json", "setup claude-code --yes --restart"),
+        ):
+            with self.subTest(connector=connector):
+                check = self._validate(connector, self.root / filename)
+                self.assertEqual(check.state, "missing")
+                self.assertIn(repair, check.detail)
+                self.assertNotRegex(
+                    check.detail.lower(),
+                    r"\.sh\b|\bchmod\b|\bbash\b|\bwsl\b|\bunset\b|hook script",
+                )
 
     def test_malformed_arguments_are_rejected(self) -> None:
         runtime = self._runtime()
@@ -228,30 +235,39 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "stale")
         self.assertIn("changed during inspection", check.detail)
 
-    def test_doctor_emitters_keep_counter_and_detail_parity(self) -> None:
+    def test_doctor_validates_registered_codex_and_claude_commands(self) -> None:
         runtime = self._runtime()
         codex = self._config(
             "codex",
             "set NoDefaultCurrentDirectoryInExePath=1&& defenseclaw-hook.exe hook --connector codex",
         )
-        result = _DoctorResult()
-        config_before = codex.read_bytes()
+        claude = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
         runtime_before = runtime.read_bytes()
-        with patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock:
-            _check_codex_hooks(
-                self.cfg,
-                result,
-                platform_name="nt",
-                config_path=str(codex),
-                install_root=str(self.install),
-                search_path=str(self.install),
-                pathext=".EXE;.CMD",
-            )
-        run_mock.assert_not_called()
-        self.assertEqual((result.passed, result.failed), (1, 0))
-        self.assertEqual(result.to_dict()["checks"], result.checks)
-        self.assertIn(str(runtime), result.checks[0]["detail"])
-        self.assertEqual(codex.read_bytes(), config_before)
+        cases = (
+            ("codex", _check_codex_hooks, codex),
+            ("claudecode", _check_claudecode_hooks, claude),
+        )
+        for connector, check_hooks, config in cases:
+            with self.subTest(config=config.name):
+                self._lock(connector, config)
+                result = _DoctorResult()
+                config_before = config.read_bytes()
+                with patch("defenseclaw.commands.cmd_doctor.subprocess.run") as run_mock:
+                    check_hooks(
+                        self.cfg,
+                        result,
+                        platform_name="nt",
+                        config_path=str(config),
+                        install_root=str(self.install),
+                        search_path=str(self.install),
+                        pathext=".EXE;.CMD",
+                    )
+                run_mock.assert_not_called()
+                self.assertEqual((result.passed, result.failed), (1, 0))
+                self.assertEqual(result.to_dict()["checks"], result.checks)
+                self.assertIn(str(runtime), result.checks[0]["detail"])
+                self.assertNotRegex(result.checks[0]["detail"].lower(), r"\.sh\b|\bbash\b|\bwsl\b")
+                self.assertEqual(config.read_bytes(), config_before)
         self.assertEqual(runtime.read_bytes(), runtime_before)
 
     @unittest.skipUnless(os.name == "nt", "native Windows disposable-state smoke test")

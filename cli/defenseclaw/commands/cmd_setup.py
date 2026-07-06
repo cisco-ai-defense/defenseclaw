@@ -8376,6 +8376,11 @@ def _uninstall_plugin_from_sandbox(sandbox_home: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
+_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
+_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
+
+
 def _normalized_connector_roster(connectors: list[str]) -> list[str]:
     """Return connector names normalized and de-duplicated in input order."""
     roster: list[str] = []
@@ -8695,7 +8700,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
 
     cmd = ["defenseclaw-gateway", "restart"] if was_running else ["defenseclaw-gateway", "start"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+        )
         if result.returncode == 0:
             click.echo(" ✓")
             return True
@@ -8710,8 +8720,52 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         click.echo("    Build with: make gateway")
         return False
     except subprocess.TimeoutExpired:
-        click.echo(" ✗ (timed out)")
+        # A freshly installed Windows executable can spend appreciable time in
+        # OS trust/AV inspection before the Go launcher creates its detached
+        # daemon.  The launcher may therefore cross this outer Python timeout
+        # even though the managed gateway reaches READY immediately afterward.
+        # Reconcile once through the real authenticated/ownership-aware status
+        # command instead of reporting a false failure.  If an initial start
+        # is still unhealthy, issue a bounded managed stop so a late detached
+        # child cannot outlive the failed setup command.  On restart, preserve
+        # the pre-existing generation rather than stopping an otherwise healthy
+        # service whose replacement outcome is uncertain.
+        status = _gateway_lifecycle_status()
+        if status:
+            click.echo(" ✓ (ready after launcher timeout)")
+            return True
+        if not was_running:
+            _cleanup_timed_out_gateway_start()
+        click.echo(" ✗ (timed out; final status is not healthy)")
         return False
+
+
+def _gateway_lifecycle_status() -> bool:
+    try:
+        result = subprocess.run(
+            ["defenseclaw-gateway", "status"],
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _cleanup_timed_out_gateway_start() -> None:
+    try:
+        subprocess.run(
+            ["defenseclaw-gateway", "stop"],
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # The setup command already reports failure.  Cleanup is best effort;
+        # the Go daemon's PID/identity checks prevent this from targeting an
+        # unrelated process.
+        return
 
 
 @setup.result_callback()

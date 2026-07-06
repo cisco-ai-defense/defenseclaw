@@ -2441,12 +2441,63 @@ class TestRestartDefenseGatewayEdgeCases(unittest.TestCase):
             _restart_defense_gateway(tmpdir)
         mock_run.assert_called_once()
 
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run",
-           side_effect=subprocess.TimeoutExpired(cmd="defenseclaw-gateway", timeout=30))
-    def test_timeout(self, _mock_run):
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_timeout_recovers_when_final_status_is_healthy(self, mock_run):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+        mock_run.side_effect = [
+            subprocess.TimeoutExpired(cmd="defenseclaw-gateway", timeout=60),
+            MagicMock(returncode=0),
+        ]
         with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_defense_gateway(tmpdir)
+            self.assertTrue(_restart_defense_gateway(tmpdir))
+
+        self.assertEqual(mock_run.call_args_list[0].args[0], ["defenseclaw-gateway", "start"])
+        self.assertEqual(mock_run.call_args_list[0].kwargs["timeout"], 60)
+        self.assertEqual(mock_run.call_args_list[1].args[0], ["defenseclaw-gateway", "status"])
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_timed_out_initial_start_is_cleaned_up_when_unhealthy(self, mock_run):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+        mock_run.side_effect = [
+            subprocess.TimeoutExpired(cmd="defenseclaw-gateway", timeout=60),
+            MagicMock(returncode=1),
+            MagicMock(returncode=0),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(_restart_defense_gateway(tmpdir))
+
+        self.assertEqual(
+            [call.args[0] for call in mock_run.call_args_list],
+            [
+                ["defenseclaw-gateway", "start"],
+                ["defenseclaw-gateway", "status"],
+                ["defenseclaw-gateway", "stop"],
+            ],
+        )
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_timed_out_restart_preserves_previous_generation(self, mock_run, _mock_identity):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+        mock_run.side_effect = [
+            subprocess.TimeoutExpired(cmd="defenseclaw-gateway", timeout=60),
+            MagicMock(returncode=1),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "gateway.pid"), "w") as fh:
+                fh.write(str(os.getpid()))
+            self.assertFalse(_restart_defense_gateway(tmpdir))
+
+        self.assertEqual(
+            [call.args[0] for call in mock_run.call_args_list],
+            [
+                ["defenseclaw-gateway", "restart"],
+                ["defenseclaw-gateway", "status"],
+            ],
+        )
 
 
 class TestCheckOpenclawGatewayEdgeCases(unittest.TestCase):

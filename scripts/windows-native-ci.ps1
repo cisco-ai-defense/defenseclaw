@@ -450,8 +450,8 @@ function Invoke-Contract {
     $root = Assert-SafeStateRoot $StateRoot
     $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
     $profile = Install-PackagedArtifacts (Join-Path $root 'install') ([IO.Path]::GetFullPath($ArtifactRoot))
-    $contractRoot = Join-Path $root 'contract'
-    $contractHome = Join-Path $contractRoot 'home'
+    $contractRoot = $profile.Root
+    $contractHome = $profile.Profile
     foreach ($path in @($contractHome, (Join-Path $contractHome 'AppData\Roaming'), (Join-Path $contractHome 'AppData\Local'), (Join-Path $contractRoot 'temp'))) {
         [IO.Directory]::CreateDirectory($path) | Out-Null
     }
@@ -466,7 +466,7 @@ function Invoke-Contract {
     $env:PATH = "$($profile.VenvScripts);$($profile.Bin);$env:PATH"
     $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
     & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
-        -StateRoot $contractRoot -ResultsPath (Join-Path $root 'results.jsonl') `
+        -StateRoot $contractRoot -HomeRoot $contractHome -ResultsPath (Join-Path $root 'results.jsonl') `
         -ArtifactPath (Join-Path $root 'contract-diagnostics')
 }
 

@@ -41,6 +41,29 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Run native Windows Go DACL regressions explicitly
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          $daclTests = @(
+            'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
+            'TestWriteWindowsPreservesStricterExistingDACL',
+            'TestWindowsWriteLikeAccess',
+            'TestWindowsTrustedOwner',
+            'TestRejectUntrustedWindowsWriteACEs',
+            'TestHookAPITokenWindowsRejectsUntrustedDirectoryACL',
+            'TestHookAPITokenWindowsAllowsReadOnlyUnsupportedAllowACE',
+            'TestHookAPITokenWindowsAllowsInheritOnlyCreatorOwnerTemplate',
+            'TestHookAPITokenWindowsAllowsOwnerRightsACE',
+            'TestHookAPITokenWindowsRejectsDirectCreatorOwnerACE',
+            'TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor',
+            'TestHookAPITokenWindowsAllowsGenericWriteOnSharedAncestor',
+            'TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor'
+          )
+          $daclTestPattern = '^(' + ($daclTests -join '|') + ')$'
+          Invoke-WindowsNativeProcess $go @('test', '-v', '-count=1', '-run', $daclTestPattern, './internal/safefile', './internal/managed', './internal/gateway/connector') -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-dacl-test.log') | Out-Null
       - name: Full native Windows Go test, vet, and build
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
@@ -87,6 +110,12 @@ jobs:
         run: uv sync --frozen --python 3.12
       - name: Stage packaged runtime data with PowerShell
         run: ./scripts/windows-native-ci.ps1 -Operation stage-package-data
+      - name: Validate registered Windows Codex and Claude hook commands
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          $uv = (Get-Command uv.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_cmd_doctor_windows_hooks.py', '-q') -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-doctor-windows-hooks.log') | Out-Null
       - name: Run every Python test, including headless TUI tests
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun

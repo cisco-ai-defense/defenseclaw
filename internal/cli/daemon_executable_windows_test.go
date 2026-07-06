@@ -142,9 +142,72 @@ otel:
 		t.Fatalf("authenticated repeated start = exit %d; output:\n%s", repeatExit, repeatOutput)
 	}
 	assertExecutableTestListenerOwner(t, port, managedPID)
+
+	// Reproduce the post-setup transaction state where a new API port has been
+	// committed before the gateway is asked to restart. A foreign owner on the
+	// new port must produce a truthful non-zero result without stopping the
+	// previously healthy generation. Rolling the config back to its prior
+	// snapshot must then let a real executable restart replace that exact
+	// managed listener.
+	foreignConfigListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignConfigPort := foreignConfigListener.Addr().(*net.TCPAddr).Port
+	foreignConfigOpen := true
+	t.Cleanup(func() {
+		if foreignConfigOpen {
+			_ = foreignConfigListener.Close()
+		}
+	})
+	changedConfig := strings.Replace(
+		configText,
+		fmt.Sprintf("api_port: %d", port),
+		fmt.Sprintf("api_port: %d", foreignConfigPort),
+		1,
+	)
+	if changedConfig == configText {
+		t.Fatal("failed to create changed-port config fixture")
+	}
+	configPath := filepath.Join(home, config.DefaultConfigName)
+	if err := os.WriteFile(configPath, []byte(changedConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changedRestartOutput, changedRestartExit := runGatewayExecutablePowerShell(t, binary, home, "restart")
+	if changedRestartExit == 0 {
+		t.Fatalf("changed-config restart LASTEXITCODE = 0, want nonzero on foreign collision; output:\n%s", changedRestartOutput)
+	}
+	if !strings.Contains(changedRestartOutput, "foreign process PID") || strings.Contains(changedRestartOutput, "OK (PID") {
+		t.Fatalf("changed-config restart was not a truthful terminal collision failure:\n%s", changedRestartOutput)
+	}
+	assertExecutableTestListenerOwner(t, foreignConfigPort, os.Getpid())
+	assertExecutableTestListenerOwner(t, port, managedPID)
+	if stillRunning, stillPID := d.IsRunning(); !stillRunning || stillPID != managedPID {
+		t.Fatalf("previous runtime after rejected config = (running=%v, PID=%d), want PID %d", stillRunning, stillPID, managedPID)
+	}
+	if status, err := fetchSidecarStatus(&http.Client{Timeout: time.Second}, sidecarStatusURL(cfg), token); err != nil {
+		t.Fatalf("previous runtime health after rejected config: %v", err)
+	} else if err := verifyGatewayRuntimeIdentity(status, managedPID, home); err != nil {
+		t.Fatalf("previous runtime identity after rejected config: %v", err)
+	}
+	if pendingConfig, err := os.ReadFile(configPath); err != nil {
+		t.Fatalf("read pending changed config: %v", err)
+	} else if string(pendingConfig) != changedConfig {
+		t.Fatalf("failed restart rewrote pending config:\n%s", pendingConfig)
+	}
+	assertExecutableTestArtifactMissing(t, filepath.Join(home, watchdogPIDFile))
+	assertExecutableTestArtifactMissing(t, filepath.Join(home, watchdogStateFile))
+
+	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := foreignConfigListener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	foreignConfigOpen = false
 	restartOutput, restartExit = runGatewayExecutablePowerShell(t, binary, home, "restart")
 	if restartExit != 0 {
-		t.Fatalf("managed restart LASTEXITCODE = %d, want 0; output:\n%s", restartExit, restartOutput)
+		t.Fatalf("rolled-back managed restart LASTEXITCODE = %d, want 0; output:\n%s", restartExit, restartOutput)
 	}
 	running, restartedPID := d.IsRunning()
 	if !running || restartedPID == managedPID || !d.HasManagedProcessIdentity(restartedPID) {

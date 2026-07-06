@@ -11,8 +11,12 @@ cancelled, or skipped.
 
 The gate certifies:
 
-- the full Go suite plus `go vet` and native gateway/hook builds;
+- explicit native Go DACL regressions, followed by the full Go suite, `go vet`,
+  and native gateway/hook builds;
 - every Python test, including the headless Textual TUI suite;
+- explicit Windows Doctor checks for the registered Codex and Claude hook
+  commands, including packaged post-setup tamper rejection, byte-for-byte
+  recovery, and native-only repair guidance;
 - PowerShell parsing, timeout/process-tree cleanup, redaction, and workflow
   contracts;
 - a release-shaped Windows x64 gateway zip and Python wheel;
