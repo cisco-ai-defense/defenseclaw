@@ -681,8 +681,11 @@ if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
 fi
 
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-"${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
+"${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet \
+    --reinstall --no-cache --strict "${STAGING_DIR}/${whl_name}" \
     || die "Failed to install CLI wheel"
+"${UV_BIN}" --no-config pip check --python "${VENV_PYTHON}" \
+    || die "CLI dependency validation failed; launcher was not published"
 ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
 ok "Python CLI installed"
 

@@ -20,7 +20,7 @@ button accents, and (when ``App.ansi_color = None``) the rich named
 colors like ``red``/``green``/``yellow`` that some panel detail
 rendering uses.
 
-The two ``ansi-*`` themes (Textual 8.2.5) are the headline pick: they
+The ``textual-ansi`` theme is the headline pick: it
 defer to the user's terminal palette, so anyone who's customized
 their terminal to Solarized / Tokyo Night / Dracula / etc. gets that
 look reflected in the TUI without us shipping a separate theme.
@@ -53,8 +53,8 @@ class ThemeChoice:
     group: str  # ``"ANSI"`` / ``"Dark"`` / ``"Light"`` for visual grouping.
 
 
-# Hand-curated subset of the 21 Textual >=8.2.7 built-in themes. We
-# expose the two ANSI themes first (they're the most distinctive
+# Hand-curated subset of the Textual 7.5 built-in themes. We expose
+# the ANSI theme first (it's the most distinctive
 # operator-visible change), then dark themes, then light themes. Keeping
 # the list literal (vs. importing ``textual.theme.BUILTIN_THEMES``) lets
 # us:
@@ -64,8 +64,7 @@ class ThemeChoice:
 #     palette and would be confusing.
 THEME_CHOICES: tuple[ThemeChoice, ...] = (
     # ANSI — defer to the operator's terminal palette.
-    ThemeChoice("ansi-dark", "ANSI (Dark terminal)", "ANSI"),
-    ThemeChoice("ansi-light", "ANSI (Light terminal)", "ANSI"),
+    ThemeChoice("textual-ansi", "ANSI (Terminal palette)", "ANSI"),
     # Dark themes.
     ThemeChoice("textual-dark", "Textual Dark (default)", "Dark"),
     ThemeChoice("tokyo-night", "Tokyo Night", "Dark"),
@@ -79,8 +78,6 @@ THEME_CHOICES: tuple[ThemeChoice, ...] = (
     ThemeChoice("rose-pine-moon", "Rosé Pine Moon", "Dark"),
     ThemeChoice("atom-one-dark", "Atom One Dark", "Dark"),
     ThemeChoice("catppuccin-mocha", "Catppuccin Mocha", "Dark"),
-    ThemeChoice("catppuccin-frappe", "Catppuccin Frappé", "Dark"),
-    ThemeChoice("catppuccin-macchiato", "Catppuccin Macchiato", "Dark"),
     # Light themes.
     ThemeChoice("textual-light", "Textual Light", "Light"),
     ThemeChoice("solarized-light", "Solarized Light", "Light"),

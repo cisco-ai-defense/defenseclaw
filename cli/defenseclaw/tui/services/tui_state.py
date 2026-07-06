@@ -54,7 +54,7 @@ class TUIState:
     # shrink the on-disk count without time travelling.
     panel_seen_counts: dict[str, int] = field(default_factory=dict)
     # Operator-chosen Textual theme id (e.g. ``"tokyo-night"``,
-    # ``"ansi-dark"``). Empty string means "use the app default"
+    # ``"textual-ansi"``). Empty string means "use the app default"
     # (``textual-dark``) and is the migration value for existing state
     # files that pre-date the theme picker.
     theme: str = ""

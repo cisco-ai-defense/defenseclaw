@@ -1690,12 +1690,11 @@ class DefenseClawTUI(App[None]):
             text = f"{key} {label}"
             if unread:
                 text = f"{text} ({unread})"
-            # Textual >=8.0 ``Tabs.get_tab(id) -> Tab | None`` replaces
-            # the older ``query_one("#tab-id", Tab)`` + NoMatches dance.
-            # It returns the tab widget directly (or None for unknown
-            # ids), so we skip exception-as-control-flow.
-            tab = tabs.get_tab(f"tab-{name}")
-            if tab is None:
+            # ``Tabs.get_tab`` is Textual 8-only.  Querying the child widget
+            # works across the scanner-compatible Textual 7.x line and 8.x.
+            try:
+                tab = tabs.query_one(f"#tab-{name}", Tab)
+            except NoMatches:
                 continue
             # Textual Tab.label accepts either str or rich Text; str
             # is the simplest and avoids markup escaping issues with

@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import tarfile
 import unittest
 import zipfile
@@ -116,9 +117,17 @@ class TestUpgradeWheelInstall(unittest.TestCase):
 
             _install_wheel("/tmp/defenseclaw.whl", "darwin")
 
-        pip_call = run_mock.call_args_list[-1].args[0]
+        pip_call = next(
+            call.args[0]
+            for call in run_mock.call_args_list
+            if call.args[0][2:4] == ["pip", "install"]
+        )
         self.assertEqual(pip_call[:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
         self.assertEqual(os.path.normcase(os.path.normpath(pip_call[5])), os.path.normcase(venv_python))
+        self.assertIn("--reinstall", pip_call)
+        self.assertIn("--strict", pip_call)
+        check_call = run_mock.call_args_list[-1].args[0]
+        self.assertEqual(check_call[:4], ["/usr/bin/uv", "--no-config", "pip", "check"])
 
     @staticmethod
     def _seed_windows_install(home):
@@ -204,6 +213,37 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             with open(shim) as stream:
                 self.assertEqual(stream.read(), "existing shim")
             self.assertIn("Cannot remove shadowing CLI launcher", err.call_args.args[0])
+
+    def test_windows_pip_check_failure_preserves_existing_launcher(self):
+        with TemporaryDirectory() as home:
+            _venv, install_dir = self._seed_windows_install(home)
+            shim = os.path.join(install_dir, "defenseclaw.cmd")
+            with open(shim, "w") as stream:
+                stream.write("existing launcher")
+
+            def fail_check(args, **kwargs):
+                if args[2:4] == ["pip", "check"]:
+                    raise subprocess.CalledProcessError(
+                        1,
+                        args,
+                        output="scanner requires compatible-runtime",
+                        stderr="dependency check failed",
+                    )
+                return Mock(returncode=0)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run", side_effect=fail_check), \
+                 patch("defenseclaw.commands.cmd_upgrade._publish_windows_cli_launcher") as publish, \
+                 patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(ctx.exception.code, 1)
+            publish.assert_not_called()
+            with open(shim) as stream:
+                self.assertEqual(stream.read(), "existing launcher")
+            self.assertIn("Managed CLI dependency validation failed", err.call_args.args[0])
 
     def test_windows_launcher_publication_is_idempotent_without_exe_shadow(self):
         with TemporaryDirectory() as home:

@@ -795,7 +795,7 @@ async def test_tool_policy_tab_is_removed() -> None:
         await pilot.pause()
 
         tabs = app.query_one("#tabs", Tabs)
-        assert tabs.get_tab("tab-tools") is None
+        assert not tabs.query("#tab-tools")
         assert all("Tool Policy" not in str(tab.label) for tab in tabs.query(Tab))
 
         await pilot.press("T")

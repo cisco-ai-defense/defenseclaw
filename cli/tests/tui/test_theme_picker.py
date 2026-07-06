@@ -54,12 +54,10 @@ def test_theme_choices_have_no_duplicates() -> None:
 
 
 def test_theme_choices_include_ansi_themes_first() -> None:
-    """``ansi-dark`` and ``ansi-light`` lead the list — they're the headline 8.2.5 feature."""
+    """The scanner-compatible ANSI theme leads the list."""
 
-    assert THEME_CHOICES[0].name == "ansi-dark"
-    assert THEME_CHOICES[1].name == "ansi-light"
+    assert THEME_CHOICES[0].name == "textual-ansi"
     assert THEME_CHOICES[0].group == "ANSI"
-    assert THEME_CHOICES[1].group == "ANSI"
 
 
 def test_theme_choices_only_reference_real_textual_themes() -> None:
@@ -81,21 +79,21 @@ def test_theme_choices_only_reference_real_textual_themes() -> None:
 def test_theme_choice_is_frozen() -> None:
     """``ThemeChoice`` is a frozen dataclass — accidental mutation should raise."""
 
-    choice = ThemeChoice("ansi-dark", "ANSI Dark", "ANSI")
+    choice = ThemeChoice("textual-ansi", "ANSI", "ANSI")
     with pytest.raises(Exception):
-        choice.name = "ansi-light"  # type: ignore[misc]
+        choice.name = "textual-dark"  # type: ignore[misc]
 
 
 @pytest.mark.asyncio
 async def test_enter_commits_current_selection() -> None:
     """Pressing Enter without moving the cursor returns the initial theme."""
 
-    app = _HarnessApp(current_theme="ansi-dark")
+    app = _HarnessApp(current_theme="textual-ansi")
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-    assert app.dismissed == "ansi-dark"
+    assert app.dismissed == "textual-ansi"
 
 
 @pytest.mark.asyncio
@@ -123,14 +121,14 @@ async def test_escape_returns_none_and_rolls_back_preview() -> None:
 async def test_down_then_enter_commits_next_theme() -> None:
     """Scrolling down once and pressing Enter returns the next theme id."""
 
-    app = _HarnessApp(current_theme="ansi-dark")  # index 0
+    app = _HarnessApp(current_theme="textual-ansi")  # index 0
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("down")
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-    # ``ansi-dark`` (index 0) -> ``ansi-light`` (index 1) per
+    # ``textual-ansi`` (index 0) -> ``textual-dark`` (index 1) per
     # ``THEME_CHOICES`` ordering.
     assert app.dismissed == THEME_CHOICES[1].name
 
@@ -142,7 +140,7 @@ async def test_rows_render_click_action_links() -> None:
 
     from textual.widgets import Static
 
-    app = _HarnessApp(current_theme="ansi-dark")
+    app = _HarnessApp(current_theme="textual-ansi")
     async with app.run_test(size=(80, 40)) as pilot:
         await pilot.pause()
         content = str(app.screen.query_one("#theme-picker-list", Static).content)
@@ -156,11 +154,11 @@ async def test_clicking_a_row_selects_and_previews_it() -> None:
     """Clicking a theme row selects it and live-previews it; Enter then
     applies that theme."""
 
-    app = _HarnessApp(current_theme="ansi-dark")
+    app = _HarnessApp(current_theme="textual-ansi")
     async with app.run_test(size=(80, 40)) as pilot:
         await pilot.pause()
-        # List lines: 0 "── ANSI ──", 1 ansi-dark(0), 2 ansi-light(1),
-        # 3 "── Dark ──", 4 textual-dark(2), 5 tokyo-night(3).
+        # List lines: 0 "── ANSI ──", 1 textual-ansi(0),
+        # 2 "── Dark ──", 3 textual-dark(1), 4 tokyo-night(2), 5 nord(3).
         await pilot.click("#theme-picker-list", offset=(3, 5))
         await pilot.pause()
         assert app.screen.selected_index == 3

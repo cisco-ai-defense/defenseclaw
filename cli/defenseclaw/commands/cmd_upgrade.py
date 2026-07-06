@@ -1395,7 +1395,45 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
         click.echo(f"  {ux.dim('→')} Creating venv ...")
         subprocess.run([uv, "--no-config", "venv", venv, "--python", "3.12"], check=True)
 
-    subprocess.run([uv, "--no-config", "pip", "install", "--python", venv_python, "--quiet", whl_path], check=True)
+    managed_env = os.environ.copy()
+    managed_env.pop("PYTHONHOME", None)
+    managed_env.pop("PYTHONPATH", None)
+    subprocess.run(
+        [
+            uv,
+            "--no-config",
+            "pip",
+            "install",
+            "--python",
+            venv_python,
+            "--quiet",
+            "--reinstall",
+            "--no-cache",
+            "--strict",
+            whl_path,
+        ],
+        check=True,
+        env=managed_env,
+    )
+    try:
+        subprocess.run(
+            [uv, "--no-config", "pip", "check", "--python", venv_python],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            env=managed_env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        output = ""
+        if isinstance(exc, subprocess.CalledProcessError):
+            output = "\n".join((exc.stdout or "", exc.stderr or ""))
+        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
+        suffix = f": {detail[:1000]}" if detail else ""
+        ux.err(f"Managed CLI dependency validation failed{suffix}", indent="  ")
+        raise SystemExit(1) from exc
 
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)
