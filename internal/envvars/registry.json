@@ -1536,6 +1536,45 @@
       "since": "0.7.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_MARKER",
+      "category": "test_fixture",
+      "purpose": "Sentinel environment variable used by the ClawHub subprocess test fixture to verify the child receives the isolated allowlisted environment.",
+      "default": "unset",
+      "accepted_values": ["test sentinel string", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_cmd_skill.py:862", "description": "ClawHub subprocess environment isolation regression fixture"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLAWHUB_LAUNCHER",
+      "category": "hook_internal",
+      "purpose": "Absolute executable path passed through the generated Windows cmd wrapper used to launch ClawHub without shell interpolation.",
+      "default": "unset (set only for the child wrapper process)",
+      "accepted_values": ["absolute executable path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:202", "description": "Windows ClawHub launcher wrapper quotes and expands this internal value"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLAWHUB_CWD",
+      "category": "hook_internal",
+      "purpose": "Validated working directory passed through the generated Windows cmd wrapper used to launch ClawHub.",
+      "default": "unset (set only for the child wrapper process)",
+      "accepted_values": ["absolute directory path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:203", "description": "Windows ClawHub launcher wrapper changes to this internal working directory"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",

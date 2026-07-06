@@ -2297,9 +2297,6 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     Python-side rotation produces the same byte-shape on disk as the
     Go-side first-boot synthesis.
     """
-    parent = os.path.dirname(dotenv_path) or "."
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-
     lines: list[str] = []
     if os.path.exists(dotenv_path):
         with open(dotenv_path, encoding="utf-8") as fh:
@@ -2313,16 +2310,9 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     lines.append(f"DEFENSECLAW_GATEWAY_TOKEN={new_token}")
     body = "\n".join(lines) + "\n"
 
-    tmp = dotenv_path + ".tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        os.write(fd, body.encode("utf-8"))
-    finally:
-        os.close(fd)
-    # Belt-and-suspenders: chmod in case the umask widened the perms.
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, dotenv_path)
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    atomic_write_private_bytes(dotenv_path, body.encode("utf-8"))
 
 
 @setup.command("rotate-token")
@@ -4395,7 +4385,11 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
     """
     if not data_dir:
         return
-    if connector not in _CONNECTOR_NAMES:
+    # Validate against the stable recognized connector catalog rather than the
+    # import-time host-filtered menu. Availability is enforced by the setup
+    # command before this helper runs, while the hint format must remain valid
+    # under platform-injected tests and cross-host config migration.
+    if connector not in _CONNECTOR_NAMES_FALLBACK:
         return
     try:
         os.makedirs(data_dir, exist_ok=True)

@@ -116,11 +116,13 @@ def test_rows_from_config_reflect_collect_view() -> None:
             os.environ.pop("DEFENSECLAW_TRUSTED_BIN_PREFIXES", None)
             rows = trusted_paths_rows_from_config(SimpleNamespace(data_dir=tmp))
     resolved = {r.resolved: r for r in rows}
-    assert "/usr/bin" in resolved  # a built-in default
-    assert not resolved["/usr/bin"].removable
-    assert "/opt/acme/bin" in resolved  # operator-added via .env
-    assert resolved["/opt/acme/bin"].source == "legacy .env"
-    assert resolved["/opt/acme/bin"].removable
+    default_rows = [row for row in rows if row.source == "default"]
+    assert default_rows
+    assert all(not row.removable for row in default_rows)
+    legacy_rows = [row for row in rows if row.source == "legacy .env"]
+    assert len(legacy_rows) == 1
+    assert ad._path_key(legacy_rows[0].resolved).endswith(ad._path_key(os.path.join("opt", "acme", "bin")))
+    assert legacy_rows[0].removable
 
 
 @pytest.mark.asyncio

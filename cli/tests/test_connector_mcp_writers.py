@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 
 import pytest
 from defenseclaw import connector_paths
@@ -41,6 +40,8 @@ from defenseclaw.connector_paths import (
     set_mcp_server,
     unset_mcp_server,
 )
+
+from tests.permissions import assert_owner_only_directory, assert_owner_only_file
 
 # ---------------------------------------------------------------------------
 # OpenClaw — delegation to injected setter/unsetter
@@ -144,11 +145,7 @@ class TestClaudeCodeWrites:
             {"command": "uvx", "env": {"API_KEY": "secret"}},
         )
         settings = tmp_path / ".claude" / "settings.json"
-        mode = stat.S_IMODE(settings.stat().st_mode)
-        assert mode == 0o600, (
-            f"settings.json mode = {oct(mode)}, want 0o600 — file may "
-            "contain API keys in env: blocks and must be owner-only"
-        )
+        assert_owner_only_file(settings)
 
     def test_unset_removes_key(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -193,8 +190,7 @@ class TestCodexWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("codex", "demo", {"command": "uvx"})
         path = tmp_path / ".codex" / "config.toml"
-        mode = stat.S_IMODE(path.stat().st_mode)
-        assert mode == 0o600
+        assert_owner_only_file(path)
 
     def test_unset_removes_key(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -248,8 +244,7 @@ class TestCodexWrites:
         # leaks every config path DefenseClaw has ever touched.
         registry_dir = tmp_path / "dchome" / "connector_backups" / "mcp"
         assert registry_dir.is_dir()
-        mode = stat.S_IMODE(registry_dir.stat().st_mode)
-        assert mode == 0o700, f"registry dir mode {oct(mode)} != 0o700"
+        assert_owner_only_directory(registry_dir)
 
         # Restore from a totally different cwd — proves the fix.
         far_away = tmp_path / "elsewhere"
@@ -365,8 +360,7 @@ class TestAntigravityWrites:
             "demo",
             {"command": "x", "env": {"API_KEY": "secret"}},
         )
-        mode = stat.S_IMODE(self._global(tmp_path).stat().st_mode)
-        assert mode == 0o600
+        assert_owner_only_file(self._global(tmp_path))
 
     def test_unset_removes_entry_preserves_others(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -592,8 +586,7 @@ class TestOpenCodeWrites:
     def test_set_uses_0o600(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("opencode", "demo", {"command": "x", "env": {"API_KEY": "s"}})
-        mode = stat.S_IMODE(self._global(tmp_path).stat().st_mode)
-        assert mode == 0o600, f"opencode.json mode {oct(mode)} != 0o600"
+        assert_owner_only_file(self._global(tmp_path))
 
     def test_unset_removes_entry_preserves_others(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))

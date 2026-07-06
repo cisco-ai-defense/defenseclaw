@@ -746,6 +746,9 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	if webhooks := s.webhooksSnapshot(); webhooks != nil {
 		webhooks.Close()
 	}
+	if aiDiscovery := s.swapAIDiscovery(nil); aiDiscovery != nil {
+		_ = aiDiscovery.Close()
+	}
 	// Drain the async judge-persistence queue BEFORE the audit DB
 	// handle is closed: any rows still buffered after a SIGTERM
 	// must land in SQLite or they are lost forever. Shutdown
@@ -1246,11 +1249,14 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if aiRestart {
-		s.swapAIDiscovery(nextAIDiscovery)
+		previousAIDiscovery := s.swapAIDiscovery(nextAIDiscovery)
 		if api := s.apiSnapshot(); api != nil {
 			api.SetAIDiscoveryService(nextAIDiscovery)
 		}
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
+		if previousAIDiscovery != nil {
+			_ = previousAIDiscovery.Close()
+		}
 	}
 
 	if watcherRestart {

@@ -16,9 +16,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func buildGitListFixture(t *testing.T, output string, outputBytes int) string {
+	t.Helper()
+	binDir := t.TempDir()
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	source := filepath.Join(binDir, "main.go")
+	program := "package main\nimport (\"bytes\"; \"fmt\"; \"os\")\nvar _ = bytes.Repeat\nvar _ = fmt.Print\nvar _ = os.Stdout\nfunc main() {"
+	if outputBytes > 0 {
+		program += fmt.Sprintf(" _, _ = os.Stdout.Write(bytes.Repeat([]byte{'x'}, %d)) ", outputBytes)
+	} else {
+		program += " fmt.Print(" + strconv.Quote(output) + ") "
+	}
+	program += "}\n"
+	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("go", "build", "-o", filepath.Join(binDir, name), source).Run(); err != nil {
+		t.Fatalf("build git fixture: %v", err)
+	}
+	return binDir
+}
 
 // TestRunGitList_CapsRunawayStdout (L-2) verifies the io.LimitReader
 // guard rejects a git invocation that streams more than the byte cap
@@ -30,26 +56,8 @@ import (
 // The shim writes more than runGitListMaxBytes bytes to stdout, which
 // exercises the cap in runGitList without needing a real repo.
 func TestRunGitList_CapsRunawayStdout(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh available")
-	}
-	tmpDir := t.TempDir()
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	gitShim := filepath.Join(binDir, "git")
-	// 16 MiB > runGitListMaxBytes (8 MiB). Each "x" line is 4097
-	// bytes including newline so we need ~4100 lines to exceed the
-	// cap; printing a 16-MiB block via head is simpler.
-	script := fmt.Sprintf(`#!/bin/sh
-# Emit %d bytes of payload (well over runGitListMaxBytes).
-yes "spam-line-that-is-not-trivially-short" | head -c %d
-exit 0
-`, runGitListMaxBytes*2, runGitListMaxBytes*2)
-	if err := os.WriteFile(gitShim, []byte(script), 0o700); err != nil {
-		t.Fatalf("write git shim: %v", err)
-	}
+	// 16 MiB > runGitListMaxBytes (8 MiB).
+	binDir := buildGitListFixture(t, "", runGitListMaxBytes*2)
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -138,22 +146,7 @@ func TestRunGitList_HostileRepoIgnoresLocalConfig(t *testing.T) {
 }
 
 func TestRunGitList_AcceptsSmallOutput(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh available")
-	}
-	tmpDir := t.TempDir()
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	gitShim := filepath.Join(binDir, "git")
-	script := `#!/bin/sh
-printf 'a\nb\nc\n'
-exit 0
-`
-	if err := os.WriteFile(gitShim, []byte(script), 0o700); err != nil {
-		t.Fatalf("write git shim: %v", err)
-	}
+	binDir := buildGitListFixture(t, "a\nb\nc\n", 0)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	got, err := runGitList(context.Background(), t.TempDir(), "ls-files")

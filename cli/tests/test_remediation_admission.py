@@ -556,9 +556,12 @@ class TestF0421OwnerWritableTrustedBinary(unittest.TestCase):
                 # trusted prefix is swappable by a non-root principal.
                 self.assertFalse(ad._is_trusted_binary_path(binary))
 
+    @unittest.skipIf(
+        os.name == "nt", "POSIX owner-writable executable trust; Windows DACL admission has dedicated coverage"
+    )
     def test_operator_opt_in_prefix_still_trusts_binary(self):
         bin_dir, binary = self._make_user_owned_binary()
-        with patch.object(ad, "_TRUSTED_BIN_PREFIXES_DEFAULT", ()):
+        with patch.object(ad, "_builtin_trusted_bin_prefixes", return_value=()):
             with patch.dict(
                 os.environ,
                 {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": bin_dir},

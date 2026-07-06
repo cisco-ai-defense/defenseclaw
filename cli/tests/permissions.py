@@ -25,8 +25,9 @@ import subprocess
 
 def grant_everyone(path: str | os.PathLike[str], perm: str = "F") -> None:
     """Grant the well-known Everyone SID broad access for negative-path tests."""
+    ace = f"*S-1-1-0:{perm}" if os.path.isfile(path) else f"*S-1-1-0:(OI)(CI){perm}"
     subprocess.run(
-        ["icacls", os.fspath(path), "/grant", f"*S-1-1-0:(OI)(CI){perm}"],
+        ["icacls", os.fspath(path), "/grant", ace],
         check=True,
         capture_output=True,
         text=True,
@@ -67,3 +68,13 @@ def assert_owner_only_file(path: str | os.PathLike[str]) -> None:
     }
     assert "S-1-5-18" in writable_sids
     assert owner_sid in writable_sids or "S-1-3-4" in writable_sids
+
+
+def assert_owner_only_directory(path: str | os.PathLike[str]) -> None:
+    """Assert POSIX 0700 or the equivalent protected Windows DACL."""
+    if os.name != "nt":
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o700, f"expected 0700, got {oct(mode)}"
+        return
+
+    assert_owner_only_file(path)

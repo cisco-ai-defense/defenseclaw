@@ -308,6 +308,7 @@ class TestPaths(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
 
+    @unittest.skipIf(os.name == "nt", "POSIX group-read mode has no Windows DACL equivalent")
     def test_secure_write_preserves_group_read_without_write(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
         path.write_text("config_version: 6\n")
@@ -315,6 +316,7 @@ class TestPaths(unittest.TestCase):
         config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
 
+    @unittest.skipIf(os.name == "nt", "fallback covers POSIX platforms without fchmod")
     def test_secure_write_uses_path_chmod_without_fchmod(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
         with patch.object(config_mod.os, "fchmod", None):

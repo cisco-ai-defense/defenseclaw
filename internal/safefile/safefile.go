@@ -138,7 +138,7 @@ func write(path string, data []byte) error {
 	if err := preserveExistingProtection(path, tmpName); err != nil {
 		return fmt.Errorf("safefile: preserve existing protection: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("safefile: rename: %w", err)
 	}
 	if d, err := os.Open(dir); err == nil {
@@ -200,4 +200,15 @@ func ProtectDirectory(path string) error {
 		return err
 	}
 	return protectDirectory(path)
+}
+
+// ProtectFile applies the platform-native owner-only protection contract to an
+// existing regular file.
+func ProtectFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return protectFile(path, f)
 }

@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestCompareSnapshots_NoDrift(t *testing.T) {
@@ -484,7 +485,7 @@ func TestRescan_FromZeptoClawConfig(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testenv.SetHome(t, tmpHome)
 
 	zcDir := filepath.Join(tmpHome, ".zeptoclaw")
 	if err := os.MkdirAll(zcDir, 0o755); err != nil {
@@ -527,7 +528,7 @@ func TestRescan_FromClaudeSettingsJSON(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testenv.SetHome(t, tmpHome)
 
 	ccDir := filepath.Join(tmpHome, ".claude")
 	if err := os.MkdirAll(ccDir, 0o755); err != nil {
@@ -568,7 +569,7 @@ func TestRescan_FromCodexConfigToml(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	codexDir := filepath.Join(home, ".codex")
 	if err := os.MkdirAll(codexDir, 0o700); err != nil {
 		t.Fatal(err)

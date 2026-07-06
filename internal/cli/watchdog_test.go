@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -507,6 +508,11 @@ func TestWatchdogDispatchesOneOutageAndOneRecovery(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{string(audit.ActionGatewayDown), string(audit.ActionGatewayRecovered)}
+	// WebhookDispatcher intentionally delivers endpoints asynchronously; pin
+	// exactly-once transition delivery without imposing goroutine completion
+	// order on the receiver.
+	sort.Strings(actions)
+	sort.Strings(want)
 	if !reflect.DeepEqual(actions, want) {
 		t.Fatalf("health transition actions = %v, want %v", actions, want)
 	}

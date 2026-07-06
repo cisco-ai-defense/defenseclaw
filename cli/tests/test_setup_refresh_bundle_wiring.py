@@ -31,16 +31,20 @@ from __future__ import annotations
 import io
 import json
 import os
-import stat
 import tempfile
 import unittest
 import uuid
 from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw import config
 from defenseclaw.context import AppContext
+
+from tests.permissions import assert_owner_only_file
 
 
 def _make_app() -> tuple[AppContext, str]:
@@ -150,7 +154,7 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
 
-        self.assertEqual(stat.S_IMODE(os.stat(env_file).st_mode), 0o600)
+        assert_owner_only_file(env_file)
         entries = _read_dotenv(env_file)
         self.assertEqual(entries["SPLUNK_HEC_TOKEN"], entries["DEFENSECLAW_HEC_TOKEN"])
         uuid.UUID(entries["SPLUNK_HEC_TOKEN"])

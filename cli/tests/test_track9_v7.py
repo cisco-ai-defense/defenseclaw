@@ -22,6 +22,8 @@ from unittest.mock import MagicMock
 
 from click.testing import CliRunner
 
+from tests.environment import isolated_home_env
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -159,11 +161,10 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=120,
-                env={**os.environ, "HOME": tmp},
+                env={**os.environ, **isolated_home_env(tmp)},
                 check=False,
             )
-            if proc.returncode != 0:
-                self.skipTest(f"go scan failed: {proc.stderr}")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
             doc = json.loads(proc.stdout)
             jsonschema.validate(instance=doc, schema=schema)
 

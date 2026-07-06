@@ -25,9 +25,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.connector_paths import KNOWN_CONNECTORS

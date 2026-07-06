@@ -521,6 +521,14 @@ def _migrate_0_4_0_tighten_perms(ctx: MigrationContext) -> None:
         if not os.path.isfile(path):
             continue
         try:
+            if os.name == "nt":
+                from defenseclaw.file_permissions import protect_private_file, windows_acl_write_error
+
+                problem = windows_acl_write_error(path)
+                protect_private_file(path)
+                if problem is not None:
+                    ctx.changes.append(f"tightened Windows DACL on {name}")
+                continue
             current = os.stat(path).st_mode & 0o777
             if current == 0o600:
                 continue
@@ -536,6 +544,15 @@ def _migrate_0_4_0_tighten_perms(ctx: MigrationContext) -> None:
         for filename in files:
             path = os.path.join(root, filename)
             try:
+                if os.name == "nt":
+                    from defenseclaw.file_permissions import protect_private_file, windows_acl_write_error
+
+                    problem = windows_acl_write_error(path)
+                    protect_private_file(path)
+                    if problem is not None:
+                        rel = os.path.relpath(path, ctx.data_dir)
+                        ctx.changes.append(f"tightened Windows DACL on {rel}")
+                    continue
                 current = os.stat(path).st_mode & 0o777
                 if current == 0o600:
                     continue
@@ -733,7 +750,7 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
         # newline="" preserves the file's existing line endings (CRLF on a
         # Windows operator's config) so the surgical insert below does not
         # silently normalize the whole file to LF.
-        with open(cfg_path, newline="") as f:
+        with open(cfg_path, encoding="utf-8", newline="") as f:
             text = f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -1103,7 +1120,7 @@ def _read_config_text(cfg_path: str) -> str | None:
     (and occasionally forgotten) per migration.
     """
     try:
-        with open(cfg_path, newline="") as f:
+        with open(cfg_path, encoding="utf-8", newline="") as f:
             return f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")

@@ -284,18 +284,19 @@ class RegistryAndDocsInSyncTests(unittest.TestCase):
 
     def test_docs_in_sync_with_registry(self) -> None:
         import subprocess
+        import sys
 
         script = _REPO_ROOT / "scripts" / "gen_envvars_docs.py"
         self.assertTrue(script.is_file(), "scripts/gen_envvars_docs.py missing")
         result = subprocess.run(
-            ["python3", str(script), "--check"],
+            [sys.executable, str(script), "--check"],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
             self.fail(
                 f"env-vars docs are out of date. Regenerate with "
-                f"`python3 scripts/gen_envvars_docs.py`.\nstderr:\n{result.stderr}"
+                f"`python scripts/gen_envvars_docs.py`.\nstderr:\n{result.stderr}"
             )
 
 

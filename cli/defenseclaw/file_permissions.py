@@ -36,6 +36,26 @@ def reject_reparse_path(path: str | os.PathLike[str]) -> None:
     _reject_reparse_path(target, allow_missing=True)
 
 
+def make_private_directory(path: str | os.PathLike[str]) -> None:
+    """Create or tighten one operator-private directory cross-platform."""
+    target = os.path.abspath(os.fspath(path))
+    _reject_reparse_chain(os.path.dirname(target) or os.curdir)
+    _make_private_directories(target)
+    _reject_reparse_path(target, allow_missing=False)
+    _protect_private_directory(target)
+
+
+def protect_private_file(path: str | os.PathLike[str]) -> None:
+    """Tighten an existing regular file to POSIX 0600 or a private DACL."""
+    target = os.path.abspath(os.fspath(path))
+    _reject_reparse_path(target, allow_missing=False)
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        set_file_mode(fd, target, 0o600)
+    finally:
+        os.close(fd)
+
+
 def set_file_mode(fd: int, path: str, mode: int) -> None:
     """Apply *mode* to the open file described by *fd* and *path*.
 

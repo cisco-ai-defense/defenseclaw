@@ -35,7 +35,7 @@ from defenseclaw.bootstrap import (  # noqa: E402
 
 
 class PidLooksLikeGatewayTests(unittest.TestCase):
-
+    @unittest.skipIf(os.name == "nt", "this assertion exercises the Linux /proc cmdline reader")
     def test_known_binary_name_accepted(self):
         """defenseclaw-gateway in argv0 is the canonical gateway."""
         fake_cmdline = b"defenseclaw-gateway\x00--config=/etc/dc.yaml\x00"

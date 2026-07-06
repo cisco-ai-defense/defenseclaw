@@ -43,6 +43,7 @@ from defenseclaw.config import SeverityAction
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import ActionState, Finding, ScanResult
 
+from tests.environment import requires_symlink_privilege
 from tests.helpers import cleanup_app, make_app_context
 
 
@@ -537,6 +538,7 @@ class TestSkillScanContainment(SkillCommandTestBase):
         scanner.scan.assert_not_called()
 
     @patch("defenseclaw.config.Config.skill_dirs")
+    @requires_symlink_privilege
     def test_f0502_scan_all_skips_symlinked_entry(self, mock_skill_dirs):
         from defenseclaw.commands.cmd_skill import _scan_all
 
@@ -582,6 +584,7 @@ class TestResolvePathFreezesSymlinks(SkillCommandTestBase):
     """F-0503: _resolve_path must reject symlinked candidates and return a
     frozen realpath so a pinned allow entry cannot be retargeted later."""
 
+    @requires_symlink_privilege
     def test_f0503_rejects_symlinked_target(self):
         from defenseclaw.commands.cmd_skill import _resolve_path
 
@@ -603,6 +606,7 @@ class TestResolvePathFreezesSymlinks(SkillCommandTestBase):
         resolved = _resolve_path(self.app, "frozen")
         self.assertEqual(resolved, os.path.realpath(skill_dir))
 
+    @requires_symlink_privilege
     def test_f0503_rejects_symlinked_candidate(self):
         from defenseclaw.commands.cmd_skill import _resolve_path
 

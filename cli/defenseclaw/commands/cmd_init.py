@@ -334,16 +334,16 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # leaking audit state to other local users. Force 0700 on creation
     # *and* tighten any pre-existing directory so the perms are
     # deterministic regardless of umask.
+    from defenseclaw.file_permissions import make_private_directory
+
     for d in dirs:
-        os.makedirs(d, mode=0o700, exist_ok=True)
-        os.chmod(d, 0o700)
+        make_private_directory(d)
 
     external_dirs = list(cfg.skill_dirs())
     for d in external_dirs:
         d_real = os.path.realpath(d)
         if d_real.startswith(data_dir_real + os.sep):
-            os.makedirs(d, mode=0o700, exist_ok=True)
-            os.chmod(d, 0o700)
+            make_private_directory(d)
     click.echo("  Directories:   " + ux._style("created", fg="green"))
 
     _seed_rego_policies(cfg.policy_dir)

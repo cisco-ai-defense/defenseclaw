@@ -1033,7 +1033,7 @@ func (a *APIServer) beginHookExecution(meta llmEventMeta) llmEventMeta {
 	}
 	meta.ExecutionID = stableLLMEventID(
 		"execution", meta.Source, meta.SessionID, meta.AgentID,
-		gatewaylog.ProcessRunID(), strconv.FormatInt(time.Now().UTC().UnixNano(), 10),
+		gatewaylog.ProcessRunID(), strconv.FormatInt(time.Now().UTC().UnixNano(), 10), uuid.NewString(),
 	)
 	a.llmPromptMu.Lock()
 	delete(a.hookSessionTraces, key)

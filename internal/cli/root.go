@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -77,6 +78,11 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	applyPrivacyConfig(cfg)
 	version.SetBinaryVersion(appVersion)
 
+	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
+		if err := safefile.ProtectDirectory(auditDir); err != nil {
+			return fmt.Errorf("failed to prepare audit store directory: %w", err)
+		}
+	}
 	auditStore, err = audit.NewStore(cfg.AuditDB)
 	if err != nil {
 		return fmt.Errorf("failed to open audit store: %w", err)

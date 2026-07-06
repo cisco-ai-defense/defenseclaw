@@ -387,7 +387,7 @@ def _rsync_overwrite(
     preserved: list[str] = []
     errors: list[str] = []
 
-    preserve_norm = tuple(p.strip("/") for p in preserve if p)
+    preserve_norm = tuple(p.replace("\\", "/").strip("/") for p in preserve if p)
 
     for root, dirs, files in os.walk(src):
         rel_root = os.path.relpath(root, src)
@@ -399,7 +399,7 @@ def _rsync_overwrite(
         # caller can show what survived.
         kept_dirs: list[str] = []
         for d in dirs:
-            rel_dir = os.path.join(rel_root, d) if rel_root else d
+            rel_dir = Path(os.path.join(rel_root, d) if rel_root else d).as_posix()
             if _path_is_preserved(rel_dir, preserve_norm):
                 preserved.append(rel_dir)
                 continue
@@ -407,7 +407,7 @@ def _rsync_overwrite(
         dirs[:] = kept_dirs
 
         for fname in files:
-            rel_file = os.path.join(rel_root, fname) if rel_root else fname
+            rel_file = Path(os.path.join(rel_root, fname) if rel_root else fname).as_posix()
             if _path_is_preserved(rel_file, preserve_norm):
                 preserved.append(rel_file)
                 continue
@@ -427,7 +427,7 @@ def _rsync_overwrite(
 
 def _path_is_preserved(rel: str, preserve: tuple[str, ...]) -> bool:
     """Return True if ``rel`` exactly matches or is nested under any preserve entry."""
-    rel_norm = rel.strip("/")
+    rel_norm = rel.replace("\\", "/").strip("/")
     for p in preserve:
         if rel_norm == p:
             return True

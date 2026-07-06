@@ -106,6 +106,7 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
         with patch.object(gateway.shutil, "which", return_value=None):
             self.assertIsNone(gateway.resolve_gateway_binary())
 
+    @unittest.skipIf(os.name == "nt", "Windows executable admission does not use POSIX execute bits")
     def test_canonical_fallback_requires_exec_bit(self):
         # A stray non-executable file at the canonical path must not
         # masquerade as a working binary.

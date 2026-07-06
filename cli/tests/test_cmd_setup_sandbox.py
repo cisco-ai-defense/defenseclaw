@@ -20,6 +20,8 @@ from defenseclaw.commands.cmd_setup_sandbox import (
     write_device_key_provenance,
 )
 
+from tests.environment import requires_symlink_privilege
+
 
 def _patch_no_sudo():
     return patch("defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False)
@@ -201,6 +203,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
                 f"{name} not found",
             )
 
+    @unittest.skipIf(os.name == "nt", "Linux sandbox launcher executable bits have no Windows contract")
     def test_scripts_are_executable(self):
         _generate_launcher_scripts(
             self.data_dir,
@@ -484,6 +487,7 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
 
 
+@unittest.skipIf(os.name == "nt", "OpenShell pre-pairing is part of the unsupported Linux sandbox")
 class TestPrePairDevice(unittest.TestCase):
     def setUp(self):
         self.data_dir = tempfile.mkdtemp(prefix="dclaw-pair-test-")
@@ -951,6 +955,7 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
             [call("tee", "--", "/etc/example"), call("chmod", "600", "--", "/etc/example")],
         )
 
+    @unittest.skipIf(os.name == "nt", "root-owned POSIX trust chain is Linux-only")
     def test_privileged_script_requires_trusted_ancestors(self):
         script = "/opt/defenseclaw/install.sh"
         trusted_file = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
@@ -975,6 +980,7 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
         ):
             self.assertIsNone(cmd_init_sandbox._trusted_root_owned_file(script))
 
+    @unittest.skipIf(os.name == "nt", "root-owned alternatives chain is Linux-only")
     def test_trusted_system_command_accepts_root_owned_alternatives_chain(self):
         link = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)
         executable = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
@@ -1002,6 +1008,7 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
         ):
             self.assertEqual(cmd_init_sandbox._trusted_system_command("iptables"), "/usr/sbin/iptables-nft")
 
+    @requires_symlink_privilege
     def test_existing_openclaw_integration_requires_pin(self):
         with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as sandbox_home:
             target = os.path.join(data_dir, "openclaw")

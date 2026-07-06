@@ -29,11 +29,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import click
+import pytest
 import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
+
+
+def _is_strict_rule_pack(path: str) -> bool:
+    return Path(path).parts[-3:] == ("policies", "guardrail", "strict")
+
+
 from defenseclaw.config import (
     Config,
     GuardrailConfig,
@@ -1218,7 +1227,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
         self.assertTrue(raw["privacy"]["disable_redaction"])
-        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+        self.assertTrue(_is_strict_rule_pack(raw["guardrail"]["rule_pack_dir"]))
 
     def test_yes_alias_updates_rule_pack(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1241,7 +1250,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
-        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+        self.assertTrue(_is_strict_rule_pack(raw["guardrail"]["rule_pack_dir"]))
 
     def test_unscoped_rule_pack_updates_global_for_all_connectors(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1273,11 +1282,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertTrue(gc.rule_pack_dir.endswith("/policies/guardrail/strict"))
+        self.assertTrue(_is_strict_rule_pack(gc.rule_pack_dir))
         for connector in ("antigravity", "codex", "hermes", "opencode"):
             self.assertEqual(gc.connectors[connector].rule_pack_dir, "")
             self.assertTrue(
-                gc.effective_rule_pack_dir(connector).endswith("/policies/guardrail/strict")
+                _is_strict_rule_pack(gc.effective_rule_pack_dir(connector))
             )
 
     def test_scoped_rule_pack_updates_only_requested_connector(self):
@@ -1313,7 +1322,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(gc.rule_pack_dir, "")
         self.assertEqual(gc.connectors["antigravity"].rule_pack_dir, "")
         self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
-        self.assertTrue(gc.connectors["hermes"].rule_pack_dir.endswith("/policies/guardrail/strict"))
+        self.assertTrue(_is_strict_rule_pack(gc.connectors["hermes"].rule_pack_dir))
         self.assertEqual(gc.connectors["opencode"].rule_pack_dir, "")
 
     def test_rule_pack_dir_missing_is_rejected_before_save(self):

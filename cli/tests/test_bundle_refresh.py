@@ -457,17 +457,26 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         outside = Path(self.tmp) / "outside.json"
         outside.write_text("keep me\n", encoding="utf-8")
         link = root / "external-link.json"
-        link.symlink_to(outside)
+        retired = ["../outside.json"]
+        symlink_created = False
+        try:
+            link.symlink_to(outside)
+            retired.append("external-link.json")
+            symlink_created = True
+        except OSError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+                raise
 
         removed, errors = _remove_retired_paths(
             root,
-            ("../outside.json", "external-link.json"),
+            tuple(retired),
         )
 
         self.assertEqual(removed, [])
-        self.assertEqual(len(errors), 2)
+        self.assertEqual(len(errors), len(retired))
         self.assertTrue(outside.exists())
-        self.assertTrue(link.is_symlink())
+        if symlink_created:
+            self.assertTrue(link.is_symlink())
 
 
 class TestIsComposeProjectRunning(unittest.TestCase):

@@ -54,7 +54,7 @@ class TestSkillEnforcer(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(dest, "main.py")))
 
     def test_quarantine_returns_none_for_nonexistent(self):
-        dest = self.enforcer.quarantine("ghost", "/nonexistent/path")
+        dest = self.enforcer.quarantine("ghost", os.path.join(self.skills_root, "nonexistent"))
         self.assertIsNone(dest)
 
     def test_quarantine_overwrites_existing_quarantine(self):

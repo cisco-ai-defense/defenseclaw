@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -23,6 +22,8 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
 from defenseclaw.context import AppContext
+
+from tests.permissions import assert_owner_only_file
 
 
 class RotateTokenFileWriteTests(unittest.TestCase):
@@ -34,8 +35,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
             _rotate_token_atomic_write(dotenv, "deadbeef" * 8)
 
             self.assertTrue(os.path.exists(dotenv))
-            mode = stat.S_IMODE(os.stat(dotenv).st_mode)
-            self.assertEqual(mode, 0o600, f"expected 0o600, got {oct(mode)}")
+            assert_owner_only_file(dotenv)
 
             with open(dotenv) as fh:
                 body = fh.read()

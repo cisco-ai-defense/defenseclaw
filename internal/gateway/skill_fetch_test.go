@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -65,7 +66,10 @@ func TestF3287_SkillFetch_RejectsOutsideRoots(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
 	doFetch := func(target string) *httptest.ResponseRecorder {
-		body := []byte(`{"target":"` + target + `"}`)
+		body, err := json.Marshal(map[string]string{"target": target})
+		if err != nil {
+			t.Fatal(err)
+		}
 		req := httptest.NewRequest(http.MethodPost, "/v1/skill/fetch",
 			bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

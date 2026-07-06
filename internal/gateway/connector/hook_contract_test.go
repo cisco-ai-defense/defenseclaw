@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestHookContractResolution(t *testing.T) {
@@ -423,7 +425,7 @@ func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	workspace := filepath.Join(dir, "repo")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	conn := NewOpenHandsConnector()
 	opts := SetupOpts{
 		DataDir:      filepath.Join(dir, "dc"),

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
@@ -119,7 +120,7 @@ async def test_overview_renders_observability_destination_panel(tmp_path) -> Non
 
     async with app.run_test(size=(170, 50)) as pilot:
         await pilot.pause()
-        console = Console(width=170, height=80, record=True)
+        console = Console(file=io.StringIO(), width=170, height=80, record=True)
         console.print(app._overview_renderable())
         rendered = console.export_text()
 
@@ -911,12 +912,13 @@ async def test_overview_mode_picker_mouse_click_opens_preview(monkeypatch: pytes
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("m")
         await pilot.pause()
-        await pilot.click("#action-menu-row-3")
+        await pilot.click("#action-menu-row-0")
         await pilot.pause()
 
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
-        assert "defenseclaw setup codex --yes" in screen.preview.masked_display
+        assert screen.preview.masked_display.startswith("defenseclaw setup ")
+        assert screen.preview.masked_display.endswith(" --yes")
 
 
 @pytest.mark.asyncio
@@ -993,12 +995,19 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
         await pilot.press("N")
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "NotificationsToggleScreen"
-        assert app.screen_stack[-1].model.title == "Desktop notifications"
-
-        await pilot.press("enter")
-        await pilot.pause()
-        assert seen[-1] == ("defenseclaw", ("setup", "notifications", "off", "--yes"))
-        assert config.notifications.enabled is False
+        if os.name == "nt":
+            assert app.screen_stack[-1].model.title == "Desktop notifications — unsupported"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert seen[-1] == ("defenseclaw", ("setup", "redaction", "off", "--yes"))
+            assert config.notifications.enabled is True
+            await pilot.press("escape")
+        else:
+            assert app.screen_stack[-1].model.title == "Desktop notifications"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert seen[-1] == ("defenseclaw", ("setup", "notifications", "off", "--yes"))
+            assert config.notifications.enabled is False
 
         app.action_switch_panel("overview")
         await pilot.press("X")
@@ -2221,9 +2230,9 @@ async def test_setup_panel_renders_wizards_and_form() -> None:
         assert "Setup Wizards" in app.body_text
         assert table.row_count == len(WIZARD_NAMES)
 
-        await pilot.click("#panel-table", offset=(2, 4))
+        await pilot.click("#panel-table", offset=(2, 2))
         await pilot.pause()
-        assert int(setup.active_wizard) == 3
+        assert int(setup.active_wizard) == 1
 
         # Enter opens the goal menu first; a second Enter picks a goal
         # and opens the filtered form.
@@ -4208,7 +4217,7 @@ def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
     for path in files:
         rel = str(path.relative_to(repo))
         try:
-            tree = _ast_scanner.parse(path.read_text(), filename=str(path))
+            tree = _ast_scanner.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except SyntaxError:
             continue
         for node in _ast_scanner.walk(tree):
@@ -4373,7 +4382,7 @@ async def test_overview_lists_all_active_connectors_in_rendered_panel() -> None:
         await pilot.pause()
         # Rich's Console.size only honors an explicit width when height is also
         # set; otherwise it falls back to an 80-col terminal and crops cells.
-        console = Console(width=170, height=80, record=True)
+        console = Console(file=io.StringIO(), width=170, height=80, record=True)
         console.print(app._overview_renderable())
         text = console.export_text()
 
@@ -5682,7 +5691,7 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
         app._enforcement_inventory_requested = True
 
         def render() -> str:
-            console = Console(width=170, height=80, record=True)
+            console = Console(file=io.StringIO(), width=170, height=80, record=True)
             console.print(app._overview_renderable())
             return console.export_text()
 

@@ -58,6 +58,7 @@ from defenseclaw.observability import (
 )
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.presets import Preset
+from defenseclaw.tui.panels.setup import OBSERVABILITY_PRESETS
 
 # ---------------------------------------------------------------------------
 # flat OTel migration
@@ -271,21 +272,9 @@ class PresetRegistryTests(unittest.TestCase):
                     self.assertIn(preset.sink_kind, ("splunk_hec", "otlp_logs", "http_jsonl"))
 
     def test_tui_preset_list_matches_python(self) -> None:
-        """Guardrail: TUI's observabilityPresets slice must mirror
-        ``preset_choices()`` ordering. The TUI is a separate Go codebase
-        so we grep its source rather than import it.
-        """
-        go_file = os.path.join(os.path.dirname(__file__), "..", "..", "internal", "tui", "setup.go")
-        if not os.path.exists(go_file):
-            self.skipTest(f"{go_file} not found; running outside repo")
-        with open(go_file) as f:
-            source = f.read()
-        for pid in self.EXPECTED_PRESET_IDS:
-            self.assertIn(
-                f'"{pid}"',
-                source,
-                f"preset id '{pid}' missing from internal/tui/setup.go — observabilityPresets drifted from presets.py",
-            )
+        """The current Python TUI preset menu must mirror the registry."""
+        tui_ids = tuple(preset_id for preset_id, _label in OBSERVABILITY_PRESETS)
+        self.assertEqual(tui_ids, tuple(preset_choices()))
 
 
 # ---------------------------------------------------------------------------

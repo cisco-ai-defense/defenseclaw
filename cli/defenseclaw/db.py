@@ -238,10 +238,9 @@ class Store:
         # Always tighten the DB file itself to owner read/write only.
         # This is functionally safe for pre-existing DBs (the owner keeps
         # full access) while closing the world/group-readable hole.
-        try:
-            os.chmod(db_path, 0o600)
-        except OSError:
-            pass
+        from defenseclaw.file_permissions import protect_private_file
+
+        protect_private_file(db_path)
         # Only adjust the parent directory when we just created the DB,
         # so we never mutate an unrelated directory a caller pointed us
         # at (e.g. a shared temp root holding a pre-existing file).
@@ -250,13 +249,18 @@ class Store:
         parent = os.path.dirname(os.path.abspath(db_path))
         if not parent:
             return
-        try:
-            current = stat.S_IMODE(os.stat(parent).st_mode)
-            hardened = current & ~stat.S_IRWXO
-            if hardened != current:
-                os.chmod(parent, hardened)
-        except OSError:
-            pass
+        if os.name == "nt":
+            from defenseclaw.file_permissions import make_private_directory
+
+            make_private_directory(parent)
+        else:
+            try:
+                current = stat.S_IMODE(os.stat(parent).st_mode)
+                hardened = current & ~stat.S_IRWXO
+                if hardened != current:
+                    os.chmod(parent, hardened)
+            except OSError:
+                pass
 
     def init(self) -> None:
         self.db.executescript(SCHEMA)

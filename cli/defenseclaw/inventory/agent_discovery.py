@@ -184,6 +184,14 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     else _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
 )
 
+
+def _builtin_trusted_bin_prefixes() -> tuple[str, ...]:
+    """Resolve identity-dependent Windows defaults at point of use."""
+    if os.name == "nt":
+        return _windows_default_trusted_bin_prefixes()
+    return _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
+
+
 _WINDOWS_EXECUTABLE_EXTENSIONS = frozenset({".com", ".exe", ".bat", ".cmd"})
 
 DISCOVERY_PRECEDENCE: tuple[str, ...] = (
@@ -519,7 +527,7 @@ def _trusted_bin_prefixes(
         piece = piece.strip()
         if piece:
             extras.append(piece)
-    return tuple(_expand_bin_prefixes((*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras)))
+    return tuple(_expand_bin_prefixes((*_builtin_trusted_bin_prefixes(), *extras)))
 
 
 def _path_key(path: str) -> str:
@@ -577,7 +585,7 @@ def _default_trusted_bin_prefixes() -> frozenset[str]:
     opting in via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``. They get a stricter
     ownership requirement (see ``_is_trusted_binary_path``).
     """
-    return frozenset(_expand_bin_prefixes(_TRUSTED_BIN_PREFIXES_DEFAULT))
+    return frozenset(_expand_bin_prefixes(_builtin_trusted_bin_prefixes()))
 
 
 def _bin_chain_is_system_owned(resolved: str, prefix: str) -> bool:
