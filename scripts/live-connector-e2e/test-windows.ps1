@@ -8,7 +8,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $harness = Join-Path $PSScriptRoot 'run-windows.ps1'
-$workflow = Join-Path $root '.github\workflows\connector-live-e2e.yml'
+$nativeHarness = Join-Path $root 'scripts\windows-native-ci.ps1'
+$nativeWorkflow = Join-Path $root '.github\workflows\windows-native.yml'
+$liveWorkflow = Join-Path $root '.github\workflows\connector-live-e2e.yml'
+$ciWorkflow = Join-Path $root '.github\workflows\ci.yml'
+$installer = Join-Path $root 'scripts\install.ps1'
 $mock = Join-Path $PSScriptRoot 'testdata\windows-mock.ps1'
 $temp = Join-Path ([IO.Path]::GetTempPath()) ("dc-windows-harness-test-" + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($temp) | Out-Null
@@ -18,12 +22,20 @@ function Assert-True([bool]$Condition, [string]$Message) {
 }
 
 try {
-    $tokens = $null; $errors = $null
-    [Management.Automation.Language.Parser]::ParseFile($harness, [ref]$tokens, [ref]$errors) | Out-Null
-    Assert-True (@($errors).Count -eq 0) "PowerShell parser errors: $($errors -join '; ')"
+    foreach ($scriptPath in @($harness, $nativeHarness, $installer)) {
+        $tokens = $null; $errors = $null
+        [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors) | Out-Null
+        Assert-True (@($errors).Count -eq 0) "PowerShell parser errors in ${scriptPath}: $($errors -join '; ')"
+    }
     . $harness -NoRun
 
     $pwsh = (Get-Process -Id $PID).Path
+    $profileTest = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-File', $nativeHarness, '-Operation', 'self-test',
+        '-StateRoot', (Join-Path $temp 'isolated-profile')
+    ) -TimeoutSeconds 30
+    Assert-True ($profileTest.ExitCode -eq 0 -and $profileTest.StdOut -match 'self-test passed') 'disposable Windows profile and PATH isolation'
+
     $allow = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'allow') -TimeoutSeconds 5
     Assert-True ($allow.ExitCode -eq 0 -and $allow.StdOut -match 'allow') 'mock allow decision'
 
@@ -63,19 +75,42 @@ try {
     Assert-True (Test-BlockVerdict $jsonl 0) 'block verdict seam'
     Assert-True (Test-OtlpEvent $jsonl 'codex' 0) 'OTLP evidence seam'
 
-    $workflowText = [IO.File]::ReadAllText($workflow)
+    $nativeWorkflowText = [IO.File]::ReadAllText($nativeWorkflow)
+    $liveWorkflowText = [IO.File]::ReadAllText($liveWorkflow)
+    $ciWorkflowText = [IO.File]::ReadAllText($ciWorkflow)
     $harnessText = [IO.File]::ReadAllText($harness)
-    Assert-True ($workflowText -match '(?s)windows-contract:.*?connector: \[codex, claudecode\].*?windows-live:') 'required Windows contract matrix contains Codex and Claude'
-    Assert-True ($workflowText -match '(?s)windows-live:.*?connector: \[codex, claudecode\].*?report:') 'required Windows live matrix contains Codex and Claude'
-    $windowsContractJobs = [regex]::Match($workflowText, '(?s)  windows-harness-static:.*?(?=\n  # -+\n  # Layer B)').Value
-    $windowsLiveJob = [regex]::Match($workflowText, '(?s)  windows-live:.*?(?=\n  # -+\n  # Report)').Value
-    Assert-True ($windowsContractJobs -notmatch 'continue-on-error') 'Windows contract jobs are not advisory'
+    $nativeHarnessText = [IO.File]::ReadAllText($nativeHarness)
+    $installerText = [IO.File]::ReadAllText($installer)
+    Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode\].*?windows-native-required:') 'required Windows contract matrix contains Codex and Claude'
+    Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
+    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract')) {
+        Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
+    }
+    Assert-True ($nativeWorkflowText -match '(?s)windows-native-required:.*?if: \$\{\{ always\(\) \}\}.*?result -ne ''success''') 'aggregate fails skipped or failed dependencies'
+    Assert-True ($nativeWorkflowText -notmatch 'continue-on-error') 'required Windows jobs are not advisory'
+    Assert-True ($nativeWorkflowText -notmatch 'shell:\s*bash') 'dedicated Windows workflow never selects Bash'
+    Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
+    Assert-True ($nativeWorkflowText -match 'go'', ''test'', ''\.\/\.\.\.''' -or $nativeWorkflowText -match "'test', './\.\.\.'") 'full Go suite is required'
+    Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests', '-q'") 'complete Python suite is required'
+    Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
+    Assert-True ($nativeHarnessText -match 'doctor'', ''--json-output' -and $nativeHarnessText -match 'skill'', ''scan' -and $nativeHarnessText -match 'mcp'', ''scan') 'installed artifact smoke covers doctor and scanners'
+    Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
+    Assert-True ($installerText -match '\[switch\]\$NoPersistPath' -and $nativeHarnessText -match '-NoPersistPath') 'CI install opts out of persistent user PATH changes'
+    Assert-True ($nativeHarnessText -match "GetEnvironmentVariable\('Path', 'User'\)" -and $nativeHarnessText -match 'runner user PATH despite -NoPersistPath') 'packaged install verifies the runner user PATH was unchanged'
+    $cleanupFunction = [regex]::Match($nativeHarnessText, '(?s)function Invoke-Cleanup \{.*?\n\}').Value
+    Assert-True ($cleanupFunction -notmatch "@\('stop'\)" -and $cleanupFunction -match 'Stop-StateProcesses') 'fresh-step cleanup cannot target the runner default profile'
+
+    Assert-True ($liveWorkflowText -match '(?s)windows-live:.*?connector: \[codex, claudecode\].*?report:') 'manual Windows live matrix contains Codex and Claude'
+    $windowsLiveJob = [regex]::Match($liveWorkflowText, '(?s)  windows-live:.*?(?=\r?\n  # -+\r?\n  # Report)').Value
     Assert-True ($windowsLiveJob -notmatch 'continue-on-error') 'Windows live jobs are not advisory'
-    Assert-True (($windowsContractJobs + $windowsLiveJob) -notmatch 'shell:\s*bash') 'Windows jobs never select Bash'
-    Assert-True ([regex]::Matches($workflowText, 'failure\(\) \|\| cancelled\(\)').Count -ge 2) 'failure and cancellation diagnostics are uploaded'
-    Assert-True ($workflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
+    Assert-True ($windowsLiveJob -notmatch 'shell:\s*bash') 'Windows live jobs never select Bash'
+    Assert-True ($windowsLiveJob -match "github.event_name == 'workflow_dispatch'") 'provider-secret Windows tests are manual-only'
+    Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
+    Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
+    Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
     Assert-True ($harnessText -notmatch '(?i)\.sh\b|\bwsl\b|git bash|/bin/') 'native harness has no Unix harness dependency'
-    $unpinned = [regex]::Matches($workflowText, '(?m)^\s*-?\s*uses:\s*[^@\s]+@(?![0-9a-f]{40}\b)')
+    Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
+    $unpinned = [regex]::Matches($nativeWorkflowText, '(?m)^\s*-?\s*uses:\s*[^@\s]+@(?![0-9a-f]{40}\b)')
     $unpinnedText = @($unpinned | ForEach-Object { $_.Value }) -join ', '
     Assert-True ($unpinned.Count -eq 0) "external actions must be SHA-pinned: $unpinnedText"
 

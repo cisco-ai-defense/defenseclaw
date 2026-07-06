@@ -10,8 +10,8 @@
 #     received the event, the verdict was shaped correctly, and teardown is
 #     clean. Fork-safe; runs on pull requests as well — one always-on macOS
 #     cell (codex / macOS, intended as a required check) plus the full
-#     Linux + macOS matrix when connector code changes. Required native-Windows
-#     x64 Codex and Claude cells run separately through PowerShell.
+#     Linux + macOS matrix when connector code changes. Deterministic native
+#     Windows x64 certification lives in windows-native.yml.
 #
 #   live-matrix (Layer B) — installs the real upstream agent at its latest
 #     version, wires it with `defenseclaw setup`, and drives lifecycle + forced
@@ -46,7 +46,7 @@ on:
   # cross-platform smoke cell (codex / macOS) so there is a required
   # connector signal on each change; when the PR touches connector, hook,
   # registry, contract-script, or this workflow, the run expands to the full
-  # supported Linux + macOS matrix plus required Windows x64 Codex/Claude jobs.
+  # supported Linux + macOS matrix. Native Windows PR gates are separate.
   # Layer B (live) stays manual-only and never runs for pull requests.
   pull_request:
   workflow_dispatch:
@@ -108,8 +108,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # Gate — decide which contract cells to run for this event.
   #
-  #   schedule / workflow_dispatch → full 2-OS x 9 Unix matrix plus the
-  #                                  required 2-connector Windows x64 matrix.
+  #   schedule / workflow_dispatch → full 2-OS x 9 Unix matrix.
   #   pull_request                 → just the always-on macOS smoke cell,
   #                                  unless the PR touches connector / hook /
   #                                  registry / contract-script / workflow
@@ -135,9 +134,9 @@ jobs:
           # Native Windows certification is a separate, explicit x64 matrix.
           full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
-          # chosen because ci.yml already guards the Windows hook path on every
-          # PR but has no macOS coverage at all — this adds the missing native
-          # macOS connector signal and is the cell to mark "required" in branch
+          # chosen because windows-native.yml separately certifies the native
+          # Windows hook path on every PR. This adds the missing native macOS
+          # connector signal and is the cell to mark "required" in branch
           # protection. Its check name is "Contract codex / macos-latest".
           minimal='{"os":["macos-latest"],"connector":["codex"]}'
 
@@ -256,7 +255,7 @@ jobs:
 
       # Golden-payload entrypoint smoke: feed each registry event into the
       # installed Unix hook entrypoint and assert fire + verdict shaping +
-      # clean teardown. Native Windows uses windows-contract below.
+      # clean teardown. Native Windows uses the dedicated windows-native.yml.
       - name: Contract entrypoint smoke
         if: steps.select.outputs.run == 'true'
         # Layer A runs agent-less, so the cached agent version is empty and the
@@ -289,84 +288,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
           include-hidden-files: true
-
-  windows-harness-static:
-    name: Windows connector harness static tests
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: PowerShell parser, mock process, cleanup, and workflow tests
-        shell: pwsh
-        run: ./scripts/live-connector-e2e/test-windows.ps1
-
-  windows-contract:
-    name: Windows x64 contract / ${{ matrix.connector }}
-    needs: windows-harness-static
-    runs-on: windows-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        connector: [codex, claudecode]
-    env:
-      DC_WINDOWS_STATE: ${{ github.workspace }}/.dc-e2e-${{ matrix.connector }}-contract
-      DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Build native DefenseClaw tools
-        shell: pwsh
-        run: |
-          $embed = Join-Path $env:GITHUB_WORKSPACE 'internal\gateway\connector\openclaw_extension'
-          New-Item -ItemType Directory -Force -Path $embed | Out-Null
-          Set-Content -LiteralPath (Join-Path $embed '.placeholder') -Value 'OpenClaw extension not built.'
-          $bin = Join-Path $env:RUNNER_TEMP 'defenseclaw-bin'
-          New-Item -ItemType Directory -Force -Path $bin | Out-Null
-          go build -o (Join-Path $bin 'defenseclaw-gateway.exe') ./cmd/defenseclaw
-          go build -ldflags '-H=windowsgui' -o (Join-Path $bin 'defenseclaw-hook.exe') ./cmd/defenseclaw-hook
-          uv sync
-          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          (Join-Path $env:GITHUB_WORKSPACE '.venv\Scripts') | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Native Windows contract harness
-        shell: pwsh
-        run: |
-          ./scripts/live-connector-e2e/run-windows.ps1 `
-            -Layer contract `
-            -Connector '${{ matrix.connector }}' `
-            -StateRoot $env:DC_WINDOWS_STATE `
-            -ResultsPath $env:DC_E2E_RESULTS `
-            -ArtifactPath (Join-Path $env:RUNNER_TEMP 'defenseclaw-live-e2e-logs')
-      - name: Upload Windows contract results
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: connector-live-e2e-results-contract-${{ matrix.connector }}-windows-x64
-          path: ${{ env.DC_E2E_RESULTS }}
-          if-no-files-found: error
-          retention-days: 7
-      - name: Capture Windows diagnostics
-        if: ${{ failure() || cancelled() }}
-        shell: pwsh
-        run: ./scripts/live-connector-e2e/run-windows.ps1 -Operation capture -Connector '${{ matrix.connector }}' -StateRoot $env:DC_WINDOWS_STATE -ArtifactPath (Join-Path $env:RUNNER_TEMP 'defenseclaw-live-e2e-logs')
-      - name: Upload Windows diagnostics on failure
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: connector-live-e2e-logs-contract-${{ matrix.connector }}-windows-x64
-          path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
-          if-no-files-found: warn
-          retention-days: 7
-          include-hidden-files: true
-      - name: Windows cleanup safety net
-        if: ${{ always() }}
-        shell: pwsh
-        run: ./scripts/live-connector-e2e/run-windows.ps1 -Operation cleanup -Connector '${{ matrix.connector }}' -StateRoot $env:DC_WINDOWS_STATE
 
   # ---------------------------------------------------------------------------
   # Layer B — live agent matrix (real agents, secrets, nightly/dispatch).
@@ -565,7 +486,6 @@ jobs:
   windows-live:
     name: Windows x64 live / ${{ matrix.connector }}
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.os == 'all' || inputs.os == 'windows') }}
-    needs: windows-harness-static
     runs-on: windows-latest
     timeout-minutes: 40
     strategy:
@@ -658,7 +578,7 @@ jobs:
   # ---------------------------------------------------------------------------
   report:
     name: Report + regression radar
-    needs: [contract-matrix, windows-contract, live-matrix, windows-live]
+    needs: [contract-matrix, live-matrix, windows-live]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:

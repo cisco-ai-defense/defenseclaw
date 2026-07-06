@@ -222,7 +222,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
-	if err := requireConfiguredPortFree(cfg); err != nil {
+	if err := waitForConfiguredPortFree(cfg, defaultStopTimeout, defaultReadinessPollInterval); err != nil {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 
@@ -425,6 +425,27 @@ func requireConfiguredPortFree(cfg *config.Config) error {
 		return err
 	}
 	return fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
+}
+
+func waitForConfiguredPortFree(cfg *config.Config, timeout, pollInterval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		lastErr = requireConfiguredPortFree(cfg)
+		if lastErr == nil {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return lastErr
+		}
+		delay := pollInterval
+		if delay <= 0 || delay > remaining {
+			delay = remaining
+		}
+		timer := time.NewTimer(delay)
+		<-timer.C
+	}
 }
 
 func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {

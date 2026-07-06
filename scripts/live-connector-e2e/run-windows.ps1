@@ -21,7 +21,8 @@ function Get-SecretValues {
     $names = @(
         'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
         'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
-        'AWS_SESSION_TOKEN', 'LLM_API_KEY', 'DC_E2E_TEST_SECRET'
+        'AWS_SESSION_TOKEN', 'LLM_API_KEY', 'DC_E2E_TEST_SECRET',
+        'DEFENSECLAW_GATEWAY_TOKEN', 'OPENCLAW_GATEWAY_TOKEN'
     )
     @($names | ForEach-Object { [Environment]::GetEnvironmentVariable($_) } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_.Length -ge 8 } |
@@ -88,7 +89,24 @@ function Invoke-NativeProcess {
 
 function Get-EventLines([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
-    return @([IO.File]::ReadAllLines($Path) | Where-Object { $_.Trim() })
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        $stream = $null
+        $reader = $null
+        try {
+            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+            $reader = [IO.StreamReader]::new($stream)
+            $text = $reader.ReadToEnd()
+            return @($text -split "`r?`n" | Where-Object { $_.Trim() })
+        } catch [IO.IOException] {
+            if ($attempt -eq 20) { throw }
+            Start-Sleep -Milliseconds 100
+        } finally {
+            if ($null -ne $reader) { $reader.Dispose() }
+            elseif ($null -ne $stream) { $stream.Dispose() }
+        }
+    }
+    return @()
 }
 
 function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
@@ -129,10 +147,10 @@ function Write-Result([string]$Event, [string]$Status, [string]$Detail = '') {
     Write-Host "[$($Status.ToUpperInvariant())] $Connector/windows/$Event $($record.detail)"
 }
 
-function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0), [string]$Input = '', [int]$Timeout = $CommandTimeoutSeconds) {
+function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0), [string]$InputPath = '', [int]$Timeout = $CommandTimeoutSeconds) {
     $file = (Get-Command $Name -ErrorAction Stop).Source
     $log = Join-Path $script:LogRoot (("{0:D3}-{1}.log" -f (++$script:CommandIndex), ($Name -replace '[^A-Za-z0-9.-]', '_')))
-    return Invoke-NativeProcess -FilePath $file -ArgumentList $Arguments -InputPath $Input -TimeoutSeconds $Timeout -AllowedExitCodes $Allowed -LogPath $log
+    return Invoke-NativeProcess -FilePath $file -ArgumentList $Arguments -InputPath $InputPath -TimeoutSeconds $Timeout -AllowedExitCodes $Allowed -LogPath $log
 }
 
 function Wait-Gateway([int]$Timeout = 30) {
@@ -142,6 +160,25 @@ function Wait-Gateway([int]$Timeout = 30) {
         catch { Start-Sleep -Milliseconds 500 }
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "gateway did not become healthy within ${Timeout}s"
+}
+
+function Set-IsolatedGatewayPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $listener.Start()
+        $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+
+    $configPath = Join-Path $env:DEFENSECLAW_HOME 'config.yaml'
+    $config = [IO.File]::ReadAllText($configPath)
+    $pattern = '(?m)^(?<indent>\s*)api_port:\s*\d+\s*$'
+    $matches = [regex]::Matches($config, $pattern)
+    if ($matches.Count -ne 1) { throw "expected one gateway api_port in $configPath, found $($matches.Count)" }
+    $updated = [regex]::Replace($config, $pattern, "`${indent}api_port: $port")
+    [IO.File]::WriteAllText($configPath, $updated, [Text.UTF8Encoding]::new($false))
+    Write-Result gateway-port pass "isolated loopback port $port"
 }
 
 function Invoke-Setup([string]$Mode) {
@@ -207,15 +244,45 @@ function Invoke-Agent([string]$Label, [string]$Prompt, [int[]]$AllowedExitCodes 
 function Assert-Evidence([int]$Since = 0) {
     Invoke-Tool 'python.exe' @((Join-Path $WorkspaceRoot 'scripts\assert-gateway-jsonl.py'), $script:GatewayJsonl, '--min-events', '1') | Out-Null
     Invoke-Tool 'python.exe' @((Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\assert-windows-evidence.py'), '--jsonl', $script:GatewayJsonl, '--audit-db', $script:AuditDb, '--connector', $Connector, '--since', "$Since") | Out-Null
+    if (-not (Test-OtlpEvent $script:GatewayJsonl $Connector $Since)) { throw 'no connector-tagged telemetry event reached the gateway' }
     Write-Result schema pass 'gateway JSONL schema valid'
     Write-Result audit-correlation pass 'gateway request_id matched SQLite audit evidence'
+    Write-Result telemetry pass 'connector-tagged OTLP event recorded'
+}
+
+function Assert-TimeoutHandling {
+    $timeoutRoot = Join-Path $StateRoot 'timeout-contract'
+    [IO.Directory]::CreateDirectory($timeoutRoot) | Out-Null
+    $mock = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\testdata\windows-mock.ps1'
+    $pwsh = (Get-Process -Id $PID).Path
+    $timedOut = $false
+    try {
+        Invoke-NativeProcess -FilePath $pwsh `
+            -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'timeout', '-StateRoot', $timeoutRoot) `
+            -TimeoutSeconds 3 | Out-Null
+    } catch {
+        $timedOut = $_.Exception.Message -match 'timed out'
+    }
+    if (-not $timedOut) { throw 'timeout contract did not return a bounded failure' }
+    Start-Sleep -Milliseconds 500
+    $childPidPath = Join-Path $timeoutRoot 'child.pid'
+    if (-not (Test-Path -LiteralPath $childPidPath -PathType Leaf)) { throw 'timeout contract child did not start' }
+    $childPid = [int][IO.File]::ReadAllText($childPidPath)
+    if ($null -ne (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) { throw 'timeout contract left its child process running' }
+    Remove-Item -LiteralPath $timeoutRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Result timeout-handling pass 'bounded failure killed the process tree'
 }
 
 function Invoke-ContractRun {
     $golden = Join-Path $WorkspaceRoot "scripts\live-connector-e2e\golden\$Connector"
     $env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'
+    Assert-TimeoutHandling
     Initialize-DefenseClawEnv
-    Invoke-Tool 'defenseclaw' @('init') | Out-Null
+    Invoke-Tool 'defenseclaw' @(
+        'init', '--skip-install', '--non-interactive', '--yes', '--connector', $Connector,
+        '--profile', 'observe', '--no-start-gateway', '--no-verify'
+    ) | Out-Null
+    Set-IsolatedGatewayPort
     Invoke-Setup observe
     Invoke-Hook 'PreTool-block' (Join-Path $golden 'pre_tool_block.json') allow $true
     Invoke-Teardown

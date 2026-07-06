@@ -612,7 +612,12 @@ def _set_windows_owner_only_acl(path: str) -> None:
     dacl_security_information = 0x00000004
     # D:P protects the DACL from inheritance. OW is the Windows Owner Rights
     # SID; SY retains LocalSystem access required by the product policy.
-    owner_only_sddl = "D:P(A;;FA;;;SY)(A;;FA;;;OW)"
+    # Private directories must propagate the same policy to existing and new
+    # descendants. Without OI/CI, Windows recalculates an existing child's
+    # inherited ACL against a parent with no inheritable ACEs and can leave the
+    # child with an empty DACL (the managed venv became inaccessible after init).
+    inheritance = "OICI" if os.path.isdir(path) else ""
+    owner_only_sddl = f"D:P(A;{inheritance};FA;;;SY)(A;{inheritance};FA;;;OW)"
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)

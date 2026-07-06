@@ -156,6 +156,32 @@ func TestInspectConfiguredListenerRejectsManagedPIDWithoutListener(t *testing.T)
 	}
 }
 
+func TestWaitForConfiguredPortFreeRetriesRestartRelease(t *testing.T) {
+	cfg := startupTestConfig(t)
+	var probes atomic.Int32
+	withStartupListenerInspector(t, func(string, int) (int, error) {
+		if probes.Add(1) < 3 {
+			return 42, nil
+		}
+		return 0, daemon.ErrNoListener
+	})
+	if err := waitForConfiguredPortFree(cfg, time.Second, time.Millisecond); err != nil {
+		t.Fatalf("waitForConfiguredPortFree: %v", err)
+	}
+	if got := probes.Load(); got != 3 {
+		t.Fatalf("listener probes = %d, want 3", got)
+	}
+}
+
+func TestWaitForConfiguredPortFreeKeepsForeignCollisionTerminal(t *testing.T) {
+	cfg := startupTestConfig(t)
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 99, nil })
+	err := waitForConfiguredPortFree(cfg, 5*time.Millisecond, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "occupied by PID 99") {
+		t.Fatalf("error = %v, want occupied-port failure", err)
+	}
+}
+
 func TestVerifyGatewayRuntimeIdentityRejectsConfigHomeMismatch(t *testing.T) {
 	status := gatewayStatusEnvelope{}
 	status.Runtime.PID = 42

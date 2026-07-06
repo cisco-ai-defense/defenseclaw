@@ -60,6 +60,7 @@ param(
     [string]$QuickstartMode = "",
     [switch]$Quickstart,
     [switch]$NoOpenclaw,
+    [switch]$NoPersistPath,
     [switch]$Yes,
     [switch]$Help
 )
@@ -123,6 +124,7 @@ Options:
   -Local <dir>         Install from a local dist directory instead of downloading
   -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install
   -QuickstartMode <m>  Pass --mode m to quickstart (observe|action)
+  -NoPersistPath       Add the install directory only to this process PATH
   -Yes                 Skip confirmation prompts (for CI/automation)
   -Help                Show this help
 
@@ -1465,17 +1467,19 @@ function Invoke-Quickstart {
 # ── PATH configuration ────────────────────────────────────────────────────────
 
 function Add-ToPath {
-    # Persist InstallDir on the user PATH (idempotent) and add it to this
-    # process so quickstart and `defenseclaw-gateway` resolve immediately.
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $userPath) { $userPath = "" }
-    $entries = $userPath -split ';' | Where-Object { $_ -ne "" }
-    if ($entries -notcontains $InstallDir) {
-        $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        Write-Step "PATH updated"
-        Write-Info "Added $InstallDir to your user PATH."
-        Write-Info "Open a new terminal for it to take effect."
+    # Persist InstallDir on the user PATH unless automation opted out, and add
+    # it to this process so quickstart and the gateway resolve immediately.
+    if (-not $NoPersistPath) {
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if (-not $userPath) { $userPath = "" }
+        $entries = $userPath -split ';' | Where-Object { $_ -ne "" }
+        if ($entries -notcontains $InstallDir) {
+            $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+            [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+            Write-Step "PATH updated"
+            Write-Info "Added $InstallDir to your user PATH."
+            Write-Info "Open a new terminal for it to take effect."
+        }
     }
     if (($env:PATH -split ';') -notcontains $InstallDir) {
         $env:PATH = "$InstallDir;$env:PATH"

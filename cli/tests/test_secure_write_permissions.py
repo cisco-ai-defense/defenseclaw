@@ -393,6 +393,23 @@ def test_private_directory_refuses_foreign_owner_without_acl_rewrite(monkeypatch
         file_permissions._protect_private_directory("synthetic")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory inheritance")
+def test_private_directory_keeps_existing_managed_venv_accessible(tmp_path):
+    private_home = tmp_path / "private-home"
+    managed_venv = private_home / ".venv"
+    managed_venv.mkdir(parents=True)
+    existing = managed_venv / "existing.txt"
+    existing.write_text("before", encoding="utf-8")
+
+    file_permissions.make_private_directory(private_home)
+
+    assert existing.read_text(encoding="utf-8") == "before"
+    created = managed_venv / "created-after-hardening.txt"
+    created.write_text("after", encoding="utf-8")
+    assert created.read_text(encoding="utf-8") == "after"
+    assert file_permissions.windows_acl_write_error(private_home) is None
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory-swap lock")
 def test_private_atomic_write_holds_parent_against_directory_swap(tmp_path):
     parent = tmp_path / "managed"

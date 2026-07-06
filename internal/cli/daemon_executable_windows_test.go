@@ -142,6 +142,15 @@ otel:
 		t.Fatalf("authenticated repeated start = exit %d; output:\n%s", repeatExit, repeatOutput)
 	}
 	assertExecutableTestListenerOwner(t, port, managedPID)
+	restartOutput, restartExit = runGatewayExecutablePowerShell(t, binary, home, "restart")
+	if restartExit != 0 {
+		t.Fatalf("managed restart LASTEXITCODE = %d, want 0; output:\n%s", restartExit, restartOutput)
+	}
+	running, restartedPID := d.IsRunning()
+	if !running || restartedPID == managedPID || !d.HasManagedProcessIdentity(restartedPID) {
+		t.Fatalf("managed restart identity = (running=%v, old=%d, new=%d, strong=%v)", running, managedPID, restartedPID, d.HasManagedProcessIdentity(restartedPID))
+	}
+	assertExecutableTestListenerOwner(t, port, restartedPID)
 
 	statusOutput, statusExit = runGatewayExecutablePowerShell(t, binary, home, "status")
 	if statusExit != 0 {
