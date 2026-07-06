@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -46,6 +47,8 @@ def _is_strict_rule_pack(path: str) -> bool:
 from defenseclaw.config import (
     Config,
     GuardrailConfig,
+    HILTConfig,
+    PerConnectorGuardrailConfig,
     default_config,
 )
 from defenseclaw.guardrail import (
@@ -878,6 +881,187 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _seed_codex_claudecode_policies(self) -> None:
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connector = "codex"
+        gc.mode = "observe"
+        self.app.cfg.claw.mode = "codex"
+        gc.connectors = {
+            "codex": PerConnectorGuardrailConfig(
+                mode="action",
+                rule_pack_dir="codex-strict",
+                block_message="Codex blocked",
+                hilt=HILTConfig(enabled=True, min_severity="LOW"),
+            ),
+            "claudecode": PerConnectorGuardrailConfig(
+                mode="observe",
+                rule_pack_dir="claude-permissive",
+                block_message="Claude blocked",
+                hilt=HILTConfig(enabled=False, min_severity="MEDIUM"),
+            ),
+        }
+        self.app.cfg.save()
+
+    def test_guardrail_wizard_scoped_disable_uses_scoped_backend_and_global_is_explicit(self):
+        from defenseclaw.commands import cmd_guardrail
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.tui.panels.setup import (
+            SetupWizard,
+            _guardrail_wizard_fields_for,
+            build_wizard_args,
+            guardrail_wizard_fields,
+        )
+
+        self._seed_codex_claudecode_policies()
+        gc = self.app.cfg.guardrail
+        peer_before = deepcopy(gc.connectors["claudecode"])
+
+        fields = guardrail_wizard_fields(self.app.cfg)
+        fields = tuple(field.with_value("codex") if field.label == "Connector" else field for field in fields)
+        fields = tuple(
+            field.with_value("yes") if field.label == "Disable Selected Connector" else field for field in fields
+        )
+        fields = tuple(field.with_value("no") if field.label == "Restart After" else field for field in fields)
+        scoped_argv = build_wizard_args(SetupWizard.GUARDRAIL, fields, self.app.cfg)
+        self.assertEqual(
+            scoped_argv,
+            ("guardrail", "disable", "--yes", "--connector", "codex", "--no-restart"),
+        )
+
+        # Exercise the formerly-global legacy setup path too: it must delegate
+        # to the same canonical scoped backend used by the TUI argv above.
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--disable", "--connector", "codex", "--no-restart"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(gc.enabled)
+        self.assertFalse(gc.effective_enabled("codex"))
+        self.assertTrue(gc.effective_enabled("claudecode"))
+        self.assertEqual(gc.connectors["claudecode"], peer_before)
+
+        global_fields = _guardrail_wizard_fields_for({"@Scope": "global-all-active"}, self.app.cfg)
+        self.assertNotIn("Connector", {field.label for field in global_fields})
+        global_fields = tuple(
+            field.with_value("yes") if field.label == "Disable Guardrail Globally" else field for field in global_fields
+        )
+        global_fields = tuple(
+            field.with_value("no") if field.label == "Restart After" else field for field in global_fields
+        )
+        global_argv = build_wizard_args(SetupWizard.GUARDRAIL, global_fields, self.app.cfg)
+        self.assertEqual(global_argv, ("guardrail", "disable", "--yes", "--no-restart"))
+
+        result = self.runner.invoke(
+            cmd_guardrail.guardrail,
+            list(global_argv[1:]),
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(gc.enabled)
+        self.assertIn("Claude Code (claudecode)", result.output)
+        self.assertIn("Codex (codex)", result.output)
+        self.assertEqual(gc.connectors["claudecode"], peer_before)
+
+        # The legacy setup alias is now the same explicit global backend and
+        # must describe/restart the full active roster, not only the primary.
+        gc.enabled = True
+        self.app.cfg.save()
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--disable"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Claude Code (claudecode)", result.output)
+        self.assertIn("Codex (codex)", result.output)
+        self.assertFalse(gc.enabled)
+        self.assertEqual(set(restart.call_args.kwargs["connectors"]), {"codex", "claudecode"})
+
+    def test_setup_guardrail_rejects_inactive_member_before_any_mutation(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connector = "codex"
+        self.app.cfg.claw.mode = "codex"
+        gc.connectors = {
+            "codex": PerConnectorGuardrailConfig(mode="action", rule_pack_dir="codex-pack"),
+            "cursor": PerConnectorGuardrailConfig(mode="observe", rule_pack_dir="cursor-pack"),
+        }
+        self.app.cfg.save()
+        config_path = Path(self.tmp_dir) / "config.yaml"
+        before_bytes = config_path.read_bytes()
+        before_semantic = deepcopy(self.app.cfg)
+
+        argv = [
+            "guardrail",
+            "--non-interactive",
+            "--connector",
+            "claudecode",
+            "--mode",
+            "action",
+            "--no-restart",
+        ]
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            result = self.runner.invoke(setup, argv, obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("not an active connector", result.output)
+        self.assertEqual(config_path.read_bytes(), before_bytes)
+        self.assertEqual(self.app.cfg, before_semantic)
+        restart.assert_not_called()
+
+    def test_setup_guardrail_rejects_global_flags_on_selected_multi_connector(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self._seed_codex_claudecode_policies()
+        config_path = Path(self.tmp_dir) / "config.yaml"
+        before_bytes = config_path.read_bytes()
+        before_semantic = deepcopy(self.app.cfg)
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--connector",
+                "codex",
+                "--scanner-mode",
+                "local",
+                "--judge-model",
+                "bedrock/global-judge",
+                "--disable-redaction",
+                "--no-restart",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("process-global option(s)", result.output)
+        self.assertIn("--scanner-mode", result.output)
+        self.assertIn("--judge-model", result.output)
+        self.assertIn("--disable-redaction", result.output)
+        self.assertEqual(config_path.read_bytes(), before_bytes)
+        self.assertEqual(self.app.cfg, before_semantic)
+
+        interactive = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "codex", "--no-restart"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(interactive.exit_code, 2, interactive.output)
+        self.assertIn("would mix connector policy and process-global prompts", interactive.output)
+        self.assertEqual(config_path.read_bytes(), before_bytes)
+        self.assertEqual(self.app.cfg, before_semantic)
 
     def test_help(self):
         from defenseclaw.commands.cmd_setup import setup

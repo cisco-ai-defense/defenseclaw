@@ -36,6 +36,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import click
+from click.core import ParameterSource
 
 # Tasteful TTY-aware color helpers. Imported as a module rather than
 # pulled name-by-name so the wizard call sites read like
@@ -3566,6 +3567,100 @@ def _resolve_judge_hook_gate(
 # ---------------------------------------------------------------------------
 
 
+def _guardrail_setup_active_members(app: AppContext) -> list[str]:
+    try:
+        return list(app.cfg.active_connectors())
+    except Exception:  # noqa: BLE001 - older/test configs may not expose the resolver.
+        return _configured_connector_set(app.cfg.guardrail)
+
+
+def _ensure_guardrail_setup_member(app: AppContext, requested: str) -> None:
+    """Reject a non-member target when a multi-connector roster is active.
+
+    Fresh and legacy single-connector setup still accepts a connector choice.
+    Once two or more peers are configured, their authoritative active roster
+    must not be rewritten by ``setup guardrail --connector``.
+    """
+
+    active = _guardrail_setup_active_members(app)
+    if len(active) <= 1:
+        return
+    wanted = normalize_connector(requested)
+    members = {normalize_connector(name) for name in active}
+    if wanted not in members:
+        raise click.UsageError(
+            f"--connector {requested!r} is not an active connector. Choose one of: {', '.join(active)}."
+        )
+
+
+_GUARDRAIL_SETUP_GLOBAL_PARAMS = frozenset(
+    {
+        "guard_port",
+        "scanner_mode",
+        "cisco_endpoint",
+        "cisco_api_key_env",
+        "cisco_timeout_ms",
+        "detection_strategy",
+        "detection_strategy_prompt",
+        "detection_strategy_completion",
+        "detection_strategy_tool_call",
+        "judge_model",
+        "judge_api_base",
+        "judge_api_key_env",
+        "judge_provider",
+        "judge_region",
+        "judge_instance_name",
+        "judge_hook_connectors",
+        "llm_role",
+        "judge_inherit_from",
+        "judge_inherit_llm",
+        "judge_auth_mode",
+        "judge_bedrock_region",
+        "judge_bedrock_auth_mode",
+        "judge_bedrock_access_key_env",
+        "judge_bedrock_secret_key_env",
+        "judge_bedrock_session_token_env",
+        "judge_bedrock_profile_name",
+        "judge_bedrock_inference_profile",
+        "judge_bedrock_deployment_aliases",
+        "judge_vertex_project_id",
+        "judge_vertex_region",
+        "judge_vertex_auth_mode",
+        "judge_vertex_service_account_json_env",
+        "judge_azure_endpoint",
+        "judge_azure_api_version",
+        "judge_azure_auth_mode",
+        "judge_azure_deployment_aliases",
+        "judge_tls_ca_cert_file",
+        "judge_insecure_skip_verify",
+        "disable_redaction",
+    }
+)
+
+
+def _reject_mixed_guardrail_setup_options(app: AppContext) -> None:
+    """Reject process-global flags on a selected peer in a populated fleet."""
+
+    if len(_guardrail_setup_active_members(app)) <= 1:
+        return
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return
+    supplied: list[str] = []
+    for param in ctx.command.params:
+        if param.name not in _GUARDRAIL_SETUP_GLOBAL_PARAMS:
+            continue
+        if ctx.get_parameter_source(param.name) is not ParameterSource.COMMANDLINE:
+            continue
+        supplied.append(param.opts[0] if isinstance(param, click.Option) and param.opts else param.name)
+    if supplied:
+        raise click.UsageError(
+            "--connector scopes only mode, rule pack, block message, and HILT on a "
+            "multi-connector install; process-global option(s) cannot be mixed into "
+            f"that submission: {', '.join(supplied)}. Omit --connector to affect all active connectors."
+        )
+
+
 @setup.command("guardrail")
 @click.option(
     "--disable",
@@ -3911,17 +4006,57 @@ def setup_guardrail(
     gc = app.cfg.guardrail
     explicit_connector = normalize_connector(agent_name) if agent_name else None
 
-    if disable:
-        # Always restart on disable — leaving the proxy running defeats the
-        # purpose of disabling. The fetch interceptor also needs OpenClaw
-        # to restart (which happens automatically when openclaw.json changes).
-        _disable_guardrail(app, gc, restart=True)
-        return
-
-    # Validate explicit operator input before mutating the in-memory config.
-    # Stored/picked fallback values are checked after resolution below.
+    # Validate before disable handling or any in-memory/file/restart/output
+    # mutation. A populated fleet is authoritative; setup must never repoint
+    # its primary mirrors or apply global policy through an inactive target.
     if explicit_connector:
         _ensure_connector_available(explicit_connector)
+        _ensure_guardrail_setup_member(app, explicit_connector)
+        _reject_mixed_guardrail_setup_options(app)
+        if not disable and not non_interactive and len(_guardrail_setup_active_members(app)) > 1:
+            raise click.UsageError(
+                "interactive setup with --connector would mix connector policy and "
+                "process-global prompts on a multi-connector install. Use scoped "
+                "non-interactive mode/rule-pack/block-message/HILT flags, use the "
+                "guardrail action commands, or omit --connector for explicit global setup."
+            )
+
+    if disable:
+        if explicit_connector:
+            # Reuse the canonical scoped Guardrail backend: this writes only
+            # connectors[X].enabled and tears down only that active peer.
+            from defenseclaw.commands.cmd_guardrail import _toggle_connector_guardrail
+
+            _toggle_connector_guardrail(
+                app,
+                explicit_connector,
+                enable=False,
+                restart=restart,
+                yes=True,
+            )
+            if not restart:
+                ctx = click.get_current_context(silent=True)
+                if ctx is not None:
+                    ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        else:
+            # Route the legacy setup alias through the canonical global action
+            # so its messaging and restart fan-out name every active connector.
+            if gc.enabled:
+                from defenseclaw.commands.cmd_guardrail import disable_cmd
+
+                ctx = click.get_current_context()
+                ctx.invoke(
+                    disable_cmd,
+                    restart=True,
+                    yes=True,
+                    connector_flag=None,
+                )
+                ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+            else:
+                # Preserve the setup alias's historical idempotent teardown
+                # behavior when the persisted master switch is already off.
+                _disable_guardrail(app, gc, restart=True)
+        return
 
     aid = app.cfg.cisco_ai_defense
 

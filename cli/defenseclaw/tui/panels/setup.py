@@ -21,6 +21,7 @@ from enum import IntEnum
 from typing import Any, Literal
 
 from defenseclaw import config as dc_config
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
@@ -89,6 +90,10 @@ GUARDRAIL_CONNECTORS = _CHOICE_GUARDRAIL_CONNECTORS
 _WIZARD_LLM_PROVIDERS = _CHOICE_WIZARD_LLM_PROVIDERS
 LLM_PROVIDERS = _CHOICE_LLM_PROVIDERS
 LLM_OVERRIDE_PROVIDERS = _CHOICE_LLM_OVERRIDE_PROVIDERS
+
+_GUARDRAIL_SCOPE_CONNECTOR = "selected-connector"
+_GUARDRAIL_SCOPE_GLOBAL = "global-all-active"
+_GUARDRAIL_SCOPES = (_GUARDRAIL_SCOPE_CONNECTOR, _GUARDRAIL_SCOPE_GLOBAL)
 
 
 class SetupWizard(IntEnum):
@@ -1154,6 +1159,7 @@ class SetupPanelModel:
                     else (
                         "--mode",
                         "--rule-pack",
+                        "--block-message",
                         "--human-approval",
                         "--hilt-min-severity",
                     )
@@ -1254,6 +1260,10 @@ class SetupPanelModel:
             env_name = wizard_field_value(self.form_fields, "Env Name")
             if looks_like_secret_value(env_name):
                 self.form_error = "Env Name looks like a secret value. Use an env var name such as DEFENSECLAW_LLM_KEY."
+                return SetupPanelAction(True)
+        if self.active_wizard in {SetupWizard.GUARDRAIL, SetupWizard.GUARDRAIL_ACTIONS}:
+            if error := _guardrail_connector_selection_error(self.config, self.form_fields):
+                self.form_error = error
                 return SetupPanelAction(True)
         # Notifications routing fans out one CLI call per *changed*
         # slot. With no changes there is nothing to apply; emitting the
@@ -1668,16 +1678,39 @@ def _trusted_paths_wizard_fields() -> tuple[WizardFormField, ...]:
     )
 
 
-def _guardrail_actions_wizard_fields() -> tuple[WizardFormField, ...]:
-    return (
+def _guardrail_actions_wizard_fields(
+    overrides: Mapping[str, str] | None = None,
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[WizardFormField, ...]:
+    overrides = overrides or {}
+    scope = (overrides.get("@Scope") or _GUARDRAIL_SCOPE_GLOBAL).strip()
+    if scope not in _GUARDRAIL_SCOPES:
+        scope = _GUARDRAIL_SCOPE_GLOBAL
+
+    def connector_scope(dv: Mapping[str, str]) -> bool:
+        return dv.get("scope") == _GUARDRAIL_SCOPE_CONNECTOR
+
+    candidates = (
+        WizardFormField(
+            "Scope",
+            "choice",
+            value=scope,
+            default=_GUARDRAIL_SCOPE_GLOBAL,
+            options=_GUARDRAIL_SCOPES,
+            hint=(
+                "global-all-active affects every active connector; selected-connector changes only the chosen member."
+            ),
+        ),
         WizardFormField(
             "Connector",
             "choice",
             "--connector",
             value="",
             default="",
-            options=("", *CONNECTORS),
-            hint="Optional: scope this guardrail action to one connector; blank keeps CLI global/all-active behavior.",
+            options=_guardrail_connector_choices(cfg),
+            hint="Active connector this action should change.",
+            required=True,
+            visible_when=connector_scope,
         ),
         WizardFormField(
             "Action",
@@ -1716,6 +1749,7 @@ def _guardrail_actions_wizard_fields() -> tuple[WizardFormField, ...]:
         WizardFormField("Clear Message", "bool", value="no", default="no", hint="Clear the custom block message."),
         WizardFormField("Restart Gateway", "bool", "--restart", "--no-restart", value="yes", default="yes"),
     )
+    return _apply_dynamic_fields(candidates, overrides, {"scope": scope})
 
 
 def _custom_action_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
@@ -1994,7 +2028,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.AI_DISCOVERY: lambda cfg=None: ai_discovery_wizard_fields(cfg),
     SetupWizard.SPLUNK_DASHBOARDS: lambda cfg=None: splunk_dashboards_wizard_fields(),
     SetupWizard.TRUSTED_PATHS: lambda cfg=None: _trusted_paths_wizard_fields(),
-    SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(),
+    SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
 }
 
 
@@ -2014,6 +2048,7 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
         cfg=cfg,
     ),
     SetupWizard.GUARDRAIL: lambda overrides, cfg: _guardrail_wizard_fields_for(overrides, cfg),
+    SetupWizard.GUARDRAIL_ACTIONS: lambda overrides, cfg: _guardrail_actions_wizard_fields(overrides, cfg),
     SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
 }
 
@@ -2074,6 +2109,52 @@ def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) ->
 
     singular = _active_connector(cfg)
     return [singular] if singular else []
+
+
+def _guardrail_connector_choices(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Connector choices for Guardrail forms.
+
+    A populated multi-connector roster is authoritative: policy forms may only
+    target its active members. Fresh and legacy single-connector setup keeps
+    the full catalog so an operator can still choose the first connector.
+    """
+
+    active = _active_connector_names_for_setup(cfg)
+    if len(active) <= 1:
+        return ("", *CONNECTORS)
+    return ("", *dict.fromkeys(active))
+
+
+def _guardrail_default_scope(cfg: object | Mapping[str, Any] | None) -> str:
+    """Prefer a selected-connector policy form only when a real fleet exists."""
+
+    if len(_active_connector_names_for_setup(cfg)) > 1:
+        return _GUARDRAIL_SCOPE_CONNECTOR
+    return _GUARDRAIL_SCOPE_GLOBAL
+
+
+def _guardrail_form_scope(fields: Sequence[WizardFormField]) -> str:
+    scope = wizard_field_value(fields, "Scope")
+    return scope if scope in _GUARDRAIL_SCOPES else _GUARDRAIL_SCOPE_CONNECTOR
+
+
+def _guardrail_connector_selection_error(
+    cfg: object | Mapping[str, Any] | None,
+    fields: Sequence[WizardFormField],
+) -> str:
+    """Reject a non-member target when the active roster is authoritative."""
+
+    if _guardrail_form_scope(fields) != _GUARDRAIL_SCOPE_CONNECTOR:
+        return ""
+    requested = wizard_field_value(fields, "Connector").strip()
+    active = _active_connector_names_for_setup(cfg)
+    if not requested or len(active) <= 1:
+        return ""
+    wanted = normalize_connector(requested)
+    members = {normalize_connector(name) for name in active}
+    if wanted in members:
+        return ""
+    return f"Connector {requested!r} is not active. Active connectors: {', '.join(active)}."
 
 
 def _connector_is_proxy(connector: str) -> bool:
@@ -2161,9 +2242,10 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
         WizardGoal(
             "judge",
             "Set up / change the LLM Judge",
-            summary="Choose the judge provider, model, and detection strategy.",
-            presets={"--detection-strategy": "regex_judge"},
+            summary="Configure global judge settings shared by all active connectors.",
+            presets={"@Scope": _GUARDRAIL_SCOPE_GLOBAL, "--detection-strategy": "regex_judge"},
             fields=(
+                "Scope",
                 "Provider",
                 "--judge-model",
                 "--judge-api-key-env",
@@ -2176,8 +2258,9 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
         WizardGoal(
             "cisco",
             "Connect Cisco AI Defense",
-            summary="Point the guardrail at a Cisco AI Defense endpoint.",
-            fields=("--cisco-endpoint", "--cisco-api-key-env", "--cisco-timeout-ms"),
+            summary="Configure global Cisco settings shared by all active connectors.",
+            presets={"@Scope": _GUARDRAIL_SCOPE_GLOBAL},
+            fields=("Scope", "--cisco-endpoint", "--cisco-api-key-env", "--cisco-timeout-ms"),
         ),
         WizardGoal(
             "hitl",
@@ -2188,9 +2271,16 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
         ),
         WizardGoal(
             "detection",
-            "Tune detection strategy / rule pack",
-            summary="Adjust the regex/judge strategy and rule pack.",
-            fields=("--detection-strategy", "--rule-pack"),
+            "Tune global detection strategy",
+            summary="Change the detection strategy for all active connectors.",
+            presets={"@Scope": _GUARDRAIL_SCOPE_GLOBAL},
+            fields=("Scope", "--detection-strategy"),
+        ),
+        WizardGoal(
+            "rule-pack",
+            "Change a connector rule pack",
+            summary="Change only one active connector's rule pack override.",
+            fields=("Connector", "--rule-pack"),
         ),
     )
 
@@ -2818,42 +2908,42 @@ def _guardrail_actions_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wi
             "Show guardrail status",
             summary="Show the full active connector roster, or narrow to one connector.",
             presets={"@Action": "status"},
-            fields=("Connector", "Action"),
+            fields=("Scope", "Connector", "Action"),
         ),
         WizardGoal(
             "enable",
             "Enable guardrail",
             summary="Enable globally or re-enable one connector override.",
             presets={"@Action": "enable"},
-            fields=("Connector", "Action", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Restart Gateway"),
         ),
         WizardGoal(
             "disable",
             "Disable guardrail",
             summary="Disable globally or disable one connector override.",
             presets={"@Action": "disable"},
-            fields=("Connector", "Action", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Restart Gateway"),
         ),
         WizardGoal(
             "fail-mode",
             "Set fail mode",
             summary="Set fail-open/fail-closed globally or for one connector.",
             presets={"@Action": "fail-mode"},
-            fields=("Connector", "Action", "Fail Mode", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Fail Mode", "Restart Gateway"),
         ),
         WizardGoal(
             "hilt",
             "Set human approval",
             summary="Toggle HILT and severity globally or for one connector.",
             presets={"@Action": "hilt"},
-            fields=("Connector", "Action", "HITL State", "Approval Min Severity", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "HITL State", "Approval Min Severity", "Restart Gateway"),
         ),
         WizardGoal(
             "block-message",
             "Set block message",
             summary="Set or clear the custom block message globally or for one connector.",
             presets={"@Action": "block-message"},
-            fields=("Connector", "Action", "Block Message", "Clear Message", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Block Message", "Clear Message", "Restart Gateway"),
         ),
     )
 
@@ -3451,7 +3541,9 @@ def _build_webhook_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
 
 def _build_guardrail_actions_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     action = wizard_field_value(fields, "Action") or "status"
-    connector = wizard_field_value(fields, "Connector")
+    connector = (
+        wizard_field_value(fields, "Connector") if _guardrail_form_scope(fields) == _GUARDRAIL_SCOPE_CONNECTOR else ""
+    )
     restart = wizard_bool_value(fields, "Restart Gateway", "yes")
 
     if action == "status":
@@ -3483,6 +3575,100 @@ def _build_guardrail_actions_args(fields: Sequence[WizardFormField]) -> tuple[st
     if restart == "no":
         args.append("--no-restart")
     return tuple(args)
+
+
+_GUARDRAIL_CONNECTOR_SETUP_FLAGS: frozenset[str] = frozenset(
+    {
+        "--connector",
+        "--mode",
+        "--rule-pack",
+        "--rule-pack-dir",
+        "--block-message",
+        "--human-approval",
+        "--hilt-min-severity",
+        "--restart",
+        "--verify",
+    }
+)
+
+
+def _build_guardrail_setup_args(
+    fields: Sequence[WizardFormField],
+    cfg: object | Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Build a Guardrail setup argv without crossing the selected scope.
+
+    Connector scope is an allow-list: process-global scanner, port, Cisco,
+    strategy, judge, LLM-role, and redaction flags cannot leak into the argv
+    even if stale/injected form rows are present. Global scope omits a
+    connector on multi-connector installs so its all-active effect is explicit.
+    """
+
+    scope = _guardrail_form_scope(fields)
+    connector = wizard_field_value(fields, "Connector").strip()
+    disable = any(field.flag == "--disable" and field.value == "yes" for field in fields)
+    restart = wizard_bool_value(fields, "Restart After", "yes")
+
+    if disable:
+        args = ["guardrail", "disable", "--yes"]
+        if scope == _GUARDRAIL_SCOPE_CONNECTOR and connector:
+            args.extend(("--connector", connector))
+        if restart == "no":
+            args.append("--no-restart")
+        return tuple(args)
+
+    active = _active_connector_names_for_setup(cfg)
+    base: list[str] = ["setup", "guardrail", "--non-interactive"]
+    judge_provider = ""
+    judge_model = ""
+    judge_dirty = False
+    for field in fields:
+        if field.kind == "section" or field.flag == "--disable":
+            continue
+        if scope == _GUARDRAIL_SCOPE_CONNECTOR and field.flag and field.flag not in _GUARDRAIL_CONNECTOR_SETUP_FLAGS:
+            continue
+        if scope == _GUARDRAIL_SCOPE_GLOBAL and field.flag == "--connector" and len(active) > 1:
+            continue
+        if field.label == "Provider" and field.flag == "":
+            judge_provider = field.value
+            judge_dirty = judge_dirty or field.value != field.default
+            continue
+        if field.label == "Model" and field.flag == "--judge-model":
+            judge_model = field.value
+            judge_dirty = judge_dirty or field.value != field.default
+            continue
+        if field.kind == "bool":
+            if field.flag in {"--human-approval", "--disable-redaction"}:
+                if field.value == "yes" and field.flag:
+                    base.append(field.flag)
+                elif field.value == "no" and field.no_flag:
+                    base.append(field.no_flag)
+                continue
+            if field.value == field.default:
+                continue
+            if field.value == "yes" and field.flag:
+                base.append(field.flag)
+            elif field.value == "no" and field.no_flag:
+                base.append(field.no_flag)
+            continue
+        if field.kind not in {"string", "int", "choice", "password"} or not field.flag:
+            continue
+        if field.flag == "--block-message" and field.value != field.default:
+            base.extend((field.flag, field.value))
+            continue
+        if not field.value or (field.value == field.default and not field.required):
+            continue
+        if field.flag in _GUARDRAIL_REPEATABLE_FLAGS:
+            for item in (chunk.strip() for chunk in field.value.split(",")):
+                if item:
+                    base.extend((field.flag, item))
+            continue
+        base.extend((field.flag, field.value))
+
+    if judge_dirty and judge_model:
+        combined = f"{judge_provider}/{judge_model}" if judge_provider else judge_model
+        base.extend(("--judge-model", combined))
+    return tuple(base)
 
 
 def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
@@ -3542,11 +3728,17 @@ def build_wizard_args(
     """
 
     wizard = SetupWizard(wizard)
-    del cfg
+    if wizard in {SetupWizard.GUARDRAIL, SetupWizard.GUARDRAIL_ACTIONS}:
+        if error := _guardrail_connector_selection_error(cfg, fields):
+            raise ValueError(error)
     if wizard == SetupWizard.GUARDRAIL:
         connector_mode_args = _connector_guardrail_mode_args(fields)
         if connector_mode_args is not None:
             return connector_mode_args
+        return _build_guardrail_setup_args(fields, cfg)
+    if wizard == SetupWizard.GUARDRAIL_ACTIONS:
+        return _build_guardrail_actions_args(fields)
+    del cfg
     builder = _WIZARD_ARG_BUILDERS.get(wizard)
     if builder is not None:
         return builder(fields)
@@ -3587,8 +3779,7 @@ def build_wizard_args(
         splunk_mode_value = wizard_field_value(fields, "Mode")
     splunk_pipeline_labels = {"Enable O11y", "Enable Local Logs", "Enable Enterprise"}
     webhook_hmac_disabled = (
-        wizard == SetupWizard.WEBHOOKS
-        and wizard_bool_value(fields, "Enable HMAC Signing", "yes") == "no"
+        wizard == SetupWizard.WEBHOOKS and wizard_bool_value(fields, "Enable HMAC Signing", "yes") == "no"
     )
     for field in fields:
         if field.kind in {"section", "preset", "whtype", "regid"}:
@@ -3599,7 +3790,10 @@ def build_wizard_args(
                 continue
             if field.label == "Apply Dashboards After":
                 continue
-            if splunk_mode_value in {"splunk-o11y", "local-docker", "enterprise"} and field.label in splunk_pipeline_labels:
+            if (
+                splunk_mode_value in {"splunk-o11y", "local-docker", "enterprise"}
+                and field.label in splunk_pipeline_labels
+            ):
                 continue
         if wizard == SetupWizard.WEBHOOKS:
             # ``Enable HMAC Signing`` is a wizard-only toggle (no flag).
@@ -4349,27 +4543,34 @@ def _guardrail_wizard_fields_for(
     cfg: object | Mapping[str, Any] | None = None,
 ) -> tuple[WizardFormField, ...]:
     overrides = overrides or {}
-    active_connectors = _guardrail_connector_keys(cfg)
+    active_connectors = _active_connector_names_for_setup(cfg)
+    scope = (overrides.get("@Scope") or _guardrail_default_scope(cfg)).strip()
+    if scope not in _GUARDRAIL_SCOPES:
+        scope = _guardrail_default_scope(cfg)
+    connector_policy = scope == _GUARDRAIL_SCOPE_CONNECTOR
     if "--connector" in overrides:
         connector = str(overrides.get("--connector", "") or "").strip()
     else:
         connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
         if not connector:
             connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
-        if len(active_connectors) > 1:
+        if connector_policy and len(active_connectors) > 1:
             connector = ""
+    if not connector_policy and len(active_connectors) > 1:
+        # A global/all-active form has no selected-connector presentation.
+        connector = ""
     mode = (
         _effective_guardrail_value(cfg, connector, "effective_mode", "guardrail.mode")
-        if connector
-        else ("observe" if len(active_connectors) > 1 else str(get_config_value(cfg, "guardrail.mode", "observe")))
+        if connector_policy and connector
+        else str(get_config_value(cfg, "guardrail.mode", "observe"))
     )
     mode = mode.strip().lower() or "observe"
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
     rule_pack_dir = (
         _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir")
-        if connector
-        else ""
+        if connector_policy and connector
+        else str(get_config_value(cfg, "guardrail.rule_pack_dir", "") or "")
     )
     rule_pack = os.path.basename(rule_pack_dir.rstrip("/\\")).strip().lower() if rule_pack_dir else "default"
     if rule_pack not in {"default", "strict", "permissive"}:
@@ -4418,13 +4619,34 @@ def _guardrail_wizard_fields_for(
     judge_bedrock_auth_mode = (
         overrides.get("--judge-bedrock-auth-mode") or judge_bedrock_auth_mode
     ).strip().lower() or "api_key"
-    effective_hilt = _effective_hilt_block(cfg, connector) if connector else None
+    effective_hilt = (
+        _effective_hilt_block(cfg, connector)
+        if connector_policy and connector
+        else get_config_value(cfg, "guardrail.hilt", None)
+    )
     hilt = "yes" if bool(get_config_value(effective_hilt, "enabled", False)) else "no"
     hilt_min_severity = str(get_config_value(effective_hilt, "min_severity", "HIGH") or "HIGH").upper()
+    block_message = (
+        _effective_guardrail_value(cfg, connector, "effective_block_message", "guardrail.block_message")
+        if connector_policy and connector
+        else str(get_config_value(cfg, "guardrail.block_message", "") or "")
+    )
     redaction = "yes" if bool(get_config_value(cfg, "privacy.disable_redaction", False)) else "no"
 
+    def connector_scope(dv: Mapping[str, str]) -> bool:
+        return dv.get("scope") == _GUARDRAIL_SCOPE_CONNECTOR
+
+    def global_scope(dv: Mapping[str, str]) -> bool:
+        return dv.get("scope") == _GUARDRAIL_SCOPE_GLOBAL
+
+    def connector_or_bootstrap_target(dv: Mapping[str, str]) -> bool:
+        return connector_scope(dv) or (global_scope(dv) and len(active_connectors) <= 1)
+
     def j_strategy(dv: Mapping[str, str]) -> bool:
-        return (dv.get("strategy", "") or "").strip().lower() in {"regex_judge", "judge_first"}
+        return global_scope(dv) and (dv.get("strategy", "") or "").strip().lower() in {
+            "regex_judge",
+            "judge_first",
+        }
 
     def j_provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
         provider_visible = _provider_is(*names)
@@ -4444,16 +4666,32 @@ def _guardrail_wizard_fields_for(
     j_azure = j_provider_is("azure")
     j_region_opts = _llm_catalog_regions(judge_provider)
     candidates: tuple[WizardFormField, ...] = (
-        WizardFormField("Core", "section"),
+        WizardFormField("Operation Scope", "section"),
+        WizardFormField(
+            "Scope",
+            "choice",
+            value=scope,
+            default=_guardrail_default_scope(cfg),
+            options=_GUARDRAIL_SCOPES,
+            hint=(
+                "selected-connector exposes only connector policy; "
+                "global-all-active exposes process-global settings affecting every active connector."
+            ),
+        ),
+        WizardFormField("Connector Policy (selected active member)", "section", visible_when=connector_scope),
+        WizardFormField("Global Settings (affects all active connectors)", "section", visible_when=global_scope),
         WizardFormField(
             "Connector",
             "choice",
             "--connector",
             value=connector,
             default=connector,
-            options=("", *CONNECTORS),
+            options=_guardrail_connector_choices(cfg),
             required=True,
-            hint="Choose the connector peer this guardrail setup should update.",
+            hint=(
+                "Choose an active connector policy target. On fresh/single setup this also selects the setup target."
+            ),
+            visible_when=connector_or_bootstrap_target,
         ),
         WizardFormField("Mode", "choice", "--mode", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
@@ -4463,9 +4701,16 @@ def _guardrail_wizard_fields_for(
             value=scanner_mode,
             default="local",
             options=("local", "remote", "both"),
+            visible_when=global_scope,
         ),
-        WizardFormField("Proxy Port", "int", "--port", value=str(get_config_value(cfg, "guardrail.port", "") or "")),
-        WizardFormField("Detection", "section"),
+        WizardFormField(
+            "Proxy Port",
+            "int",
+            "--port",
+            value=str(get_config_value(cfg, "guardrail.port", "") or ""),
+            visible_when=global_scope,
+        ),
+        WizardFormField("Detection", "section", visible_when=global_scope),
         WizardFormField(
             "Strategy",
             "choice",
@@ -4474,6 +4719,7 @@ def _guardrail_wizard_fields_for(
             default="regex_only",
             options=("regex_only", "regex_judge", "judge_first"),
             hint="Rule/regex scanning is the baseline; judge strategies add LLM review on top.",
+            visible_when=global_scope,
         ),
         WizardFormField(
             "Rule Pack",
@@ -4482,6 +4728,14 @@ def _guardrail_wizard_fields_for(
             value=rule_pack,
             default=rule_pack,
             options=("default", "strict", "permissive"),
+        ),
+        WizardFormField(
+            "Block Message",
+            "string",
+            "--block-message",
+            value=block_message,
+            default=block_message,
+            hint="Custom message for the selected connector, or every connector in global scope.",
         ),
         WizardFormField("LLM Judge", "section", visible_when=j_strategy),
         WizardFormField(
@@ -4591,7 +4845,9 @@ def _guardrail_wizard_fields_for(
             "Endpoint", "string", "--judge-azure-endpoint", hint="https://name.openai.azure.com", visible_when=j_azure
         ),
         WizardFormField("API Version", "string", "--judge-azure-api-version", visible_when=j_azure),
-        WizardFormField("Auth Mode", "choice", "--judge-azure-auth-mode", options=AZURE_AUTH_MODES, visible_when=j_azure),
+        WizardFormField(
+            "Auth Mode", "choice", "--judge-azure-auth-mode", options=AZURE_AUTH_MODES, visible_when=j_azure
+        ),
         WizardFormField(
             "Deployment Aliases (CSV)",
             "string",
@@ -4616,24 +4872,27 @@ def _guardrail_wizard_fields_for(
             hint="Disable TLS verification for the judge (lab use only).",
             visible_when=j_provider_regional_or_custom,
         ),
-        WizardFormField("Cisco AI Defense", "section"),
+        WizardFormField("Cisco AI Defense (global)", "section", visible_when=global_scope),
         WizardFormField(
             "Endpoint",
             "string",
             "--cisco-endpoint",
             value=str(get_config_value(cfg, "cisco_ai_defense.endpoint", "") or ""),
+            visible_when=global_scope,
         ),
         WizardFormField(
             "API Key Env",
             "string",
             "--cisco-api-key-env",
             value=str(get_config_value(cfg, "cisco_ai_defense.api_key_env", "") or ""),
+            visible_when=global_scope,
         ),
         WizardFormField(
             "Timeout (ms)",
             "int",
             "--cisco-timeout-ms",
             value=str(get_config_value(cfg, "cisco_ai_defense.timeout_ms", "") or ""),
+            visible_when=global_scope,
         ),
         WizardFormField("Advanced", "section"),
         WizardFormField("Human Approval", "bool", "--human-approval", "--no-human-approval", value=hilt, default=hilt),
@@ -4646,12 +4905,35 @@ def _guardrail_wizard_fields_for(
             options=("HIGH", "MEDIUM", "LOW", "CRITICAL"),
         ),
         WizardFormField(
-            "Disable Redaction", "bool", "--disable-redaction", "--enable-redaction", value=redaction, default=redaction
+            "Disable Redaction",
+            "bool",
+            "--disable-redaction",
+            "--enable-redaction",
+            value=redaction,
+            default=redaction,
+            visible_when=global_scope,
         ),
         WizardFormField("Post-Setup", "section"),
         WizardFormField("Restart After", "bool", "--restart", "--no-restart", value="yes", default="yes"),
         WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
-        WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
+        WizardFormField(
+            "Disable Selected Connector",
+            "bool",
+            "--disable",
+            value="no",
+            default="no",
+            hint="Uses guardrail disable --connector; peer connectors remain enabled.",
+            visible_when=connector_scope,
+        ),
+        WizardFormField(
+            "Disable Guardrail Globally",
+            "bool",
+            "--disable",
+            value="no",
+            default="no",
+            hint="Explicit global kill switch: affects every active connector.",
+            visible_when=global_scope,
+        ),
     )
     return _apply_dynamic_fields(
         candidates,
@@ -4660,6 +4942,7 @@ def _guardrail_wizard_fields_for(
             "provider": judge_provider,
             "bedrock_auth_mode": judge_bedrock_auth_mode,
             "strategy": strategy,
+            "scope": scope,
         },
     )
 

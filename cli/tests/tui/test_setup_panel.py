@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from defenseclaw.tui.panels.setup import (
     CONNECTORS,
     WIZARD_DESCRIPTIONS,
@@ -26,6 +28,7 @@ from defenseclaw.tui.panels.setup import (
     WizardGoal,
     _custom_providers_fields_for,
     _filter_fields_for_goal,
+    _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
     action_matrix_fields,
@@ -681,6 +684,78 @@ def test_guardrail_live_connector_change_rederives_connector_scoped_settings() -
     assert wizard_field_value(model.form_fields, "Approval Min Severity") == "LOW"
 
 
+def test_guardrail_advanced_separates_connector_and_global_argv() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    connector_fields = guardrail_wizard_fields(cfg)
+
+    assert wizard_field_value(connector_fields, "Scope") == "selected-connector"
+    assert _wizard_options(connector_fields, "Connector") == ("", "claudecode", "codex")
+    assert "Global Settings (affects all active connectors)" not in {field.label for field in connector_fields}
+    connector_fields = _with_field(connector_fields, "Connector", "codex")
+    connector_argv = build_wizard_args(SetupWizard.GUARDRAIL, connector_fields, cfg)
+    assert _pair_after(connector_argv, "--connector") == "codex"
+    for global_flag in (
+        "--scanner-mode",
+        "--port",
+        "--cisco-endpoint",
+        "--cisco-api-key-env",
+        "--cisco-timeout-ms",
+        "--detection-strategy",
+        "--judge-model",
+        "--llm-role",
+        "--disable-redaction",
+        "--enable-redaction",
+    ):
+        assert global_flag not in connector_argv
+
+    scoped_disable = _with_field(connector_fields, "Disable Selected Connector", "yes")
+    scoped_disable = _with_field(scoped_disable, "Restart After", "no")
+    assert build_wizard_args(SetupWizard.GUARDRAIL, scoped_disable, cfg) == (
+        "guardrail",
+        "disable",
+        "--yes",
+        "--connector",
+        "codex",
+        "--no-restart",
+    )
+
+    global_fields = _guardrail_wizard_fields_for({"@Scope": "global-all-active"}, cfg)
+    labels = {field.label for field in global_fields}
+    assert "Connector" not in labels
+    assert "Global Settings (affects all active connectors)" in labels
+    global_disable = _with_field(global_fields, "Disable Guardrail Globally", "yes")
+    global_disable = _with_field(global_disable, "Restart After", "no")
+    assert build_wizard_args(SetupWizard.GUARDRAIL, global_disable, cfg) == (
+        "guardrail",
+        "disable",
+        "--yes",
+        "--no-restart",
+    )
+
+
+def test_guardrail_inactive_connector_is_unavailable_and_rejected_before_intent() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    before = deepcopy(cfg)
+    model = SetupPanelModel(cfg=cfg)
+    model.open_wizard_form(SetupWizard.GUARDRAIL)
+
+    connector = next(field for field in model.form_fields if field.label == "Connector")
+    assert connector.options == ("", "claudecode", "codex")
+    assert "cursor" not in connector.options
+
+    # Simulate a stale/injected form value, bypassing the choice widget.
+    model.form_fields = list(_with_field(model.form_fields, "Connector", "cursor"))
+    with pytest.raises(ValueError, match="not active"):
+        build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields, cfg)
+
+    action = model.submit_wizard_form()
+    assert action.intent is None
+    assert model.form_active is True
+    assert "not active" in model.form_error
+    assert SetupWizard.GUARDRAIL not in model.wizard_status
+    assert cfg == before
+
+
 def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
     fields = wizard_form_defs(SetupWizard.TRUSTED_PATHS)
     assert build_wizard_args(SetupWizard.TRUSTED_PATHS, fields) == ("setup", "trusted-paths", "list")
@@ -703,8 +778,14 @@ def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
 
 
 def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
-    fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
-    assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fields) == ("guardrail", "status")
+    global_fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
+    assert wizard_field_value(global_fields, "Scope") == "global-all-active"
+    assert "Connector" not in {field.label for field in global_fields}
+    assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, global_fields) == ("guardrail", "status")
+
+    cfg = {"guardrail": {"connectors": {"codex": {}, "hermes": {}}}}
+    fields = _guardrail_actions_wizard_fields({"@Scope": "selected-connector"}, cfg)
+    assert _wizard_options(fields, "Connector") == ("", "codex", "hermes")
 
     scoped_status = _with_field(fields, "Connector", "codex")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, scoped_status) == (
@@ -737,7 +818,7 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "hermes",
     )
 
-    hilt = _with_field(fields, "Action", "hilt")
+    hilt = _with_field(global_fields, "Action", "hilt")
     hilt = _with_field(hilt, "HITL State", "off")
     hilt = _with_field(hilt, "Approval Min Severity", "MEDIUM")
     hilt = _with_field(hilt, "Restart Gateway", "no")
@@ -752,19 +833,19 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
     )
 
     block = _with_field(fields, "Action", "block-message")
+    block = _with_field(block, "Connector", "hermes")
     assert missing_required_fields(SetupWizard.GUARDRAIL_ACTIONS, block) == ("Block Message or Clear Message",)
     block = _with_field(block, "Block Message", "Blocked by policy.")
-    block = _with_field(block, "Connector", "antigravity")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, block) == (
         "guardrail",
         "block-message",
         "Blocked by policy.",
         "--yes",
         "--connector",
-        "antigravity",
+        "hermes",
     )
 
-    clear = _with_field(fields, "Action", "block-message")
+    clear = _with_field(global_fields, "Action", "block-message")
     clear = _with_field(clear, "Clear Message", "yes")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, clear) == (
         "guardrail",
@@ -1908,13 +1989,13 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
     assert _pair_after(argv, "--judge-model") == "bedrock/us.anthropic.claude-sonnet-4-6"
 
 
-def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_auth_rows() -> None:
+def test_guardrail_wizard_exposes_scoped_block_message_and_scopes_bedrock_auth_rows() -> None:
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     flags = {f.flag for f in fields}
 
-    assert "Block Message" not in labels
-    assert "--block-message" not in flags
+    assert "Block Message" in labels
+    assert "--block-message" in flags
     assert "--judge-bedrock-auth-mode" in flags
     assert "--judge-bedrock-secret-key-env" not in flags
     assert "--judge-bedrock-profile-name" not in flags
