@@ -80,6 +80,9 @@ def _detach_ui(app: DefenseClawTUI, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app, "_set_status", lambda message: setattr(app, "status_text", message))
     monkeypatch.setattr(app, "_write_activity", lambda message: app.activity_lines.append(message))
     monkeypatch.setattr(app, "_render_chrome", lambda: None)
+    monkeypatch.setattr(app, "_schedule_active_panel_refresh", lambda _reason="": 0)
+    monkeypatch.setattr(app, "_schedule_signal_data_refresh", lambda: None)
+    monkeypatch.setattr(app, "_schedule_roster_catalog_refresh", lambda: None)
 
 
 def test_atomic_replace_emits_one_generation(tmp_path: Path) -> None:
@@ -149,6 +152,7 @@ async def test_external_mode_change_refreshes_without_health_and_without_duplica
     app.setup_model.queue_restart("existing operator restart")
 
     render_count = 0
+    refresh_reasons: list[str] = []
     load_count = 0
     real_loader = app_module._load_config_generation
 
@@ -163,6 +167,11 @@ async def test_external_mode_change_refreshes_without_health_and_without_duplica
 
     monkeypatch.setattr(app_module, "_load_config_generation", counted_loader)
     monkeypatch.setattr(app, "_render_chrome", counted_render)
+    monkeypatch.setattr(
+        app,
+        "_schedule_active_panel_refresh",
+        lambda reason="": refresh_reasons.append(reason) or len(refresh_reasons),
+    )
     monkeypatch.setattr(app, "_set_status", lambda _message: None)
     # CLI-shaped single-connector update: connector override advances while
     # the inherited global mode remains observe.
@@ -182,7 +191,8 @@ async def test_external_mode_change_refreshes_without_health_and_without_duplica
     assert app.overview_model.health is None
     assert app._config_reload_count == 1  # noqa: SLF001
     assert load_count == 1
-    assert render_count == 1
+    assert render_count == 0
+    assert refresh_reasons == ["config-generation"]
 
 
 @pytest.mark.asyncio

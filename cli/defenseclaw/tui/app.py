@@ -9182,7 +9182,7 @@ class DefenseClawTUI(App[None]):
             save = getattr(self.config, "save", None)
             if callable(save):
                 save()
-            roster_changed = self._apply_config_snapshot(
+            roster_changed, storage_changed = self._apply_config_snapshot(
                 self.config,
                 external=False,
                 refresh_disk=False,
@@ -9191,6 +9191,9 @@ class DefenseClawTUI(App[None]):
                 self._config_watcher.sync_to_disk()
             if roster_changed:
                 self._schedule_roster_catalog_refresh()
+            if storage_changed:
+                self._schedule_signal_data_refresh()
+            self._schedule_active_panel_refresh("config-save")
             self.setup_model.queue_restart(restart_reason)
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
@@ -9439,7 +9442,7 @@ class DefenseClawTUI(App[None]):
                 return
 
             try:
-                roster_changed = self._apply_config_snapshot(
+                roster_changed, storage_changed = self._apply_config_snapshot(
                     new_cfg,
                     external=True,
                     refresh_disk=False,
@@ -9455,8 +9458,10 @@ class DefenseClawTUI(App[None]):
             watcher.accept(generation)
             self._config_reload_count += 1
             self._set_status("Configuration refreshed from disk.")
-            self._render_chrome()
-            if roster_changed:
+            self._schedule_active_panel_refresh("config-generation")
+            if storage_changed:
+                self._schedule_signal_data_refresh()
+            if roster_changed or storage_changed:
                 self._schedule_roster_catalog_refresh()
         finally:
             self._config_poll_running = False
@@ -9517,9 +9522,18 @@ class DefenseClawTUI(App[None]):
             )
             return
 
-        self._apply_config_snapshot(new_cfg, external=False, refresh_disk=True)
+        roster_changed, storage_changed = self._apply_config_snapshot(
+            new_cfg,
+            external=False,
+            refresh_disk=True,
+        )
         if self._config_watcher is not None:
             self._config_watcher.sync_to_disk()
+        self._schedule_active_panel_refresh("internal-config-generation")
+        if storage_changed:
+            self._schedule_signal_data_refresh()
+        if roster_changed or storage_changed:
+            self._schedule_roster_catalog_refresh()
 
     def _apply_config_snapshot(
         self,
@@ -9527,12 +9541,14 @@ class DefenseClawTUI(App[None]):
         *,
         external: bool,
         refresh_disk: bool,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Swap the authoritative config and all config-derived TUI state.
 
         The method is synchronous and contains no event-loop yield, so every
         model sees one generation before the next render. Returns whether the
-        configured connector roster changed.
+        configured connector roster and its backing storage changed. Callers
+        feed those invalidations into the deferred rendering/data pipelines so
+        a config write in another process cannot block Textual's event loop.
         """
 
         old_cfg = self.config
@@ -9620,13 +9636,11 @@ class DefenseClawTUI(App[None]):
         self._sync_catalog_connector_filters()
         self._sync_setup_readiness()
 
-        if storage_changed:
-            self._refresh_models_from_disk()
         if self.first_run_model.active and new_cfg is not None:
             self.first_run_model.active = False
             if self.active_panel == "setup":
                 self.active_panel = "overview"
-        return old_roster != new_roster
+        return old_roster != new_roster, storage_changed
 
     def _schedule_credentials_refresh(self) -> None:
         """Dispatch a credential refresh as a Textual worker.
@@ -10177,7 +10191,10 @@ class DefenseClawTUI(App[None]):
     def _schedule_signal_data_refresh(self) -> None:
         """Coalesce file/SQLite refreshes for Alerts, Audit, and Logs."""
 
-        if getattr(self, "_app_shutting_down", False):
+        # Model-level callers and unit tests can apply a config snapshot before
+        # Textual mounts the app. Do not manufacture an unowned Worker/coroutine
+        # in that state; the mount/periodic refresh will load the current source.
+        if not self.is_running or getattr(self, "_app_shutting_down", False):
             return
         if self._signal_refresh_running:
             self._signal_refresh_pending = True
