@@ -12,6 +12,8 @@ import ctypes
 from ctypes import wintypes
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+_TUI_JOB_LIMIT_FLAGS = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _PROCESS_TERMINATE = 0x0001
@@ -112,7 +114,11 @@ class WindowsJob:
             self._raise_last_error("CreateJobObjectW")
         try:
             limits = _JobObjectExtendedLimitInformation()
-            limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            # Ordinary descendants remain in this kill-on-close job.  Only
+            # DefenseClaw's managed gateway/watchdog launch sites request
+            # CREATE_BREAKAWAY_FROM_JOB, allowing those PID-file-owned
+            # daemons to survive after a successful TUI command exits.
+            limits.BasicLimitInformation.LimitFlags = _TUI_JOB_LIMIT_FLAGS
             if not kernel32.SetInformationJobObject(
                 self._job,
                 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,

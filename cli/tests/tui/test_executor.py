@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import defenseclaw.tui.app as app_module
+import defenseclaw.tui.windows_process as windows_process
 import pytest
 from defenseclaw.tui.executor import (
     CommandExecutor,
@@ -135,6 +136,14 @@ def test_managed_subprocess_is_suspended_only_on_windows() -> None:
         assert kwargs == {"creationflags": subprocess.CREATE_NO_WINDOW | 0x00000004}
     else:
         assert kwargs == {}
+
+
+def test_windows_job_allows_only_explicit_managed_breakaway() -> None:
+    assert windows_process._TUI_JOB_LIMIT_FLAGS == (  # noqa: SLF001 - exact Win32 contract.
+        windows_process._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE  # noqa: SLF001
+        | windows_process._JOB_OBJECT_LIMIT_BREAKAWAY_OK  # noqa: SLF001
+    )
+    assert windows_process._TUI_JOB_LIMIT_FLAGS & 0x00001000 == 0  # noqa: SLF001 - no silent breakaway.
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows console allocation behavior")

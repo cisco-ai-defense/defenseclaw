@@ -40,6 +40,8 @@ const (
 	defaultStartReadinessTimeout = 10 * time.Second
 	defaultReadinessPollInterval = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout  = time.Second
+	restartPortReleaseTimeout    = 2 * time.Second
+	restartPortReleaseInterval   = 25 * time.Millisecond
 )
 
 var startCmd = &cobra.Command{
@@ -222,7 +224,12 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
-	if err := waitForConfiguredPortFree(cfg, defaultStopTimeout, defaultReadinessPollInterval); err != nil {
+	if err := waitForConfiguredPortFree(
+		cfg,
+		pid,
+		restartPortReleaseTimeout,
+		restartPortReleaseInterval,
+	); err != nil {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 
@@ -413,38 +420,37 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 	return true, managedPID, nil
 }
 
-func requireConfiguredPortFree(cfg *config.Config) error {
+// waitForConfiguredPortFree handles the short Windows listener-table handoff
+// after a verified managed process has stopped. GetExtendedTcpTable can retain
+// that PID's listener row briefly after process exit. Retry only that exact
+// stopped owner; a different PID still fails immediately as a foreign
+// collision. Other platforms retain the previous no-op behavior.
+func waitForConfiguredPortFree(
+	cfg *config.Config,
+	stoppedPID int,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) error {
 	if !requireStartupListenerOwnership {
 		return nil
 	}
-	pid, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
-	if errors.Is(err, daemon.ErrNoListener) {
-		return nil
+	if pollInterval <= 0 {
+		pollInterval = restartPortReleaseInterval
 	}
-	if err != nil {
-		return err
-	}
-	return fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
-}
-
-func waitForConfiguredPortFree(cfg *config.Config, timeout, pollInterval time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	var lastErr error
 	for {
-		lastErr = requireConfiguredPortFree(cfg)
-		if lastErr == nil {
+		pid, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+		if errors.Is(err, daemon.ErrNoListener) {
 			return nil
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return lastErr
+		if err != nil {
+			return err
 		}
-		delay := pollInterval
-		if delay <= 0 || delay > remaining {
-			delay = remaining
+		collision := fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
+		if stoppedPID <= 0 || pid != stoppedPID || time.Now().After(deadline) {
+			return collision
 		}
-		timer := time.NewTimer(delay)
-		<-timer.C
+		time.Sleep(pollInterval)
 	}
 }
 

@@ -165,7 +165,7 @@ func TestWaitForConfiguredPortFreeRetriesRestartRelease(t *testing.T) {
 		}
 		return 0, daemon.ErrNoListener
 	})
-	if err := waitForConfiguredPortFree(cfg, time.Second, time.Millisecond); err != nil {
+	if err := waitForConfiguredPortFree(cfg, 42, time.Second, time.Millisecond); err != nil {
 		t.Fatalf("waitForConfiguredPortFree: %v", err)
 	}
 	if got := probes.Load(); got != 3 {
@@ -175,10 +175,17 @@ func TestWaitForConfiguredPortFreeRetriesRestartRelease(t *testing.T) {
 
 func TestWaitForConfiguredPortFreeKeepsForeignCollisionTerminal(t *testing.T) {
 	cfg := startupTestConfig(t)
-	withStartupListenerInspector(t, func(string, int) (int, error) { return 99, nil })
-	err := waitForConfiguredPortFree(cfg, 5*time.Millisecond, time.Millisecond)
+	var probes atomic.Int32
+	withStartupListenerInspector(t, func(string, int) (int, error) {
+		probes.Add(1)
+		return 99, nil
+	})
+	err := waitForConfiguredPortFree(cfg, 42, time.Second, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "occupied by PID 99") {
 		t.Fatalf("error = %v, want occupied-port failure", err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("foreign-listener probes = %d, want immediate failure after 1", got)
 	}
 }
 

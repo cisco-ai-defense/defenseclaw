@@ -52,10 +52,18 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	// it becomes addressable by GenerateConsoleCtrlEvent for graceful stop.
 	// DETACHED_PROCESS drops the inherited console so a closing terminal
 	// cannot deliver CTRL_CLOSE and take the gateway down with it.
+	// CREATE_BREAKAWAY_FROM_JOB is intentionally limited to this managed
+	// daemon launch. It lets the PID-file-owned gateway survive a successful
+	// TUI command whose enclosing Job Object is closed, while ordinary TUI
+	// descendants remain in that kill-on-close job.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP |
+			windows.DETACHED_PROCESS |
+			windows.CREATE_BREAKAWAY_FROM_JOB,
 	}
 }
+
+func daemonChildRegistersPID() bool { return true }
 
 func sendTermSignal(proc *os.Process) error {
 	// The managed gateway is always launched with DETACHED_PROCESS (see
