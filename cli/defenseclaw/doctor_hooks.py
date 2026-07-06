@@ -44,10 +44,33 @@ class WindowsHookCheck:
     detail: str
     command: str = ""
     target: str = ""
+    raw_target: str = ""
 
     @property
     def healthy(self) -> bool:
         return self.state == "healthy"
+
+    @property
+    def runtime_description(self) -> str:
+        """Describe the registered runtime without executing command text.
+
+        A healthy resolved target is safe to render directly after the
+        ownership and containment checks below.  Failed targets, unresolved
+        targets, and malformed commands remain untrusted input, so ``repr``
+        keeps control characters inert in Doctor's human output while still
+        showing the operator the exact registration that needs repair.
+        """
+        if self.target:
+            runtime = f"runtime_path={self.target}" if self.healthy else f"runtime_path={self.target!r}"
+        elif self.raw_target:
+            runtime = f"runtime_path={self.raw_target!r}"
+        elif self.command:
+            runtime = f"runtime_command={self.command!r}"
+        else:
+            runtime = "runtime_path=unresolved"
+        if self.healthy:
+            return runtime
+        return f"{runtime} runtime_state={self.state} runtime_error={self.detail}"
 
 
 class _InspectionError(Exception):
@@ -400,6 +423,7 @@ def validate_windows_hook_registration(
     connector = connector.strip().lower()
     command = ""
     target = ""
+    raw_target = ""
     try:
         document = _read_config(config_path, connector)
         commands = _commands_from_hooks(document, connector)
@@ -454,6 +478,13 @@ def validate_windows_hook_registration(
             f"healthy Windows-native {runtime} registration; entries={len(commands)}; target={resolved}; {evidence}",
             command,
             resolved,
+            raw_target,
         )
     except _InspectionError as exc:
-        return WindowsHookCheck(exc.state, _repair_detail(connector, exc.detail), command, target)
+        return WindowsHookCheck(
+            exc.state,
+            _repair_detail(connector, exc.detail),
+            command,
+            target,
+            raw_target,
+        )
