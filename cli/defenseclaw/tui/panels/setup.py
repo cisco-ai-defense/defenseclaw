@@ -518,6 +518,10 @@ class SetupPanelModel:
         self.form_active = False
         self.form_reveal = False
         self.form_error = ""
+        # Set when disk changes while the operator has an unsaved wizard form
+        # or config-editor draft. The authoritative config/readiness state
+        # still advances, but the draft remains intact until run/cancel/revert.
+        self.disk_change_pending = False
         # Goal-first entry layer: a contextual "what do you want to do?" menu
         # that sits in front of the wizard form. ``active_goal`` is carried
         # into the form so its preset filter survives dependent rebuilds.
@@ -526,18 +530,27 @@ class SetupPanelModel:
         self.goals: tuple[WizardGoal, ...] = ()
         self.active_goal: WizardGoal | None = None
 
-    def set_config(self, cfg: object | Mapping[str, Any] | None) -> None:
+    def set_config(
+        self,
+        cfg: object | Mapping[str, Any] | None,
+        *,
+        external: bool = False,
+    ) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
+        preserve_config_draft = external and self.mode == "config" and self.has_changes()
+        preserve_wizard_draft = external and self.form_active
         self.config = cfg
-        self.sections = build_setup_sections(cfg)
-        if active_name:
-            for index, section in enumerate(self.sections):
-                if section.name == active_name:
-                    self.active_section = index
-                    break
-        self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
-        self.active_line = self.first_editable_line()
-        self.config_scroll = 0
+        if not preserve_config_draft:
+            self.sections = build_setup_sections(cfg)
+            if active_name:
+                for index, section in enumerate(self.sections):
+                    if section.name == active_name:
+                        self.active_section = index
+                        break
+            self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
+            self.active_line = self.first_editable_line()
+            self.config_scroll = 0
+        self.disk_change_pending = preserve_config_draft or preserve_wizard_draft
         # Readiness rows depend on cfg.gateway / cfg.guardrail / cfg.audit /
         # cfg.observability, so rebuild them whenever the cached config
         # changes; otherwise we keep showing rows derived from the
@@ -960,15 +973,22 @@ class SetupPanelModel:
             for field in section.fields:
                 if field.value != field.original:
                     apply_config_field(self.config, field.key, field.value)
-        self.sections = tuple(
-            ConfigSection(
-                section.name,
-                tuple(_field_with_original(field, field.value) for field in section.fields),
-                section.summary,
-                section.help,
+        if self.disk_change_pending:
+            # The draft was based on an older disk generation. Changed fields
+            # were just merged into the latest authoritative object; rebuild
+            # so externally changed, untouched fields are visible too.
+            self.sections = build_setup_sections(self.config)
+            self.disk_change_pending = False
+        else:
+            self.sections = tuple(
+                ConfigSection(
+                    section.name,
+                    tuple(_field_with_original(field, field.value) for field in section.fields),
+                    section.summary,
+                    section.help,
+                )
+                for section in self.sections
             )
-            for section in self.sections
-        )
 
     def first_editable_line(self) -> int:
         if not self.sections:
@@ -1104,6 +1124,7 @@ class SetupPanelModel:
         self.goal_active = False
         self.form_reveal = False
         self.form_error = ""
+        self.disk_change_pending = False
         self._place_form_cursor()
 
     def _place_form_cursor(self) -> None:
@@ -1125,6 +1146,7 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals = ()
         self.active_goal = None
+        self.disk_change_pending = False
 
     def recompute_dependent_fields(self) -> None:
         """Rebuild the active form when a driver field (provider/role/action)

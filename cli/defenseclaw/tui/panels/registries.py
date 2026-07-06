@@ -141,6 +141,13 @@ class RegistriesPanelModel:
             self.data_dir = _config_data_dir(config)
         self.refresh()
 
+    def set_data_dir(self, data_dir: str | Path | None) -> None:
+        """Rebind an app-owned model after the authoritative config moves."""
+
+        self._explicit_data_dir = str(data_dir) if data_dir is not None else None
+        self.data_dir = self._explicit_data_dir or _config_data_dir(self.config)
+        self.refresh()
+
     def refresh(self) -> None:
         """Reload source config and registry cache indexes."""
 

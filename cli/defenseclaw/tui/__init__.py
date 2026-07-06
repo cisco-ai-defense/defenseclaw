@@ -81,7 +81,11 @@ def run_textual_tui() -> None:
         first_run = False
     except Exception:
         cfg, first_run = _load_after_optional_first_run_prompt(config)
-    DefenseClawTUI(config=cfg, first_run=first_run).run()
+    DefenseClawTUI(
+        config=cfg,
+        first_run=first_run,
+        config_path=config.config_path(),
+    ).run()
 
 
 def _load_after_optional_first_run_prompt(config_module: object) -> tuple[object | None, bool]:

@@ -3222,6 +3222,7 @@ def test_refresh_cached_config_closes_stale_audit_store(monkeypatch, tmp_path) -
     app = DefenseClawTUI(
         alerts_model=AlertsPanelModel(store=old_store),
         audit_model=AuditPanelModel(store=old_store),
+        tools_model=ToolsPanelModel(old_store),
     )
     # Stub the heavy fan-out so we only exercise the close-on-swap
     # branch. We don't need a real config reload — ``_audit_store``
@@ -3242,6 +3243,7 @@ def test_refresh_cached_config_closes_stale_audit_store(monkeypatch, tmp_path) -
     assert new_store.closed is False
     assert app.alerts_model.store is new_store
     assert app.audit_model.store is new_store
+    assert app.tools_model.store is new_store
 
     # Second reload returning the SAME handle must NOT close it
     # (otherwise we'd close the live store we just installed).

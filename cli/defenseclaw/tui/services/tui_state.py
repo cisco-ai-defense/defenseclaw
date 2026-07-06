@@ -169,6 +169,11 @@ class TUIStateStore:
     def persistent(self) -> bool:
         return self._path is not None
 
+    def set_data_dir(self, data_dir: Path | str | None) -> None:
+        """Move future state writes to ``data_dir`` without losing session state."""
+
+        self._path = _state_path_for(data_dir)
+
     def load(self) -> TUIState:
         """Return the persisted state, defaulting on missing/corrupt input."""
 

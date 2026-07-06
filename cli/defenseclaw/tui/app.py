@@ -128,6 +128,12 @@ from defenseclaw.tui.services.catalog_state import (
     friendly_connector_name,
 )
 from defenseclaw.tui.services.cli_choices import CONNECTORS as _KNOWN_CONNECTORS
+from defenseclaw.tui.services.config_watch import (
+    CONFIG_POLL_INTERVAL_SECONDS,
+    ConfigChangeWatcher,
+    ConfigGeneration,
+    probe_config_generation,
+)
 from defenseclaw.tui.services.overview_state import (
     ConnectorHealth,
     ConnectorOverviewRow,
@@ -151,6 +157,24 @@ def _write_owner_only_text(path: Path, text: str, *, protect_parent: bool = Fals
 
 
 TOKENS = DEFAULT_TOKENS
+
+
+class _ConfigGenerationChangedError(RuntimeError):
+    """The watched config moved while a background reload was in flight."""
+
+
+def _load_config_generation(path: Path, expected: ConfigGeneration) -> object:
+    """Load exactly ``expected`` while cooperating writers are excluded."""
+
+    with config_module.locked_config_yaml(str(path)):
+        before = probe_config_generation(path)
+        if before != expected:
+            raise _ConfigGenerationChangedError("config changed before reload")
+        loaded = config_module.load()
+        after = probe_config_generation(path)
+        if after != expected:
+            raise _ConfigGenerationChangedError("config changed during reload")
+    return loaded
 
 
 # Wizard rows whose value changes must re-derive the conditional field groups
@@ -676,6 +700,7 @@ class DefenseClawTUI(App[None]):
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
+        config_path: str | Path | None = None,
     ) -> None:
         super().__init__()
         # Textual defaults to two rows per wheel notch, which makes the dense
@@ -686,6 +711,12 @@ class DefenseClawTUI(App[None]):
         self.first_run_model = first_run_model or FirstRunPanelModel(active=first_run)
         self.executor = CommandExecutor()
         self.config = config
+        # ``run_textual_tui`` passes the active path explicitly. Keeping the
+        # default disabled prevents model-only tests and embedded consumers
+        # from accidentally watching the operator's real home config.
+        self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
+        self._config_poll_running = False
+        self._config_reload_count = 0
         self.data_dir = _resolve_data_dir(config, data_dir)
         # Operator's persisted session preferences (palette MRU,
         # per-panel "last seen" cursors, last filter, theme).
@@ -725,6 +756,7 @@ class DefenseClawTUI(App[None]):
         self.activity_model = ActivityPanelModel()
         audit_store = _audit_store(config)
         self.alerts_model = alerts_model or AlertsPanelModel(self.data_dir, store=audit_store)
+        self._registries_model_owned = registries_model is None
         self.registries_model = registries_model or RegistriesPanelModel(config, data_dir=self.data_dir)
         connector = _active_connector(config)
         self.skills_model = skills_model or SkillsPanelModel(connector=connector)
@@ -760,6 +792,7 @@ class DefenseClawTUI(App[None]):
         self._table_rows: tuple[tuple[str, ...], ...] = ()
         self._periodic_refresh_running = False
         self._slow_refresh_running = False
+        self._roster_catalog_refresh_pending = False
         self._credentials_refresh_running = False
         self._health_poll_running = False
         self._ai_usage_poll_running = False
@@ -1409,6 +1442,12 @@ class DefenseClawTUI(App[None]):
         self._refresh_models_from_disk()
         self.set_interval(0.25, self._tick_command_strip)
         self.set_interval(2.0, self._periodic_refresh)
+        # Config freshness is independent of gateway health. The watcher
+        # hashes a stable file generation in a background thread and parses
+        # only after a change, so renders never perform config I/O.
+        if self._config_watcher is not None:
+            self.set_interval(CONFIG_POLL_INTERVAL_SECONDS, self._schedule_config_poll)
+            self._schedule_config_poll()
         self.set_interval(30.0, self._schedule_ai_usage_poll)
         # Mirror Go TUI: poll /health every 3s so the Overview SERVICES
         # box reflects the actual sidecar state instead of "unknown".
@@ -1472,6 +1511,9 @@ class DefenseClawTUI(App[None]):
                 await self._load_inventory_model()
         finally:
             self._slow_refresh_running = False
+            if self._roster_catalog_refresh_pending:
+                self._roster_catalog_refresh_pending = False
+                self._schedule_slow_refresh()
 
     def on_key(self, event: events.Key) -> None:
         if len(self.screen_stack) > 1:
@@ -8101,6 +8143,12 @@ class DefenseClawTUI(App[None]):
             missing_line = (
                 f"\n[#FBBF24]Required fields still empty:[/] {', '.join(missing)}" if missing else ""
             )
+            disk_change_line = (
+                "\n[#FBBF24]Config changed on disk.[/] Your unsaved form values were preserved; "
+                "run or cancel this form to use refreshed defaults."
+                if self.setup_model.disk_change_pending
+                else ""
+            )
             focused_line = (
                 f"[{TOKENS.accent_violet} bold]→ {focused.label}[/] "
                 f"[{TOKENS.text_secondary}]({focused.kind})[/]"
@@ -8120,6 +8168,7 @@ class DefenseClawTUI(App[None]):
                 f"Keys: ↑/↓ move · ←/→ or space cycle choice · type to edit · "
                 f"Ctrl+T reveal={reveal} · [bold]Ctrl+R run[/] · Esc cancel"
                 f"[/]"
+                f"{disk_change_line}"
                 f"{missing_line}"
                 # Escape ``focused.hint`` so a wizard hint that quotes a
                 # bracketed identifier (e.g. ``set webhooks[0].url``) can't
@@ -8137,6 +8186,12 @@ class DefenseClawTUI(App[None]):
                 else f"[{TOKENS.text_secondary}]{label.name}[/]"
                 for label in self.setup_model.section_labels()
             )
+            disk_change_line = (
+                "\n[#FBBF24]Config changed on disk.[/] Your draft is preserved; "
+                "S merges edited fields or R reloads the disk version."
+                if self.setup_model.disk_change_pending
+                else ""
+            )
             return (
                 f"[bold #22D3EE]Setup Config[/]  {section.name if section else 'No sections'}\n"
                 f"{sections}\n"
@@ -8150,6 +8205,7 @@ class DefenseClawTUI(App[None]):
                 f"{'  '.join(hints.action_bar)}\n"
                 "Keys: tab/shift+tab section, up/down field, enter/space cycle, type/backspace edit, "
                 "S save, R revert, w wizards."
+                f"{disk_change_line}"
             ).strip()
         readiness_rows = self.setup_model.readiness_checks
         readiness = "\n".join(f"{check.status.upper()}: {check.title} - {check.detail}" for check in readiness_rows[:8])
@@ -8478,6 +8534,15 @@ class DefenseClawTUI(App[None]):
             save = getattr(self.config, "save", None)
             if callable(save):
                 save()
+            roster_changed = self._apply_config_snapshot(
+                self.config,
+                external=False,
+                refresh_disk=False,
+            )
+            if self._config_watcher is not None:
+                self._config_watcher.sync_to_disk()
+            if roster_changed:
+                self._schedule_roster_catalog_refresh()
             self.setup_model.queue_restart(restart_reason)
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
@@ -8679,6 +8744,90 @@ class DefenseClawTUI(App[None]):
             return
         await self._load_catalog_model(panel)
 
+    def _schedule_config_poll(self) -> None:
+        """Probe the active config without depending on gateway health."""
+
+        if (
+            self._config_watcher is None
+            or self._config_poll_running
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        self._config_poll_running = True
+        self.run_worker(
+            self._poll_config_once(),
+            exclusive=False,
+            thread=False,
+        )
+
+    async def _poll_config_once(self, *, now: float | None = None) -> None:
+        """Apply one changed, stable config generation if one is available."""
+
+        watcher = self._config_watcher
+        if watcher is None:
+            self._config_poll_running = False
+            return
+        try:
+            generation = await asyncio.to_thread(watcher.poll, now=now)
+            if generation is None:
+                return
+            try:
+                new_cfg = await asyncio.to_thread(
+                    _load_config_generation,
+                    watcher.path,
+                    generation,
+                )
+            except _ConfigGenerationChangedError:
+                # Atomic replacement or an in-place writer advanced again
+                # while this worker waited for the config lock. The next poll
+                # evaluates the new generation; the current snapshot remains.
+                return
+            except Exception as exc:  # noqa: BLE001 - malformed/locked config is retryable.
+                if watcher.reject(generation, now=now):
+                    self._write_activity(
+                        f"[#FBBF24]external config reload deferred:[/] "
+                        f"{rich_escape(str(exc))}; keeping the last valid snapshot."
+                    )
+                return
+
+            try:
+                roster_changed = self._apply_config_snapshot(
+                    new_cfg,
+                    external=True,
+                    refresh_disk=False,
+                )
+            except Exception as exc:  # noqa: BLE001 - never replace the accepted generation on failure.
+                if watcher.reject(generation, now=now):
+                    self._write_activity(
+                        f"[#FBBF24]external config refresh failed:[/] "
+                        f"{rich_escape(str(exc))}; keeping the last valid snapshot."
+                    )
+                return
+
+            watcher.accept(generation)
+            self._config_reload_count += 1
+            self._set_status("Configuration refreshed from disk.")
+            self._render_chrome()
+            if roster_changed:
+                self._schedule_roster_catalog_refresh()
+        finally:
+            self._config_poll_running = False
+
+    def _schedule_roster_catalog_refresh(self) -> None:
+        """Reload already-open catalogs when connector membership changes."""
+
+        loaded = any(getattr(model, "loaded", False) for model in self.catalog_models.values())
+        loaded = loaded or bool(getattr(self.inventory_model, "loaded", False))
+        if not loaded:
+            return
+        if self._slow_refresh_running:
+            self._roster_catalog_refresh_pending = True
+            return
+        try:
+            self._schedule_slow_refresh()
+        except Exception:  # noqa: BLE001 - direct model tests have no running Textual app.
+            pass
+
     def _refresh_cached_config(self) -> None:
         """Full reload-from-disk after ``setup``/``init``/``sandbox``/``registry``.
 
@@ -8718,20 +8867,63 @@ class DefenseClawTUI(App[None]):
             self._write_activity(
                 f"[#FBBF24]config reload failed:[/] {rich_escape(str(exc))}; keeping current snapshot."
             )
-            new_cfg = self.config
+            return
+
+        self._apply_config_snapshot(new_cfg, external=False, refresh_disk=True)
+        if self._config_watcher is not None:
+            self._config_watcher.sync_to_disk()
+
+    def _apply_config_snapshot(
+        self,
+        new_cfg: object | None,
+        *,
+        external: bool,
+        refresh_disk: bool,
+    ) -> bool:
+        """Swap the authoritative config and all config-derived TUI state.
+
+        The method is synchronous and contains no event-loop yield, so every
+        model sees one generation before the next render. Returns whether the
+        configured connector roster changed.
+        """
+
+        old_cfg = self.config
+        old_overview_cfg = self.overview_model.cfg
+        new_overview_cfg = _overview_config(new_cfg)
+        old_roster = _overview_connector_names(old_overview_cfg)
+        new_roster = _overview_connector_names(new_overview_cfg)
+        old_data_dir = self.data_dir
+        new_data_dir = _resolve_data_dir(new_cfg, None)
+        data_dir_changed = new_data_dir != old_data_dir
+        storage_changed = (
+            refresh_disk
+            or data_dir_changed
+            or _audit_db_path(old_cfg) != _audit_db_path(new_cfg)
+        )
+
+        new_store = _audit_store(new_cfg) if storage_changed else None
+        old_stores: list[object] = []
+        if storage_changed:
+            for model in (self.alerts_model, self.audit_model, self.tools_model):
+                prior = getattr(model, "store", None)
+                if prior is not None and prior is not new_store and prior not in old_stores:
+                    old_stores.append(prior)
 
         self.config = new_cfg
-        new_data_dir = _resolve_data_dir(new_cfg, None)
-        if new_data_dir is not None:
-            self.data_dir = new_data_dir
-
-        # Panels that cache the config snapshot.
-        self.setup_model.set_config(new_cfg)
-        self.overview_model.set_cfg(_overview_config(new_cfg))
+        self.data_dir = new_data_dir
+        self.overview_model.set_cfg(new_overview_cfg)
+        self.setup_model.set_config(new_cfg, external=external)
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
+        if (
+            data_dir_changed
+            and self._registries_model_owned
+            and hasattr(self.registries_model, "set_data_dir")
+        ):
+            self.registries_model.set_data_dir(new_data_dir)
 
-        # Panels that tail files from data_dir.
+        if data_dir_changed and hasattr(self.state_store, "set_data_dir"):
+            self.state_store.set_data_dir(new_data_dir)
         if hasattr(self.logs_model, "set_data_dir"):
             self.logs_model.set_data_dir(new_data_dir)
         if hasattr(self.activity_model, "set_data_dir"):
@@ -8739,27 +8931,19 @@ class DefenseClawTUI(App[None]):
         if hasattr(self.alerts_model, "set_data_dir"):
             self.alerts_model.set_data_dir(new_data_dir)
 
-        # Re-open audit store at the new path. Capture the previous
-        # handles *before* the swap so we can close them after — the
-        # alerts and audit panels each held a reference and replacing
-        # the attribute alone leaked the SQLite file descriptor on
-        # every setup-driven reload (which a typical session triggers
-        # several times: connector pick, registry add, redaction
-        # toggle, etc.). The previous handles can be the same Store
-        # instance, so dedupe before closing.
-        new_store = _audit_store(new_cfg)
-        old_stores: list[object] = []
-        for model in (self.alerts_model, self.audit_model):
-            prior = getattr(model, "store", None)
-            if prior is not None and prior is not new_store and prior not in old_stores:
-                old_stores.append(prior)
-        if hasattr(self.alerts_model, "set_store"):
-            self.alerts_model.set_store(new_store)
-        if hasattr(self.audit_model, "set_store"):
-            self.audit_model.set_store(new_store)
-        self._connector_hook_event_stats_cache = None
-        self._connector_hook_event_stats_loaded_at = 0.0
-        self._overview_audit_version_cache = None
+        if storage_changed:
+            if hasattr(self.alerts_model, "set_store"):
+                self.alerts_model.set_store(new_store)
+            if hasattr(self.audit_model, "set_store"):
+                self.audit_model.set_store(new_store)
+            if hasattr(self.tools_model, "set_store"):
+                self.tools_model.set_store(new_store)
+            else:
+                self.tools_model.store = new_store
+            self._connector_hook_event_stats_cache = None
+            self._connector_hook_event_stats_loaded_at = 0.0
+            self._overview_audit_version_cache = None
+
         for stale in old_stores:
             close = getattr(stale, "close", None)
             if callable(close):
@@ -8768,16 +8952,33 @@ class DefenseClawTUI(App[None]):
                 except Exception:  # noqa: BLE001 — best-effort cleanup; never block the reload.
                     pass
 
-        # Re-apply the known health snapshot so subsystem state stays
-        # populated through the reload (next poll overwrites this in 3s).
+        # Clamp a removed connector selection before propagating the new
+        # action target. Multi-connector removals fall back predictably to All.
+        self.connector_filter = connector_filter_svc.normalize_filter(
+            self.connector_filter,
+            self._active_connector_names(),
+        )
+        self._overview_connector_rows_render_cache = None
+        self._overview_metric_data_render_cache = None
+        self._overview_session_enforcement_counts_render_cache = None
+        self._overview_connector_rows_signature_cache = None
+        self._overview_live_data_signature_cache = None
+        self._last_body_signature = None
+
+        # Keep the last health sample, but do not use health availability as
+        # the freshness trigger. Config is authoritative for connector scope.
         self.overview_model.set_health(self.overview_model.health)
         self._propagate_connector(self.overview_model.health)
-
-        # Run the standard refresh pipeline so every panel re-reads
-        # against the new paths in a single pass, then rebuild Setup
-        # readiness so rows flip on the same tick.
-        self._refresh_models_from_disk()
+        self._sync_catalog_connector_filters()
         self._sync_setup_readiness()
+
+        if storage_changed:
+            self._refresh_models_from_disk()
+        if self.first_run_model.active and new_cfg is not None:
+            self.first_run_model.active = False
+            if self.active_panel == "setup":
+                self.active_panel = "overview"
+        return old_roster != new_roster
 
     def _schedule_credentials_refresh(self) -> None:
         """Dispatch a credential refresh as a Textual worker.
@@ -9563,18 +9764,21 @@ class DefenseClawTUI(App[None]):
         # ``_connector_filter`` returns "" for single-connector installs and
         # the All state, preserving the original behaviour.
         selected = self._connector_filter()
-        connector_name = selected or _resolve_active_connector(snapshot, mode)
+        configured = self.overview_model.active_connector_name()
+        connector_name = selected or configured or _resolve_active_connector(snapshot, mode)
         focus_enabled = bool(selected)
         for model in (
             self.skills_model,
             self.mcps_model,
             self.plugins_model,
+            self.tools_model,
             self.inventory_model,
         ):
-            try:
-                model.set_connector(connector_name)
-            except AttributeError:
-                continue
+            setter = getattr(model, "set_connector", None)
+            if callable(setter):
+                setter(connector_name)
+            elif hasattr(model, "connector"):
+                model.connector = connector_name
             if hasattr(model, "connector_focus_enabled"):
                 model.connector_focus_enabled = focus_enabled
 
@@ -10007,6 +10211,24 @@ def _audit_store(config: object | None) -> object | None:
         return None
 
 
+def _audit_db_path(config: object | None) -> str:
+    if isinstance(config, dict):
+        return str(config.get("audit_db", "") or "")
+    return str(getattr(config, "audit_db", "") or "")
+
+
+def _overview_connector_names(cfg: OverviewConfig | None) -> tuple[str, ...]:
+    """Configured connector membership for reload invalidation."""
+
+    if cfg is None:
+        return ()
+    roster = tuple(name.strip().lower() for name, _mode in cfg.connector_modes if name.strip())
+    if roster:
+        return roster
+    active = cfg.guardrail_connector.strip().lower() or cfg.claw_mode.strip().lower()
+    return (active,) if active else ()
+
+
 def _flatten_scanner_overrides(
     overrides: object,
 ) -> tuple[tuple[str, str, str, str], ...]:
@@ -10089,6 +10311,43 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
+
+    # A one-entry ``guardrail.connectors`` map is still connector-scoped.
+    # Project its effective values into the legacy singular Overview fields;
+    # otherwise an external CLI write can correctly set Claude Code to action
+    # while the TUI keeps rendering the inherited global observe/defaults.
+    effective_guardrail_enabled = bool(getattr(guardrail, "enabled", False))
+    effective_guardrail_mode = str(getattr(guardrail, "mode", "") or "observe")
+    effective_rule_pack_dir = str(getattr(guardrail, "rule_pack_dir", "") or "")
+    effective_hilt = hilt
+    if len(actives) == 1 and guardrail is not None:
+        connector = actives[0]
+        if hasattr(guardrail, "effective_enabled"):
+            try:
+                effective_guardrail_enabled = effective_guardrail_enabled and bool(
+                    guardrail.effective_enabled(connector)
+                )
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
+        if hasattr(guardrail, "effective_mode"):
+            try:
+                effective_guardrail_mode = str(
+                    guardrail.effective_mode(connector) or effective_guardrail_mode
+                )
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
+        if hasattr(guardrail, "effective_rule_pack_dir"):
+            try:
+                effective_rule_pack_dir = str(
+                    guardrail.effective_rule_pack_dir(connector) or effective_rule_pack_dir
+                )
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
+        if hasattr(guardrail, "effective_hilt"):
+            try:
+                effective_hilt = guardrail.effective_hilt(connector)
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
     if len(actives) > 1:
         pairs: list[tuple[str, str]] = []
         packs: list[tuple[str, str]] = []
@@ -10145,17 +10404,17 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # connector) instead of fabricating "openclaw". The Go-parity
         # config.active_connector() contract is deliberately left untouched.
         claw_mode=str(getattr(claw, "mode", "") or ""),
-        guardrail_enabled=bool(getattr(guardrail, "enabled", False)),
+        guardrail_enabled=effective_guardrail_enabled,
         guardrail_connector=str(getattr(guardrail, "connector", "") or ""),
-        guardrail_mode=str(getattr(guardrail, "mode", "") or "observe"),
-        guardrail_rule_pack_dir=str(getattr(guardrail, "rule_pack_dir", "") or ""),
+        guardrail_mode=effective_guardrail_mode,
+        guardrail_rule_pack_dir=effective_rule_pack_dir,
         guardrail_port=int(getattr(guardrail, "port", 0) or 0),
         guardrail_model=str(getattr(guardrail, "model", "") or ""),
         guardrail_strategy=str(getattr(guardrail, "strategy", "") or "default"),
         guardrail_judge_enabled=bool(getattr(guardrail, "judge_enabled", False)),
         guardrail_judge_model=str(getattr(guardrail, "judge_model", "") or ""),
-        hilt_enabled=bool(getattr(hilt, "enabled", False)),
-        hilt_min_severity=str(getattr(hilt, "min_severity", "") or ""),
+        hilt_enabled=bool(getattr(effective_hilt, "enabled", False)),
+        hilt_min_severity=str(getattr(effective_hilt, "min_severity", "") or ""),
         privacy_disable_redaction=bool(getattr(privacy, "disable_redaction", False)),
         llm_provider=str(getattr(llm, "provider", "") or ""),
         llm_model=str(getattr(llm, "model", "") or ""),
