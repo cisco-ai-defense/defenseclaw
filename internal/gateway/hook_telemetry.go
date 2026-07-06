@@ -356,4 +356,29 @@ func (a *APIServer) stampHookEnvelopeIdentity(connectorName string, env *HookAud
 	env.StepIdx = a.stepIndexForTurn(req.SessionID, req.TurnID, req.HookEventName)
 	env.Enforced = resp.Action == "block"
 	env.RulePackDir = a.effectiveRulePackDir(connectorName)
+
+	meta := hookLLMEventMeta(
+		connectorName,
+		req.SessionID,
+		req.TurnID,
+		firstString(req.Payload, "model", "model_name", "modelName"),
+		connectorName,
+		req.AgentID,
+		req.AgentName,
+		req.AgentType,
+		req.Payload,
+	)
+	meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
+	meta.ToolName = req.ToolName
+	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
+	meta = a.reconcileHookParent(meta)
+	meta = a.mergeHookSessionLifecycle(meta)
+	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
+		env.AgentPhase = snapshot.Phase
+		env.AgentPreviousPhase = snapshot.PreviousPhase
+		env.AgentSequence = snapshot.Sequence
+		env.AgentLifecycleID = snapshot.LifecycleID
+		env.AgentExecutionID = snapshot.ExecutionID
+		env.AgentOperationID = snapshot.OperationID
+	}
 }

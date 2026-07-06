@@ -41,6 +41,12 @@ There are three enforcement levels:
 | `otel/galileo-export-profile.schema.json` | Galileo destination filter | CI parity with the LLM contract and Galileo setup preset | None |
 | Other `otel/*-event.schema.json` files | OTel log/event consumers | Reference contracts plus subsystem tests | None |
 
+The canonical agent phase vocabulary is the envelope's
+`$defs.AgentPhase`. Both `agent_phase` and optional
+`agent_previous_phase` reference that single definition. The Go emitter uses
+the projection in `internal/gatewaylog/agent_phase.go`; the schema parity and
+embedded-copy tests fail if any of those sources drift.
+
 ## Why any copies exist
 
 Go's `go:embed` packages schemas into a single DefenseClaw binary. Those files
