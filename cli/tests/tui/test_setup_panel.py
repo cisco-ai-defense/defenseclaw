@@ -525,6 +525,101 @@ def test_guardrail_wizard_prefills_single_connector_and_passes_explicit_scope() 
     assert argv[argv.index("--connector") + 1] == "codex"
 
 
+def _codex_claude_guardrail_cfg() -> object:
+    from defenseclaw.config import Config, GuardrailConfig, HILTConfig, PerConnectorGuardrailConfig
+
+    cfg = Config(
+        guardrail=GuardrailConfig(
+            enabled=True,
+            mode="observe",
+            connector="codex",
+            connectors={
+                "codex": PerConnectorGuardrailConfig(
+                    mode="action",
+                    hilt=HILTConfig(enabled=True, min_severity="LOW"),
+                    rule_pack_dir="strict",
+                ),
+                "claudecode": PerConnectorGuardrailConfig(
+                    mode="observe",
+                    hilt=HILTConfig(enabled=False, min_severity="MEDIUM"),
+                    rule_pack_dir="permissive",
+                ),
+            },
+        )
+    )
+    cfg.claw.mode = "codex"
+    return cfg
+
+
+def _replace_live_guardrail_field(model: SetupPanelModel, label: str, value: str) -> None:
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    index = next(index for index, field in enumerate(model.form_fields) if field.label == label)
+    DefenseClawTUI._replace_setup_form_value(SimpleNamespace(setup_model=model), index, value)
+
+
+def _open_guardrail_mode_goal(cfg: object) -> SetupPanelModel:
+    model = SetupPanelModel(cfg=cfg)
+    assert model.open_goal_menu(SetupWizard.GUARDRAIL) is True
+    model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "mode")
+    model.select_active_goal()
+    assert {field.label for field in model.form_fields if field.kind != "section"} == {"Connector", "Mode"}
+    return model
+
+
+def test_guardrail_mode_goal_routes_claude_code_and_attributes_guardrail_status() -> None:
+    model = _open_guardrail_mode_goal(_codex_claude_guardrail_cfg())
+
+    _replace_live_guardrail_field(model, "Connector", "claudecode")
+    assert wizard_field_value(model.form_fields, "Mode") == "observe"
+    _replace_live_guardrail_field(model, "Mode", "action")
+
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields)
+    assert argv == ("setup", "claude-code", "--yes", "--mode", "action")
+    assert "--replace" not in argv
+    assert argv[:2] != ("setup", "guardrail")
+
+    action = model.submit_wizard_form()
+    assert action.intent is not None
+    assert action.intent.args == argv
+    assert action.intent.label == "setup Guardrail (claudecode)"
+    assert model.wizard_status[SetupWizard.GUARDRAIL] == "running..."
+
+    model.mark_wizard_complete(argv, success=True)
+    assert model.wizard_status[SetupWizard.GUARDRAIL] == "done"
+    assert SetupWizard.CONNECTOR_SETUP not in model.wizard_status
+
+
+def test_guardrail_mode_goal_routes_codex_symmetrically() -> None:
+    model = _open_guardrail_mode_goal(_codex_claude_guardrail_cfg())
+
+    _replace_live_guardrail_field(model, "Connector", "codex")
+    assert wizard_field_value(model.form_fields, "Mode") == "action"
+    _replace_live_guardrail_field(model, "Mode", "observe")
+
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields)
+    assert argv == ("setup", "codex", "--yes", "--mode", "observe")
+    assert "--replace" not in argv
+    assert argv[:2] != ("setup", "guardrail")
+
+
+def test_guardrail_live_connector_change_rederives_connector_scoped_settings() -> None:
+    model = SetupPanelModel(cfg=_codex_claude_guardrail_cfg())
+    model.open_wizard_form(SetupWizard.GUARDRAIL)
+
+    _replace_live_guardrail_field(model, "Connector", "claudecode")
+    assert wizard_field_value(model.form_fields, "Mode") == "observe"
+    assert wizard_field_value(model.form_fields, "Rule Pack") == "permissive"
+    assert wizard_field_value(model.form_fields, "Human Approval") == "no"
+    assert wizard_field_value(model.form_fields, "Approval Min Severity") == "MEDIUM"
+
+    _replace_live_guardrail_field(model, "Connector", "codex")
+    assert wizard_field_value(model.form_fields, "Mode") == "action"
+    assert wizard_field_value(model.form_fields, "Rule Pack") == "strict"
+    assert wizard_field_value(model.form_fields, "Human Approval") == "yes"
+    assert wizard_field_value(model.form_fields, "Approval Min Severity") == "LOW"
+
+
 def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
     fields = wizard_form_defs(SetupWizard.TRUSTED_PATHS)
     assert build_wizard_args(SetupWizard.TRUSTED_PATHS, fields) == ("setup", "trusted-paths", "list")

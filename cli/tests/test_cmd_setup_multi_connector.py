@@ -486,6 +486,58 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
         self.assertEqual(gc.effective_mode("codex"), "action")
         self.assertEqual(gc.effective_mode("hermes"), "observe")
 
+    def test_tui_mode_argv_exercises_real_backend_without_changing_roster(self):
+        from defenseclaw.tui.panels.setup import SetupPanelModel, SetupWizard, build_wizard_args
+
+        cases = (
+            (
+                "claudecode",
+                "action",
+                ("setup", "claude-code", "--yes", "--mode", "action"),
+            ),
+            (
+                "codex",
+                "observe",
+                ("setup", "codex", "--yes", "--mode", "observe"),
+            ),
+        )
+        for connector, desired_mode, expected_argv in cases:
+            with self.subTest(connector=connector):
+                gc = self.app.cfg.guardrail
+                gc.mode = "observe"
+                gc.connector = "codex"
+                self.app.cfg.claw.mode = "codex"
+                gc.connectors = {
+                    "codex": PerConnectorGuardrailConfig(mode="action"),
+                    "claudecode": PerConnectorGuardrailConfig(mode="observe"),
+                }
+                before_modes = {name: gc.effective_mode(name) for name in gc.connectors}
+
+                model = SetupPanelModel(cfg=self.app.cfg)
+                self.assertTrue(model.open_goal_menu(SetupWizard.GUARDRAIL))
+                model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "mode")
+                model.select_active_goal()
+                for index, field in enumerate(model.form_fields):
+                    if field.label == "Connector":
+                        model.form_fields[index] = field.with_value(connector)
+                        break
+                model.recompute_dependent_fields()
+                for index, field in enumerate(model.form_fields):
+                    if field.label == "Mode":
+                        model.form_fields[index] = field.with_value(desired_mode)
+                        break
+                argv = build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields)
+
+                self.assertEqual(argv, expected_argv)
+                self.assertNotIn("--replace", argv)
+                with _setup_patches():
+                    result = _invoke(list(argv[1:]), self.app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(set(gc.connectors), {"codex", "claudecode"})
+                self.assertEqual(gc.effective_mode(connector), desired_mode)
+                peer = "codex" if connector == "claudecode" else "claudecode"
+                self.assertEqual(gc.effective_mode(peer), before_modes[peer])
+
     def test_pdf_repro_peer_mode_not_flipped(self):
         # PDF repro: `setup hermes --mode action` then `setup codex` (default
         # observe). The bug wrote the global mode, so configuring codex flipped

@@ -158,6 +158,7 @@ TOKENS = DEFAULT_TOKENS
 # the custom-provider ``Action`` selector.
 _SETUP_DRIVER_FLAGS: dict[SetupWizard, frozenset[str]] = {
     SetupWizard.LLM: frozenset({"--provider", "--role"}),
+    SetupWizard.GUARDRAIL: frozenset({"--connector"}),
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"--base-provider-type"}),
 }
 _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {

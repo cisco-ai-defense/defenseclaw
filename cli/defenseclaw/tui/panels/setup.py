@@ -1135,6 +1135,22 @@ class SetupPanelModel:
         if rebuild is None:
             return
         overrides = _field_value_overrides(self.form_fields)
+        if self.active_wizard == SetupWizard.GUARDRAIL:
+            connector_field = next(
+                (field for field in self.form_fields if field.flag == "--connector"),
+                None,
+            )
+            if connector_field is not None and connector_field.value != connector_field.default:
+                # Connector-scoped rows must be re-seeded from the newly
+                # selected peer. Carrying these values across a connector
+                # change can display (and then write) another peer's policy.
+                for flag in (
+                    "--mode",
+                    "--rule-pack",
+                    "--human-approval",
+                    "--hilt-min-severity",
+                ):
+                    overrides.pop(flag, None)
         # Re-seed any preset the goal filter may have hidden so it persists
         # across the rebuild even when its row is not currently visible.
         if self.active_goal is not None:
@@ -1196,6 +1212,17 @@ class SetupPanelModel:
 
         best: SetupWizard | None = None
         best_len = 0
+        connector_mode_prefixes = (("setup", "codex"), ("setup", "claude-code"))
+        if (
+            any(tuple(args[: len(prefix)]) == prefix for prefix in connector_mode_prefixes)
+            and self.wizard_status.get(SetupWizard.GUARDRAIL) == "running..."
+        ):
+            # The focused Guardrail mode workflow deliberately executes an
+            # existing connector-specific setup command. Prefer the wizard
+            # that actually started the run over CONNECTOR_SETUP's generic
+            # one-token ``setup`` prefix.
+            best = SetupWizard.GUARDRAIL
+            best_len = 2
         for wizard, command in WIZARD_COMMANDS.items():
             if len(command) > len(args):
                 continue
@@ -1233,6 +1260,10 @@ class SetupPanelModel:
                 return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
         name = WIZARD_NAMES[int(self.active_wizard)]
+        if self.active_wizard == SetupWizard.GUARDRAIL:
+            connector = wizard_field_value(self.form_fields, "Connector")
+            if connector:
+                name += f" ({connector})"
         # Credentials "set" feeds the secret over stdin (hidden prompt) so
         # it never lands in the child's argv. See F-0801.
         secret_stdin: str | None = None
@@ -2112,7 +2143,7 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
             "mode",
             "Switch enforcement mode (observe / action)",
             summary="Toggle log-only (observe) vs blocking (action) enforcement.",
-            fields=("Mode", "Scanner Mode"),
+            fields=("Mode",),
         ),
         WizardGoal(
             "judge",
@@ -3458,6 +3489,32 @@ _GUARDRAIL_REPEATABLE_FLAGS: frozenset[str] = frozenset(
 )
 
 
+def _connector_guardrail_mode_args(fields: Sequence[WizardFormField]) -> tuple[str, ...] | None:
+    """Build the focused Guardrail mode workflow for hook connectors.
+
+    ``setup codex`` and ``setup claude-code`` own additive, per-connector
+    roster updates. Keep every other Guardrail workflow on ``setup guardrail``
+    because judge, Cisco, scanner, and other global settings do not belong on
+    these connector-specific commands.
+    """
+
+    form_labels = {field.label for field in fields if field.kind != "section"}
+    if form_labels != {"Connector", "Mode"}:
+        return None
+    connector = wizard_field_value(fields, "Connector").strip().lower()
+    command = {
+        "claude-code": "claude-code",
+        "claudecode": "claude-code",
+        "codex": "codex",
+    }.get(connector)
+    if command is None:
+        return None
+    mode = wizard_field_value(fields, "Mode").strip().lower()
+    if mode not in {"observe", "action"}:
+        mode = "observe"
+    return ("setup", command, "--yes", "--mode", mode)
+
+
 def build_wizard_args(
     wizard: SetupWizard | int,
     fields: Sequence[WizardFormField],
@@ -3471,8 +3528,12 @@ def build_wizard_args(
     over per-wizard field metadata.
     """
 
-    del cfg
     wizard = SetupWizard(wizard)
+    del cfg
+    if wizard == SetupWizard.GUARDRAIL:
+        connector_mode_args = _connector_guardrail_mode_args(fields)
+        if connector_mode_args is not None:
+            return connector_mode_args
     builder = _WIZARD_ARG_BUILDERS.get(wizard)
     if builder is not None:
         return builder(fields)
@@ -4253,14 +4314,30 @@ def _guardrail_wizard_fields_for(
 ) -> tuple[WizardFormField, ...]:
     overrides = overrides or {}
     active_connectors = _guardrail_connector_keys(cfg)
-    connector = str(get_config_value(cfg, "guardrail.connector", "") or "")
-    if not connector:
-        connector = str(get_config_value(cfg, "claw.mode", "") or "")
-    if len(active_connectors) > 1 and "--connector" not in overrides:
-        connector = ""
-    mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
+    if "--connector" in overrides:
+        connector = str(overrides.get("--connector", "") or "").strip()
+    else:
+        connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
+        if not connector:
+            connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
+        if len(active_connectors) > 1:
+            connector = ""
+    mode = (
+        _effective_guardrail_value(cfg, connector, "effective_mode", "guardrail.mode")
+        if connector
+        else ("observe" if len(active_connectors) > 1 else str(get_config_value(cfg, "guardrail.mode", "observe")))
+    )
+    mode = mode.strip().lower() or "observe"
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
+    rule_pack_dir = (
+        _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir")
+        if connector
+        else ""
+    )
+    rule_pack = os.path.basename(rule_pack_dir.rstrip("/\\")).strip().lower() if rule_pack_dir else "default"
+    if rule_pack not in {"default", "strict", "permissive"}:
+        rule_pack = "default"
     judge_provider = "bedrock"
     judge_model = ""
     judge_provider_default = "bedrock"
@@ -4305,8 +4382,11 @@ def _guardrail_wizard_fields_for(
     judge_bedrock_auth_mode = (
         overrides.get("--judge-bedrock-auth-mode") or judge_bedrock_auth_mode
     ).strip().lower() or "api_key"
-    hilt = "yes" if bool(get_config_value(cfg, "guardrail.hilt.enabled", False)) else "no"
+    effective_hilt = _effective_hilt_block(cfg, connector) if connector else None
+    hilt = "yes" if bool(get_config_value(effective_hilt, "enabled", False)) else "no"
+    hilt_min_severity = str(get_config_value(effective_hilt, "min_severity", "HIGH") or "HIGH").upper()
     redaction = "yes" if bool(get_config_value(cfg, "privacy.disable_redaction", False)) else "no"
+
     def j_strategy(dv: Mapping[str, str]) -> bool:
         return (dv.get("strategy", "") or "").strip().lower() in {"regex_judge", "judge_first"}
 
@@ -4339,7 +4419,7 @@ def _guardrail_wizard_fields_for(
             required=True,
             hint="Choose the connector peer this guardrail setup should update.",
         ),
-        WizardFormField("Mode", "choice", "--mode", value=mode, default="observe", options=("observe", "action")),
+        WizardFormField("Mode", "choice", "--mode", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
             "Scanner Mode",
             "choice",
@@ -4363,8 +4443,8 @@ def _guardrail_wizard_fields_for(
             "Rule Pack",
             "choice",
             "--rule-pack",
-            value="default",
-            default="default",
+            value=rule_pack,
+            default=rule_pack,
             options=("default", "strict", "permissive"),
         ),
         WizardFormField("LLM Judge", "section", visible_when=j_strategy),
@@ -4525,8 +4605,8 @@ def _guardrail_wizard_fields_for(
             "Approval Min Severity",
             "choice",
             "--hilt-min-severity",
-            value=str(get_config_value(cfg, "guardrail.hilt.min_severity", "HIGH") or "HIGH").upper(),
-            default=str(get_config_value(cfg, "guardrail.hilt.min_severity", "HIGH") or "HIGH").upper(),
+            value=hilt_min_severity,
+            default=hilt_min_severity,
             options=("HIGH", "MEDIUM", "LOW", "CRITICAL"),
         ),
         WizardFormField(
@@ -5179,6 +5259,23 @@ def _effective_guardrail_value(
             return str(resolver(connector) or "")
         except Exception:  # noqa: BLE001 - degrade to the raw global value.
             pass
+    leaf = {
+        "effective_mode": "mode",
+        "effective_hook_fail_mode": "hook_fail_mode",
+        "effective_block_message": "block_message",
+        "effective_rule_pack_dir": "rule_pack_dir",
+    }.get(method_name, "")
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    if connector and leaf and isinstance(overrides, Mapping):
+        normalized = connector.strip().lower().replace("-", "").replace("_", "")
+        for name, entry in overrides.items():
+            candidate = str(name).strip().lower().replace("-", "").replace("_", "")
+            if candidate != normalized:
+                continue
+            value = get_config_value(entry, leaf, "")
+            if str(value or "").strip():
+                return str(value)
+            break
     return str(get_config_value(cfg, fallback_path, "") or "")
 
 
@@ -5228,7 +5325,18 @@ def _effective_hilt_block(cfg: object | Mapping[str, Any] | None, connector: str
             return resolver(connector)
         except Exception:  # noqa: BLE001 - degrade to the raw global block.
             pass
-    return getattr(guardrail, "hilt", None) if guardrail is not None else None
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    if connector and isinstance(overrides, Mapping):
+        normalized = connector.strip().lower().replace("-", "").replace("_", "")
+        for name, entry in overrides.items():
+            candidate = str(name).strip().lower().replace("-", "").replace("_", "")
+            if candidate != normalized:
+                continue
+            block = get_config_value(entry, "hilt", None)
+            if block is not None:
+                return block
+            break
+    return get_config_value(cfg, "guardrail.hilt", None)
 
 
 def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connector: str) -> str:
