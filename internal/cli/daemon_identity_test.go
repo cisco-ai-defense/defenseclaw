@@ -192,6 +192,36 @@ func TestWaitForGatewayReadinessRequiresAuthRuntimeAndListenerIdentity(t *testin
 	}
 }
 
+func TestWaitForGatewayReadinessIdentityProvenButStartingAtDeadlineFails(t *testing.T) {
+	dataDir := t.TempDir()
+	status := gatewayStatusEnvelope{Health: readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled)}
+	status.Runtime.PID = 77
+	status.Runtime.DataDir = dataDir
+	srv := authenticatedStatusServer(t, "secret", status)
+	defer srv.Close()
+	requirements := daemonReadinessRequirements{
+		guardrailEnabled: true,
+		expectedPID:      77,
+		expectedDataDir:  dataDir,
+		token:            func() string { return "secret" },
+		listenerHost:     "127.0.0.1",
+		listenerPort:     18970,
+		listenerOwner:    func(string, int) (int, error) { return 77, nil },
+		requireOwnership: true,
+	}
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(),
+		srv.URL,
+		25*time.Millisecond,
+		5*time.Millisecond,
+		requirements,
+		func() bool { return true },
+	)
+	if err == nil || !strings.Contains(err.Error(), "remained STARTING") || ready {
+		t.Fatalf("ready = %v, error = %v, want terminal timeout after identity proof", ready, err)
+	}
+}
+
 func TestWaitForGatewayReadinessRejectsPIDReuseAndForeignListener(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

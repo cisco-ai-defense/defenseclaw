@@ -141,7 +141,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
-	snap, ready, err := waitForStartedDaemon(
+	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
 		client,
@@ -155,7 +155,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap, ready, defaultStartReadinessTimeout)
+	printDaemonStartResult(pid, snap)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -240,7 +240,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
-	snap, ready, err := waitForStartedDaemon(
+	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
 		client,
@@ -254,7 +254,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap, ready, defaultStartReadinessTimeout)
+	printDaemonStartResult(pid, snap)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
@@ -491,9 +491,9 @@ type attemptedProcessStopper interface {
 	StopStarted(int, time.Duration) error
 }
 
-// waitForStartedDaemon centralizes the readiness and fatal-startup cleanup
-// shared by start and restart. A live process that is merely slow returns a
-// non-ready snapshot without an error and is deliberately left running.
+// waitForStartedDaemon centralizes the readiness and failed-startup cleanup
+// shared by start and restart. Only a fully ready process with the exact
+// executable and creation identity launched by this attempt may succeed.
 func waitForStartedDaemon(
 	d daemonReadinessProcess,
 	pid int,
@@ -514,8 +514,14 @@ func waitForStartedDaemon(
 			return running && currentPID == pid
 		},
 	)
+	if err == nil && ready {
+		if identity, ok := d.(managedProcessIdentity); !ok || identity.HasManagedProcessIdentity(pid) {
+			return snap, true, nil
+		}
+		err = fmt.Errorf("launched gateway PID %d lacks matching executable and process start identity", pid)
+	}
 	if err == nil {
-		return snap, ready, nil
+		err = fmt.Errorf("gateway did not reach READY before the startup deadline")
 	}
 
 	var stopErr error
@@ -578,8 +584,6 @@ func waitForGatewayReadiness(
 	deadline := time.Now().Add(timeout)
 	var lastSnap gateway.HealthSnapshot
 	var lastProbeErr error
-	identityVerified := false
-
 	for {
 		if processRunning != nil && !processRunning() {
 			if lastProbeErr != nil {
@@ -615,9 +619,6 @@ func waitForGatewayReadiness(
 					return lastSnap, false, fmt.Errorf("%w: configured listener PID %d does not match launched PID %d", errGatewayIdentityMismatch, ownerPID, requirements.expectedPID)
 				}
 			}
-			if err == nil {
-				identityVerified = true
-			}
 		} else {
 			snap, err = fetchSidecarHealth(client, healthURL)
 		}
@@ -642,17 +643,10 @@ func waitForGatewayReadiness(
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			// A live, authenticated process whose PID, data home, start
-			// identity, and listener ownership were proven may continue its
-			// existing STARTING contract when optional subsystems are slow.
-			// We never allow that compatibility path before identity proof.
-			if requirements.expectedPID == 0 || identityVerified {
-				return lastSnap, false, nil
-			}
 			if lastProbeErr != nil {
 				return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout (last probe: %v)", lastProbeErr)
 			}
-			return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout")
+			return lastSnap, false, fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout)
 		}
 		delay := pollInterval
 		if remaining < delay {
@@ -763,18 +757,9 @@ func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool)
 	return state == gateway.StateDisabled
 }
 
-func printDaemonStartResult(pid int, snap gateway.HealthSnapshot, ready bool, timeout time.Duration) {
-	if ready {
-		fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
-		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
-		return
-	}
-
-	fmt.Printf("%s (PID %d)\n", Style("STARTING", "fg=yellow", "bold"), pid)
-	fmt.Printf(
-		"  Health: still starting after %s (use 'defenseclaw-gateway status')\n",
-		timeout,
-	)
+func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
+	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+	fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
 }
 
 func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {
