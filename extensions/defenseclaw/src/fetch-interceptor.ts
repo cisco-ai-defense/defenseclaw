@@ -1426,6 +1426,7 @@ export function createFetchInterceptor(
       egressReporter.stop();
       egressReporter = null;
     }
+    chatgptCodexPassthroughWarned = false;
     console.log("[defenseclaw] LLM fetch interceptor stopped");
   }
 

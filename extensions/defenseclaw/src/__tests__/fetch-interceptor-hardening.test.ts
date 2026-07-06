@@ -225,6 +225,34 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
       ),
     );
   });
+
+  it("warns again after the interceptor is restarted", async () => {
+    process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("ok")) as typeof fetch;
+    const interceptor = createFetchInterceptor(guardrailPort);
+
+    try {
+      interceptor.start();
+      await fetch("https://chatgpt.com/backend-api/codex/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "openai/gpt-5.5", input: "ping" }),
+      });
+      interceptor.stop();
+
+      interceptor.start();
+      await fetch("https://chatgpt.com/backend-api/codex/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "openai/gpt-5.5", input: "pong" }),
+      });
+    } finally {
+      interceptor.stop();
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("isAlreadyProxied: no substring bypass", () => {
