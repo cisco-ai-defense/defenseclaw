@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
+import time
 from dataclasses import dataclass, field
 
 import pytest
 from defenseclaw.tui.windows_clipboard import (
+    CF_UNICODETEXT,
     MAX_CLIPBOARD_BYTES,
     ClipboardError,
+    Win32ClipboardAPI,
     copy_windows_clipboard,
 )
 
@@ -160,3 +165,58 @@ def test_oversize_content_has_no_native_side_effect() -> None:
 
     assert api.open_calls == 0
     assert api.allocated_payload == b""
+
+
+def _open_native_clipboard(api: Win32ClipboardAPI, timeout: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not api.open():
+        if time.monotonic() >= deadline:
+            pytest.skip("native clipboard stayed busy; preserving operator clipboard state")
+        time.sleep(0.025)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows clipboard round trip")
+def test_native_win32_round_trip_restores_clipboard_state() -> None:
+    """Use the real Win32 boundary without destroying an operator clipboard.
+
+    Arbitrary clipboard formats cannot be reconstructed from a generic memory
+    handle. Refuse to mutate when anything except Unicode text is present; an
+    empty or text-only clipboard can be restored losslessly in ``finally``.
+    """
+
+    api = Win32ClipboardAPI()
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    enum_formats = user32.EnumClipboardFormats
+    enum_formats.argtypes = [ctypes.c_uint]
+    enum_formats.restype = ctypes.c_uint
+
+    _open_native_clipboard(api)
+    formats: list[int] = []
+    current = 0
+    try:
+        while current := int(enum_formats(current)):
+            formats.append(current)
+        unsupported = [value for value in formats if value != CF_UNICODETEXT]
+        if unsupported:
+            pytest.skip("native clipboard has non-text formats that cannot be restored losslessly")
+        original = api.read_unicode() if CF_UNICODETEXT in formats else None
+    finally:
+        api.close()
+
+    payload = "DefenseClaw clipboard café\r\n第二行 🛡️"
+    try:
+        copy_windows_clipboard(payload)
+        _open_native_clipboard(api)
+        try:
+            assert api.read_unicode() == payload
+        finally:
+            api.close()
+    finally:
+        if original is None:
+            _open_native_clipboard(api)
+            try:
+                assert api.empty()
+            finally:
+                api.close()
+        else:
+            copy_windows_clipboard(original)

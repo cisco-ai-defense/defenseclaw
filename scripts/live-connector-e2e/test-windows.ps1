@@ -212,6 +212,7 @@ try {
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and $harnessText -match 'obsolete gateway launcher' -and $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) 'Doctor connector contract rejects a tampered registered hook command with exit 1'
     Assert-True ($harnessText -match 'WriteAllBytes\(\$configPath, \$originalConfig\)' -and $harnessText -match 'doctor:windows-hook-recovery') 'Doctor connector contract restores the registration byte-for-byte and validates recovery'
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome' -and $harnessText -match 'HomeRoot must be contained by StateRoot') 'connector contract keeps the installed runtime and agent home in one disposable ownership root'
+    Assert-True ($harnessText -match 'Assert-DoctorHookRegistration' -and $harnessText -match 'doctor-hooks pass') 'contract validates setup-created hooks with Doctor'
     $unpinned = [regex]::Matches($nativeWorkflowText, '(?m)^\s*-?\s*uses:\s*[^@\s]+@(?![0-9a-f]{40}\b)')
     $unpinnedText = @($unpinned | ForEach-Object { $_.Value }) -join ', '
     Assert-True ($unpinned.Count -eq 0) "external actions must be SHA-pinned: $unpinnedText"

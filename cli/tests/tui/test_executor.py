@@ -253,6 +253,21 @@ async def test_cancel_after_exit_is_a_noop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_redirected_subprocess_output_is_decoded_as_utf8() -> None:
+    payload = "café — 防御 🛡️"
+    encoded_line = (payload + "\n").encode("utf-8")
+    executor = CommandExecutor(use_pty=False)
+
+    events = await _collect(
+        executor,
+        ("-c", f"import sys; sys.stdout.buffer.write({encoded_line!r}); sys.stdout.buffer.flush()"),
+    )
+
+    assert [event.text for event in events if event.kind == "output"] == [payload]
+    assert events[-1].exit_code == 0
+
+
+@pytest.mark.asyncio
 async def test_cancel_natural_exit_race_has_one_terminal_result() -> None:
     executor = CommandExecutor(use_pty=False, cancel_grace=0.05)
     collect = asyncio.create_task(_collect(executor, ("-c", "import time; time.sleep(0.03)")))

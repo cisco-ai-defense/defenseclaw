@@ -232,6 +232,50 @@ function Invoke-Setup([string]$Mode) {
     Wait-Gateway
 }
 
+function Test-ObsoleteWindowsHookGuidance([string]$Text) {
+    $terms = @(
+        [string]::Concat('.', 's', 'h'),
+        [string]::Concat('b', 'a', 's', 'h'),
+        [string]::Concat('w', 's', 'l'),
+        [string]::Concat('c', 'h', 'm', 'o', 'd')
+    )
+    foreach ($term in $terms) {
+        if ($Text.IndexOf($term, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+    }
+    return $false
+}
+
+function Assert-DoctorHookRegistration {
+    $doctor = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1)
+    try {
+        $report = $doctor.StdOut | ConvertFrom-Json
+    } catch {
+        throw "doctor did not return JSON after $Connector setup"
+    }
+    $label = if ($Connector -eq 'claudecode') { 'Claude Code hooks' } else { 'Codex hooks' }
+    $rows = @($report.checks | Where-Object { $_.label -like "$label*" })
+    if ($rows.Count -ne 1) { throw "doctor returned $($rows.Count) $label rows after setup" }
+    if ($rows[0].status -ne 'pass') { throw "doctor rejected setup-created $Connector hooks: $($rows[0].detail)" }
+    if (Test-ObsoleteWindowsHookGuidance $rows[0].detail) {
+        throw "doctor returned obsolete Unix guidance for native Windows $Connector hooks"
+    }
+
+    $config = if ($Connector -eq 'codex') {
+        Join-Path $env:CODEX_HOME 'config.toml'
+    } else {
+        Join-Path $env:CLAUDE_CONFIG_DIR 'settings.json'
+    }
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw "setup did not create $config" }
+    $registration = [IO.File]::ReadAllText($config)
+    if ($registration -notmatch '(?i)defenseclaw-hook(?:\.exe|\.cmd)') {
+        throw "setup-created $Connector registration does not use a native DefenseClaw hook launcher"
+    }
+    if (Test-ObsoleteWindowsHookGuidance $registration) {
+        throw "setup-created $Connector registration contains obsolete Unix guidance"
+    }
+    Write-Result doctor-hooks pass "$label accepted the setup-created native registration"
+}
+
 function Initialize-DefenseClawEnv {
     [IO.Directory]::CreateDirectory($env:DEFENSECLAW_HOME) | Out-Null
     $envPath = Join-Path $env:DEFENSECLAW_HOME '.env'
@@ -537,6 +581,7 @@ function Invoke-ContractRun {
     ) | Out-Null
     Set-IsolatedGatewayPort
     Invoke-Setup observe
+    Assert-DoctorHookRegistration
     Invoke-DangerousCommandCorpus observe
     Invoke-Hook 'PreTool-block' (Join-Path $golden 'pre_tool_block.json') allow $true
     Invoke-Teardown
