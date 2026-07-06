@@ -765,9 +765,9 @@ _bundle-data:
 	@#
 	@# Hosted Windows runners ship no rsync (`make install` for the connector
 	@# contract matrix died here with CreateProcess failed). Fall back to a plain
-	@# mirror there. That fallback loses inode stability, but the obs Docker stack
-	@# — the only consumer of that property — never runs on those Windows build
-	@# hosts, so the tradeoff is safe. Mirrors the rsync-or-cp guard in
+	@# mirror there. That fallback loses inode stability during package staging;
+	@# the runtime controller refreshes the user's seeded stack with atomic file
+	@# replacement on every supported OS. Mirrors the rsync-or-cp guard in
 	@# sync-openclaw-extension above.
 	@for d in splunk_local_bridge local_observability_stack; do \
 	  if command -v rsync >/dev/null 2>&1; then \

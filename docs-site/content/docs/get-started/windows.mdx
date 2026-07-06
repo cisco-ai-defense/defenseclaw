@@ -203,9 +203,13 @@ defenseclaw doctor
 ```
 
 Native Windows is hook-only. Sandbox, enterprise hooks, OpenHands, OmniGent,
-OpenClaw, ZeptoClaw, the bundled local observability and Splunk shell stacks,
-and native desktop toasts are unsupported on Windows. Remote observability
-sinks are separate. Inventory, scanners, audit storage, alerts, and the TUI remain available. The TUI accepts Windows
+OpenClaw, ZeptoClaw, the bundled local Splunk shell stack, and native desktop toasts
+are unsupported on Windows. The separate bundled local observability
+stack is supported from PowerShell/cmd on native Windows x64 with Docker
+Desktop using Linux containers through the Hyper-V backend on Windows Pro,
+Enterprise, or Education. Docker Desktop per-user and WSL-only installations
+are outside this no-WSL certification. Remote observability sinks remain
+available independently. Inventory, scanners, audit storage, alerts, and the TUI remain available. The TUI accepts Windows
 arrow-key sequences and falls back to numbered prompts when a console cannot
 redraw safely.
 

@@ -98,9 +98,11 @@ from defenseclaw.observability.writer import (
     _sink_protocol,
 )
 from defenseclaw.platform_support import (
-    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
-    is_local_shell_stack_destination,
-    local_shell_stacks_supported,
+    LOCAL_SPLUNK_UNSUPPORTED_REASON,
+    is_local_observability_stack_destination,
+    is_local_splunk_stack_destination,
+    local_observability_stack_supported,
+    local_splunk_stack_supported,
 )
 
 # All prompt keys across all presets. Exposed as Click options so the
@@ -204,8 +206,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
       # Interactive (default)
       defenseclaw setup observability add splunk-enterprise
     """
-    if preset_id.lower() == "local-otlp" and not local_shell_stacks_supported():
-        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+    if preset_id.lower() == "local-otlp" and not local_observability_stack_supported():
+        raise click.ClickException("Bundled local observability is unavailable on this platform.")
     preset = resolve_preset(preset_id.lower())
 
     raw_inputs: dict[str, str | None] = {
@@ -225,14 +227,14 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     candidate_endpoint = str(raw_inputs.get("endpoint") or "")
     candidate_host = str(raw_inputs.get("host") or "")
     if (
-        not local_shell_stacks_supported()
+        not local_splunk_stack_supported()
         and preset.id in {"splunk-hec", "splunk-enterprise"}
-        and is_local_shell_stack_destination(
+        and is_local_splunk_stack_destination(
             kind="splunk_hec",
             endpoint=candidate_endpoint or candidate_host,
         )
     ):
-        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+        raise click.ClickException(LOCAL_SPLUNK_UNSUPPORTED_REASON)
 
     if not non_interactive:
         if token_value is None:
@@ -526,10 +528,10 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     host = "localhost"
     endpoint = str(legacy.get("hec_endpoint", "") or "")
     if (
-        not local_shell_stacks_supported()
-        and is_local_shell_stack_destination(kind="splunk_hec", endpoint=endpoint)
+        not local_splunk_stack_supported()
+        and is_local_splunk_stack_destination(kind="splunk_hec", endpoint=endpoint)
     ):
-        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+        raise click.ClickException(LOCAL_SPLUNK_UNSUPPORTED_REASON)
     if endpoint:
         parsed = urlparse(endpoint)
         if parsed.hostname:
@@ -991,21 +993,34 @@ def _print_destination_row(d: Destination) -> None:
 
 
 def _gate_local_destination(destination: Destination) -> None:
-    if local_shell_stacks_supported():
-        return
-    if is_local_shell_stack_destination(
+    if (
+        not local_observability_stack_supported()
+        and is_local_observability_stack_destination(
+            name=destination.name,
+            preset_id=destination.preset_id,
+            kind=destination.kind,
+            endpoint=destination.endpoint,
+        )
+    ):
+        raise click.ClickException(
+            "Bundled local observability is unavailable on this platform."
+        )
+    if not local_splunk_stack_supported() and is_local_splunk_stack_destination(
+        kind=destination.kind,
+        endpoint=destination.endpoint,
+    ):
+        raise click.ClickException(LOCAL_SPLUNK_UNSUPPORTED_REASON)
+
+
+def _destination_platform_status(destination: Destination) -> str:
+    if not local_observability_stack_supported() and is_local_observability_stack_destination(
         name=destination.name,
         preset_id=destination.preset_id,
         kind=destination.kind,
         endpoint=destination.endpoint,
     ):
-        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
-
-
-def _destination_platform_status(destination: Destination) -> str:
-    if not local_shell_stacks_supported() and is_local_shell_stack_destination(
-        name=destination.name,
-        preset_id=destination.preset_id,
+        return "unsupported"
+    if not local_splunk_stack_supported() and is_local_splunk_stack_destination(
         kind=destination.kind,
         endpoint=destination.endpoint,
     ):
@@ -1014,8 +1029,6 @@ def _destination_platform_status(destination: Destination) -> str:
 
 
 def _gate_named_local_destination(data_dir: str, name: str, connector: str) -> None:
-    if local_shell_stacks_supported():
-        return
     destinations = (
         _connector_destinations(data_dir, connector)
         if connector

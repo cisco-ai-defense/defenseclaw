@@ -79,6 +79,7 @@ dev = [
 
 [project.scripts]
 defenseclaw = "defenseclaw.main:main"
+defenseclaw-observability = "defenseclaw.observability.local_stack:main"
 
 [build-system]
 requires = ["setuptools==82.0.1"]

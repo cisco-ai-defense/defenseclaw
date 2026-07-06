@@ -1115,7 +1115,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
     def test_add_splunk_hec_then_disable(self) -> None:
         with patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
             return_value=True,
         ):
             r1 = self._invoke(
@@ -1136,7 +1136,7 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertEqual(r1.exit_code, 0, r1.output)
 
         with patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
             return_value=True,
         ):
             r2 = self._invoke(["disable", "splunk-hec-local"])

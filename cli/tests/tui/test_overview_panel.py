@@ -157,7 +157,11 @@ def test_overview_telemetry_detail_lists_named_destinations() -> None:
 
 def test_overview_observability_rows_combine_otel_and_audit_sinks(monkeypatch) -> None:
     monkeypatch.setattr(
-        "defenseclaw.tui.services.overview_state.local_shell_stacks_supported",
+        "defenseclaw.tui.services.overview_state.local_observability_stack_supported",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "defenseclaw.tui.services.overview_state.local_splunk_stack_supported",
         lambda: True,
     )
     model = _model()

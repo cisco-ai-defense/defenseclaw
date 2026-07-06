@@ -65,9 +65,12 @@ Windows**: they require the local guardrail proxy, which DefenseClaw does not
 host there. They are hidden from the TUI/CLI connector pickers and rejected by
 setup on Windows with a clear error. Use them on macOS or Linux instead.
 
-Sandbox, enterprise hooks, bundled local observability/Splunk shell stacks, and
-native desktop toasts are also unsupported on Windows. This does not change
-their documented macOS/Linux support.
+Sandbox, enterprise hooks, the bundled local Splunk shell stack, and native
+desktop toasts are unsupported on Windows. The separate bundled local
+observability stack is supported from PowerShell/cmd on native Windows x64 when
+Docker Desktop runs Linux containers through Hyper-V on Windows Pro,
+Enterprise, or Education. Per-user and WSL-only Docker Desktop installations
+are outside that no-WSL certification. macOS/Linux behavior is unchanged.
 
 ## Splunk Terms And Scope For The Local Preset
 

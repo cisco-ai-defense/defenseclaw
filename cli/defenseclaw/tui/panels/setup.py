@@ -24,8 +24,9 @@ from defenseclaw import config as dc_config
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.platform_support import (
-    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
-    local_shell_stacks_supported,
+    LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
+    local_observability_stack_supported,
+    local_splunk_stack_supported,
 )
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
@@ -582,7 +583,7 @@ class SetupPanelModel:
                 status=(
                     "unsupported"
                     if wizard == SetupWizard.LOCAL_OBSERVABILITY
-                    and not local_shell_stacks_supported(self.os_name)
+                    and not local_observability_stack_supported(self.os_name)
                     else self._formatted_wizard_status(wizard, now=now)
                 ),
             )
@@ -634,7 +635,7 @@ class SetupPanelModel:
             status=(
                 "unsupported"
                 if wizard == SetupWizard.LOCAL_OBSERVABILITY
-                and not local_shell_stacks_supported(self.os_name)
+                and not local_observability_stack_supported(self.os_name)
                 else self._formatted_wizard_status(wizard, now=now)
             ),
         )
@@ -642,11 +643,11 @@ class SetupPanelModel:
     def wizard_available(self, wizard: SetupWizard | int) -> bool:
         return not (
             SetupWizard(wizard) == SetupWizard.LOCAL_OBSERVABILITY
-            and not local_shell_stacks_supported(self.os_name)
+            and not local_observability_stack_supported(self.os_name)
         )
 
     def wizard_unavailable_reason(self, wizard: SetupWizard | int) -> str:
-        return "" if self.wizard_available(wizard) else LOCAL_SHELL_STACKS_UNSUPPORTED_REASON
+        return "" if self.wizard_available(wizard) else LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
 
     def section_labels(self) -> tuple[SetupSectionLabel, ...]:
         return tuple(
@@ -1046,7 +1047,7 @@ class SetupPanelModel:
         if not self.wizard_available(self.active_wizard):
             self.form_active = False
             self.goal_active = False
-            self.form_error = LOCAL_SHELL_STACKS_UNSUPPORTED_REASON
+            self.form_error = LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
             return False
         self.goals = wizard_goals(self.active_wizard, self.config)
         if len(self.goals) <= 1:
@@ -2577,7 +2578,7 @@ def _splunk_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, .
             summary="Spin up a local Splunk via Docker for logs.",
             presets={"@Mode": "local-docker"},
             fields=("Mode", "Accept Splunk License", "Traces", "Metrics", "Logs Export"),
-            available_when=lambda _cfg: local_shell_stacks_supported(),
+            available_when=lambda _cfg: local_splunk_stack_supported(),
         ),
         WizardGoal(
             "enterprise",
@@ -4955,7 +4956,7 @@ SPLUNK_PIPELINE_OPTIONS: tuple[str, ...] = ("splunk-o11y", "local-docker", "ente
 
 
 def splunk_wizard_fields(os_name: str | None = None) -> tuple[WizardFormField, ...]:
-    local_available = local_shell_stacks_supported(os_name)
+    local_available = local_splunk_stack_supported(os_name)
     options = (
         SPLUNK_PIPELINE_OPTIONS
         if local_available
@@ -5030,7 +5031,7 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
     preset_options = tuple(
         preset
         for preset, _ in OBSERVABILITY_PRESETS
-        if preset != "local-otlp" or local_shell_stacks_supported()
+        if preset != "local-otlp" or local_observability_stack_supported()
     )
     fields: list[WizardFormField] = [
         WizardFormField(

@@ -300,7 +300,7 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         mock_refresh.assert_called_once_with("/data")
 
 
-class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
+class LegacySetupLocalObservabilityRefreshWiring:
     def setUp(self) -> None:
         self._local_stack_support = patch(
             "defenseclaw.commands.cmd_setup_local_observability.local_shell_stacks_supported",
@@ -527,7 +527,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
 
 
-class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
+class LegacyRefreshAndMaybeRestartLocalObservability:
     """Direct coverage for local-observability refresh messaging."""
 
     @patch(
@@ -567,6 +567,109 @@ class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
         self.assertIn("Preserved local observability config", output.getvalue())
         self.assertIn("--refresh-config", output.getvalue())
         self.assertIn("--no-refresh-config", output.getvalue())
+
+
+class TestPythonControllerRefreshWiring(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runner = CliRunner()
+        self.app, self.tmp_dir = _make_app()
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_up_refreshes_before_shared_controller_start(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import local_observability
+        from defenseclaw.observability.local_stack import CONTRACT, UpResult
+
+        controller = MagicMock()
+        controller.up.return_value = UpResult(dict(CONTRACT), readiness_verified=False)
+        refresh = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest=os.path.join(self.tmp_dir, "observability-stack"),
+            bundle_source="/bundle",
+        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability"
+                "._refresh_and_maybe_restart_local_observability",
+                return_value=refresh,
+            ) as refresh_call,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up", "--no-wait", "--no-config"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        controller.preflight.assert_called_once_with()
+        controller.up.assert_called_once_with(timeout=180, wait=False)
+        refresh_call.assert_called_once()
+        self.assertTrue(refresh_call.call_args.kwargs["refresh_config"])
+
+    def test_no_refresh_bundle_skips_refresh(self) -> None:
+        from defenseclaw.commands.cmd_setup_local_observability import local_observability
+        from defenseclaw.observability.local_stack import CONTRACT, UpResult
+
+        controller = MagicMock()
+        controller.up.return_value = UpResult(dict(CONTRACT), readiness_verified=False)
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability"
+                "._refresh_and_maybe_restart_local_observability"
+            ) as refresh_call,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up", "--no-wait", "--no-config", "--no-refresh-bundle"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        refresh_call.assert_not_called()
+
+    def test_refresh_stop_uses_controller_and_preserves_config_hint(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            _refresh_and_maybe_restart_local_observability,
+        )
+
+        controller = MagicMock()
+        controller.is_running.return_value = True
+        refreshed = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest="/dest",
+            bundle_source="/src",
+            preserved_paths=["grafana", "prometheus"],
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_local_observability"
+            ".refresh_local_observability_stack",
+            return_value=refreshed,
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = _refresh_and_maybe_restart_local_observability(
+                    "/data", refresh_config=False, controller=controller
+                )
+
+        self.assertTrue(result.was_running)
+        self.assertTrue(result.stopped)
+        controller.down.assert_called_once_with()
+        self.assertIn("Preserved local observability config", output.getvalue())
 
 
 if __name__ == "__main__":

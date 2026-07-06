@@ -737,8 +737,10 @@ def _print_observability_status(cfg) -> None:
     from defenseclaw.observability import list_destinations
     from defenseclaw.observability.presets import PRESETS
     from defenseclaw.platform_support import (
-        is_local_shell_stack_destination,
-        local_shell_stacks_supported,
+        is_local_observability_stack_destination,
+        is_local_splunk_stack_destination,
+        local_observability_stack_supported,
+        local_splunk_stack_supported,
     )
 
     try:
@@ -755,12 +757,21 @@ def _print_observability_status(cfg) -> None:
     for d in destinations:
         label = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
         local_unsupported = (
-            not local_shell_stacks_supported()
-            and is_local_shell_stack_destination(
-                name=d.name,
-                preset_id=d.preset_id,
-                kind=d.kind,
-                endpoint=d.endpoint,
+            (
+                not local_observability_stack_supported()
+                and is_local_observability_stack_destination(
+                    name=d.name,
+                    preset_id=d.preset_id,
+                    kind=d.kind,
+                    endpoint=d.endpoint,
+                )
+            )
+            or (
+                not local_splunk_stack_supported()
+                and is_local_splunk_stack_destination(
+                    kind=d.kind,
+                    endpoint=d.endpoint,
+                )
             )
         )
         if local_unsupported:

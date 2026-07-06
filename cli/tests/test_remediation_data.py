@@ -90,7 +90,8 @@ def test_f0561_local_grafana_is_loopback_bound_and_loginless() -> None:
     assert "GF_AUTH_ANONYMOUS_ENABLED=true" in text
     assert "GF_AUTH_DISABLE_LOGIN_FORM=true" in text
     # the loopback bind is what actually protects the stack
-    assert "${HOST_BIND:-127.0.0.1}:3000:3000" in text
+    assert "127.0.0.1:3000:3000" in text
+    assert "HOST_BIND" not in text
     # no required-password gate (the :? form) and no all-interfaces publish
     assert "GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:?" not in text
     assert '"0.0.0.0:3000:3000"' not in text
@@ -107,7 +108,7 @@ def test_f0562_local_prometheus_apis_enabled_but_loopback_bound() -> None:
     assert '"--web.enable-remote-write-receiver"' in text
     assert '"--web.enable-lifecycle"' in text
     # the loopback bind is the security boundary, not the absence of the APIs
-    assert "${HOST_BIND:-127.0.0.1}:9090:9090" in text
+    assert "127.0.0.1:9090:9090" in text
     assert '"0.0.0.0:9090:9090"' not in text
 
 

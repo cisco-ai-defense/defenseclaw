@@ -20,8 +20,10 @@ from typing import Any, Literal
 from defenseclaw.connector_paths import hermes_config_path, hermes_home
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.platform_support import (
-    is_local_shell_stack_destination,
-    local_shell_stacks_supported,
+    is_local_observability_stack_destination,
+    is_local_splunk_stack_destination,
+    local_observability_stack_supported,
+    local_splunk_stack_supported,
 )
 from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
@@ -1023,8 +1025,10 @@ class OverviewPanelModel:
                 preset = str(item.get("preset", "") or "")
                 kind = preset or "otlp"
                 local_unsupported = (
-                    not local_shell_stacks_supported()
-                    and is_local_shell_stack_destination(name=name, preset_id=preset, kind=kind)
+                    not local_observability_stack_supported()
+                    and is_local_observability_stack_destination(
+                        name=name, preset_id=preset, kind=kind
+                    )
                 )
                 signals = str(item.get("signals", "") or "none")
                 routing_label = ""
@@ -1099,11 +1103,19 @@ class OverviewPanelModel:
                 )
                 raw_endpoint = str(item.get("endpoint") or item.get("url") or "")
                 local_unsupported = (
-                    not local_shell_stacks_supported()
-                    and is_local_shell_stack_destination(
-                        name=str(item.get("name", "")),
-                        kind=str(item.get("kind", "")),
-                        endpoint=raw_endpoint,
+                    (
+                        not local_observability_stack_supported()
+                        and is_local_observability_stack_destination(
+                            name=str(item.get("name", "")),
+                            kind=str(item.get("kind", "")),
+                            endpoint=raw_endpoint,
+                        )
+                    )
+                    or (
+                        not local_splunk_stack_supported()
+                        and is_local_splunk_stack_destination(
+                            kind=str(item.get("kind", "")), endpoint=raw_endpoint
+                        )
                     )
                 )
                 rows.append(
