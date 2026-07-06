@@ -824,6 +824,7 @@ func TestPatchOpenClawConfig_PreservesDefenseClawPluginConfig(t *testing.T) {
 				"insightclaw": {
 					"enabled": false,
 					"config": {
+						"captureContent": true,
 						"endpoint": "http://collector.test:4318",
 						"metrics": false
 					}
@@ -865,8 +866,11 @@ func TestPatchOpenClawConfig_PreservesDefenseClawPluginConfig(t *testing.T) {
 	if insightClawConfig["metrics"] != false {
 		t.Errorf("explicit insightclaw.config.metrics should be preserved, got %v", insightClawConfig["metrics"])
 	}
+	if insightClawConfig["captureContent"] != true {
+		t.Errorf("explicit insightclaw.config.captureContent should be preserved, got %v", insightClawConfig["captureContent"])
+	}
 	for k, want := range defaultInsightClawConfig {
-		if k == "endpoint" || k == "metrics" {
+		if k == "endpoint" || k == "metrics" || k == "captureContent" {
 			continue
 		}
 		if got := insightClawConfig[k]; got != want {

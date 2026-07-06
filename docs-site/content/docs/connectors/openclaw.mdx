@@ -10,6 +10,10 @@ keywords:
 
 OpenClaw is the connector DefenseClaw was designed against. It ships a first-party TypeScript plugin (`extensions/defenseclaw/`) that hooks into `fetch` interception and OpenClaw's `before_tool_call` lifecycle so every prompt, response, and tool call lands in the DefenseClaw gateway.
 
+During setup, DefenseClaw also installs the separate InsightClaw plugin for OTLP telemetry; by default it emits metrics and traces without prompt or completion content (`captureContent: false`).
+
+Choose the InsightClaw `endpoint` carefully if you override it: send telemetry only to a trusted collector that OpenClaw can reach, and prefer HTTPS for off-box export.
+
 <Video
   src="openclaw-e2e"
   caption="Full OpenClaw end-to-end: prompt arrives → gateway inspects → policy decides → HITL approves → tool runs → audit row written."

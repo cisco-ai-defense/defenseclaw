@@ -476,11 +476,16 @@ Use the OpenClaw command rather than `npm install @outshift-open/insightclaw`: O
 installer places the package where the gateway expects plugins and records the
 plugin metadata it needs to load it. DefenseClaw then patches
 `~/.openclaw/openclaw.json` to ensure `insightclaw` is enabled, allowed, and
-configured for the local OpenTelemetry collector:
+configured for the local OpenTelemetry collector. By default, InsightClaw emits
+metrics and traces without prompt or completion content:
+
+Choose `endpoint` carefully: it controls where telemetry leaves the OpenClaw
+runtime. Keep it pointed at a trusted collector that is reachable from the
+agent host, and prefer HTTPS when exporting off-box.
 
 ```json
 {
-  "captureContent": true,
+  "captureContent": false,
   "endpoint": "http://172.17.0.1:4318",
   "metrics": true,
   "protocol": "http",

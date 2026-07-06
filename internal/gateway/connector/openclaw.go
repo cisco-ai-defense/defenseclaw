@@ -62,7 +62,7 @@ const insightClawOpenClawPluginID = "insightclaw"
 const insightClawNPMSource = "@outshift-open/insightclaw"
 
 var defaultInsightClawConfig = map[string]interface{}{
-	"captureContent":           true,
+	"captureContent":           false,
 	"endpoint":                 "http://172.17.0.1:4318",
 	"metrics":                  true,
 	"protocol":                 "http",
@@ -276,7 +276,7 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 		return nil
 	}
 
-	// Preflight: give a clear error when the CLI is not on PATH rather than
+	// Give a clear error when the CLI is not on PATH rather than
 	// letting the exec fail with a cryptic "file not found" message.
 	if _, err := exec.LookPath("openclaw"); err != nil {
 		return fmt.Errorf("openclaw CLI not found on PATH — install OpenClaw before running setup: %w", err)
