@@ -2091,6 +2091,46 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 f"must not restart openclaw when a different connector is selected; got {commands}",
             )
 
+    @patch("defenseclaw.commands.cmd_setup._check_openclaw_gateway")
+    @patch("defenseclaw.commands.cmd_setup._restart_openclaw_gateway")
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_authoritative_hook_roster_ignores_inactive_openclaw_hint(
+        self, _mock_dc, openclaw_restart, openclaw_check,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        for roster in ([], ["codex"], ["claudecode", "codex"]):
+            with self.subTest(roster=roster), tempfile.TemporaryDirectory() as tmpdir:
+                _restart_services(
+                    tmpdir,
+                    connector="openclaw",
+                    connectors=roster,
+                )
+
+        openclaw_restart.assert_not_called()
+        openclaw_check.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_setup._check_openclaw_gateway")
+    @patch(
+        "defenseclaw.commands.cmd_setup._restart_openclaw_gateway",
+        return_value=True,
+    )
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_authoritative_roster_restarts_active_openclaw_once(
+        self, _mock_dc, openclaw_restart, openclaw_check,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(
+                tmpdir,
+                connector="codex",
+                connectors=["codex", "openclaw", "openclaw"],
+            )
+
+        openclaw_restart.assert_called_once_with()
+        openclaw_check.assert_called_once_with("127.0.0.1", 18789)
+
     @patch("defenseclaw.commands.cmd_setup.ux.subhead")
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
     def test_multi_connector_omnigent_hint_uses_neutral_surface_wording(

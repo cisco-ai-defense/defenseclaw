@@ -2320,8 +2320,8 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
 @click.option(
     "--connector",
     default=None,
-    help="Override the connector used for the restart hint (the token is shared, "
-    "so ALL active connectors are refreshed regardless).",
+    help="Prefer an active connector for restart messaging (inactive hints are ignored; "
+    "the token is shared, so ALL active connectors are refreshed regardless).",
 )
 @click.option(
     "--no-restart",
@@ -2354,10 +2354,29 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     dotenv_path = _rotate_token_dotenv_path(app)
 
-    actives = list(app.cfg.active_connectors()) if hasattr(app.cfg, "active_connectors") else []
-    if not actives:
+    has_authoritative_roster = hasattr(app.cfg, "active_connectors")
+    if has_authoritative_roster:
+        actives = _normalized_connector_roster(app.cfg.active_connectors())
+    else:
+        # Compatibility for older/custom Config-like objects that predate the
+        # multi-connector roster. Do not use this fallback when
+        # active_connectors() exists and deliberately reports an empty roster:
+        # that is the authoritative "no connector configured" state.
         single = connector or (app.cfg.guardrail.connector or "").strip()
-        actives = [single] if single else []
+        actives = _normalized_connector_roster([single] if single else [])
+
+    requested = normalize_connector(connector)
+    if requested and requested not in actives:
+        scope = ", ".join(actives) if actives else "none"
+        ux.warn(
+            f"Ignoring inactive connector restart hint {requested!r}; "
+            f"active connector roster: {scope}."
+        )
+
+    primary = normalize_connector(app.cfg.active_connector())
+    restart_connector = requested if requested in actives else primary
+    if restart_connector not in actives:
+        restart_connector = actives[0] if actives else ""
 
     if not yes:
         scope = ", ".join(actives) if actives else "no active connector"
@@ -2391,7 +2410,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         app.cfg.data_dir,
         app.cfg.gateway.host,
         app.cfg.gateway.port,
-        connector=connector or app.cfg.active_connector(),
+        connector=restart_connector,
         connectors=actives,
     )
     ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
@@ -8357,6 +8376,35 @@ def _uninstall_plugin_from_sandbox(sandbox_home: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _normalized_connector_roster(connectors: list[str]) -> list[str]:
+    """Return connector names normalized and de-duplicated in input order."""
+    roster: list[str] = []
+    seen: set[str] = set()
+    for raw in connectors:
+        name = normalize_connector(raw)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        roster.append(name)
+    return roster
+
+
+def _restart_targets(
+    connector: str | None,
+    connectors: list[str] | None,
+) -> list[str]:
+    """Resolve the authoritative restart target roster.
+
+    When ``connectors`` is supplied it is authoritative, including when it is
+    empty. A singular hint that is not present in that roster is ignored so it
+    cannot select an unrelated service operation (most importantly an
+    OpenClaw gateway restart on a hook-only install).
+    """
+    return _normalized_connector_roster(
+        [connector or ""] if connectors is None else connectors
+    )
+
+
 def _is_pid_alive(pid_file: str) -> bool:
     """Check whether the process recorded in ``pid_file`` is alive.
 
@@ -8386,11 +8434,10 @@ def _restart_services(
     always need to bounce.
 
     ``connector`` selects the single connector whose post-restart hint is
-    shown (and, for OpenClaw, whether its own gateway is bounced). For a
-    GLOBAL change on a multi-connector install (e.g. ``guardrail hilt`` with no
-    ``--connector``), pass the full active set as ``connectors`` so the
-    hook-bus hint names every affected connector instead of just the primary —
-    the gateway restart itself is always global regardless.
+    shown when no roster is available. When ``connectors`` is supplied, that
+    full active roster is authoritative for both output and connector-owned
+    service operations. An inactive singular hint is safely ignored. The
+    gateway restart itself is always global regardless.
 
     Avarice F-0142/F-0143: a failed gateway restart is fatal. We collect
     every restart failure and raise a ``ClickException`` at the end so the
@@ -8400,12 +8447,20 @@ def _restart_services(
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
+    restart_targets = _restart_targets(connector, connectors)
+
+    if connectors is not None and len(restart_targets) > 1:
+        ux.subhead(
+            f"{len(restart_targets)} active connectors "
+            f"({', '.join(restart_targets)}): applying the shared gateway restart "
+            "to the complete roster."
+        )
 
     hook_targets = sorted(
         {
-            normalize_connector(name)
-            for name in ((connectors or []) if connectors else [connector])
-            if name and normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
+            name
+            for name in restart_targets
+            if name in _HOOK_ENFORCED_CONNECTORS
         }
     )
     connector_state_before = (
@@ -8424,37 +8479,47 @@ def _restart_services(
             click.echo(" ✗")
             failed.append("connector runtime readiness")
 
-    # Multi-connector global change: every active hook connector is affected
-    # by the gateway bounce, so enumerate them rather than naming the primary.
-    hook_multi = [c for c in (connectors or []) if c in _HOOK_ENFORCED_CONNECTORS]
-    if connector != "openclaw" and len(hook_multi) > 1:
-        names = ", ".join(sorted(hook_multi))
-        ux.subhead(
-            f"{len(hook_multi)} hook connectors ({names}): enforcement via native "
-            f"lifecycle surfaces on the sidecar API port. No proxy listener — each talks directly "
-            f"to its native upstream."
-        )
-        click.echo()
-        _fail_if_restart_failed(failed)
-        return
-
-    if connector == "openclaw":
+    # OpenClaw owns a separate gateway process. Its presence in the active
+    # roster — never an unrelated singular hint — controls that operation.
+    if "openclaw" in restart_targets:
         if not _restart_openclaw_gateway():
             failed.append("openclaw-gateway")
         _check_openclaw_gateway(oc_host, oc_port)
-    elif connector in _PROXY_BACKED_CONNECTORS:
+
+    # Multi-connector global change: every active hook connector is affected
+    # by the gateway bounce, so enumerate them rather than naming the primary.
+    if len(hook_targets) > 1:
+        names = ", ".join(hook_targets)
+        ux.subhead(
+            f"{len(hook_targets)} hook connectors ({names}): enforcement via native "
+            f"lifecycle surfaces on the sidecar API port. No proxy listener — each talks directly "
+            f"to its native upstream."
+        )
+    elif len(hook_targets) == 1:
+        hook_connector = hook_targets[0]
+        surface = "custom policy API" if hook_connector == "omnigent" else "hook bus"
+        ux.subhead(
+            f"{hook_connector} connector: enforcement via {surface} on the sidecar API port. "
+            f"No proxy listener — {hook_connector} talks directly to its native upstream."
+        )
+
+    proxy_targets = [
+        name
+        for name in restart_targets
+        if name in _PROXY_BACKED_CONNECTORS and name != "openclaw"
+    ]
+    if len(proxy_targets) > 1:
+        ux.subhead(
+            f"{len(proxy_targets)} proxy connectors ({', '.join(proxy_targets)}): "
+            "traffic will route through defenseclaw-gateway proxy."
+        )
+    elif len(proxy_targets) == 1:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
         # message without the separate openclaw-gateway restart step.
-        ux.subhead(f"{connector} connector: traffic will route through defenseclaw-gateway proxy.")
-    elif connector in _HOOK_ENFORCED_CONNECTORS:
-        # No proxy listener binds for hook-only connectors — the agent
-        # talks directly to its native upstream and DefenseClaw
-        # observes/enforces via the hook bus on the sidecar API port.
-        surface = "custom policy API" if connector == "omnigent" else "hook bus"
         ux.subhead(
-            f"{connector} connector: enforcement via {surface} on the sidecar API port. "
-            f"No proxy listener — {connector} talks directly to its native upstream."
+            f"{proxy_targets[0]} connector: traffic will route through "
+            "defenseclaw-gateway proxy."
         )
 
     click.echo()

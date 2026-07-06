@@ -27,20 +27,31 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
 import requests
+import yaml
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands import cmd_agent
+from defenseclaw.config import (
+    AIDiscoveryConfig,
+    ClawConfig,
+    Config,
+    GuardrailConfig,
+    PerConnectorGuardrailConfig,
+)
 from defenseclaw.context import AppContext
 
 
 def _make_ctx(*, enabled: bool = False, connector: str = "openclaw",
+              connectors: list[str] | None = None,
               mode: str = "enhanced", token: str = "secret-token") -> AppContext:
     """Build a minimal AppContext that the discovery commands can drive.
 
@@ -80,6 +91,8 @@ def _make_ctx(*, enabled: bool = False, connector: str = "openclaw",
         return connector
 
     cfg.active_connector = active_connector
+    roster = list(connectors) if connectors is not None else [connector]
+    cfg.active_connectors = lambda: list(roster)
     cfg.save = MagicMock()
 
     app = AppContext()
@@ -120,6 +133,22 @@ class ResolveConnectorTests(unittest.TestCase):
             active_connector=lambda: (_ for _ in ()).throw(RuntimeError("x")),
         )
         self.assertEqual(cmd_agent._resolve_connector_for_restart(cfg), "hermes")
+
+    def test_roster_normalizes_and_deduplicates(self):
+        cfg = SimpleNamespace(
+            active_connectors=lambda: ["Claude-Code", "codex", "codex"],
+        )
+        self.assertEqual(
+            cmd_agent._resolve_connectors_for_restart(cfg),
+            ["claudecode", "codex"],
+        )
+
+    def test_empty_roster_is_authoritative(self):
+        cfg = SimpleNamespace(
+            active_connectors=lambda: [],
+            active_connector=lambda: "openclaw",
+        )
+        self.assertEqual(cmd_agent._resolve_connectors_for_restart(cfg), [])
 
 
 class NormalizeScanRootsTests(unittest.TestCase):
@@ -167,10 +196,84 @@ class DiscoveryEnableTests(unittest.TestCase):
         # is the same invariant the guardrail enable/disable tests
         # enforce.
         self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
+        self.assertEqual(restart_mock.call_args.kwargs.get("connectors"), ["codex"])
         # --no-scan suppresses the post-enable scan; with --no-scan we
         # must not even attempt the network call.
         scan_mock.assert_not_called()
         app.logger.log_action.assert_called_once()
+
+    def test_multi_connector_restart_attribution_and_repeat_are_complete(self):
+        runner = CliRunner()
+        app = _make_ctx(
+            enabled=False,
+            connector="claudecode",
+            connectors=["claudecode", "codex"],
+        )
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
+                patch.object(cmd_agent, "_trigger_post_enable_scan"):
+            first = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan"],
+                obj=app,
+            )
+            second = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan"],
+                obj=app,
+            )
+
+        self.assertEqual(first.exit_code, 0, msg=first.output)
+        self.assertEqual(second.exit_code, 0, msg=second.output)
+        restart_mock.assert_called_once()
+        self.assertEqual(restart_mock.call_args.kwargs["connector"], "claudecode")
+        self.assertEqual(
+            restart_mock.call_args.kwargs["connectors"],
+            ["claudecode", "codex"],
+        )
+        self.assertIn("claudecode, codex", first.output)
+        self.assertIn("already enabled", second.output)
+
+    def test_restart_failure_propagates_with_complete_roster(self):
+        runner = CliRunner()
+        app = _make_ctx(
+            enabled=False,
+            connector="claudecode",
+            connectors=["claudecode", "codex"],
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services",
+            side_effect=click.ClickException("simulated restart failure"),
+        ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"):
+            result = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan"],
+                obj=app,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(
+            restart_mock.call_args.kwargs["connectors"],
+            ["claudecode", "codex"],
+        )
+        self.assertIn("simulated restart failure", result.output)
+        self.assertNotIn("AI discovery is live", result.output)
+        app.logger.log_action.assert_not_called()
+
+    def test_no_connector_roster_restarts_only_the_shared_sidecar(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=False, connector="openclaw", connectors=[])
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
+                patch.object(cmd_agent, "_trigger_post_enable_scan"):
+            result = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan"],
+                obj=app,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart_mock.assert_called_once()
+        self.assertEqual(restart_mock.call_args.kwargs["connector"], "")
+        self.assertEqual(restart_mock.call_args.kwargs["connectors"], [])
 
     def test_no_restart_implies_no_scan(self):
         runner = CliRunner()
@@ -265,6 +368,28 @@ class DiscoveryDisableTests(unittest.TestCase):
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
         self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "claudecode")
+        self.assertEqual(
+            restart_mock.call_args.kwargs.get("connectors"),
+            ["claudecode"],
+        )
+
+    def test_multi_connector_restart_attribution_is_complete(self):
+        runner = CliRunner()
+        app = _make_ctx(
+            enabled=True,
+            connector="claudecode",
+            connectors=["claudecode", "codex"],
+        )
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(cmd_agent.discovery_disable, ["--yes"], obj=app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(restart_mock.call_args.kwargs["connector"], "claudecode")
+        self.assertEqual(
+            restart_mock.call_args.kwargs["connectors"],
+            ["claudecode", "codex"],
+        )
+        self.assertIn("claudecode, codex", result.output)
 
     def test_no_restart_skips_gateway_call(self):
         runner = CliRunner()
@@ -287,6 +412,55 @@ class DiscoveryDisableTests(unittest.TestCase):
             result = runner.invoke(cmd_agent.discovery_disable, ["--yes"], obj=app)
         self.assertNotEqual(result.exit_code, 0)
         restart_mock.assert_not_called()
+
+
+class DiscoveryConnectorConfigRoundTripTests(unittest.TestCase):
+    def test_enable_and_disable_preserve_multi_connector_yaml(self):
+        cases = (
+            (False, cmd_agent.discovery_enable, ["--yes", "--no-scan"]),
+            (True, cmd_agent.discovery_disable, ["--yes"]),
+        )
+        for initially_enabled, command, args in cases:
+            with self.subTest(command=command.name), tempfile.TemporaryDirectory() as td:
+                cfg = Config(
+                    data_dir=td,
+                    claw=ClawConfig(mode="claudecode"),
+                    guardrail=GuardrailConfig(
+                        enabled=True,
+                        connector="claudecode",
+                        connectors={
+                            "claudecode": PerConnectorGuardrailConfig(),
+                            "codex": PerConnectorGuardrailConfig(),
+                        },
+                    ),
+                    ai_discovery=AIDiscoveryConfig(enabled=initially_enabled),
+                )
+                cfg.save()
+                config_path = os.path.join(td, "config.yaml")
+                with open(config_path, encoding="utf-8") as handle:
+                    before = yaml.safe_load(handle)
+                roster_before = cfg.active_connectors()
+
+                app = AppContext()
+                app.cfg = cfg
+                app.logger = MagicMock()
+                with patch(
+                    "defenseclaw.commands.cmd_setup._restart_services"
+                ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"):
+                    result = CliRunner().invoke(command, args, obj=app)
+
+                with open(config_path, encoding="utf-8") as handle:
+                    after = yaml.safe_load(handle)
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(cfg.active_connectors(), roster_before)
+                self.assertEqual(before["guardrail"], after["guardrail"])
+                self.assertEqual(before["claw"], after["claw"])
+                self.assertEqual(
+                    restart_mock.call_args.kwargs["connectors"],
+                    ["claudecode", "codex"],
+                )
+                self.assertIn("claudecode, codex", result.output)
 
 
 class DiscoveryStatusTests(unittest.TestCase):
