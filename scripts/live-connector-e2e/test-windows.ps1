@@ -126,11 +126,63 @@ try {
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests', '-q'") 'complete Python suite is required'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'doctor'', ''--json-output' -and $nativeHarnessText -match 'skill'', ''scan' -and $nativeHarnessText -match 'mcp'', ''scan') 'installed artifact smoke covers doctor and scanners'
+    $acceptance = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-Acceptance\b.*?\n\}'
+    ).Value
+    foreach ($phase in @('Invoke-InstallerAcceptance', 'Invoke-GatewayLifecycleAcceptance')) {
+        Assert-True ($acceptance -match "\b$([regex]::Escape($phase))\b") `
+            "packaged acceptance reaches $phase"
+    }
+    $installerAcceptance = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-InstallerAcceptance\b.*?\n\}'
+    ).Value
+    foreach ($acceptanceHelper in @(
+        'Assert-PackagedDoctorSmoke',
+        'Assert-PackagedDaclAcceptance',
+        'Assert-PackagedRepairAcceptance',
+        'Assert-ResetAcceptance',
+        'Invoke-FullUninstallCycle'
+    )) {
+        $definition = [regex]::Match(
+            $nativeHarnessText,
+            "(?s)function $([regex]::Escape($acceptanceHelper))\b.*?\n\}"
+        ).Value
+        Assert-True ($definition -and $installerAcceptance -match "\b$([regex]::Escape($acceptanceHelper))\b") `
+            "packaged installer acceptance reaches $acceptanceHelper"
+    }
+    $gatewayAcceptance = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-GatewayLifecycleAcceptance\b.*?\n\}'
+    ).Value
+    foreach ($acceptanceHelper in @(
+        'Assert-RunningReinstallAcceptance',
+        'Assert-TransactionalRollbackAcceptance'
+    )) {
+        $definition = [regex]::Match(
+            $nativeHarnessText,
+            "(?s)function $([regex]::Escape($acceptanceHelper))\b.*?\n\}"
+        ).Value
+        Assert-True ($definition -and $gatewayAcceptance -match "\b$([regex]::Escape($acceptanceHelper))\b") `
+            "packaged gateway acceptance reaches $acceptanceHelper"
+    }
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
     Assert-True ($installerText -match '\[switch\]\$NoPersistPath' -and $nativeHarnessText -match '-NoPersistPath') 'CI install opts out of persistent user PATH changes'
     Assert-True ($nativeHarnessText -match "GetEnvironmentVariable\('Path', 'User'\)" -and $nativeHarnessText -match 'runner user PATH despite -NoPersistPath') 'packaged install verifies the runner user PATH was unchanged'
     $cleanupFunction = [regex]::Match($nativeHarnessText, '(?s)function Invoke-Cleanup \{.*?\n\}').Value
-    Assert-True ($cleanupFunction -notmatch "@\('stop'\)" -and $cleanupFunction -match 'Stop-StateProcesses') 'fresh-step cleanup cannot target the runner default profile'
+    $stateProcessesFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Get-StateProcesses\(.*?\n\}'
+    ).Value
+    Assert-True ($stateProcessesFunction -match 'ParentProcessId' -and
+        $stateProcessesFunction -match 'ExecutablePath' -and
+        $stateProcessesFunction -match '-StateRoot') `
+        'cleanup excludes caller ancestry and requires rooted process evidence'
+    Assert-True ($cleanupFunction -notmatch "@\('stop'\)" -and
+        $cleanupFunction -match 'Stop-StateProcesses' -and
+        $cleanupFunction -match 'Remove-SafeDisposableTree') `
+        'fresh-step cleanup is process-scoped and removes without reparse traversal'
 
     Assert-True ($liveWorkflowText -match '(?s)windows-live:.*?connector: \[codex, claudecode\].*?report:') 'manual Windows live matrix contains Codex and Claude'
     $windowsLiveJob = [regex]::Match($liveWorkflowText, '(?s)  windows-live:.*?(?=\r?\n  # -+\r?\n  # Report)').Value
