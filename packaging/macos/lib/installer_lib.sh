@@ -130,9 +130,9 @@ discover_agent_version() {
       done
       # Last resort: exec codex --version as the target user (not as
       # root). Requires TARGET_USER to be known to the caller.
-      if [[ -n "${DEFENSECLAW_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
+      if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
         local vraw
-        vraw="$(sudo -n -u "${DEFENSECLAW_TARGET_USER}" codex --version 2>/dev/null | head -1 || true)"
+        vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" codex --version 2>/dev/null | head -1 || true)"
         # Codex prints "codex-cli X.Y.Z"; take just the version token.
         vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
         if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
@@ -242,12 +242,14 @@ prepare_userspace_for() {
 # Renders the full config.yaml. Pure stdout, no file writes.
 # Extra args after SUPPORT_DIR are the full connector list (primary + others).
 #
-# SUPPORT_DIR holds config.yaml at its root (root:wheel 0640) — the
-# managed_enterprise trust check walks every ancestor and refuses group-
-# or other-writable dirs, so SUPPORT_DIR itself must be root-owned 0750.
-# Runtime state (audit DB, tokens, guardian state) lives in
-# ${SUPPORT_DIR}/runtime which is chown'd to the service user during
-# install. data_dir/audit_db point at that runtime subdir.
+# SUPPORT_DIR holds config.yaml at its root (root-owned 0640) — the
+# managed_enterprise trust check walks every ancestor of config.yaml
+# and refuses group-writable or non-root ancestors. Runtime state
+# (audit DB, tokens, guardian state) lives in ${SUPPORT_DIR}/runtime,
+# which is chown'd to the service user. This split matches the docs
+# (docs-site/content/docs/setup/enterprise-deployment.mdx: "The managed
+# config must set data_dir: /Library/Application Support/DefenseClaw/runtime")
+# and preserves the CI plist test's WorkingDirectory/HOME assertions.
 render_config() {
   local mode="$1"
   local primary="$2"

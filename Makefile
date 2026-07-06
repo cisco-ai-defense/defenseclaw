@@ -527,56 +527,14 @@ BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 
 packaging-macos-bundle:
-	@[ "$(BUNDLE_GOOS)" = "darwin" ] || { \
-	  echo "packaging-macos-bundle: BUNDLE_GOOS must be 'darwin' (got '$(BUNDLE_GOOS)')" >&2; exit 1; }
-	@[ "$(BUNDLE_GOARCH)" = "amd64" ] || [ "$(BUNDLE_GOARCH)" = "arm64" ] || [ "$(BUNDLE_GOARCH)" = "universal" ] || { \
-	  echo "packaging-macos-bundle: BUNDLE_GOARCH must be amd64, arm64, or universal (got '$(BUNDLE_GOARCH)')" >&2; exit 1; }
-	@echo "==> packaging macOS bundle: $(BUNDLE_NAME)"
-	@rm -rf "$(BUNDLE_DIR)"
-	@mkdir -p "$(BUNDLE_DIR)/lib"
-	@if [ "$(BUNDLE_GOARCH)" = "universal" ]; then \
-	  command -v lipo >/dev/null 2>&1 || { echo "packaging-macos-bundle: 'lipo' not found — universal builds must run on macOS with Xcode CLT" >&2; exit 1; }; \
-	  echo "==> building gateway (darwin/amd64)"; \
-	  GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 \
-	      go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway.amd64" ./cmd/defenseclaw; \
-	  echo "==> building gateway (darwin/arm64)"; \
-	  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
-	      go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway.arm64" ./cmd/defenseclaw; \
-	  echo "==> lipo-creating universal binary"; \
-	  lipo -create -output "$(BUNDLE_DIR)/defenseclaw-gateway" \
-	      "$(BUNDLE_DIR)/defenseclaw-gateway.amd64" \
-	      "$(BUNDLE_DIR)/defenseclaw-gateway.arm64"; \
-	  rm -f "$(BUNDLE_DIR)/defenseclaw-gateway.amd64" "$(BUNDLE_DIR)/defenseclaw-gateway.arm64"; \
-	  lipo -info "$(BUNDLE_DIR)/defenseclaw-gateway"; \
-	else \
-	  echo "==> building gateway ($(BUNDLE_GOOS)/$(BUNDLE_GOARCH))"; \
-	  GOOS=$(BUNDLE_GOOS) GOARCH=$(BUNDLE_GOARCH) CGO_ENABLED=1 \
-	      go build $(GOFLAGS) -o "$(BUNDLE_DIR)/defenseclaw-gateway" ./cmd/defenseclaw; \
-	fi
-	@chmod 0755 "$(BUNDLE_DIR)/defenseclaw-gateway"
-	@echo "==> copying installer scripts"
-	@cp packaging/macos/install.sh    "$(BUNDLE_DIR)/install.sh"
-	@cp packaging/macos/uninstall.sh  "$(BUNDLE_DIR)/uninstall.sh"
-	@cp packaging/macos/lib/installer_lib.sh          "$(BUNDLE_DIR)/lib/installer_lib.sh"
-	@cp packaging/macos/lib/scrub_agent_configs.py    "$(BUNDLE_DIR)/lib/scrub_agent_configs.py"
-	@cp packaging/launchd/com.defenseclaw.gateway.plist "$(BUNDLE_DIR)/com.defenseclaw.gateway.plist"
-	@chmod 0755 "$(BUNDLE_DIR)/install.sh" "$(BUNDLE_DIR)/uninstall.sh"
-	@chmod 0755 "$(BUNDLE_DIR)/lib/installer_lib.sh" "$(BUNDLE_DIR)/lib/scrub_agent_configs.py"
-	@chmod 0644 "$(BUNDLE_DIR)/com.defenseclaw.gateway.plist"
-	@echo "==> writing README"
-	@scripts/write-macos-bundle-readme.sh \
-	    "$(BUNDLE_DIR)/README.md" \
-	    "$(VERSION)" \
+	@scripts/build-macos-bundle.sh \
 	    "$(BUNDLE_GOOS)" \
-	    "$(BUNDLE_GOARCH)"
-	@echo "==> creating tarball"
-	@( cd $(DIST_DIR) && tar -czf $(BUNDLE_NAME).tar.gz $(BUNDLE_NAME) )
-	@( cd $(DIST_DIR) && shasum -a 256 $(BUNDLE_NAME).tar.gz > $(BUNDLE_NAME).tar.gz.sha256 )
-	@echo ""
-	@echo "==> bundle ready:"
-	@echo "    $(BUNDLE_DIR)/"
-	@echo "    $(DIST_DIR)/$(BUNDLE_NAME).tar.gz"
-	@echo "    $(DIST_DIR)/$(BUNDLE_NAME).tar.gz.sha256"
+	    "$(BUNDLE_GOARCH)" \
+	    "$(BUNDLE_NAME)" \
+	    "$(BUNDLE_DIR)" \
+	    "$(DIST_DIR)" \
+	    "$(VERSION)" \
+	    '$(GOFLAGS)'
 
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.

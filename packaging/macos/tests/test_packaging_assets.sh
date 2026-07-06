@@ -109,35 +109,46 @@ t_scrub_py_syntax() {
   assert_status "${rc}" 0 "scrub_agent_configs.py parses"
 }
 
-# Regression guard for the "shippable bundle" contract: install.sh must
-# discover the plist and binary next to itself (SCRIPT_DIR-relative)
-# before falling back to the repo tree, and it must NOT try to `go build`
-# when no repo tree is available. Simulate a bundle in a tmpdir and
-# confirm the script picks the bundle-local assets.
-t_bundle_layout_resolves_locally() {
-  local bundle; bundle="$(mktest_tmp)"
-  # mktest_tmp may return a path with a trailing slash from $TMPDIR;
-  # normalize so grep and the trace lines compare cleanly.
+# _setup_bundle_fixture WITH_BINARY
+#   Prints the fresh tmpdir path on stdout, populated with the installer
+#   scaffolding (install.sh, installer_lib.sh, plist stub). When
+#   WITH_BINARY=true, also drops in a stub defenseclaw-gateway. Bypasses
+#   the root check via sed so tests can drive install.sh without sudo.
+#   Both bundle tests below share this so the setup never drifts.
+#
+#   Uses stdout instead of bash 4.3+ namerefs (macOS bash 3.2 has no
+#   `local -n`).
+_setup_bundle_fixture() {
+  local with_binary="$1"
+  local bundle
+  bundle="$(mktest_tmp)"
+  # mktest_tmp may return a trailing-slash / mid-path `//` from $TMPDIR
+  # concat. Canonicalize via cd -P so grep + trace comparisons match
+  # what install.sh's SCRIPT_DIR resolves to.
   bundle="${bundle%/}"
-  # $bundle may still contain a mid-path `//` from the $TMPDIR concat
-  # (e.g. `/var/.../T//dctest...`). Bash's set -x prints it verbatim,
-  # so canonicalize via cd -P to match what install.sh's SCRIPT_DIR
-  # resolves to.
   bundle="$(cd "${bundle}" && pwd -P)"
   mkdir -p "${bundle}/lib"
-  cp "${PKG_DIR}/install.sh"                              "${bundle}/install.sh"
-  cp "${PKG_DIR}/lib/installer_lib.sh"                    "${bundle}/lib/installer_lib.sh"
-  # Fake bundle-local plist + binary so the resolution has something to
-  # find. Contents don't matter, only existence.
+  cp "${PKG_DIR}/install.sh"           "${bundle}/install.sh"
+  cp "${PKG_DIR}/lib/installer_lib.sh" "${bundle}/lib/installer_lib.sh"
   printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.defenseclaw.gateway.plist"
-  printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw-gateway"
-  chmod 0755 "${bundle}/defenseclaw-gateway" "${bundle}/install.sh"
-
-  # Bypass the root check so we can reach the resolution block.
+  chmod 0755 "${bundle}/install.sh"
+  if [[ "${with_binary}" == "true" ]]; then
+    printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw-gateway"
+    chmod 0755 "${bundle}/defenseclaw-gateway"
+  fi
+  # Bypass the root check so tests can reach the resolution block.
   sed -i.bak 's/\[\[ \$EUID -eq 0 \]\] || die/[[ 1 -eq 0 ]] || : /' "${bundle}/install.sh"
   rm -f "${bundle}/install.sh.bak"
+  printf '%s\n' "${bundle}"
+}
 
-  # Non-strict trace: filter for the PLIST/BINARY resolution lines.
+# Regression guard for the "shippable bundle" contract: install.sh must
+# discover the plist and binary next to itself (SCRIPT_DIR-relative)
+# before falling back to the repo tree.
+t_bundle_layout_resolves_locally() {
+  local bundle
+  bundle="$(_setup_bundle_fixture true)"
+
   local trace
   trace="$(bash -x "${bundle}/install.sh" --connector codex --skip-launchd --skip-connector 2>&1 | \
     grep -E "PLIST_SRC=|BINARY_SRC=/" || true)"
@@ -149,15 +160,8 @@ t_bundle_layout_resolves_locally() {
 # Complementary: with NO bundle-local binary AND no repo tree, install.sh
 # must die with a clear message rather than trying to `go build`.
 t_bundle_without_binary_and_no_repo_dies() {
-  local bundle; bundle="$(mktest_tmp)"
-  bundle="$(cd "${bundle}" && pwd -P)"
-  mkdir -p "${bundle}/lib"
-  cp "${PKG_DIR}/install.sh"                              "${bundle}/install.sh"
-  cp "${PKG_DIR}/lib/installer_lib.sh"                    "${bundle}/lib/installer_lib.sh"
-  printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.defenseclaw.gateway.plist"
-  chmod 0755 "${bundle}/install.sh"
-  sed -i.bak 's/\[\[ \$EUID -eq 0 \]\] || die/[[ 1 -eq 0 ]] || : /' "${bundle}/install.sh"
-  rm -f "${bundle}/install.sh.bak"
+  local bundle
+  bundle="$(_setup_bundle_fixture false)"
 
   local out rc=0
   out="$("${bundle}/install.sh" --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?

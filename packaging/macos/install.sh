@@ -491,11 +491,12 @@ fi
 #   4. `go build` from ${REPO_ROOT}/cmd/defenseclaw  (dev-tree fallback)
 if [[ -z "${BINARY_SRC}" ]]; then
   if [[ -x "${SCRIPT_DIR}/defenseclaw-gateway" ]]; then
+    # Standalone bundle layout — trust the shipped binary.
     BINARY_SRC="${SCRIPT_DIR}/defenseclaw-gateway"
     SKIP_BUILD="true"
-  elif [[ -x "${REPO_ROOT}/defenseclaw-gateway" ]]; then
-    BINARY_SRC="${REPO_ROOT}/defenseclaw-gateway"
   else
+    # Repo-tree layout — either a pre-built binary at REPO_ROOT
+    # (skip-build flow) or `go build` produces it there.
     BINARY_SRC="${REPO_ROOT}/defenseclaw-gateway"
   fi
 fi
@@ -523,21 +524,19 @@ install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}/bin"
 install    -o root -g wheel -m 0755 "${BINARY_SRC}" "${GATEWAY_BIN}"
 
 log "creating support dirs"
-# SUPPORT_DIR is root:wheel 0750 — the config file at its root has to
+# SUPPORT_DIR is root-owned 0750 — the config file at its root has to
 # be trust-checked, and the check walks every ancestor requiring
 # root ownership and no group/other write bits.
 install -d -o root -g wheel -m 0750 "${SUPPORT_DIR}"
-# RUNTIME_DIR lives INSIDE SUPPORT_DIR (matching what render_config
-# points data_dir at). It's chown'd to the service user after we
-# ensure the user exists — see below.
+# RUNTIME_DIR lives INSIDE SUPPORT_DIR (matches render_config's data_dir).
+# Chown'd to the service user after we ensure the user exists.
 RUNTIME_DIR="${SUPPORT_DIR}/runtime"
-# GUARDIAN_AUTH_DIR is the hook guardian's authorization state dir.
-# managed.HookGuardianAuthorizationDir() computes this as
-# `${data_dir}-hook-guardian` when DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR
-# isn't set — we mirror that default so the daemon (which does
-# have the env var set via the plist) and the CLI (invoked without
-# it) both resolve to the same path.
-GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/runtime-hook-guardian"
+# GUARDIAN_AUTH_DIR must match the shipped plist's
+# DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR env var (see
+# packaging/launchd/com.defenseclaw.gateway.plist and the
+# test_launchd_gateway_plist_uses_managed_paths CI assertion).
+# Root-owned per docs — "root-owned authorization-record directory".
+GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
 install -d -o root -g wheel -m 0750 "${RUNTIME_DIR}"
 install -d -o root -g wheel -m 0750 "${GUARDIAN_AUTH_DIR}"
 install -d -o root -g wheel -m 0750 "${LOGS_DIR}"
@@ -564,7 +563,7 @@ log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP} (uid=${SERVICE_UI
 # accepts them.
 [[ -n "${SERVICE_UID}" && -n "${SERVICE_GID}" ]] \
   || die "service uid/gid unset after ensure_service_user (internal bug)"
-chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${GUARDIAN_AUTH_DIR}" "${LOGS_DIR}"
+chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${LOGS_DIR}"
 
 # SUPPORT_DIR stays owned by root, but the service user needs group
 # traverse (x) access so launchd can chdir into
@@ -695,7 +694,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     if [[ -z "${AGENT_VER}" ]]; then
       # Expose TARGET_USER to the lib so its Codex fallback can exec
       # `codex --version` as the user (not as root).
-      AGENT_VER="$(DEFENSECLAW_TARGET_USER="${TARGET_USER}" \
+      AGENT_VER="$(DC_INSTALLER_TARGET_USER="${TARGET_USER}" \
         discover_agent_version "${c}" "${TARGET_HOME}" || true)"
     fi
     if [[ -z "${AGENT_VER}" ]]; then
