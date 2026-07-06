@@ -37,7 +37,7 @@ import (
 
 const (
 	defaultStopTimeout           = 10 * time.Second
-	defaultStartReadinessTimeout = 10 * time.Second
+	defaultStartReadinessTimeout = 60 * time.Second
 	defaultReadinessPollInterval = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout  = time.Second
 	restartPortReleaseTimeout    = 2 * time.Second
@@ -759,14 +759,23 @@ func gatewaySnapshotReady(
 	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
 		return false, nil
 	}
-	if !subsystemMatchesConfiguredState(snap.Guardrail.State, requirements.guardrailEnabled) {
-		return false, nil
-	}
-	// Guardrail starts life as disabled in NewSidecarHealth. When disabled is
-	// the configured final state, require the guardrail goroutine to publish a
-	// newer health record so the initial placeholder cannot win the race.
-	if !requirements.guardrailEnabled && !snap.StartedAt.IsZero() && !snap.Guardrail.Since.After(snap.StartedAt) {
-		return false, nil
+	if requirements.guardrailEnabled {
+		if snap.Guardrail.State != gateway.StateRunning {
+			return false, nil
+		}
+	} else {
+		// Connector-native lifecycle hooks can remain active for observation
+		// while the local proxy is disabled. Both running hooks and a finalized
+		// disabled state are ready; the initial disabled placeholder is not.
+		switch snap.Guardrail.State {
+		case gateway.StateRunning:
+		case gateway.StateDisabled:
+			if !snap.StartedAt.IsZero() && !snap.Guardrail.Since.After(snap.StartedAt) {
+				return false, nil
+			}
+		default:
+			return false, nil
+		}
 	}
 	if !subsystemMatchesConfiguredState(snap.Telemetry.State, requirements.telemetryEnabled) {
 		return false, nil

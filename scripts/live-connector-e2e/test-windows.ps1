@@ -167,6 +167,9 @@ try {
         Assert-True ($definition -and $gatewayAcceptance -match "\b$([regex]::Escape($acceptanceHelper))\b") `
             "packaged gateway acceptance reaches $acceptanceHelper"
     }
+    Assert-True ($gatewayAcceptance -match "@\('start'\) -Timeout 90" -and
+        $gatewayAcceptance -match "@\('restart'\) -Timeout 90") `
+        'packaged gateway lifecycle lets the native 60-second readiness deadline report and clean up'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
     Assert-True ($installerText -match '\[switch\]\$NoPersistPath' -and $nativeHarnessText -match '-NoPersistPath') 'CI install opts out of persistent user PATH changes'
     Assert-True ($nativeHarnessText -match "GetEnvironmentVariable\('Path', 'User'\)" -and $nativeHarnessText -match 'runner user PATH despite -NoPersistPath') 'packaged install verifies the runner user PATH was unchanged'
@@ -207,6 +210,22 @@ try {
     }
     Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks rejection is bounded, exit 1, and checks an unchanged tree'
     Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
+    $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
+    Assert-True ($contractRun -match "(?s)try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?Invoke-Setup action.*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") `
+        'unversioned fixture override is removed before Doctor tamper validation'
+    $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
+    $doctorRegistration = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-registration'", [StringComparison]::Ordinal)
+    $doctorStop = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('stop')", [StringComparison]::Ordinal)
+    $doctorTamper = $doctorContract.IndexOf('$tamperedConfig =', [StringComparison]::Ordinal)
+    $doctorRecovery = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-recovery'", [StringComparison]::Ordinal)
+    $doctorStart = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('start')", [StringComparison]::Ordinal)
+    $doctorWait = $doctorContract.LastIndexOf('Wait-Gateway', [StringComparison]::Ordinal)
+    Assert-True ($doctorRegistration -ge 0 -and $doctorStop -gt $doctorRegistration -and
+        $doctorTamper -gt $doctorStop -and $doctorRecovery -gt $doctorTamper -and
+        $doctorStart -gt $doctorRecovery -and $doctorWait -gt $doctorStart) `
+        'Doctor tamper validation pauses isolated self-heal and restores the gateway afterward'
+    Assert-True ($doctorContract -match "(?s)Write-Result 'doctor:windows-hook-recovery'.*?try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?defenseclaw-gateway' @\('start'\).*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT.*?\}.*?Wait-Gateway") `
+        'unversioned fixture override is scoped to the post-Doctor gateway restart'
     Assert-True ($harnessText -match 'obsolete shell-hook guidance for native Windows') 'Doctor connector contract rejects obsolete shell guidance'
     Assert-True ($harnessText -match 'function Wait-Gateway\(\[int\]\$Timeout = 90\)' -and $harnessText -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)') 'gateway readiness uses bounded Windows-native status probes'
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and $harnessText -match 'obsolete gateway launcher' -and $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) 'Doctor connector contract rejects a tampered registered hook command with exit 1'

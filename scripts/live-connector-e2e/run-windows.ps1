@@ -457,6 +457,10 @@ function Assert-DoctorWindowsHookRegistration {
     }
     Write-Result 'doctor:windows-hook-registration' pass "label=$label target=$hookExecutable obsolete-shell-guidance=absent"
 
+    # Pause the isolated gateway's connector self-heal while the registration
+    # is deliberately corrupted. Otherwise it can repair the fixture before
+    # Doctor observes the invalid launcher, making the negative check racey.
+    Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 60 | Out-Null
     $tamperedConfig = [regex]::Replace($config, '(?i)defenseclaw-hook\.exe', 'defenseclaw-gateway.exe')
     if ([string]::Equals($tamperedConfig, $config, [StringComparison]::Ordinal)) {
         throw "Doctor tamper contract could not locate the registered $Connector hook executable"
@@ -490,6 +494,13 @@ function Assert-DoctorWindowsHookRegistration {
         throw "Doctor did not recover after restoring the $Connector hook command"
     }
     Write-Result 'doctor:windows-hook-recovery' pass 'original registration restored byte-for-byte and validated'
+    try {
+        $env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'
+        Invoke-Tool 'defenseclaw-gateway' @('start') -Timeout 90 | Out-Null
+    } finally {
+        Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
+    }
+    Wait-Gateway
 }
 
 function Assert-NativeEnterpriseHooksRejected {
@@ -571,7 +582,7 @@ function Assert-TimeoutHandling {
 
 function Invoke-ContractRun {
     $golden = Join-Path $WorkspaceRoot "scripts\live-connector-e2e\golden\$Connector"
-    $env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'
+    Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     Assert-TimeoutHandling
     Assert-NativeEnterpriseHooksRejected
     Initialize-DefenseClawEnv
@@ -585,7 +596,15 @@ function Invoke-ContractRun {
     Invoke-DangerousCommandCorpus observe
     Invoke-Hook 'PreTool-block' (Join-Path $golden 'pre_tool_block.json') allow $true
     Invoke-Teardown
-    Invoke-Setup action
+    try {
+        # Locally built fixtures do not carry a release hook-contract version.
+        # Permit only their action-mode setup, then remove the bypass before
+        # Doctor verifies that tampering fails closed.
+        $env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'
+        Invoke-Setup action
+    } finally {
+        Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
+    }
     Assert-DoctorWindowsHookRegistration
     $session = Join-Path $golden 'session_start.json'
     if (Test-Path -LiteralPath $session) { Invoke-Hook 'SessionStart' $session allow }

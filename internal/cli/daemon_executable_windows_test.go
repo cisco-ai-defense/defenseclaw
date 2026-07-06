@@ -307,7 +307,10 @@ func buildGatewayExecutable(t *testing.T) string {
 
 func runGatewayExecutablePowerShell(t *testing.T, binary, home, command string) (string, int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		defaultStartReadinessTimeout+30*time.Second,
+	)
 	defer cancel()
 	script := `$output = & $env:DEFENSECLAW_TEST_EXE $env:DEFENSECLAW_TEST_COMMAND 2>&1 | Out-String
 $code = $LASTEXITCODE

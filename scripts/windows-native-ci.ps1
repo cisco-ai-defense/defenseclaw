@@ -987,7 +987,7 @@ function Invoke-GatewayLifecycleAcceptance(
         '--profile', 'observe', '--no-start-gateway', '--no-verify'
     ) -Timeout 300 -Log (Join-Path $logs 'gateway-lifecycle-init.log') | Out-Null
     Set-MinimalGatewayAcceptanceConfig $python
-    Invoke-Installed $gateway @('start') -Timeout 60 `
+    Invoke-Installed $gateway @('start') -Timeout 90 `
         -Log (Join-Path $logs 'gateway-start.log') | Out-Null
     Invoke-Installed $gateway @('status') -Timeout 30 `
         -Log (Join-Path $logs 'gateway-status.log') | Out-Null
@@ -995,7 +995,7 @@ function Invoke-GatewayLifecycleAcceptance(
     $Profile = Assert-RunningReinstallAcceptance $Profile $root $artifacts $logs
     $gateway = Join-Path $Profile.Bin 'defenseclaw-gateway.exe'
     Assert-TransactionalRollbackAcceptance $Profile $root $artifacts $logs
-    Invoke-Installed $gateway @('restart') -Timeout 60 `
+    Invoke-Installed $gateway @('restart') -Timeout 90 `
         -Log (Join-Path $logs 'gateway-restart.log') | Out-Null
     Invoke-Installed $gateway @('status') -Timeout 30 | Out-Null
     Invoke-Installed $gateway @('stop') -Timeout 60 `

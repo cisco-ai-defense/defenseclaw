@@ -33,6 +33,12 @@ func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gate
 	}
 }
 
+func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
+	if defaultStartReadinessTimeout != 60*time.Second {
+		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
+	}
+}
+
 func TestWaitForGatewayReadinessWaitsForDelayedGuardrailRunning(t *testing.T) {
 	var probes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -304,6 +310,22 @@ func TestWaitForGatewayReadinessAcceptsConfiguredDisabledGuardrail(t *testing.T)
 	)
 	if err != nil || !ready {
 		t.Fatalf("disabled guardrail readiness = %v, error = %v", ready, err)
+	}
+}
+
+func TestWaitForGatewayReadinessAcceptsRunningHooksWithProxyDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: false},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("connector-native hook readiness = %v, error = %v", ready, err)
 	}
 }
 
