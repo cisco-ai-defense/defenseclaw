@@ -19,7 +19,7 @@ import { createRequire } from "node:module";
 
 import {
   createFetchInterceptor,
-  DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
+  UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
 } from "../fetch-interceptor.js";
 
 // The interceptor mutates CJS `https.request` via createRequire; mirror that
@@ -45,8 +45,8 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
   beforeEach(() => {
     captured.length = 0;
     originalUnguardedEnv =
-      process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
-    delete process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+      process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+    delete process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
     originalHttpRequest = http.request;
     originalHttpsRequest = https.request;
     // Swap http.request so the interceptor's proxied call lands in `captured`
@@ -73,9 +73,9 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
     http.request = originalHttpRequest;
     https.request = originalHttpsRequest;
     if (originalUnguardedEnv === undefined) {
-      delete process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+      delete process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
     } else {
-      process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] =
+      process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] =
         originalUnguardedEnv;
     }
     vi.restoreAllMocks();
@@ -194,7 +194,7 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
   });
 
   it("passes through ChatGPT Codex responses only with explicit unguarded opt-in", () => {
-    process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+    process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     let passthroughCalled = false;
     const passthrough = ((..._args: unknown[]) => {
@@ -226,7 +226,7 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
     expect(passthroughCalled).toBe(true);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining(
-        DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
+        UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
       ),
     );
   });

@@ -254,7 +254,7 @@ function extractHost(urlStr: string): string {
   }
 }
 
-export const DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV =
+export const UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV =
   "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES";
 
 const CHATGPT_CODEX_RESPONSES_PATH = "/backend-api/codex/responses";
@@ -290,7 +290,7 @@ export function shouldPassthroughChatGPTCodexResponseBackendUrl(
 ): boolean {
   return (
     isChatGPTCodexResponseBackendUrl(urlStr) &&
-    truthyEnv(DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV)
+    truthyEnv(UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV)
   );
 }
 
@@ -899,7 +899,7 @@ export function createFetchInterceptor(
     if (!chatgptCodexPassthroughWarned) {
       chatgptCodexPassthroughWarned = true;
       console.warn(
-        `[defenseclaw] ${DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV}=1: ` +
+        `[defenseclaw] ${UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV}=1: ` +
         `ChatGPT/Codex responses are being passed through unguarded: ${scrubUrlForLog(urlStr)}`,
       );
     }

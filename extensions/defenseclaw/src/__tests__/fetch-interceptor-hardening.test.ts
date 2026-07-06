@@ -26,12 +26,12 @@ import { createRequire } from "node:module";
 
 import {
   createFetchInterceptor,
-  DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
   isLLMUrl,
   hasLLMPathSuffix,
   shouldPassthroughChatGPTCodexResponseBackendUrl,
   scrubUrlForLog,
   LLM_PATH_SUFFIXES,
+  UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
 } from "../fetch-interceptor.js";
 
 const _require = createRequire(import.meta.url);
@@ -101,15 +101,15 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
 
   beforeEach(() => {
     originalUnguardedEnv =
-      process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
-    delete process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+      process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+    delete process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
   });
 
   afterEach(() => {
     if (originalUnguardedEnv === undefined) {
-      delete process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+      delete process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
     } else {
-      process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] =
+      process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] =
         originalUnguardedEnv;
     }
     vi.restoreAllMocks();
@@ -139,7 +139,7 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
   });
 
   it("allows ChatGPT Codex response passthrough only with explicit opt-in", () => {
-    process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+    process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
 
     expect(
       shouldPassthroughChatGPTCodexResponseBackendUrl(
@@ -198,7 +198,7 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
   });
 
   it("passes through fetch calls only with explicit unguarded opt-in", async () => {
-    process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+    process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const originalFetch = globalThis.fetch;
     const calls: string[] = [];
@@ -225,13 +225,13 @@ describe("ChatGPT Codex OAuth backend passthrough", () => {
     );
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining(
-        DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
+        UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
       ),
     );
   });
 
   it("warns again after the interceptor is restarted", async () => {
-    process.env[DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+    process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response("ok")) as typeof fetch;
