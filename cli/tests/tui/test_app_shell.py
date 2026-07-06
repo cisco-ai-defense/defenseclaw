@@ -313,7 +313,7 @@ def test_connector_signature_detects_raw_activity_change_without_count_change() 
 
     assert first != second
     row = next(row for row in app._overview_connector_rows() if row.connector == "codex")
-    assert row.calls == 4
+    assert row.calls == 0
     assert row.last_activity_at == now
 
 
@@ -354,7 +354,16 @@ def test_live_overview_signature_covers_scans_alerts_and_large_tiles() -> None:
             return list(self.events[-limit:])
 
         def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
-            return {}
+            if not self.events:
+                return {}
+            return {
+                "codex": {
+                    "calls": len(self.events),
+                    "alerts": len(self.events),
+                    "blocks": 0,
+                    "newest": self.events[-1].timestamp.isoformat(),
+                }
+            }
 
     store = LiveStore()
     app = DefenseClawTUI(
@@ -375,6 +384,8 @@ def test_live_overview_signature_covers_scans_alerts_and_large_tiles() -> None:
             details="connector=codex action=alert severity=HIGH",
         )
     )
+    app._connector_hook_event_stats_cache = None
+    app._connector_hook_event_stats_loaded_at = 0.0
     with app._connector_hook_event_render_cache():
         second = app._overview_live_data_signature()
         metrics = {metric.key: metric.value for metric in app._overview_metric_data()}
@@ -2117,7 +2128,7 @@ async def test_health_poll_allows_scrolled_repaint_when_live_overview_changes(
 
     assert scheduled == [True]
     rows = {row.connector: row for row in app._overview_connector_rows()}
-    assert rows["codex"].calls == 5
+    assert rows["codex"].calls == 0
     assert rows["codex"].last_activity_at == now
 
 
@@ -4714,19 +4725,8 @@ async def test_overview_connector_rows_use_total_hook_stats_not_recent_window() 
             severity="INFO",
             details="connector=codex action=allow",
         )
-        for i in range(498)
+        for i in range(501)
     ]
-    events.extend(
-        Event(
-            id=f"claudecode-{i}",
-            timestamp=base + timedelta(seconds=498 + i),
-            action="connector-hook",
-            target="preToolUse",
-            severity="INFO",
-            details="connector=claudecode action=allow",
-        )
-        for i in range(2)
-    )
     class HookStatsStore:
         def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
             return list(events[-limit:])
@@ -4743,7 +4743,7 @@ async def test_overview_connector_rows_use_total_hook_stats_not_recent_window() 
                     "calls": 4402,
                     "alerts": 0,
                     "blocks": 0,
-                    "newest": (base + timedelta(seconds=499)).isoformat(),
+                    "newest": (base - timedelta(hours=1)).isoformat(),
                 },
                 "codex": {
                     "calls": 16090,
@@ -4785,8 +4785,8 @@ async def test_overview_connector_rows_use_total_hook_stats_not_recent_window() 
 
 
 @pytest.mark.asyncio
-async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
-    """Cold startup should not flash lifetime hook totals as active-session counts."""
+async def test_overview_persisted_totals_do_not_depend_on_health_loading() -> None:
+    """Cold startup and online health use the same persisted metric window."""
 
     cfg = OverviewConfig(
         data_dir="/tmp/dc",
@@ -4855,12 +4855,12 @@ async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
         await pilot.pause()
 
         metrics = {metric.key: metric for metric in app._overview_metric_data()}
-        assert metrics["hook_calls"].value == 3
-        assert metrics["blocks"].value == 1
+        assert metrics["hook_calls"].value == 27000
+        assert metrics["blocks"].value == 300
         rows = {row.connector: row for row in app._overview_connector_rows()}
-        assert rows["codex"].calls == 2
-        assert rows["cursor"].calls == 1
-        assert store.stats_calls == 0
+        assert rows["codex"].calls == 20000
+        assert rows["cursor"].calls == 7000
+        assert store.stats_calls >= 1
 
         overview.set_health(
             HealthSnapshot(
@@ -4873,15 +4873,16 @@ async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
         )
         metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert metrics["hook_calls"].value == 27000
+        assert metrics["blocks"].value == 300
         rows = {row.connector: row for row in app._overview_connector_rows()}
         assert rows["codex"].calls == 20000
         assert rows["cursor"].calls == 7000
-        assert store.stats_calls == 1
+        assert store.stats_calls >= 1
 
 
 @pytest.mark.asyncio
-async def test_overview_prefers_live_connector_counts_over_lifetime_history() -> None:
-    """Live health counters are the current dashboard number; history is fallback."""
+async def test_overview_persisted_counts_survive_online_to_none_transition() -> None:
+    """Health counters/status transitions never replace persisted statistics."""
 
     since = datetime.now(timezone.utc) - timedelta(minutes=2)
     cfg = OverviewConfig(
@@ -4959,20 +4960,20 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
             return {
                 "claudecode": {
                     "calls": 4408,
-                    "alerts": 5,
-                    "blocks": 12,
+                    "alerts": 1,
+                    "blocks": 0,
                     "newest": (since + timedelta(seconds=5)).isoformat(),
                 },
                 "codex": {
                     "calls": 16216,
-                    "alerts": 54,
-                    "blocks": 27,
+                    "alerts": 2,
+                    "blocks": 0,
                     "newest": (since + timedelta(seconds=10)).isoformat(),
                 },
             }
 
         def count_scan_results_since(self, since_arg: datetime | None) -> int:
-            assert since_arg is not None
+            assert since_arg is None
             return 2
 
     store = HookStatsStore()
@@ -5004,33 +5005,47 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
         await pilot.pause()
 
         rows = {row.connector: row for row in app._overview_connector_rows()}
-        assert rows["claudecode"].calls == 6
-        assert rows["codex"].calls == 135
+        assert rows["claudecode"].calls == 4408
+        assert rows["claudecode"].blocks == 0
+        assert rows["claudecode"].alerts == 1
+        assert rows["codex"].calls == 16216
         assert rows["codex"].blocks == 0
         assert rows["codex"].alerts == 2
         assert rows["codex"].last_activity != "—"
-        assert store.stats_calls == 0
+        assert store.stats_calls >= 1
 
         app._set_connector_filter("codex")
         codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert codex_metrics["hook_calls"].value == 16216
+        assert codex_metrics["blocks"].value == 0
         assert codex_metrics["findings"].value == 2
-        assert store.stats_calls == 0
+        assert app._enforcement_scope_breakdown(("codex",)) == (16216, 2, 0)
+        assert store.stats_calls >= 1
 
         app._set_connector_filter("claudecode")
         metrics = {metric.key: metric for metric in app._overview_metric_data()}
         assert metrics["hook_calls"].label == "Hook Calls (claudecode)"
-        assert metrics["hook_calls"].value == 6
-        assert metrics["findings"].value == 1
-        assert store.stats_calls == 0
+        assert metrics["hook_calls"].value == 4408
+        assert metrics["blocks"].value == 0
+        assert metrics["findings"].value == 2
+        assert store.stats_calls >= 1
 
         session_counts = app._overview_session_enforcement_counts()
         assert session_counts.active_alerts == 3
         assert session_counts.total_scans == 2
 
+        overview.set_health(None)
+        offline_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        offline_rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert offline_metrics["hook_calls"].value == 4408
+        assert offline_metrics["blocks"].value == 0
+        assert offline_rows["codex"].calls == 16216
+        assert offline_rows["claudecode"].calls == 4408
+
 
 @pytest.mark.asyncio
-async def test_overview_live_counts_old_gateway_uses_audit_last_activity() -> None:
-    """Live counters without a gateway timestamp retain the audit fallback."""
+async def test_overview_old_gateway_uses_persisted_counts_and_last_activity() -> None:
+    """Older health rows remain status-only and retain audit activity truth."""
 
     now = datetime.now(timezone.utc)
     since = now - timedelta(minutes=2)
@@ -5044,20 +5059,13 @@ async def test_overview_live_counts_old_gateway_uses_audit_last_activity() -> No
     overview.set_health(
         HealthSnapshot(
             gateway=SubsystemHealth(state="disabled"),
-            connectors=(
-                ConnectorHealth(
-                    name="codex",
-                    state="running",
-                    since=since.isoformat(),
-                    requests=1,
-                ),
-                ConnectorHealth(
-                    name="cursor",
-                    state="running",
-                    since=since.isoformat(),
-                    last_activity_at="not-a-timestamp",
-                    requests=2,
-                ),
+            connector=ConnectorHealth(
+                name="codex",
+                state="running",
+                since=since.isoformat(),
+                last_activity_at=now.isoformat(),
+                requests=999,
+                tool_blocks=88,
             ),
         )
     )
@@ -5086,11 +5094,101 @@ async def test_overview_live_counts_old_gateway_uses_audit_last_activity() -> No
         await pilot.pause()
 
         rows = {row.connector: row for row in app._overview_connector_rows()}
-        assert rows["codex"].calls == 1
-        assert rows["cursor"].calls == 2
-        assert rows["codex"].last_activity != "—"
+        assert rows["codex"].calls == 100
+        assert rows["codex"].blocks == 0
+        assert rows["cursor"].calls == 200
+        assert rows["codex"].last_activity_at == now
         assert rows["cursor"].last_activity != "—"
         assert store.stats_calls >= 1
+
+
+def test_overview_external_audit_event_invalidates_stats_without_health(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A second DB writer becomes visible through the lightweight poll."""
+
+    db_path = tmp_path / "audit.db"
+    reader = Store(str(db_path))
+    reader.init()
+    writer = Store(str(db_path))
+    writer.init()
+    try:
+        writer.log_event(
+            Event(
+                id="first",
+                action="connector-hook",
+                target="PreToolUse",
+                connector="codex",
+                details="connector=codex action=allow mode=observe",
+            )
+        )
+        overview = OverviewPanelModel(
+            OverviewConfig(
+                data_dir=str(tmp_path),
+                claw_mode="codex",
+                guardrail_connector="codex",
+                connector_modes=(("codex", "observe"), ("claudecode", "observe")),
+            ),
+            version="test",
+        )
+        stats_calls = 0
+        load_stats = reader.connector_hook_event_stats
+
+        def counted_stats() -> dict[str, dict[str, object]]:
+            nonlocal stats_calls
+            stats_calls += 1
+            return load_stats()
+
+        monkeypatch.setattr(reader, "connector_hook_event_stats", counted_stats)
+        app = DefenseClawTUI(
+            overview_model=overview,
+            audit_model=AuditPanelModel(reader),
+        )
+        assert overview.health is None
+        assert {metric.key: metric.value for metric in app._overview_metric_data()}[
+            "hook_calls"
+        ] == 1
+        assert stats_calls == 1
+
+        scheduled: list[bool] = []
+        monkeypatch.setattr(
+            app,
+            "_schedule_overview_sampled_refresh",
+            lambda *, allow_scrolled=False, **_kwargs: scheduled.append(allow_scrolled),
+        )
+        app._poll_overview_audit_stats()
+        assert stats_calls == 1
+        assert scheduled == []
+
+        writer.log_event(
+            Event(
+                id="second",
+                action="connector-hook",
+                target="PostToolUse",
+                connector="claudecode",
+                details=(
+                    "connector=claudecode action=allow raw_action=block "
+                    "mode=observe would_block=true"
+                ),
+            )
+        )
+
+        app._poll_overview_audit_stats()
+
+        metrics = {metric.key: metric.value for metric in app._overview_metric_data()}
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert scheduled == [True]
+        assert stats_calls == 2
+        assert metrics["hook_calls"] == 2
+        assert metrics["blocks"] == 0
+        assert rows["codex"].calls == 1
+        assert rows["claudecode"].calls == 1
+        assert rows["claudecode"].alerts == 1
+        assert app._enforcement_scope_breakdown(("claudecode",)) == (1, 1, 0)
+    finally:
+        writer.close()
+        reader.close()
 
 
 @pytest.mark.asyncio
@@ -6136,7 +6234,30 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
     )
     overview = OverviewPanelModel(cfg, version="test")
     overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
-    audit = AuditPanelModel()
+    class MutableHookStore:
+        def __init__(self) -> None:
+            self.events: list[Event] = []
+
+        def list_actionable_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(self.events[-limit:])
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(self.events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            if not self.events:
+                return {}
+            return {
+                "claudecode": {
+                    "calls": 1,
+                    "alerts": 0,
+                    "blocks": 1,
+                    "newest": self.events[-1].timestamp.isoformat(),
+                }
+            }
+
+    store = MutableHookStore()
+    audit = AuditPanelModel(store)
     app = DefenseClawTUI(overview_model=overview, audit_model=audit)
 
     async with app.run_test(size=(120, 18)) as pilot:
@@ -6168,20 +6289,18 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         await pilot.pause()
         assert render_calls == 0
 
-        audit.set_events(
-            [
-                Event(
-                    id="claude-block",
-                    timestamp=datetime.now(timezone.utc),
-                    action="connector-hook",
-                    target="preToolUse",
-                    severity="HIGH",
-                    details="connector=claudecode action=block",
-                )
-            ]
+        store.events.append(
+            Event(
+                id="claude-block",
+                timestamp=datetime.now(timezone.utc),
+                action="connector-hook",
+                target="preToolUse",
+                severity="HIGH",
+                details="connector=claudecode action=block mode=action",
+            )
         )
 
-        app._schedule_overview_sampled_refresh(allow_scrolled=True)
+        app._periodic_refresh()
         await pilot.pause()
 
         assert render_calls == 1

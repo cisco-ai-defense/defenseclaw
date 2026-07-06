@@ -30,6 +30,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from defenseclaw.hook_metrics import (
+    aggregate_connector_hook_decision,
+    connector_hook_connector,
+)
 from defenseclaw.models import ActionEntry, ActionState, Counts, Event, TargetSnapshot
 
 SCHEMA = """\
@@ -209,6 +213,12 @@ class Store:
         )
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
+        # The grouped hook aggregate stays inside SQLite and returns only one
+        # compact row per connector. This fallback resolves identity for old
+        # rows that predate the dedicated connector column; current rows take
+        # the indexed connector path and exact-token fast classifier.
+        self.db.create_function("dc_hook_connector", 3, connector_hook_connector)
+        self.db.create_function("dc_hook_decision", 3, aggregate_connector_hook_decision)
         # The audit DB stores audit events, scan results, findings, raw
         # scanner JSON, target paths, and action decisions, so it must be
         # private to the operator / service account. sqlite3.connect()
@@ -539,34 +549,48 @@ class Store:
         return [self._row_to_event(r) for r in cur.fetchall()]
 
     def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
-        """Return all-time connector-hook counters grouped by connector.
+        """Return authoritative all-time hook counters grouped by connector.
 
-        The Overview chart still uses a bounded event window for sparklines
-        and target breakdowns, but the CONNECTORS table's ``CALLS`` column
-        must not look frozen just because that window is full. Newer sidecar
-        schemas populate ``audit_events.connector`` and index it, so use a
-        grouped aggregate instead of loading every hook row into the TUI.
+        The recent 500-row view is reserved for trends and detail labels.  This
+        grouped query scans the complete indexed connector-hook set inside
+        SQLite and returns only one compact row per connector, including rows
+        from older schemas where connector identity lived in structured JSON
+        or the legacy details tail.
         """
 
-        details_expr = "' ' || COALESCE(details, '') || ' '"
         cur = self.db.execute(
-            f"""SELECT connector AS connector_name,
-                       COUNT(*) AS calls,
-                       SUM(CASE
-                             WHEN {details_expr} LIKE '% action=block %'
-                               OR {details_expr} LIKE '% action=deny %'
-                             THEN 1 ELSE 0
-                           END) AS blocks,
-                       SUM(CASE
-                             WHEN {details_expr} LIKE '% action=alert %'
-                               OR {details_expr} LIKE '% action=warn %'
-                             THEN 1 ELSE 0
-                           END) AS alerts,
-                       MAX(timestamp) AS newest
-                FROM audit_events
-                WHERE action = 'connector-hook'
-                  AND connector <> ''
-                GROUP BY connector"""
+            """WITH source AS (
+                   SELECT CASE
+                              WHEN TRIM(COALESCE(connector, '')) <> ''
+                                  THEN LOWER(TRIM(connector))
+                              ELSE COALESCE(
+                                  NULLIF(
+                                      dc_hook_connector(connector, structured_json, details),
+                                      ''
+                                  ),
+                                  '__unattributed__'
+                              )
+                          END AS connector_name,
+                          details,
+                          structured_json,
+                          enforced,
+                          timestamp
+                     FROM audit_events
+                    WHERE action = ?
+               ), classified AS (
+                   SELECT connector_name,
+                          dc_hook_decision(details, structured_json, enforced) AS decision,
+                          timestamp
+                     FROM source
+               )
+               SELECT connector_name,
+                      COUNT(*) AS calls,
+                      SUM(CASE WHEN decision = 'block' THEN 1 ELSE 0 END) AS blocks,
+                      SUM(CASE WHEN decision = 'alert' THEN 1 ELSE 0 END) AS alerts,
+                      MAX(timestamp) AS newest
+                 FROM classified
+                GROUP BY connector_name""",
+            ("connector-hook",),
         )
         stats: dict[str, dict[str, Any]] = {}
         for connector, calls, blocks, alerts, newest in cur.fetchall():
@@ -580,6 +604,12 @@ class Store:
             if newest and str(newest) > str(entry["newest"]):
                 entry["newest"] = newest
         return stats
+
+    def audit_data_version(self) -> tuple[int, int]:
+        """Cheap token that changes for external or local connection writes."""
+
+        data_version = int(self.db.execute("PRAGMA data_version").fetchone()[0])
+        return data_version, int(self.db.total_changes)
 
     def count_scan_results_since(self, since: datetime | None) -> int:
         """Count scan results in the active Overview session window."""

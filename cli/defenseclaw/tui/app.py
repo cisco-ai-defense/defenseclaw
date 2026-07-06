@@ -34,6 +34,7 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 from defenseclaw import __version__
 from defenseclaw import config as config_module
 from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
@@ -801,6 +802,7 @@ class DefenseClawTUI(App[None]):
         self._overview_session_enforcement_counts_render_cache: EnforcementCounts | None = None
         self._connector_hook_event_stats_cache: dict[str, dict[str, Any]] | None = None
         self._connector_hook_event_stats_loaded_at: float = 0.0
+        self._overview_audit_version_cache: object | None = None
         self._overview_last_render_scroll_y: float | None = None
         self._overview_last_scroll_activity_at: float = 0.0
         self._overview_deferred_render_token: int = 0
@@ -4160,73 +4162,45 @@ class DefenseClawTUI(App[None]):
                 requests = connector_health.requests
                 inspections = connector_health.tool_inspections
                 errors = connector_health.errors
-                tool_blocks = connector_health.tool_blocks
-                subprocess_blocks = connector_health.subprocess_blocks
             else:
-                requests = inspections = errors = tool_blocks = subprocess_blocks = 0
-            blocks_total = tool_blocks + subprocess_blocks
-            session_since = self._session_start_for_connectors(scope_connectors)
+                requests = inspections = errors = 0
             allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown_for_connectors(
-                scope_connectors, since=session_since
+                scope_connectors
             )
-            history_ready = health is not None
-            live_hook_calls, live_blocks_value, has_live_hook_counts = self._connector_live_counts_for_connectors(scope_connectors)
-            fleet_live_hook_calls, fleet_live_blocks_value, has_fleet_live_hook_counts = self._connector_live_counts_for_connectors(())
-            if history_ready and not has_live_hook_counts:
-                total_allow, total_alert, total_block, _total_newest = self._connector_hook_stats_for_connectors(scope_connectors)
-            else:
-                total_allow = total_alert = total_block = 0
-            if history_ready and not has_fleet_live_hook_counts:
-                fleet_total_allow, fleet_total_alert, fleet_total_block, _fleet_total_newest = self._connector_hook_stats_for_connectors()
-            else:
-                fleet_total_allow = fleet_total_alert = fleet_total_block = 0
+            total_allow, total_alert, total_block, _total_newest = (
+                self._connector_hook_stats_for_connectors(scope_connectors)
+            )
+            fleet_total_allow, fleet_total_alert, fleet_total_block, _fleet_total_newest = (
+                self._connector_hook_stats_for_connectors()
+            )
 
-            # Prefer the gateway's live per-connector request counters when
-            # available. Older gateways did not expose the connector array,
-            # so after /health has loaded fall back to grouped audit totals.
-            # Before the first health poll, avoid flashing all-time history in
-            # the header; use the bounded recent window instead.
+            # Persisted audit aggregates are the counter source of truth.
+            # /health describes process/session status only; substituting its
+            # restart-scoped counters here made Overview jump between
+            # incompatible all-time and live-session windows.
             hook_timestamps = self._hook_event_timestamps_for_connectors(scope_connectors)
             total_hook_calls = total_allow + total_alert + total_block
             fleet_total_hook_calls = fleet_total_allow + fleet_total_alert + fleet_total_block
-            fleet_hook_calls = (
-                fleet_live_hook_calls
-                if has_fleet_live_hook_counts
-                else fleet_total_hook_calls
-            )
-            hook_calls = (
-                live_hook_calls
-                if has_live_hook_counts
-                else (requests or total_hook_calls or len(hook_timestamps))
-            )
+            fleet_hook_calls = fleet_total_hook_calls
+            hook_calls = total_hook_calls
             outside_roster_hook_calls = max(fleet_hook_calls - hook_calls, 0) if scope_connectors and not selected_connector else 0
             block_timestamps = self._block_event_timestamps_for_connectors(scope_connectors)
-            fleet_block_timestamps = self._block_event_timestamps()
-            blocks_value = (
-                live_blocks_value
-                if has_live_hook_counts
-                else (blocks_total or total_block or len(block_timestamps))
-            )
-            fleet_blocks_value = (
-                fleet_live_blocks_value
-                if has_fleet_live_hook_counts
-                else (fleet_total_block or len(fleet_block_timestamps))
-            )
+            blocks_value = total_block
+            fleet_blocks_value = fleet_total_block
             outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
             finding_timestamps = self._finding_event_timestamps_for_connectors(scope_connectors)
 
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
                 call_detail_parts.append(
-                    f"session [{TOKENS.accent_green}]a{allow_count}[/] "
+                    f"recent [{TOKENS.accent_green}]a{allow_count}[/] "
                     f"[{TOKENS.accent_amber}]w{alert_count}[/] "
                     f"[{TOKENS.accent_red}]b{block_decisions}[/]"
                 )
                 if top_hook:
                     call_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{top_hook}[/]")
                 if selected_connector:
-                    fleet_prefix = "live fleet" if has_fleet_live_hook_counts else "fleet"
-                    call_detail_parts.append(f"{fleet_prefix} {fleet_hook_calls}")
+                    call_detail_parts.append(f"fleet {fleet_hook_calls}")
                 elif outside_roster_hook_calls:
                     call_detail_parts.append(f"outside roster {outside_roster_hook_calls}")
             elif inspections or errors:
@@ -4246,16 +4220,18 @@ class DefenseClawTUI(App[None]):
 
             top_blocked_target, top_blocked_count = self._top_block_target_for_connectors(scope_connectors)
             block_detail_parts: list[str] = []
-            if tool_blocks:
-                block_detail_parts.append(f"[{TOKENS.accent_red}]{tool_blocks}[/] tool")
-            if subprocess_blocks:
-                block_detail_parts.append(f"[{TOKENS.accent_red}]{subprocess_blocks}[/] subprocess")
             if top_blocked_target:
                 short_target = top_blocked_target if len(top_blocked_target) <= 22 else top_blocked_target[:21] + "…"
                 block_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{short_target}[/] x{top_blocked_count}")
             if not block_detail_parts:
-                if not gateway_online:
-                    block_detail_parts.append(f"[{TOKENS.text_muted}]no data — gateway offline[/]")
+                if blocks_value:
+                    block_detail_parts.append(
+                        f"[{TOKENS.accent_red}]{blocks_value}[/] persisted"
+                    )
+                elif not gateway_online:
+                    block_detail_parts.append(
+                        f"[{TOKENS.text_muted}]0 persisted · gateway offline[/]"
+                    )
                 else:
                     block_detail_parts.append("no blocks yet")
             if selected_connector:
@@ -4454,85 +4430,15 @@ class DefenseClawTUI(App[None]):
                 return health.connector
         return None
 
-    @staticmethod
-    def _connector_health_has_live_window(connector_health: Any) -> bool:
-        """True when a health row represents a current gateway counter window."""
-
-        if not connector_health:
-            return False
-        if (getattr(connector_health, "since", "") or "").strip():
-            return True
-        return any(
-            _coerce_nonnegative_int(getattr(connector_health, field, 0))
-            for field in (
-                "requests",
-                "errors",
-                "tool_inspections",
-                "tool_blocks",
-                "subprocess_blocks",
-            )
-        )
-
-    def _connector_live_counts_for_connectors(
-        self, connectors: Iterable[str] = (),
-    ) -> tuple[int, int, bool]:
-        """Return live ``(requests, blocks, has_live_window)`` for a scope."""
-
-        health = self.overview_model.health
-        if health is None:
-            return 0, 0, False
-        scope = self._normalize_connector_scope(connectors)
-        rows: list[Any] = []
-        for conn in health.connectors:
-            name = conn.name.strip().lower()
-            if not scope or any(want in name for want in scope):
-                rows.append(conn)
-        if not rows and health.connector is not None:
-            name = health.connector.name.strip().lower()
-            if not scope or any(want in name for want in scope):
-                rows.append(health.connector)
-        live_rows = [row for row in rows if self._connector_health_has_live_window(row)]
-        if not live_rows:
-            return 0, 0, False
-        requests = sum(_coerce_nonnegative_int(getattr(row, "requests", 0)) for row in live_rows)
-        blocks = sum(
-            _coerce_nonnegative_int(getattr(row, "tool_blocks", 0))
-            + _coerce_nonnegative_int(getattr(row, "subprocess_blocks", 0))
-            for row in live_rows
-        )
-        return requests, blocks, True
-
-    def _session_start_for_connectors(
-        self, connectors: Iterable[str] = (),
-    ) -> datetime | None:
-        """Start of the active gateway/session window for a connector scope."""
-
-        health = self.overview_model.health
-        if health is None:
-            return None
-        scope = self._normalize_connector_scope(connectors)
-        starts: list[datetime] = []
-        for conn in health.connectors:
-            name = conn.name.strip().lower()
-            if scope and not any(want in name for want in scope):
-                continue
-            since = _parse_timestamp(conn.since)
-            if since is not None:
-                starts.append(since)
-        if not starts and health.connector is not None:
-            name = health.connector.name.strip().lower()
-            if not scope or any(want in name for want in scope):
-                since = _parse_timestamp(health.connector.since)
-                if since is not None:
-                    starts.append(since)
-        if not starts:
-            since = _parse_timestamp(health.guardrail.since)
-            if since is not None:
-                starts.append(since)
-        return min(starts) if starts else None
-
     def _overview_session_enforcement_counts(self) -> EnforcementCounts:
-        """Overview counts using the active gateway/session where possible."""
+        """Persisted Overview enforcement counts independent of health.
+
+        The historical method name is retained for compatibility with focused
+        callers, but these values deliberately no longer follow a gateway
+        session boundary.  Status and uptime remain health-derived; audit and
+        scan statistics remain stable when that health endpoint restarts or
+        disappears.
+        """
 
         if (
             self._connector_hook_event_cache_enabled
@@ -4542,53 +4448,31 @@ class DefenseClawTUI(App[None]):
 
         current = self.overview_model.enforcement
         scope = tuple(self._active_connector_names())
-        session_start = self._session_start_for_connectors(scope)
         total_scans = current.total_scans
         store = getattr(self.alerts_model, "store", None) or getattr(self.audit_model, "store", None)
         loader = getattr(store, "count_scan_results_since", None)
         if callable(loader):
             try:
-                total_scans = int(loader(session_start))
+                total_scans = int(loader(None))
             except Exception:  # noqa: BLE001 - retain the last known count.
                 total_scans = current.total_scans
+        if scope:
+            _allow, active_alerts, _block, _newest = self._connector_hook_stats_for_connectors(
+                scope
+            )
+        else:
+            active_alerts = current.active_alerts
         counts = EnforcementCounts(
             blocked_skills=current.blocked_skills,
             allowed_skills=current.allowed_skills,
             blocked_mcps=current.blocked_mcps,
             allowed_mcps=current.allowed_mcps,
             total_scans=total_scans,
-            active_alerts=self._session_alert_count_for_connectors(scope),
+            active_alerts=active_alerts,
         )
         if self._connector_hook_event_cache_enabled:
             self._overview_session_enforcement_counts_render_cache = counts
         return counts
-
-    def _session_alert_count_for_connectors(self, connectors: Iterable[str] = ()) -> int:
-        """Count current-session alert decisions for an Overview connector scope."""
-
-        scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
-        seen: set[tuple[str, ...]] = set()
-
-        if self.alerts_model is not None:
-            for row in self.alerts_model.flat_rows():
-                if row.kind == "scan_finding":
-                    continue
-                event = row.event
-                if not self._event_in_session(event, since):
-                    continue
-                if not self._cached_event_matches_scope(event, scope):
-                    continue
-                bucket = self._cached_event_metric_severity_bucket(event)
-                if bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
-                    seen.add(self._event_count_key(event))
-
-        summary = self._recent_hook_scope_summary(scope, since=since)
-        if summary["alert"]:
-            for event in summary["alert_events"]:
-                seen.add(self._event_count_key(event))
-
-        return len(seen)
 
     @staticmethod
     def _event_count_key(event: Any) -> tuple[str, ...]:
@@ -4626,7 +4510,7 @@ class DefenseClawTUI(App[None]):
 
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         seen: set[tuple[str, ...]] = set()
         if self.alerts_model is not None:
             for row in self.alerts_model.flat_rows():
@@ -4694,7 +4578,7 @@ class DefenseClawTUI(App[None]):
         if not scope:
             return True
         got = DefenseClawTUI._event_connector(event)
-        return bool(got) and any(want in got for want in scope)
+        return got in scope
 
     def _cached_event_connector(self, event: Any) -> str:
         if not self._connector_hook_event_cache_enabled:
@@ -4725,36 +4609,15 @@ class DefenseClawTUI(App[None]):
         if not normalized:
             return True
         got = self._cached_event_connector(event)
-        return bool(got) and any(want in got for want in normalized)
+        return got in normalized
 
     @staticmethod
     def _hook_decision(event: Any) -> str:
-        details = _parse_kv_details(getattr(event, "details", "") or "")
-        structured = getattr(event, "structured", None)
-        if isinstance(structured, dict):
-            action = str(structured.get("action") or details.get("action", "")).strip().lower()
-            raw_action = str(structured.get("raw_action") or details.get("raw_action", "")).strip().lower()
-            mode = str(structured.get("mode") or details.get("mode", "")).strip().lower()
-            if "would_block" in structured:
-                would_block = bool(structured.get("would_block"))
-            else:
-                would_block = details.get("would_block", "").strip().lower() == "true"
-        else:
-            action = details.get("action", "").strip().lower()
-            raw_action = details.get("raw_action", "").strip().lower()
-            mode = details.get("mode", "").strip().lower()
-            would_block = details.get("would_block", "").strip().lower() == "true"
-
-        if action in {"block", "deny"}:
-            return "block"
-        if action in {"alert", "warn"}:
-            return "alert"
-        if action == "allow" and mode == "observe":
-            if raw_action in {"block", "deny"} or would_block:
-                return "alert"
-            if raw_action in {"alert", "warn"}:
-                return "alert"
-        return action
+        return connector_hook_decision(
+            getattr(event, "details", "") or "",
+            getattr(event, "structured", None),
+            getattr(event, "enforced", None),
+        )
 
     def _connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
         """All-time connector-hook counts plus latest timestamps.
@@ -4775,6 +4638,15 @@ class DefenseClawTUI(App[None]):
         store = getattr(self.audit_model, "store", None) if self.audit_model is not None else None
         loader = getattr(store, "connector_hook_event_stats", None)
         if callable(loader):
+            version_loader = getattr(store, "audit_data_version", None)
+            if callable(version_loader):
+                try:
+                    # Capture the version before the aggregate. If a writer
+                    # commits during the query, the next poll observes another
+                    # change instead of treating a stale snapshot as current.
+                    self._overview_audit_version_cache = version_loader()
+                except Exception:  # noqa: BLE001 - version checks are an optimization.
+                    self._overview_audit_version_cache = None
             try:
                 raw_stats = loader() or {}
             except Exception:  # noqa: BLE001 - fall back to the recent in-memory window.
@@ -4784,12 +4656,15 @@ class DefenseClawTUI(App[None]):
                 if not connector or not isinstance(raw, dict):
                     continue
                 calls = _coerce_nonnegative_int(raw.get("calls"))
-                blocks = _coerce_nonnegative_int(raw.get("blocks"))
-                alerts = _coerce_nonnegative_int(raw.get("alerts"))
+                blocks = min(_coerce_nonnegative_int(raw.get("blocks")), calls)
+                alerts = min(
+                    _coerce_nonnegative_int(raw.get("alerts")),
+                    max(calls - blocks, 0),
+                )
                 stats[connector] = {
                     "calls": calls,
-                    "blocks": min(blocks, calls),
-                    "alerts": min(alerts, calls),
+                    "blocks": blocks,
+                    "alerts": alerts,
                     "newest": _parse_timestamp(raw.get("newest")),
                 }
         if not stats:
@@ -4823,7 +4698,7 @@ class DefenseClawTUI(App[None]):
         allow = alert = block = 0
         newest: datetime | None = None
         for connector, row in self._connector_hook_event_stats().items():
-            if scope and not any(want in connector for want in scope):
+            if scope and connector not in scope:
                 continue
             calls = _coerce_nonnegative_int(row.get("calls"))
             row_alerts = min(_coerce_nonnegative_int(row.get("alerts")), calls)
@@ -4903,12 +4778,9 @@ class DefenseClawTUI(App[None]):
     @staticmethod
     def _is_block_event(event: Any) -> bool:
         action = (getattr(event, "action", "") or "").lower()
-        details = (getattr(event, "details", "") or "").lower()
-        return (
-            action in {"block", "guardrail-block", "deny", "quarantine"}
-            or "action=block" in details
-            or "action=deny" in details
-        )
+        if action == "connector-hook":
+            return DefenseClawTUI._hook_decision(event) == "block"
+        return action in {"block", "guardrail-block", "deny", "quarantine"}
 
     def _findings_metric_detail(
         self,
@@ -5011,18 +4883,10 @@ class DefenseClawTUI(App[None]):
         return self._enforcement_scope_breakdown((connector,))
 
     def _enforcement_scope_breakdown(self, connectors: Iterable[str]) -> tuple[int, int, int]:
-        """``(calls, alerts, blocks)`` for an Overview connector scope."""
+        """Authoritative persisted ``(calls, alerts, blocks)`` for a scope."""
 
-        since = self._session_start_for_connectors(connectors)
-        allow, alert, block, _top = self._connector_hook_breakdown_for_connectors(
-            connectors, since=since
-        )
-        live_calls, live_blocks, has_live = self._connector_live_counts_for_connectors(connectors)
-        return (
-            live_calls if has_live else allow + alert + block,
-            alert,
-            live_blocks if has_live else block,
-        )
+        allow, alert, block, _newest = self._connector_hook_stats_for_connectors(connectors)
+        return allow + alert + block, alert, block
 
     _BLOCK_VERDICTS = frozenset({"block", "blocked", "deny", "denied", "quarantine", "quarantined"})
     _ALLOW_VERDICTS = frozenset({"allow", "allowed", "clean", "ok", "pass"})
@@ -5429,10 +5293,10 @@ class DefenseClawTUI(App[None]):
         """Per-connector split lines for the Hook Calls and Blocks tiles.
 
         Returns ``(calls_detail, blocks_detail)``. Each active connector is
-        scored independently via :meth:`_connector_hook_breakdown` so the
+        scored independently via the persisted grouped aggregate so the
         single tile row stays intact (D1=B) while the detail sub-line
-        attributes recent activity to the right connector — e.g.
-        ``recent codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists
+        attributes complete activity to the right connector — e.g.
+        ``persisted codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists
         only connectors that actually blocked something. Returns ``("", "")``
         when fewer than two connectors are active, leaving the
         single-connector detail lines unchanged.
@@ -5444,12 +5308,11 @@ class DefenseClawTUI(App[None]):
         call_parts: list[str] = []
         block_parts: list[str] = []
         for connector in connectors:
-            since = self._session_start_for_connectors((connector,))
-            allow, alert, block, _top = self._connector_hook_breakdown_for_connectors(
-                (connector,), since=since
+            allow, alert, block, _newest = self._connector_hook_stats_for_connectors(
+                (connector,)
             )
             call_parts.append(
-                f"[{TOKENS.text_secondary}]session[/] [{TOKENS.accent_cyan}]{connector}[/] "
+                f"[{TOKENS.text_secondary}]persisted[/] [{TOKENS.accent_cyan}]{connector}[/] "
                 f"[{TOKENS.accent_green}]a{allow}[/] "
                 f"[{TOKENS.accent_amber}]w{alert}[/] "
                 f"[{TOKENS.accent_red}]b{block}[/]"
@@ -5475,6 +5338,8 @@ class DefenseClawTUI(App[None]):
             for conn in health.connectors:
                 if conn.name:
                     out[conn.name.strip().lower()] = (conn.state or "").strip()
+            if not out and health.connector is not None and health.connector.name:
+                out[health.connector.name.strip().lower()] = (health.connector.state or "").strip()
         return out
 
     def _connector_last_activity(
@@ -5490,26 +5355,15 @@ class DefenseClawTUI(App[None]):
         remains the compatibility fallback even when live counters exist.
         """
 
-        if health_row is not None:
-            live_activity = _parse_timestamp(health_row.last_activity_at)
-            if live_activity is not None:
-                return live_activity
-
         want = connector.strip().lower()
-        if self.overview_model.health is not None:
-            stats_newest = self._connector_hook_event_stats().get(want, {}).get("newest")
-            if isinstance(stats_newest, datetime):
-                return stats_newest
-        latest: datetime | None = None
-        for event in self._recent_connector_hook_events():
-            if event.timestamp is None:
-                continue
-            attributed = self._cached_event_connector(event)
-            if attributed != want:
-                continue
-            if latest is None or event.timestamp > latest:
-                latest = event.timestamp
-        return latest
+        stats_newest = self._connector_hook_event_stats().get(want, {}).get("newest")
+        persisted = stats_newest if isinstance(stats_newest, datetime) else None
+        live = _parse_timestamp(health_row.last_activity_at) if health_row is not None else None
+        if persisted is None:
+            return live
+        if live is None:
+            return persisted
+        return max(persisted, live)
 
     def _overview_connector_rows(self) -> list[ConnectorOverviewRow]:
         """Per-connector rows for the Overview CONNECTORS table.
@@ -5544,26 +5398,11 @@ class DefenseClawTUI(App[None]):
         for connector, mode in cfg.connector_modes:
             if not connector:
                 continue
-            health_row = self._connector_health_for_metric(connector, use_single=False)
-            health_has_live_window = health_row is not None and self._connector_health_has_live_window(health_row)
-            if health_has_live_window:
-                calls = _coerce_nonnegative_int(getattr(health_row, "requests", 0))
-                blocks = (
-                    _coerce_nonnegative_int(getattr(health_row, "tool_blocks", 0))
-                    + _coerce_nonnegative_int(getattr(health_row, "subprocess_blocks", 0))
-                )
-                since = _parse_timestamp(getattr(health_row, "since", ""))
-                _allow, alerts, audit_blocks, _top = self._connector_hook_breakdown_for_connectors(
-                    (connector,), since=since
-                )
-                if blocks == 0:
-                    blocks = audit_blocks
-            else:
-                if self.overview_model.health is None:
-                    allow, alerts, blocks, _top = self._connector_hook_breakdown_for_connectors((connector,))
-                else:
-                    allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors((connector,))
-                calls = allow + alerts + blocks
+            health_row = self._connector_health_for_metric(connector, use_single=True)
+            allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
+                (connector,)
+            )
+            calls = allow + alerts + blocks
             last = self._connector_last_activity(
                 connector,
                 health_row=health_row,
@@ -5622,11 +5461,7 @@ class DefenseClawTUI(App[None]):
         else:
             with self._connector_hook_event_render_cache():
                 signature = self._overview_connector_rows_signature()
-        changed = signature != self._overview_connector_rows_signature_cache
-        if changed:
-            self._connector_hook_event_stats_cache = None
-            self._connector_hook_event_stats_loaded_at = 0.0
-        return changed
+        return signature != self._overview_connector_rows_signature_cache
 
     def _overview_live_data_signature(self) -> tuple[object, ...]:
         """Fingerprint every live value shared across the Overview surfaces.
@@ -5674,32 +5509,13 @@ class DefenseClawTUI(App[None]):
         else:
             with self._connector_hook_event_render_cache():
                 signature = self._overview_live_data_signature()
-        changed = signature != self._overview_live_data_signature_cache
-        if changed:
-            # A live signature can advance from audit data even when the
-            # gateway has no per-connector counter window (older gateways).
-            # Drop the short-lived grouped-stats cache before the synchronized
-            # render so CONNECTORS does not lag behind tiles/ENFORCEMENT by one
-            # additional TTL.
-            self._connector_hook_event_stats_cache = None
-            self._connector_hook_event_stats_loaded_at = 0.0
-            # The change-detection signature may have materialized connector
-            # rows from the old grouped-stats TTL. Rebuild only that derived
-            # object; the event list and per-scope summaries remain cached for
-            # this sample, so no second hook-history read is introduced.
-            if self._connector_hook_event_cache_enabled:
-                self._overview_connector_rows_render_cache = None
-        return changed
+        return signature != self._overview_live_data_signature_cache
 
     def _hook_event_timestamps(self, connector: str = "") -> list[datetime]:
         """Timestamps of recent connector-hook audit events.
 
-        Each connector-hook event is one hook call (preToolUse,
-        afterShellExecution, ...), so this is the authoritative "Hook
-        Calls" series even when the gateway's connector ``requests``
-        counter stays at zero — hook connectors deliver calls
-        out-of-band from proxied LLM requests, so that counter never
-        moves for them.
+        The bounded series feeds only the sparkline.  Authoritative numeric
+        totals come from :meth:`_connector_hook_event_stats`.
         """
 
         return self._hook_event_timestamps_for_connectors((connector,) if connector else ())
@@ -5757,7 +5573,7 @@ class DefenseClawTUI(App[None]):
         """Recent block/deny events for a connector roster scope."""
 
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         events: list[Any] = list(self._recent_hook_scope_summary(scope, since=since)["block_events"])
         if self.audit_model is not None:
             events.extend(self.audit_model.items)
@@ -5803,7 +5619,7 @@ class DefenseClawTUI(App[None]):
         else:
             alert_events = list(self.alerts_model.audit_events)
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         stamps: list[datetime] = []
         seen: set[tuple[str, ...]] = set()
         for event in alert_events:
@@ -5831,7 +5647,7 @@ class DefenseClawTUI(App[None]):
 
         if self.audit_model is None:
             return []
-        since = self._session_start_for_connectors(tuple(self._active_connector_names()))
+        since = None
         stamps: list[datetime] = []
         for event in self.audit_model.items:
             action = (event.action or "").lower()
@@ -5879,7 +5695,7 @@ class DefenseClawTUI(App[None]):
 
         alert_events: list[Any] = [] if self.alerts_model is None else list(self.alerts_model.audit_events[-200:])
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         severity_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
         best: tuple[int, str, str] = (0, "", "")
         seen: set[tuple[str, ...]] = set()
@@ -8941,6 +8757,9 @@ class DefenseClawTUI(App[None]):
             self.alerts_model.set_store(new_store)
         if hasattr(self.audit_model, "set_store"):
             self.audit_model.set_store(new_store)
+        self._connector_hook_event_stats_cache = None
+        self._connector_hook_event_stats_loaded_at = 0.0
+        self._overview_audit_version_cache = None
         for stale in old_stores:
             close = getattr(stale, "close", None)
             if callable(close):
@@ -9487,10 +9306,10 @@ class DefenseClawTUI(App[None]):
         if len(self.screen_stack) > 1:
             return
         if self.active_panel == "overview" and not self.help_open:
-            # Live Overview data is sampled after the existing 3 s gateway
-            # health poll. Do not run a second telemetry pass from this general
-            # 2 s model ticker: overlapping passes made scroll and tab input
-            # wait behind duplicate SQLite reads without improving freshness.
+            # Audit statistics must continue advancing while /health is absent.
+            # Poll only the grouped aggregate here; the 500-row detail window
+            # is reloaded only when a changed aggregate schedules a repaint.
+            self._poll_overview_audit_stats()
             return
         self._periodic_refresh_running = True
         try:
@@ -9501,6 +9320,26 @@ class DefenseClawTUI(App[None]):
                 return
         finally:
             self._periodic_refresh_running = False
+
+    def _poll_overview_audit_stats(self) -> None:
+        """Invalidate/repaint Overview when persisted hook totals change."""
+
+        store = getattr(self.audit_model, "store", None) if self.audit_model is not None else None
+        version_loader = getattr(store, "audit_data_version", None)
+        if callable(version_loader):
+            try:
+                version = version_loader()
+            except Exception:  # noqa: BLE001 - fall back to the grouped query.
+                version = None
+            if version is not None and version == self._overview_audit_version_cache:
+                return
+            self._overview_audit_version_cache = version
+        previous = self._connector_hook_event_stats_cache
+        self._connector_hook_event_stats_cache = None
+        self._connector_hook_event_stats_loaded_at = 0.0
+        current = self._connector_hook_event_stats()
+        if previous is None or current != previous:
+            self._schedule_overview_sampled_refresh(allow_scrolled=True)
 
     def _refresh_models_from_disk(self) -> None:
         self._refresh_alerts()
