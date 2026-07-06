@@ -25,12 +25,12 @@
 #   9090        — Prometheus UI
 #   8888        — Collector self-metrics
 #
-# SECURITY: all host-side port publishes are scoped to the loopback
-# interface (127.0.0.1) so a developer laptop joining a coffee-shop
-# Wi-Fi does not accidentally expose Grafana/Prometheus/Tempo to the
-# LAN. The certified bundle intentionally has no environment override that can
-# widen these binds; use a separately maintained Compose override if you need a
-# different exposure model and secure it independently.
+# SECURITY: all host-side port publishes default to the loopback interface
+# (127.0.0.1) so a developer laptop joining a coffee-shop Wi-Fi does not
+# accidentally expose Grafana/Prometheus/Tempo to the LAN. The managed
+# `defenseclaw setup` path always removes inherited HOST_BIND values. Operators
+# who intentionally need a different bind must use the manual Compose procedure
+# documented in README.md and secure the exposed services independently.
 #
 # Teardown drops everything including persisted data volumes:
 #   docker compose down -v
@@ -59,10 +59,10 @@ services:
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
     ports:
-      - "127.0.0.1:4317:4317"   # OTLP gRPC (traces, metrics, logs)
-      - "127.0.0.1:4318:4318"   # OTLP HTTP
-      - "127.0.0.1:8888:8888"   # Collector telemetry
-      - "127.0.0.1:13133:13133" # health check extension
+      - "${HOST_BIND:-127.0.0.1}:4317:4317"   # OTLP gRPC (traces, metrics, logs)
+      - "${HOST_BIND:-127.0.0.1}:4318:4318"   # OTLP HTTP
+      - "${HOST_BIND:-127.0.0.1}:8888:8888"   # Collector telemetry
+      - "${HOST_BIND:-127.0.0.1}:13133:13133" # health check extension
     networks:
       - defenseclaw-o11y
     depends_on:
@@ -91,7 +91,7 @@ services:
       # The admin + remote-write APIs are convenient for local work (purge
       # stale series after a histogram-bucket change, push test data) and the
       # 127.0.0.1 bind keeps them off the network. Drop these flags if you
-      # ever publish 9090 through a separately maintained override.
+      # ever publish 9090 through the documented manual Compose override.
       - "--web.enable-admin-api"
       - "--web.enable-remote-write-receiver"
       - "--enable-feature=exemplar-storage,native-histograms"
@@ -100,7 +100,7 @@ services:
       - ./prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports:
-      - "127.0.0.1:9090:9090"
+      - "${HOST_BIND:-127.0.0.1}:9090:9090"
     networks:
       - defenseclaw-o11y
     restart: unless-stopped
@@ -113,7 +113,7 @@ services:
       - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
       - loki-data:/loki
     ports:
-      - "127.0.0.1:3100:3100"
+      - "${HOST_BIND:-127.0.0.1}:3100:3100"
     networks:
       - defenseclaw-o11y
     restart: unless-stopped
@@ -126,8 +126,8 @@ services:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo-data:/var/tempo
     ports:
-      - "127.0.0.1:3200:3200" # tempo HTTP
-      - "127.0.0.1:9095:9095" # tempo gRPC (internal)
+      - "${HOST_BIND:-127.0.0.1}:3200:3200" # tempo HTTP
+      - "${HOST_BIND:-127.0.0.1}:9095:9095" # tempo gRPC (internal)
     networks:
       - defenseclaw-o11y
     restart: unless-stopped
@@ -137,12 +137,12 @@ services:
     container_name: defenseclaw-grafana
     environment:
       # This is a developer-laptop stack: every host port is published on
-      # 127.0.0.1 (loopback), so the dashboard is only
+      # ${HOST_BIND:-127.0.0.1} (loopback by default), so the dashboard is only
       # reachable from the same machine. A login prompt on a localhost-only
       # dashboard is pure friction, so Grafana opens with no login —
       # anonymous access with the Admin role and the login form disabled.
       # The loopback bind is the security boundary here. If you expose this
-      # through a separate override, turn auth back on: set
+      # through the documented manual override, turn auth back on: set
       # GF_AUTH_ANONYMOUS_ENABLED=false and GF_SECURITY_ADMIN_PASSWORD=<pw>.
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -154,7 +154,7 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "127.0.0.1:3000:3000"
+      - "${HOST_BIND:-127.0.0.1}:3000:3000"
     networks:
       - defenseclaw-o11y
     depends_on:

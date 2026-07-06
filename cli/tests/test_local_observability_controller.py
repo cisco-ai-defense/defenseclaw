@@ -187,6 +187,25 @@ def test_macos_linux_keep_the_same_python_compose_lifecycle(
     assert _compose_call(runner, "up")[-2:] == ("up", "--detach")
 
 
+def test_managed_controller_strips_host_bind_override(
+    stack: Path, docker: Path
+) -> None:
+    runner = FakeRunner()
+    subject = LocalStackController(
+        stack,
+        docker_path=docker,
+        runner=runner,
+        os_name="linux",
+        environment={"HOST_BIND": "192.0.2.10", "PRESERVED": "yes"},
+    )
+
+    subject.up(wait=False)
+
+    assert runner.calls
+    assert all("HOST_BIND" not in environment for _, _, _, environment in runner.calls)
+    assert all(environment["PRESERVED"] == "yes" for _, _, _, environment in runner.calls)
+
+
 def test_contract_and_environment_are_stable() -> None:
     assert LocalStackController.contract() == CONTRACT
     assert LocalStackController.environment_contract() == {

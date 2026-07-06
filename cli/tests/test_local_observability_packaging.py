@@ -54,6 +54,10 @@ def test_wheel_resolves_complete_stack_outside_source_checkout(tmp_path: Path) -
             name.removeprefix(prefix) for name in names if name.startswith(prefix)
         }
         assert expected_assets <= packaged_assets
+        for relative_path in expected_assets:
+            assert archive.read(prefix + relative_path) == (
+                BUNDLE / Path(relative_path)
+            ).read_bytes(), f"packaged local-observability asset drifted: {relative_path}"
         assert "defenseclaw/observability/local_stack.py" in names
         entry_points = next(
             name for name in names if name.endswith(".dist-info/entry_points.txt")

@@ -349,8 +349,9 @@ class LocalStackController:
             )
         self.runner = runner or CommandRunner()
         self.environment = dict(os.environ if environment is None else environment)
-        # The Compose file is already loopback-only; removing any inherited
-        # override closes older bundles that still accepted HOST_BIND.
+        # The managed lifecycle always uses the Compose file's loopback default.
+        # Intentional HOST_BIND overrides are confined to the documented manual
+        # `docker compose` path, where the operator owns the exposure decision.
         self.environment.pop("HOST_BIND", None)
 
     def compose_argv(self, *args: str) -> list[str]:

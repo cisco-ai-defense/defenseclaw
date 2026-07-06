@@ -156,11 +156,36 @@ defenseclaw setup local-observability down
 defenseclaw setup local-observability reset --yes
 ```
 
+## Network binding
+
+Every published service uses `${HOST_BIND:-127.0.0.1}`, so an unset or empty
+`HOST_BIND` remains loopback-only. The managed
+`defenseclaw setup local-observability` lifecycle removes inherited `HOST_BIND`
+values and always uses that secure default.
+
+For a deliberate bind override, invoke Docker Compose directly from this
+directory. Bind a specific trusted interface rather than a wildcard address.
+
+PowerShell:
+
+```powershell
+$env:HOST_BIND = "192.0.2.10"
+docker compose up -d
+Remove-Item Env:HOST_BIND
+```
+
+POSIX shells on macOS or Linux:
+
+```bash
+HOST_BIND=192.0.2.10 docker compose up -d
+```
+
+This manual path bypasses the managed controller's loopback enforcement. Before
+using it, enable Grafana authentication, disable anonymous Admin access, and
+apply host firewall controls appropriate for every published service.
+
 ## Notes
 
-- All services are unconditionally bound to loopback. The certified bundle has
-  no environment variable that can widen exposure. Maintain a separate,
-  independently secured Compose override if you need remote access.
 - The collector's `debug` exporter is on for every pipeline. Tail
   `./run.sh logs otel-collector` to watch raw OTLP frames while
   iterating on the sidecar contract.
