@@ -1135,21 +1135,30 @@ class SetupPanelModel:
         if rebuild is None:
             return
         overrides = _field_value_overrides(self.form_fields)
-        if self.active_wizard == SetupWizard.GUARDRAIL:
+        if self.active_wizard in {SetupWizard.CONNECTOR_SETUP, SetupWizard.GUARDRAIL}:
             connector_field = next(
-                (field for field in self.form_fields if field.flag == "--connector"),
+                (
+                    field
+                    for field in self.form_fields
+                    if field.flag == "--connector" or field.label == "Connector"
+                ),
                 None,
             )
             if connector_field is not None and connector_field.value != connector_field.default:
                 # Connector-scoped rows must be re-seeded from the newly
                 # selected peer. Carrying these values across a connector
                 # change can display (and then write) another peer's policy.
-                for flag in (
-                    "--mode",
-                    "--rule-pack",
-                    "--human-approval",
-                    "--hilt-min-severity",
-                ):
+                connector_scoped_flags = (
+                    ("@Guardrail Mode",)
+                    if self.active_wizard == SetupWizard.CONNECTOR_SETUP
+                    else (
+                        "--mode",
+                        "--rule-pack",
+                        "--human-approval",
+                        "--hilt-min-severity",
+                    )
+                )
+                for flag in connector_scoped_flags:
                     overrides.pop(flag, None)
         # Re-seed any preset the goal filter may have hidden so it persists
         # across the rebuild even when its row is not currently visible.
@@ -1994,6 +2003,10 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
 # current values, and returns the filtered field list for the new driver
 # selection. Lambdas keep resolution lazy so the builders can live anywhere.
 _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
+    SetupWizard.CONNECTOR_SETUP: lambda overrides, cfg: connector_setup_wizard_fields(
+        cfg,
+        overrides=overrides,
+    ),
     SetupWizard.LLM: lambda overrides, cfg: _llm_wizard_fields_for(
         provider=overrides.get("--provider", "anthropic"),
         role=overrides.get("--role", "unified"),
@@ -3831,18 +3844,40 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
 
 
 def connector_setup_wizard_fields(
-    cfg: object | Mapping[str, Any] | None = None, os_name: str | None = None
+    cfg: object | Mapping[str, Any] | None = None,
+    os_name: str | None = None,
+    *,
+    overrides: Mapping[str, str] | None = None,
 ) -> tuple[WizardFormField, ...]:
+    overrides = dict(overrides or {})
     choices = supported_connector_choices(os_name)
-    connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip() or "openclaw"
-    # The stored ``claw.mode`` can name a proxy connector that this OS can't
-    # run (e.g. a config copied from macOS opened on Windows); fall back to
-    # the first supported connector rather than offering an unusable default.
+    if "@Connector" in overrides:
+        connector = str(overrides.get("@Connector", "") or "").strip()
+    else:
+        connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
+        if not connector:
+            connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip()
+    connector = connector or "openclaw"
+    # A stored compatibility mirror can name a proxy connector that this OS
+    # can't run (e.g. a config copied from macOS opened on Windows); fall back
+    # to the first supported connector rather than offering an unusable default.
     if connector not in choices:
         connector = choices[0] if choices else connector
-    mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
+    action = str(overrides.get("@Action", "setup") or "setup").strip().lower()
+    mode = (
+        str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
+        if action == "batch"
+        else _effective_guardrail_value(cfg, connector, "effective_mode", "guardrail.mode")
+    )
+    mode = mode.strip().lower()
+    if mode not in {"observe", "action"}:
+        mode = "observe"
+    # Rebuilders run only after Connector/Action driver changes. Re-seed this
+    # connector-scoped value instead of carrying a prior connector's mode (or
+    # a single-connector mode into intentional bare batch reconciliation).
+    overrides.pop("@Guardrail Mode", None)
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
-    return (
+    fields = (
         WizardFormField("Connector", "choice", value=connector, default=connector, options=choices),
         WizardFormField(
             "Connectors (CSV)",
@@ -3898,6 +3933,7 @@ def connector_setup_wizard_fields(
             hint="Allow removing the final connector and fully unconfiguring enforcement.",
         ),
     )
+    return _overlay_field_overrides(fields, overrides)
 
 
 # ---------------------------------------------------------------------------

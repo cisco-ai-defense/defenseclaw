@@ -558,6 +558,67 @@ def _replace_live_guardrail_field(model: SetupPanelModel, label: str, value: str
     DefenseClawTUI._replace_setup_form_value(SimpleNamespace(setup_model=model), index, value)
 
 
+def test_connector_setup_codex_submits_its_effective_action_mode() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    cfg.guardrail.connector = "codex"
+    cfg.claw.mode = "codex"
+
+    for os_name in ("windows", "darwin", "linux"):
+        fields = connector_setup_wizard_fields(cfg, os_name=os_name)
+
+        assert wizard_field_value(fields, "Connector") == "codex"
+        assert wizard_field_value(fields, "Guardrail Mode") == "action"
+        assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
+            "setup",
+            "codex",
+            "--yes",
+            "--mode",
+            "action",
+        )
+
+
+def test_connector_setup_claude_code_submits_its_effective_observe_mode() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    cfg.guardrail.connector = "claudecode"
+    cfg.claw.mode = "claudecode"
+
+    for os_name in ("windows", "darwin", "linux"):
+        fields = connector_setup_wizard_fields(cfg, os_name=os_name)
+
+        assert wizard_field_value(fields, "Connector") == "claudecode"
+        assert wizard_field_value(fields, "Guardrail Mode") == "observe"
+        assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
+            "setup",
+            "claude-code",
+            "--yes",
+            "--mode",
+            "observe",
+        )
+
+
+def test_connector_setup_live_connector_change_rederives_mode_only() -> None:
+    model = SetupPanelModel(cfg=_codex_claude_guardrail_cfg(), os_name="windows")
+    model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
+    _replace_live_guardrail_field(model, "Restart Gateway", "no")
+
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "action"
+    _replace_live_guardrail_field(model, "Connector", "claudecode")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "observe"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+    _replace_live_guardrail_field(model, "Connector", "codex")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "action"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+    # Bare batch setup intentionally keeps the global mode default; switching
+    # back to single-connector setup re-derives Codex's effective override.
+    _replace_live_guardrail_field(model, "Action", "batch")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "observe"
+    _replace_live_guardrail_field(model, "Action", "setup")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "action"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+
 def _open_guardrail_mode_goal(cfg: object) -> SetupPanelModel:
     model = SetupPanelModel(cfg=cfg)
     assert model.open_goal_menu(SetupWizard.GUARDRAIL) is True

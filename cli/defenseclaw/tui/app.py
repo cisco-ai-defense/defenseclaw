@@ -162,6 +162,7 @@ _SETUP_DRIVER_FLAGS: dict[SetupWizard, frozenset[str]] = {
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"--base-provider-type"}),
 }
 _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
+    SetupWizard.CONNECTOR_SETUP: frozenset({"Connector", "Action"}),
     # The guardrail judge "Provider" row carries no flag (it is emitted as
     # ``--judge-provider`` by the arg builder), so it must be matched by label.
     SetupWizard.GUARDRAIL: frozenset({"Provider"}),

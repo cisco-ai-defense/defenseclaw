@@ -6333,9 +6333,10 @@ def _remove_connector(
       * Removing one of several connectors drops it from
         ``guardrail.connectors`` and repoints the singular
         ``guardrail.connector`` / ``claw.mode`` mirror at the new primary
-        (sorted-first remaining). When exactly one connector remains the
-        map is collapsed back to the legacy singular shape so a
-        single-connector install looks byte-identical to a pre-multi one.
+        (sorted-first remaining). A one-entry map is retained so the
+        survivor's explicit per-connector policy remains authoritative;
+        collapsing to the legacy singular shape would discard values that
+        cannot be represented losslessly, including ``enabled: false``.
       * Removing the LAST connector is gated (WU8 D2=A): refused unless
         ``--force``, which fully unconfigures enforcement (clears the map
         and the singular mirror). ``defenseclaw uninstall`` remains the
@@ -6362,6 +6363,9 @@ def _remove_connector(
     # `claude-code`, or `open-hands` interchangeably.
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
+        if requested_norm in _CONNECTOR_META:
+            click.echo(f"  ✓ Connector {requested_norm!r} is already absent; no changes made.")
+            return True
         configured_label = ", ".join(configured) if configured else "(none configured)"
         click.echo(
             f"  ✗ {requested!r} is not a configured connector. Configured: {configured_label}",
@@ -6409,14 +6413,11 @@ def _remove_connector(
         gc.connectors = {}
         gc.connector = ""
         cfg.claw.mode = ""
-    elif len(remaining) == 1:
-        # Collapse to the legacy singular shape for parity with a
-        # pre-multi single-connector install.
-        gc.connectors = {}
-        gc.connector = remaining[0]
-        cfg.claw.mode = remaining[0]
     else:
-        # Still multi: keep the map, repoint the primary mirror.
+        # Keep the authoritative map even when only one connector remains.
+        # Its override may contain policy that the singular compatibility
+        # fields cannot represent (especially an explicit enabled=false).
+        # The mirrors identify the primary but never replace the roster.
         primary = sorted(remaining)[0]
         gc.connector = primary
         cfg.claw.mode = primary
