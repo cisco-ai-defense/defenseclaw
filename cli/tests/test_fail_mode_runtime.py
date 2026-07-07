@@ -117,7 +117,10 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
 def test_windows_resolver_reports_effective_mixed_modes(tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
     assert claude.current and claude.runtime == "closed"
@@ -127,7 +130,10 @@ def test_windows_resolver_reports_effective_mixed_modes(tmp_path: Path) -> None:
 def test_windows_resolver_initial_open_open_and_reverse_mixed_mode(tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(tmp_path, {"claudecode": "open", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         assert resolve_connector_fail_mode(cfg, "claudecode").current
         assert resolve_connector_fail_mode(cfg, "codex").current
 
@@ -145,7 +151,10 @@ def test_cli_status_reports_effective_mixed_modes_without_drift(tmp_path: Path) 
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
     assert result.exit_code == 0, result.output
     assert "Claude Code" in result.output and "closed" in result.output
@@ -156,7 +165,10 @@ def test_cli_status_reports_effective_mixed_modes_without_drift(tmp_path: Path) 
 def test_stale_persisted_closed_runtime_open_is_not_current(tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert not state.current
     assert state.desired == "closed"
@@ -171,7 +183,7 @@ def test_stale_closed_never_reports_already_closed(tmp_path: Path) -> None:
     app.cfg = cfg
     app.logger = MagicMock()
     with (
-        patch("defenseclaw.fail_mode.os.name", "nt"),
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
         patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
     ):
@@ -195,7 +207,7 @@ def test_raw_global_closed_observe_runtime_open_creates_scoped_override(tmp_path
     app.cfg = cfg
     app.logger = MagicMock()
     with (
-        patch("defenseclaw.fail_mode.os.name", "nt"),
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
         patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
     ):
@@ -222,7 +234,10 @@ def test_legacy_hookcfg_is_runtime_fallback_but_requires_migration(tmp_path: Pat
     (home / ".codex" / "config.toml").write_text(
         '[hooks]\ndefenseclaw = "defenseclaw hook --connector codex"\n', encoding="utf-8"
     )
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "codex")
     assert state.runtime == "open"
     assert not state.current
@@ -275,7 +290,7 @@ def test_truthful_noop_requires_current_runtime(tmp_path: Path) -> None:
     app.cfg = cfg
     app.logger = MagicMock()
     with (
-        patch("defenseclaw.fail_mode.os.name", "nt"),
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
         patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode") as resolver,
         patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
@@ -296,7 +311,10 @@ def test_stale_registered_script_digest_rejects_noop(tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     (Path(cfg.data_dir) / "hooks" / "claude-code-hook.sh").write_text("stale launcher", encoding="utf-8")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert not state.current
     assert "registration-digest-stale" in state.drift
@@ -306,7 +324,10 @@ def test_stale_windows_launcher_digest_rejects_noop(tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     (home / ".local" / "bin" / "defenseclaw-hook.exe").write_bytes(b"MZstale-launcher")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert not state.current
     assert "registration-digest-stale" in state.drift
@@ -326,7 +347,10 @@ def test_v2_shared_digest_is_authoritative_over_legacy_entry_duplicate(tmp_path:
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     lock["connectors"]["claudecode"]["hook_script_digests"]["inspect-tool.sh"] = "sha256:legacy-stale"
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert state.current
 
@@ -342,7 +366,10 @@ def test_divergent_v1_shared_digests_require_controlled_migration(tmp_path: Path
         for script_name, digest in shared.items():
             entry["hook_script_digests"][script_name] = digest if name == "codex" else "sha256:divergent"
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
     assert "registration-shared-digest-divergent" in claude.drift
@@ -358,7 +385,10 @@ def test_single_connector_v1_shared_digests_remain_compatible(tmp_path: Path) ->
     lock["version"] = 1
     lock["connectors"]["claudecode"]["hook_script_digests"].update(shared)
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert state.current
 
@@ -371,7 +401,10 @@ def test_single_connector_v1_missing_shared_digests_is_stale(tmp_path: Path) -> 
     lock.pop("shared_hook_script_digests")
     lock["version"] = 1
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert "registration-shared-digests-missing" in state.drift
 
@@ -384,7 +417,10 @@ def test_unsupported_contract_lock_version_is_stale(tmp_path: Path, version: obj
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     lock["version"] = version
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     expected = "registration-lock-version-unsupported" if version == 3 else "registration-lock-malformed"
     assert expected in state.drift

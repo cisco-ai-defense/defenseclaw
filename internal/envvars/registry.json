@@ -803,6 +803,20 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_CONNECTOR",
+      "category": "hook_internal",
+      "purpose": "Runtime selector for the connector that owns an invocation of the shared hook scripts. Managed installations read the installer-owned connector sidecar; non-managed shells may set this explicitly.",
+      "default": "unset",
+      "accepted_values": ["normalized connector identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/hooks/_hardening.sh:175", "description": "Selects one unambiguous connector runtime record for shared hooks"},
+        {"location": "internal/gateway/connector/subprocess.go:664", "description": "Writes and validates the connector-scoped runtime sidecar"}
+      ],
+      "since": "0.7.0"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_NAME",
       "category": "hook_internal",
       "purpose": "Internal label identifying which hook is executing. Set by every *-hook.sh.",

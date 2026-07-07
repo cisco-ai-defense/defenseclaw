@@ -172,9 +172,8 @@ _NON_ENVVAR_TOKENS = frozenset(
 # reviewed rather than disappearing behind the old generic trailing-underscore
 # exemption.
 _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
-    "DEFENSECLAW_CLAWHUB_ARG_": frozenset(
-        {"cli/defenseclaw/commands/cmd_skill.py"}
-    ),
+    "DEFENSECLAW_CLAWHUB_ARG_": frozenset({"cli/defenseclaw/commands/cmd_skill.py"}),
+    "DEFENSECLAW_FAIL_MODE_": frozenset({"internal/cli/hook.go"}),
     "DEFENSECLAW_LOCAL_": frozenset({"internal/cli/daemon.go"}),
     "DEFENSECLAW_OTEL_": frozenset(
         {
@@ -185,9 +184,7 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
             "internal/config/config_test.go",
         }
     ),
-    "DEFENSECLAW_TEST_LLM_KEY_": frozenset(
-        {"internal/gateway/passthrough_hydration_test.go"}
-    ),
+    "DEFENSECLAW_TEST_LLM_KEY_": frozenset({"internal/gateway/passthrough_hydration_test.go"}),
 }
 
 
@@ -255,13 +252,9 @@ def _extract_envvar_references(
                             # vars but aren't.
                             if token in _NON_ENVVAR_TOKENS:
                                 continue
-                            if apply_dynamic_prefix_allowlist and _is_allowlisted_dynamic_prefix(
-                                token, rel
-                            ):
+                            if apply_dynamic_prefix_allowlist and _is_allowlisted_dynamic_prefix(token, rel):
                                 continue
-                            refs.setdefault(token, []).append(
-                                f"{rel.as_posix()}:{lineno}"
-                            )
+                            refs.setdefault(token, []).append(f"{rel.as_posix()}:{lineno}")
             except OSError:
                 continue
     return refs
@@ -282,8 +275,7 @@ class CodebaseCoverageTests(unittest.TestCase):
         if not undeclared:
             return
         msg_lines = [
-            "Found DEFENSECLAW_* references in the codebase that are not "
-            "declared in internal/envvars/registry.json:",
+            "Found DEFENSECLAW_* references in the codebase that are not declared in internal/envvars/registry.json:",
             "",
         ]
         for name in undeclared:
@@ -325,10 +317,7 @@ class CodebaseCoverageTests(unittest.TestCase):
         )
         for prefix, expected_paths in _DYNAMIC_ENVVAR_PREFIX_PATHS.items():
             with self.subTest(prefix=prefix):
-                actual_paths = {
-                    location.rsplit(":", 1)[0]
-                    for location in raw_refs.get(prefix, [])
-                }
+                actual_paths = {location.rsplit(":", 1)[0] for location in raw_refs.get(prefix, [])}
                 self.assertEqual(actual_paths, expected_paths)
 
     def test_no_orphan_registry_entries(self) -> None:
@@ -347,8 +336,7 @@ class CodebaseCoverageTests(unittest.TestCase):
             import sys
 
             print(
-                "\n[info] Registry entries without any non-allow-listed "
-                "codebase references:",
+                "\n[info] Registry entries without any non-allow-listed codebase references:",
                 file=sys.stderr,
             )
             for name in orphans:
@@ -363,8 +351,7 @@ class CoverageExtractionTests(unittest.TestCase):
             root = Path(tmp)
             script = root / "bridge"
             script.write_text(
-                "#!/usr/bin/env sh\n"
-                'echo "$DEFENSECLAW_EXTENSIONLESS_FIXTURE"\n',
+                '#!/usr/bin/env sh\necho "$DEFENSECLAW_EXTENSIONLESS_FIXTURE"\n',
                 encoding="utf-8",
             )
             refs = _extract_envvar_references(root)

@@ -39,6 +39,10 @@ _SHARED_HOOK_SCRIPTS = frozenset(
 _LEGACY_SHARED_HOOK_SCRIPTS = _SHARED_HOOK_SCRIPTS - {"_hardening.sh"}
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
     raw = str(value or "").strip().lower()
     return raw if raw in _VALID_MODES else default
@@ -100,7 +104,7 @@ def resolve_connector_fail_mode(cfg: Any, connector: str) -> ConnectorFailModeSt
         drift.append("registration-stale")
     if lock_drift:
         drift.append(lock_drift)
-    if os.name == "nt" and name in _EXPECTED_CONTRACT:
+    if _is_windows() and name in _EXPECTED_CONTRACT:
         windows_registration = _windows_registration_freshness(cfg, name)
         if windows_registration:
             drift.append(windows_registration)
@@ -129,7 +133,7 @@ def resolve_connector_fail_mode(cfg: Any, connector: str) -> ConnectorFailModeSt
 
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
-    if os.name == "nt":
+    if _is_windows():
         mode, legacy = _read_windows_hook_mode(Path(cfg.data_dir) / "hooks" / ".hookcfg", connector)
         if legacy:
             return "windows-sidecar-legacy", mode
@@ -269,7 +273,7 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
                 return mode, "registration-shared-digest-divergent"
         if legacy_shared and len(connectors or {}) > 1:
             return mode, "registration-shared-lock-legacy"
-    if os.name == "nt" and expected_contract:
+    if _is_windows() and expected_contract:
         digest_names = {str(filename).casefold() for filename in digests}
         if "defenseclaw-hook.exe" not in digest_names:
             return mode, "registration-launcher-digest-missing"
@@ -570,7 +574,7 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
 
 def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailModeState:
     executable = shutil.which("defenseclaw-gateway")
-    if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+    if not executable or (_is_windows() and Path(executable).suffix.lower() != ".exe"):
         raise OSError("native defenseclaw-gateway executable not found")
     environment = os.environ.copy()
     environment[config_module.CONFIG_PATH_ENV] = str(config_module.config_path_for_data_dir(cfg.data_dir))

@@ -3835,10 +3835,16 @@ func TestSharedInspectHookResolvesSingleConnectorRuntimeState(t *testing.T) {
 		{mode: "closed", wantCode: 2},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
-			var gotConnector, gotAuthorization string
+			type requestHeaders struct {
+				connector     string
+				authorization string
+			}
+			headers := make(chan requestHeaders, 1)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotConnector = r.Header.Get("X-DefenseClaw-Connector")
-				gotAuthorization = r.Header.Get("Authorization")
+				headers <- requestHeaders{
+					connector:     r.Header.Get("X-DefenseClaw-Connector"),
+					authorization: r.Header.Get("Authorization"),
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte("not-json"))
 			}))
@@ -3885,10 +3891,11 @@ func TestSharedInspectHookResolvesSingleConnectorRuntimeState(t *testing.T) {
 			if code != tc.wantCode {
 				t.Fatalf("shared hook exit=%d want %d", code, tc.wantCode)
 			}
-			if gotConnector != "zeptoclaw" {
-				t.Fatalf("connector header=%q", gotConnector)
+			got := <-headers
+			if got.connector != "zeptoclaw" {
+				t.Fatalf("connector header=%q", got.connector)
 			}
-			if gotAuthorization != "Bearer scoped-runtime-fixture" {
+			if got.authorization != "Bearer scoped-runtime-fixture" {
 				t.Fatalf("authorization header did not use scoped runtime token")
 			}
 		})
