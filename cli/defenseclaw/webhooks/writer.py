@@ -32,15 +32,12 @@ than hand-editing YAML.
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import inspect
 import ipaddress
 import os
 import re
 import socket
-import stat
-import tempfile
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
@@ -53,7 +50,7 @@ from defenseclaw.config import (
     config_path_for_data_dir,
     locked_config_yaml,
 )
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import atomic_write_text_secure
 
 # ---------------------------------------------------------------------------
 # Constants mirrored with internal/gateway/webhook.go and internal/config
@@ -587,41 +584,11 @@ def _load_yaml(path: str) -> dict[str, Any]:
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
     """Atomically write webhook config with managed-mode and ACL checks."""
     _assert_config_write_allowed(path, data)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    target_mode = 0o600
-    if os.name != "nt":
-        try:
-            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
-        except OSError:
-            existing_mode = None
-        if existing_mode is not None and existing_mode != 0o600:
-            target_mode = existing_mode & 0o600
-            if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
-                target_mode = 0o640
-            elif target_mode == 0:
-                target_mode = 0o600
 
-    fd = -1
-    tmp = ""
-    try:
-        fd, tmp = tempfile.mkstemp(prefix=".webhooks.", suffix=".tmp", dir=directory)
-        set_file_mode(fd, tmp, target_mode)
-        stream = os.fdopen(fd, "w")
-        fd = -1
-        with stream as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if fd != -1:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        if tmp:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
+    def write_yaml(stream) -> None:
+        yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
+
+    atomic_write_text_secure(path, write_yaml, prefix=".webhooks.")
 
 
 # ---------------------------------------------------------------------------

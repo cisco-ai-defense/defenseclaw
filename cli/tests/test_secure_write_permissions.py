@@ -36,7 +36,7 @@ from tests.permissions import assert_owner_only_file
 _ATOMIC_WRITERS = [
     (
         "config",
-        config_module,
+        file_permissions,
         lambda path: config_module.write_config_yaml_secure(
             os.fspath(path),
             {"data_dir": os.fspath(path.parent)},
@@ -44,7 +44,7 @@ _ATOMIC_WRITERS = [
     ),
     (
         "webhooks",
-        webhook_writer,
+        file_permissions,
         lambda path: webhook_writer._write_yaml(
             os.fspath(path),
             {"webhooks": [{"name": "secure-write"}]},
@@ -189,6 +189,28 @@ def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):
     file_permissions.set_file_mode(17, "/tmp/secret", 0o600)
 
     assert calls == [(17, 0o600)]
+
+
+def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
+    monkeypatch,
+    tmp_path,
+):
+    calls: list[tuple[str, int, bool]] = []
+    real_makedirs = os.makedirs
+
+    def recording_makedirs(path, mode=0o777, exist_ok=False):
+        calls.append((os.fspath(path), mode, exist_ok))
+        return real_makedirs(path, mode=mode, exist_ok=exist_ok)
+
+    monkeypatch.setattr(file_permissions.os, "makedirs", recording_makedirs)
+    target = tmp_path / "private" / "config.yaml"
+
+    config_module.write_config_yaml_secure(
+        os.fspath(target),
+        {"data_dir": os.fspath(target.parent)},
+    )
+
+    assert calls == [(os.fspath(target.parent), 0o700, True)]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACLs")
