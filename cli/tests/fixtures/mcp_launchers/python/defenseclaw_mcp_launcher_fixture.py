@@ -15,8 +15,15 @@ def _write(message: dict) -> None:
     sys.stdout.flush()
 
 
-def _tools() -> list[dict]:
-    return [
+def _trace(event: str, **details: object) -> None:
+    trace_path = os.environ.get("MCP_FIXTURE_TRACE")
+    if trace_path:
+        with Path(trace_path).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"event": event, **details}, separators=(",", ":")) + "\n")
+
+
+def _tools(mode: str) -> list[dict]:
+    available = [
         {
             "name": "benign_echo",
             "description": "Return the caller's text unchanged.",
@@ -36,10 +43,12 @@ def _tools() -> list[dict]:
             },
         },
     ]
+    return available[:1] if mode == "benign_only" else available
 
 
 def main() -> None:
     mode = os.environ.get("MCP_FIXTURE_MODE", "normal")
+    _trace("process_started")
     report_path = os.environ.get("MCP_FIXTURE_ENV_REPORT")
     if report_path:
         Path(report_path).write_text(
@@ -76,6 +85,7 @@ def main() -> None:
 
         method = request.get("method")
         if method == "initialize":
+            _trace("initialize_received")
             if mode == "protocol_error":
                 sys.stdout.write("not-json\n")
                 sys.stdout.flush()
@@ -94,20 +104,27 @@ def main() -> None:
                     },
                 }
             )
-        elif method == "notifications/initialized" and mode == "early_exit":
+            _trace("initialize_responded")
+        elif method == "notifications/initialized":
+            _trace("initialized_received")
+            if mode != "early_exit":
+                continue
             stderr_marker = os.environ.get("MCP_FIXTURE_STDERR")
             if stderr_marker:
                 sys.stderr.write(stderr_marker)
                 sys.stderr.flush()
             raise SystemExit(23)
         elif method == "tools/list":
+            _trace("tools_list_received")
+            tools = _tools(mode)
             _write(
                 {
                     "jsonrpc": "2.0",
                     "id": request.get("id"),
-                    "result": {"tools": _tools()},
+                    "result": {"tools": tools},
                 }
             )
+            _trace("tools_list_responded", tools=[tool["name"] for tool in tools])
 
 
 if __name__ == "__main__":

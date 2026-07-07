@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import click
 import pytest
+from defenseclaw.commands import cmd_mcp
 from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner import mcp
@@ -22,6 +26,8 @@ PYTHON_FIXTURE = FIXTURES / "python" / "defenseclaw_mcp_launcher_fixture.py"
 HOST_LOCALAPPDATA = os.environ.get("LOCALAPPDATA", "")
 HOST_UVX = shutil.which("uvx.exe") if os.name == "nt" else None
 HOST_NPX = shutil.which("npx.cmd") if os.name == "nt" else None
+HOST_UV = shutil.which("uv.exe") if os.name == "nt" else None
+HOST_POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
 
 
 def _touch(path: Path, content: str = "fixture") -> str:
@@ -45,6 +51,25 @@ def _trusted(monkeypatch: pytest.MonkeyPatch, trusted_paths: set[str]) -> None:
         "_is_trusted_binary_path",
         lambda path, *_args, **_kwargs: os.path.normcase(os.path.realpath(path)) in trusted,
     )
+
+
+def test_mcp_set_recovers_json_argv_stripped_by_windows_batch_launcher() -> None:
+    raw = (
+        r"[--offline,--from,C:\\Users\\operator\\Temp\\fixture package,"
+        r"defenseclaw-mcp-launcher-fixture]"
+    )
+
+    assert cmd_mcp._parse_args(raw) == [
+        "--offline",
+        "--from",
+        r"C:\Users\operator\Temp\fixture package",
+        "defenseclaw-mcp-launcher-fixture",
+    ]
+
+
+def test_mcp_set_rejects_ambiguous_batch_mangled_json_argv() -> None:
+    with pytest.raises(click.BadParameter, match="malformed JSON array"):
+        cmd_mcp._parse_args('[--from,"ambiguous]')
 
 
 def test_trusted_npx_cmd_uses_narrow_system_wrapper(
@@ -238,6 +263,53 @@ def test_complete_lifecycle_enumerates_benign_and_malicious_tools_and_scrubs_env
 
 @pytest.mark.allow_subprocess
 @pytest.mark.skipif(os.name != "nt", reason="native Windows stdio adapter")
+def test_lifecycle_trace_reaches_tools_list_and_analyzer_handoff(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    trace = tmp_path / "protocol.jsonl"
+    env = mcp._safe_subprocess_env({"MCP_FIXTURE_TRACE": os.fspath(trace)})
+    caplog.set_level(logging.DEBUG, logger=mcp.__name__)
+
+    scanner = _RecordingScanner()
+    results, _stderr_size = asyncio.run(mcp._scan_windows_stdio_tools(scanner, _python_plan(env), ["fixture"]))
+
+    stages = [
+        record.getMessage().split("stage=", 1)[1].split()[0]
+        for record in caplog.records
+        if "Windows MCP stdio lifecycle stage=" in record.getMessage()
+    ]
+    assert stages == [
+        "transport-opening",
+        "process-created-job-assigned-resumed",
+        "process-context-entered",
+        "transport-opened",
+        "initialize-sent",
+        "initialize-responded-initialized-sent",
+        "tools-list-sent",
+        "tools-list-responded",
+        "session-closed",
+        "process-context-exited",
+        "job-containment-closed",
+        "transport-closed",
+        "analyzer-handoff",
+        "analyzer-completed",
+    ]
+    protocol = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in protocol] == [
+        "process_started",
+        "initialize_received",
+        "initialize_responded",
+        "initialized_received",
+        "tools_list_received",
+        "tools_list_responded",
+    ]
+    assert protocol[-1]["tools"] == ["benign_echo", "malicious_shell"]
+    assert [result.tool_name for result in results] == ["benign_echo", "malicious_shell"]
+
+
+@pytest.mark.allow_subprocess
+@pytest.mark.skipif(os.name != "nt", reason="native Windows stdio adapter")
 def test_yara_verdicts_keep_clean_and_malicious_tool_semantics() -> None:
     from mcpscanner import Config, Scanner
     from mcpscanner.core.models import AnalyzerEnum
@@ -309,6 +381,305 @@ def test_native_uvx_exe_acceptance(
 
     assert Path(plan.command).name.lower() == "uvx.exe"
     assert [result.tool_name for result in results] == ["benign_echo", "malicious_shell"]
+
+
+def _run_public_installed_cli(
+    bin_dir: Path,
+    env: dict[str, str],
+    *args: str,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    child_env = dict(env)
+    child_env["WIN_AUD_064_CLI_ARGV"] = json.dumps(args)
+    completed = subprocess.run(
+        [
+            os.fspath(HOST_POWERSHELL),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            ("$forward = ConvertFrom-Json $env:WIN_AUD_064_CLI_ARGV; & defenseclaw @forward; exit $LASTEXITCODE"),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    if check and completed.returncode:
+        raise AssertionError(
+            f"installed CLI failed ({completed.returncode}):\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        )
+    return completed
+
+
+def _read_fixture_trace(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+@pytest.mark.allow_subprocess
+@pytest.mark.skipif(
+    not (os.name == "nt" and HOST_NPX and HOST_UVX and HOST_UV and HOST_POWERSHELL),
+    reason="native npx, uvx, uv, and Windows PowerShell are required",
+)
+def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
+    tmp_path: Path,
+) -> None:
+    """Exercise the wheel and public .cmd entrypoint, not an internal adapter."""
+
+    repo = Path(__file__).resolve().parents[2]
+    dist = tmp_path / "dist"
+    venv = tmp_path / "installed-venv"
+    subprocess.run(
+        [os.fspath(HOST_UV), "build", "--wheel", "--out-dir", os.fspath(dist)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    subprocess.run(
+        [
+            os.fspath(HOST_UV),
+            "venv",
+            "--python",
+            sys.executable,
+            os.fspath(venv),
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    python = venv / "Scripts" / "python.exe"
+    wheel = next(dist.glob("defenseclaw-*.whl"))
+    subprocess.run(
+        [
+            os.fspath(HOST_UV),
+            "pip",
+            "install",
+            "--python",
+            os.fspath(python),
+            "--no-deps",
+            os.fspath(wheel),
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+
+    # Keep this deterministic and offline: the wheel under test is installed
+    # in the fresh venv, while its already-pinned dependencies are imported
+    # from the repository venv.  Added .pth directories do not recursively
+    # process the editable-install .pth, so DefenseClaw itself still comes
+    # from the built wheel (verified below).
+    dependency_site = next(
+        Path(item) for item in sys.path if item.lower().endswith("site-packages") and Path(item).is_dir()
+    )
+    installed_site = venv / "Lib" / "site-packages"
+    (installed_site / "win-aud-064-dependencies.pth").write_text(
+        "\n".join(
+            (
+                os.fspath(dependency_site),
+                os.fspath(dependency_site / "win32"),
+                os.fspath(dependency_site / "win32" / "lib"),
+                os.fspath(dependency_site / "Pythonwin"),
+                "import pywin32_bootstrap",
+            )
+        ),
+        encoding="utf-8",
+    )
+    probe = subprocess.run(
+        [python, "-c", "import defenseclaw; print(defenseclaw.__file__)"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=True,
+    )
+    assert os.path.normcase(probe.stdout.strip()).startswith(os.path.normcase(os.fspath(installed_site)))
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cli_exe = venv / "Scripts" / "defenseclaw.exe"
+    (bin_dir / "defenseclaw.cmd").write_text(
+        "@echo off\r\n"
+        "setlocal\r\n"
+        'set "PYTHONPATH="\r\n'
+        'set "PYTHONHOME="\r\n'
+        f'"{cli_exe}" %*\r\n'
+        'set "defenseclawExit=%errorlevel%"\r\n'
+        "endlocal & exit /b %defenseclawExit%\r\n",
+        encoding="ascii",
+    )
+
+    profile = tmp_path / "profile"
+    dc_home = profile / ".defenseclaw"
+    dc_home.mkdir(parents=True)
+    config = dc_home / "config.yaml"
+    config.write_text(
+        "guardrail:\n"
+        "  enabled: true\n"
+        "  connector: codex\n"
+        "  connectors:\n"
+        "    codex:\n"
+        "      mode: observe\n"
+        "    claudecode:\n"
+        "      mode: observe\n"
+        "scanners:\n"
+        "  mcp_scanner:\n"
+        "    analyzers: yara\n",
+        encoding="utf-8",
+    )
+    fixture_root = tmp_path / "fixture packages with spaces"
+    node_fixture = fixture_root / "node fixture with spaces"
+    python_fixture = fixture_root / "python fixture with spaces"
+    shutil.copytree(FIXTURES / "node", node_fixture)
+    shutil.copytree(FIXTURES / "python", python_fixture)
+
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    npx_trace = traces / "npx.jsonl"
+    uvx_trace = traces / "uvx.jsonl"
+    npx_report = traces / "npx-env.json"
+    uvx_report = traces / "uvx-env.json"
+    npx_args = [
+        "--yes",
+        "--offline",
+        f"--package={node_fixture}",
+        "defenseclaw-mcp-launcher-fixture",
+    ]
+    uvx_args = [
+        "--offline",
+        "--from",
+        os.fspath(python_fixture),
+        "defenseclaw-mcp-launcher-fixture",
+    ]
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": os.pathsep.join((os.fspath(bin_dir), env["PATH"])),
+            "HOME": os.fspath(profile),
+            "USERPROFILE": os.fspath(profile),
+            "APPDATA": os.fspath(profile / "AppData" / "Roaming"),
+            "LOCALAPPDATA": HOST_LOCALAPPDATA,
+            "DEFENSECLAW_HOME": os.fspath(dc_home),
+            "DEFENSECLAW_CONFIG": os.fspath(config),
+            "PYTHONPATH": os.fspath(tmp_path / "hostile-python-path"),
+            "PYTHONHOME": os.fspath(tmp_path / "hostile-python-home"),
+            "WIN_AUD_064_TEST_API_KEY": "must-not-reach-fixture",
+        }
+    )
+
+    registrations = (
+        (
+            "installed-npx",
+            "npx",
+            npx_args,
+            npx_trace,
+            npx_report,
+        ),
+        (
+            "installed-uvx",
+            "uvx",
+            uvx_args,
+            uvx_trace,
+            uvx_report,
+        ),
+    )
+    for name, command, args, trace, report in registrations:
+        _run_public_installed_cli(
+            bin_dir,
+            env,
+            "mcp",
+            "set",
+            name,
+            "--command",
+            command,
+            "--args",
+            json.dumps(args, separators=(",", ":")),
+            "--transport",
+            "stdio",
+            "--env",
+            "MCP_FIXTURE_REQUIRED=present",
+            "--env",
+            f"MCP_FIXTURE_TRACE={trace}",
+            "--env",
+            f"MCP_FIXTURE_ENV_REPORT={report}",
+            "--skip-scan",
+        )
+
+    listed = json.loads(_run_public_installed_cli(bin_dir, env, "mcp", "list", "--connector", "codex", "--json").stdout)
+    by_name = {entry["name"]: entry for entry in listed["mcp_servers"]}
+    assert by_name["installed-npx"]["args"] == npx_args
+    assert by_name["installed-uvx"]["args"] == uvx_args
+
+    for connector in ("codex", "claudecode"):
+        for name, _command, _args, _trace, _report in registrations:
+            payload = json.loads(
+                _run_public_installed_cli(
+                    bin_dir,
+                    env,
+                    "mcp",
+                    "scan",
+                    name,
+                    "--connector",
+                    connector,
+                    "--analyzers",
+                    "yara",
+                    "--json",
+                ).stdout
+            )
+            assert payload.get("error") is None
+            assert payload["connector"] == connector
+            assert {finding["location"] for finding in payload["findings"]} == {"tool:malicious_shell"}
+
+    all_payload = json.loads(
+        _run_public_installed_cli(bin_dir, env, "mcp", "scan", "--all", "--analyzers", "yara", "--json").stdout
+    )
+    assert len(all_payload) == 4
+    assert {item["connector"] for item in all_payload} == {"codex", "claudecode"}
+    assert all(not item.get("error") for item in all_payload)
+
+    for trace in (npx_trace, uvx_trace):
+        responses = [event for event in _read_fixture_trace(trace) if event["event"] == "tools_list_responded"]
+        assert len(responses) == 4
+        assert all(response["tools"] == ["benign_echo", "malicious_shell"] for response in responses)
+    for report in (npx_report, uvx_report):
+        assert json.loads(report.read_text(encoding="utf-8")) == {
+            "requiredPresent": True,
+            "secretAbsent": True,
+        }
+
+    install_trace = traces / "install-time.jsonl"
+    _run_public_installed_cli(
+        bin_dir,
+        env,
+        "mcp",
+        "set",
+        "installed-clean",
+        "--command",
+        "uvx",
+        "--args",
+        json.dumps(uvx_args, separators=(",", ":")),
+        "--transport",
+        "stdio",
+        "--env",
+        "MCP_FIXTURE_MODE=benign_only",
+        "--env",
+        f"MCP_FIXTURE_TRACE={install_trace}",
+        "--connector",
+        "codex",
+    )
+    install_responses = [
+        event for event in _read_fixture_trace(install_trace) if event["event"] == "tools_list_responded"
+    ]
+    assert install_responses == [{"event": "tools_list_responded", "tools": ["benign_echo"]}]
 
 
 @pytest.mark.parametrize(

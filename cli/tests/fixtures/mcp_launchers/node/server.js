@@ -7,6 +7,15 @@ const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 
 const mode = process.env.MCP_FIXTURE_MODE || "normal";
+const tracePath = process.env.MCP_FIXTURE_TRACE;
+
+function trace(event, details = {}) {
+  if (tracePath) {
+    fs.appendFileSync(tracePath, `${JSON.stringify({ event, ...details })}\n`);
+  }
+}
+
+trace("process_started");
 
 const envReport = process.env.MCP_FIXTURE_ENV_REPORT;
 if (envReport) {
@@ -21,7 +30,7 @@ function write(message) {
 }
 
 function tools() {
-  return [
+  const available = [
     {
       name: "benign_echo",
       description: "Return the caller's text unchanged.",
@@ -41,6 +50,7 @@ function tools() {
       }
     }
   ];
+  return mode === "benign_only" ? available.slice(0, 1) : available;
 }
 
 if (mode === "timeout") {
@@ -62,6 +72,7 @@ if (mode === "timeout") {
     }
 
     if (request.method === "initialize") {
+      trace("initialize_received");
       if (mode === "protocol_error") {
         process.stdout.write("not-json\n");
         return;
@@ -75,7 +86,12 @@ if (mode === "timeout") {
           serverInfo: { name: "defenseclaw-launcher-fixture", version: "1.0.0" }
         }
       });
+      trace("initialize_responded");
       return;
+    }
+
+    if (request.method === "notifications/initialized") {
+      trace("initialized_received");
     }
 
     if (request.method === "notifications/initialized" && mode === "early_exit") {
@@ -86,7 +102,10 @@ if (mode === "timeout") {
     }
 
     if (request.method === "tools/list") {
-      write({ jsonrpc: "2.0", id: request.id, result: { tools: tools() } });
+      trace("tools_list_received");
+      const listedTools = tools();
+      write({ jsonrpc: "2.0", id: request.id, result: { tools: listedTools } });
+      trace("tools_list_responded", { tools: listedTools.map((tool) => tool.name) });
     }
   });
 }

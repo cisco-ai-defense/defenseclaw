@@ -227,6 +227,33 @@ _FORBIDDEN_STDIO_FLAGS = frozenset({
 _WINDOWS_CMD_METACHARACTERS = frozenset('&|<>()^%!"\r\n\x00')
 _STDIO_SCAN_TIMEOUT_SECONDS = 60
 _MCP_WINDOWS_PROCESS_FACTORY_LOCK = threading.RLock()
+_LOGGER = logging.getLogger(__name__)
+
+
+def _trace_windows_stdio_lifecycle(
+    stage: str,
+    *,
+    launcher: str = "",
+    pid: int | None = None,
+    returncode: int | None = None,
+    tool_count: int | None = None,
+) -> None:
+    """Emit secret-free DEBUG facts for the contained Windows MCP session."""
+
+    facts = [f"stage={stage}"]
+    if launcher:
+        facts.append(f"launcher={launcher}")
+    if pid is not None:
+        facts.append(f"pid={pid}")
+    if returncode is not None:
+        facts.append(f"returncode={returncode}")
+    if tool_count is not None:
+        facts.append(f"tool_count={tool_count}")
+    try:
+        _LOGGER.debug("Windows MCP stdio lifecycle %s", " ".join(facts))
+    except Exception:
+        # Diagnostic logging must never alter process ownership or cleanup.
+        pass
 
 
 class MCPStdioLaunchError(RuntimeError):
@@ -260,6 +287,7 @@ class _ContainedWindowsProcess:
     async def __aenter__(self) -> _ContainedWindowsProcess:
         enter = getattr(self._process, "__aenter__")
         await enter()
+        _trace_windows_stdio_lifecycle("process-context-entered", pid=self.pid)
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
@@ -267,7 +295,13 @@ class _ContainedWindowsProcess:
             exit_process = getattr(self._process, "__aexit__")
             await exit_process(exc_type, exc_value, traceback)
         finally:
+            _trace_windows_stdio_lifecycle(
+                "process-context-exited",
+                pid=self.pid,
+                returncode=getattr(self._process, "returncode", None),
+            )
             self._job.close()
+            _trace_windows_stdio_lifecycle("job-containment-closed", pid=self.pid)
 
     async def wait(self):
         return await self._process.wait()
@@ -279,10 +313,16 @@ class _ContainedWindowsProcess:
         self._process.kill()
 
     async def terminate_tree(self, timeout_seconds: float) -> None:
+        _trace_windows_stdio_lifecycle("job-cleanup-started", pid=self.pid)
         await self._job.cancel(
             self,
             grace=min(0.25, timeout_seconds),
             force=timeout_seconds,
+        )
+        _trace_windows_stdio_lifecycle(
+            "job-cleanup-completed",
+            pid=self.pid,
+            returncode=getattr(self._process, "returncode", None),
         )
 
 
@@ -336,6 +376,7 @@ async def _create_contained_windows_process(
         process.kill()
         await process.wait()
         raise
+    _trace_windows_stdio_lifecycle("process-created-job-assigned-resumed", pid=process.pid)
     return _ContainedWindowsProcess(process, job)
 
 
@@ -734,21 +775,47 @@ async def _scan_windows_stdio_tools(
                 # Keep transport, session, and all protocol messages in this
                 # task. The child remains attached through tools/list and the
                 # official context manager owns process-tree cleanup.
+                _trace_windows_stdio_lifecycle("transport-opening", launcher=plan.launcher)
                 with _contained_mcp_windows_process_factory():
                     async with stdio_client(params, errlog=errlog) as (read, write):
+                        _trace_windows_stdio_lifecycle("transport-opened", launcher=plan.launcher)
                         async with ClientSession(read, write) as session:
+                            _trace_windows_stdio_lifecycle("initialize-sent", launcher=plan.launcher)
                             await session.initialize()
+                            _trace_windows_stdio_lifecycle(
+                                "initialize-responded-initialized-sent",
+                                launcher=plan.launcher,
+                            )
+                            _trace_windows_stdio_lifecycle("tools-list-sent", launcher=plan.launcher)
                             tool_list = await session.list_tools()
+                            _trace_windows_stdio_lifecycle(
+                                "tools-list-responded",
+                                launcher=plan.launcher,
+                                tool_count=len(tool_list.tools),
+                            )
+                        _trace_windows_stdio_lifecycle("session-closed", launcher=plan.launcher)
+                _trace_windows_stdio_lifecycle("transport-closed", launcher=plan.launcher)
             errlog.flush()
             stderr_size = errlog.tell()
         except BaseException as exc:
+            _trace_windows_stdio_lifecycle("session-failed", launcher=plan.launcher)
             errlog.flush()
             stderr_size = errlog.tell()
             setattr(exc, "_defenseclaw_stderr_size", stderr_size)
             raise
 
+    _trace_windows_stdio_lifecycle(
+        "analyzer-handoff",
+        launcher=plan.launcher,
+        tool_count=len(tool_list.tools),
+    )
     results = await asyncio.gather(
         *(analyze(tool, selected) for tool in tool_list.tools)
+    )
+    _trace_windows_stdio_lifecycle(
+        "analyzer-completed",
+        launcher=plan.launcher,
+        tool_count=len(results),
     )
     return list(results), stderr_size
 
