@@ -54,6 +54,12 @@ try {
         @{ connector = 'codex'; request_id = $requestId; event_type = 'tool_invocation' }
     ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
     [IO.File]::WriteAllText($jsonl, ($fixtureEvents -join [Environment]::NewLine) + [Environment]::NewLine)
+    $heldWriter = [IO.File]::Open($jsonl, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+    try {
+        Assert-True (@(Get-EventLines $jsonl).Count -eq 2) 'gateway JSONL remains readable while the gateway writer is open'
+    } finally {
+        $heldWriter.Dispose()
+    }
     $pythonCode = 'import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute("create table audit_events(request_id text)");c.execute("insert into audit_events(request_id) values (?)",(sys.argv[2],));c.commit();c.close()'
     & python.exe -c $pythonCode $database $requestId
     if ($LASTEXITCODE -ne 0) { throw 'failed to create disposable audit fixture' }

@@ -88,7 +88,26 @@ function Invoke-NativeProcess {
 
 function Get-EventLines([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
-    return @([IO.File]::ReadAllLines($Path) | Where-Object { $_.Trim() })
+    $deadline = [DateTime]::UtcNow.AddSeconds(1)
+    do {
+        $stream = $null
+        $reader = $null
+        try {
+            $share = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+            $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+            $content = $reader.ReadToEnd()
+            return @($content -split '\r?\n' | Where-Object { $_.Trim() })
+        } catch {
+            $exception = $_.Exception
+            if ($exception -isnot [IO.IOException] -and $exception.InnerException -isnot [IO.IOException]) { throw }
+            if ([DateTime]::UtcNow -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 50
+        } finally {
+            if ($null -ne $reader) { $reader.Dispose() }
+            elseif ($null -ne $stream) { $stream.Dispose() }
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
 }
 
 function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
