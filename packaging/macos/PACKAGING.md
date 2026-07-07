@@ -1,15 +1,15 @@
 # DefenseClaw macOS 0.8.0 — Install & Uninstall
 
-**Artifact:** `defenseclaw-macos-0.8.0-darwin-arm64.tar.gz`
-**SHA-256:** see accompanying `defenseclaw-macos-0.8.0-darwin-arm64.tar.gz.sha256`
-**Target:** macOS (arm64), `launchctl` + `/usr/bin/python3` present, root privileges.
+**Artifact:** `defenseclaw-macos-0.8.0-darwin-universal.tar.gz` (fat binary — `x86_64` + `arm64`; produced by `make packaging-macos-bundle` with the default `BUNDLE_GOARCH=universal`. Single-arch tarballs `-darwin-arm64` / `-darwin-amd64` are available via `make packaging-macos-bundle BUNDLE_GOARCH=arm64` etc.)
+**SHA-256:** see accompanying `defenseclaw-macos-0.8.0-darwin-universal.tar.gz.sha256`
+**Target:** macOS (Intel or Apple Silicon), `launchctl` + `/usr/bin/python3` present, root privileges.
 
 ## 1. Verify + unpack
 
 ```sh
-shasum -a 256 -c defenseclaw-macos-0.8.0-darwin-arm64.tar.gz.sha256
-tar -xzf defenseclaw-macos-0.8.0-darwin-arm64.tar.gz
-cd defenseclaw-macos-0.8.0-darwin-arm64
+shasum -a 256 -c defenseclaw-macos-0.8.0-darwin-universal.tar.gz.sha256
+tar -xzf defenseclaw-macos-0.8.0-darwin-universal.tar.gz
+cd defenseclaw-macos-0.8.0-darwin-universal
 ```
 
 The bundle is self-contained — no Go toolchain, no Homebrew, no repo checkout. `install.sh` resolves the gateway binary and plist next to itself.
