@@ -126,8 +126,16 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertEqual(os.path.normcase(os.path.normpath(pip_call[5])), os.path.normcase(venv_python))
         self.assertIn("--reinstall", pip_call)
         self.assertIn("--strict", pip_call)
-        check_call = run_mock.call_args_list[-1].args[0]
+        check_call = next(
+            call.args[0]
+            for call in run_mock.call_args_list
+            if call.args[0][2:4] == ["pip", "check"]
+        )
         self.assertEqual(check_call[:4], ["/usr/bin/uv", "--no-config", "pip", "check"])
+        tui_call = run_mock.call_args_list[-1].args[0]
+        self.assertEqual(os.path.normcase(os.path.normpath(tui_call[0])), os.path.normcase(venv_python))
+        self.assertEqual(tui_call[1:3], ["-I", "-c"])
+        self.assertIn("run_test", tui_call[3])
 
     @staticmethod
     def _seed_windows_install(home):
@@ -244,6 +252,38 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             with open(shim) as stream:
                 self.assertEqual(stream.read(), "existing launcher")
             self.assertIn("Managed CLI dependency validation failed", err.call_args.args[0])
+
+    def test_windows_tui_failure_preserves_existing_launcher(self):
+        with TemporaryDirectory() as home:
+            venv, install_dir = self._seed_windows_install(home)
+            shim = os.path.join(install_dir, "defenseclaw.cmd")
+            with open(shim, "w") as stream:
+                stream.write("existing launcher")
+            venv_python = os.path.join(venv, "Scripts", "python.exe")
+
+            def fail_tui(args, **_kwargs):
+                if os.path.normcase(os.path.normpath(args[0])) == os.path.normcase(venv_python) and args[1:3] == ["-I", "-c"]:
+                    raise subprocess.CalledProcessError(
+                        1,
+                        args,
+                        output="",
+                        stderr="AttributeError: 'Tabs' object has no attribute 'get_tab'",
+                    )
+                return Mock(returncode=0)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run", side_effect=fail_tui), \
+                 patch("defenseclaw.commands.cmd_upgrade._publish_windows_cli_launcher") as publish, \
+                 patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(ctx.exception.code, 1)
+            publish.assert_not_called()
+            with open(shim) as stream:
+                self.assertEqual(stream.read(), "existing launcher")
+            self.assertIn("Managed TUI launch validation failed", err.call_args.args[0])
 
     def test_windows_launcher_publication_is_idempotent_without_exe_shadow(self):
         with TemporaryDirectory() as home:

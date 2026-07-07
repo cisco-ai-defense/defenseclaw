@@ -1435,6 +1435,39 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
         ux.err(f"Managed CLI dependency validation failed{suffix}", indent="  ")
         raise SystemExit(1) from exc
 
+    tui_smoke = """
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
+
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir, gateway_url="http://127.0.0.1:1")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+asyncio.run(smoke())
+"""
+    try:
+        subprocess.run(
+            [venv_python, "-I", "-c", tui_smoke],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            env=managed_env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        output = ""
+        if isinstance(exc, subprocess.CalledProcessError):
+            output = "\n".join((exc.stdout or "", exc.stderr or ""))
+        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
+        suffix = f": {detail[:1000]}" if detail else ""
+        ux.err(f"Managed TUI launch validation failed{suffix}", indent="  ")
+        raise SystemExit(1) from exc
+
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)
 

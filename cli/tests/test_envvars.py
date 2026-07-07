@@ -84,22 +84,6 @@ class RegistryStructureTests(unittest.TestCase):
         names = [e.name for e in self.registry.entries]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_bundled_registry_matches_source_registry(self) -> None:
-        source = _REPO_ROOT / "internal" / "envvars" / "registry.json"
-        bundled = (
-            _REPO_ROOT
-            / "cli"
-            / "defenseclaw"
-            / "_data"
-            / "envvars"
-            / "registry.json"
-        )
-        self.assertEqual(
-            bundled.read_bytes(),
-            source.read_bytes(),
-            "generated registry drift; run `python scripts/gen_envvars_docs.py`",
-        )
-
     def test_source_registry_precedes_generated_bundle(self) -> None:
         source = _REPO_ROOT / "internal" / "envvars" / "registry.json"
         with mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}):
@@ -185,12 +169,6 @@ class RegistryStructureTests(unittest.TestCase):
         fields = tuple(next(iter(expected_registry.values())))
         registry_paths = (
             _REPO_ROOT / "internal" / "envvars" / "registry.json",
-            _REPO_ROOT
-            / "cli"
-            / "defenseclaw"
-            / "_data"
-            / "envvars"
-            / "registry.json",
         )
         for path in registry_paths:
             entries = _entries_by_name(path)

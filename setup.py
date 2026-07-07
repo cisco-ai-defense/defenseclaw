@@ -19,8 +19,8 @@ from setuptools import setup
 from setuptools.command.build_py import build_py
 
 
-class BuildPyWithLocalObservability(build_py):
-    """Copy the maintained Compose bundle directly into every wheel build."""
+class BuildPyWithRuntimeAssets(build_py):
+    """Copy authoritative non-Python runtime assets into every wheel build."""
 
     def run(self) -> None:
         super().run()
@@ -37,5 +37,14 @@ class BuildPyWithLocalObservability(build_py):
         shutil.rmtree(destination, ignore_errors=True)
         shutil.copytree(source, destination)
 
+        registry_source = root / "internal" / "envvars" / "registry.json"
+        registry_destination = (
+            Path(self.build_lib) / "defenseclaw" / "_data" / "envvars" / "registry.json"
+        )
+        if not registry_source.is_file():
+            raise RuntimeError(f"required environment registry is missing: {registry_source}")
+        registry_destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(registry_source, registry_destination)
 
-setup(cmdclass={"build_py": BuildPyWithLocalObservability})
+
+setup(cmdclass={"build_py": BuildPyWithRuntimeAssets})

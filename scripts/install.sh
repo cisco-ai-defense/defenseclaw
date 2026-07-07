@@ -458,6 +458,18 @@ install_python_cli() {
     uv --no-config pip check --python "${DEFENSECLAW_VENV}/bin/python" \
         || die "CLI dependency validation failed; launcher was not published"
 
+    "${DEFENSECLAW_VENV}/bin/python" -I -c '
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+asyncio.run(smoke())
+' || die "CLI TUI launch validation failed; launcher was not published"
+
     if "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null; then
         mkdir -p "${INSTALL_DIR}"
         ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"

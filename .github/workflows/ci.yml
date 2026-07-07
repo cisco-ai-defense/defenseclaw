@@ -262,9 +262,10 @@ jobs:
       # pip-audit here, not by DefenseClaw at runtime, and we install
       # exclusively from PyPI via uv with locked hashes (uv.lock).
       #
-      # Previously ignored, now fixed by bumping cisco-ai-skill-scanner to
-      # >=2.0.11 + overriding starlette>=1.0.1 and python-dotenv>=1.2.2 in
-      # pyproject.toml:
+      # Previously ignored, now fixed by overriding starlette>=1.0.1 and
+      # python-dotenv>=1.2.2 in pyproject.toml. The Textual 8-compatible
+      # scanner release is 2.0.4, whose broad wheel metadata permits both
+      # security floors:
       #   - PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr, starlette host-header)
       #   - CVE-2026-28684 (python-dotenv arbitrary file read)
       # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265) and pyjwt>=2.13.0

@@ -304,6 +304,33 @@ if problems:
         throw "Managed distribution integrity validation failed: $detail"
     }
 
+    # Import and mount the installed TUI under Python isolated mode. This is
+    # deliberately stronger than importing defenseclaw.tui: production mount
+    # exercises Textual 8-only tab/theme behavior and catches a resolver that
+    # silently retained the old Textual 7 graph. A bounded run_test session
+    # avoids publishing a launcher for an environment that crashes on launch.
+    $tuiSmokeCode = @'
+import asyncio
+import tempfile
+
+from defenseclaw.tui.app import DefenseClawTUI
+
+
+async def smoke() -> None:
+    with tempfile.TemporaryDirectory(prefix='defenseclaw-tui-smoke-') as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+
+asyncio.run(smoke())
+'@
+    $tuiResult = Invoke-ManagedCommand -Executable $venvPython -Arguments @("-I", "-c", $tuiSmokeCode)
+    if ($tuiResult.ExitCode -ne 0) {
+        $detail = ($tuiResult.Output | Select-Object -First 8) -join " | "
+        throw "Managed TUI launch validation failed (exit $($tuiResult.ExitCode)): $detail"
+    }
+
     $doctorResult = Invoke-ManagedCommand -Executable $cliExe -Arguments @("doctor", "--help")
     if ($doctorResult.ExitCode -ne 0) {
         $detail = ($doctorResult.Output | Select-Object -First 5) -join " | "
