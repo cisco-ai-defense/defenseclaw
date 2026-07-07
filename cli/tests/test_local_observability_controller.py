@@ -306,6 +306,12 @@ def test_windows_requires_supported_edition_and_verifiable_backend(
     )
     with (
         patch("platform.machine", return_value="AMD64"),
+        patch("platform.win32_edition", return_value=None),
+        pytest.raises(LocalStackError, match="Pro, Enterprise, or Education"),
+    ):
+        subject.preflight()
+    with (
+        patch("platform.machine", return_value="AMD64"),
         patch("platform.win32_edition", return_value="Home"),
         pytest.raises(LocalStackError, match="Pro, Enterprise, or Education"),
     ):
@@ -638,13 +644,17 @@ def test_native_path_has_no_shell_or_forbidden_executable_calls(
     runner.info.update(
         {"OperatingSystem": "Docker Desktop", "KernelVersion": "6.10-linuxkit"}
     )
-    LocalStackController(
-        stack,
-        docker_path=docker,
-        runner=runner,
-        os_name="windows",
-        environment={},
-    ).up(wait=False)
+    with (
+        patch("defenseclaw.observability.local_stack.platform.machine", return_value="AMD64"),
+        patch("defenseclaw.observability.local_stack.platform.win32_edition", return_value="Professional"),
+    ):
+        LocalStackController(
+            stack,
+            docker_path=docker,
+            runner=runner,
+            os_name="windows",
+            environment={},
+        ).up(wait=False)
     assert runner.calls
     assert not any(
         Path(call[0][0]).name.lower() in forbidden_executables for call in runner.calls

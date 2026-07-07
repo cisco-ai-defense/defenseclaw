@@ -722,6 +722,7 @@ def test_windows_scan_preserves_cancellation() -> None:
         raise asyncio.CancelledError
 
     with (
+        patch.object(mcp.os, "name", "nt"),
         patch.object(mcp, "_windows_stdio_launch_plan", return_value=plan),
         patch.object(mcp, "_scan_windows_stdio_tools", cancel),
         pytest.raises(asyncio.CancelledError),

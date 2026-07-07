@@ -380,7 +380,7 @@ def _validate_windows_docker_certification(
     machine = platform.machine().lower()
     if machine not in {"amd64", "x86_64"}:
         raise LocalStackError(f"Native Windows {feature_name} is certified only for x64 systems.")
-    edition = platform.win32_edition().lower()
+    edition = str(platform.win32_edition() or "").lower()
     if not any(token in edition for token in ("professional", "enterprise", "education")):
         raise LocalStackError(
             f"The no-WSL {feature_name} path requires a supported Windows "

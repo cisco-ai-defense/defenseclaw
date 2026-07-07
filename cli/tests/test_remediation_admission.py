@@ -637,6 +637,11 @@ class TestF0641TomllibFallback(unittest.TestCase):
         # ``import tomllib`` and silently dropped every Codex tool definition.
         # Simulate the 3.10 environment by forcing that import to fail and
         # confirm the tomli backport still yields the parsed tools.
+        try:
+            import tomllib as fallback_parser
+        except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+            import tomli as fallback_parser
+
         real_import = builtins.__import__
 
         def _no_tomllib(name, *args, **kwargs):
@@ -644,7 +649,10 @@ class TestF0641TomllibFallback(unittest.TestCase):
                 raise ModuleNotFoundError("No module named 'tomllib'")
             return real_import(name, *args, **kwargs)
 
-        with patch("builtins.__import__", side_effect=_no_tomllib):
+        with (
+            patch.dict(sys.modules, {"tomli": fallback_parser}),
+            patch("builtins.__import__", side_effect=_no_tomllib),
+        ):
             rows = _tools_from_codex_config(self.path)
         self.assertEqual([r["id"] for r in rows], ["audit"])
         self.assertEqual(rows[0]["name"], "Audit Tool")

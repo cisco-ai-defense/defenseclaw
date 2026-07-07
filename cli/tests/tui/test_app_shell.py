@@ -6283,6 +6283,11 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         assert scroller.max_scroll_y > 0
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
         await pilot.pause()
+        await _wait_for_background(
+            lambda: "overview" not in app._panel_render_running  # noqa: SLF001
+            and "overview" not in app._panel_render_pending  # noqa: SLF001
+            and "overview" not in app._panel_render_workers  # noqa: SLF001
+        )
 
         app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
         body = app.query_one("#body", Static)

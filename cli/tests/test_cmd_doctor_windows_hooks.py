@@ -271,7 +271,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
     def test_target_replacement_race_is_stale_and_has_no_side_effect(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
-        config_stat = os.lstat(config)
+        real_lstat = os.lstat
         runtime_stat = os.lstat(runtime)
         changed = SimpleNamespace(
             st_dev=runtime_stat.st_dev,
@@ -280,11 +280,20 @@ class WindowsHookDoctorTests(unittest.TestCase):
             st_mtime_ns=runtime_stat.st_mtime_ns,
             st_mode=runtime_stat.st_mode,
         )
+        runtime_stats = iter((runtime_stat, changed))
+
+        def race_runtime_lstat(path: str | os.PathLike[str]):
+            if os.path.normcase(os.path.abspath(os.fspath(path))) == os.path.normcase(
+                os.path.abspath(str(runtime))
+            ):
+                return next(runtime_stats)
+            return real_lstat(path)
+
         with (
             patch("defenseclaw.doctor_hooks.is_link_or_reparse", return_value=False),
             patch(
                 "defenseclaw.doctor_hooks.os.lstat",
-                side_effect=[config_stat, config_stat, runtime_stat, changed],
+                side_effect=race_runtime_lstat,
             ),
         ):
             check = self._validate("claudecode", config)
