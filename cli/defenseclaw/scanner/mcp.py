@@ -22,8 +22,8 @@ DefenseClaw models.
 
 Supports both remote (URL) and local (stdio) MCP servers:
   - Remote: uses ``scan_remote_server_tools`` with the URL directly.
-  - Local:  creates a temporary MCP config file and uses
-    ``scan_mcp_config_file`` which spawns the server process.
+  - Local:  macOS/Linux use ``scan_mcp_config_file``; native Windows uses a
+    narrow same-task adapter around the official MCP stdio client.
 """
 
 from __future__ import annotations
@@ -33,10 +33,14 @@ import json
 import logging
 import ntpath
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -117,6 +121,10 @@ _SAFE_INHERIT_ENV = (
 # LD_LIBRARY_PATH, …).
 _EXEC_CONTROL_ENV_NAMES = frozenset({
     "PATH",
+    "PATHEXT",
+    "COMSPEC",
+    "SYSTEMROOT",
+    "WINDIR",
     "NODE_PATH",
     "NODE_OPTIONS",
     "PYTHONPATH",
@@ -215,6 +223,149 @@ _SAFE_STDIO_LAUNCHERS = frozenset({"npx", "uvx"})
 _FORBIDDEN_STDIO_FLAGS = frozenset({
     "-c", "--command", "--eval", "-e", "--exec", "--script", "-x",
 })
+
+_WINDOWS_CMD_METACHARACTERS = frozenset('&|<>()^%!"\r\n\x00')
+_STDIO_SCAN_TIMEOUT_SECONDS = 60
+_MCP_WINDOWS_PROCESS_FACTORY_LOCK = threading.RLock()
+
+
+class MCPStdioLaunchError(RuntimeError):
+    """Actionable, secret-safe failure from the Windows stdio adapter."""
+
+
+@dataclass(frozen=True)
+class _StdioLaunchPlan:
+    """Fully resolved argv/environment passed to the official MCP transport."""
+
+    command: str
+    args: tuple[str, ...]
+    env: dict[str, str]
+    launcher: str
+
+
+class _ContainedWindowsProcess:
+    """Delegate an AnyIO/MCP process while retaining a race-free Job Object."""
+
+    def __init__(self, process: object, job: object) -> None:
+        self._process = process
+        self._job = job
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._process, name)
+
+    @property
+    def pid(self) -> int:
+        return int(getattr(self._process, "pid"))
+
+    async def __aenter__(self) -> _ContainedWindowsProcess:
+        enter = getattr(self._process, "__aenter__")
+        await enter()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        try:
+            exit_process = getattr(self._process, "__aexit__")
+            await exit_process(exc_type, exc_value, traceback)
+        finally:
+            self._job.close()
+
+    async def wait(self):
+        return await self._process.wait()
+
+    def terminate(self) -> None:
+        self._process.terminate()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    async def terminate_tree(self, timeout_seconds: float) -> None:
+        await self._job.cancel(
+            self,
+            grace=min(0.25, timeout_seconds),
+            force=timeout_seconds,
+        )
+
+
+async def _create_contained_windows_process(
+    command: str,
+    args: list[str],
+    env: dict[str, str] | None = None,
+    errlog=None,
+    cwd=None,
+) -> _ContainedWindowsProcess:
+    """Create suspended, assign to a Job Object, then resume.
+
+    MCP 1.26 creates the process running and assigns its Job Object afterward.
+    Fast package launchers can spawn outside the job in that interval. This
+    focused factory reuses DefenseClaw's established suspended-start
+    ``WindowsJob`` owner, closing the launch-to-assignment race.
+    """
+    import anyio
+    from mcp.os.win32.utilities import FallbackProcess
+
+    creationflags = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+    )
+    try:
+        process = await anyio.open_process(
+            [command, *args],
+            env=env,
+            creationflags=creationflags,
+            stderr=errlog,
+            cwd=cwd,
+        )
+    except NotImplementedError:
+        popen = subprocess.Popen(
+            [command, *args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=errlog,
+            env=env,
+            cwd=cwd,
+            bufsize=0,
+            creationflags=creationflags,
+        )
+        process = FallbackProcess(popen)
+
+    from defenseclaw.tui.windows_process import WindowsJob
+
+    try:
+        job = WindowsJob(process.pid)
+    except BaseException:
+        process.kill()
+        await process.wait()
+        raise
+    return _ContainedWindowsProcess(process, job)
+
+
+async def _terminate_contained_windows_process(
+    process: object,
+    timeout_seconds: float = 2.0,
+) -> None:
+    if isinstance(process, _ContainedWindowsProcess):
+        await process.terminate_tree(timeout_seconds)
+        return
+    from mcp.os.win32.utilities import terminate_windows_process_tree
+
+    await terminate_windows_process_tree(process, timeout_seconds)
+
+
+@contextmanager
+def _contained_mcp_windows_process_factory() -> Iterator[None]:
+    """Scope the official MCP stdio client to DefenseClaw's safe factory."""
+    import mcp.client.stdio as mcp_stdio
+
+    with _MCP_WINDOWS_PROCESS_FACTORY_LOCK:
+        original_create = mcp_stdio._create_platform_compatible_process
+        original_terminate = mcp_stdio._terminate_process_tree
+        mcp_stdio._create_platform_compatible_process = _create_contained_windows_process
+        mcp_stdio._terminate_process_tree = _terminate_contained_windows_process
+        try:
+            yield
+        finally:
+            mcp_stdio._create_platform_compatible_process = original_create
+            mcp_stdio._terminate_process_tree = original_terminate
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
@@ -339,6 +490,267 @@ def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
       ``node_repl.exe`` after layout, real-path, owner, and DACL validation.
     """
     return _stdio_scan_command_error(command, args) is None
+
+
+def _canonical_windows_file(path: str) -> str:
+    """Return a canonical absolute Windows file path or an empty string."""
+    try:
+        resolved = os.path.realpath(os.path.abspath(path))
+    except (OSError, ValueError):
+        return ""
+    return resolved if os.path.isfile(resolved) else ""
+
+
+def _resolve_trusted_windows_launcher(
+    launcher: str,
+    extension: str,
+    env: dict[str, str],
+) -> str:
+    """Resolve one native launcher without accepting PATH shadowing.
+
+    Resolution is deliberately extension-specific. ``npx`` may only become
+    ``npx.cmd`` and ``uvx`` may only become ``uvx.exe``; a same-name ``.bat``,
+    PowerShell script, extensionless file, or executable of the wrong type is
+    never selected. The ordinary bare-name result must identify the same file,
+    otherwise an earlier PATH entry is shadowing the trusted wrapper.
+    """
+    path_value = env.get("PATH", "")
+    expected_name = f"{launcher}{extension}"
+    resolved = shutil.which(expected_name, path=path_value) if path_value else None
+    if not resolved:
+        raise MCPStdioLaunchError(
+            f"local MCP launcher {launcher!r} was not found as native "
+            f"{expected_name!r} on PATH"
+        )
+
+    canonical = _canonical_windows_file(resolved)
+    if not canonical or ntpath.basename(canonical).lower() != expected_name.lower():
+        raise MCPStdioLaunchError(
+            f"local MCP launcher {launcher!r} resolved to an unsupported Windows wrapper"
+        )
+
+    bare = shutil.which(launcher, path=path_value)
+    if bare:
+        bare_canonical = _canonical_windows_file(bare)
+        if not bare_canonical or ntpath.normcase(bare_canonical) != ntpath.normcase(canonical):
+            raise MCPStdioLaunchError(
+                f"local MCP launcher {launcher!r} is shadowed by an unsupported "
+                "or different executable earlier on PATH"
+            )
+
+    from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
+
+    if not _is_trusted_binary_path(canonical):
+        raise MCPStdioLaunchError(
+            f"local MCP launcher {launcher!r} resolved to an untrusted Windows path "
+            "or failed owner/DACL validation"
+        )
+    return canonical
+
+
+def _trusted_windows_command_processor(env: dict[str, str]) -> str:
+    """Resolve the native System32 command processor used only for npx.cmd."""
+    system_root = env.get("SYSTEMROOT", "") or env.get("WINDIR", "")
+    candidate = (
+        os.path.join(system_root, "System32", "cmd.exe") if system_root else ""
+    )
+    canonical = _canonical_windows_file(candidate) if candidate else ""
+
+    from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
+
+    if (
+        not canonical
+        or ntpath.basename(canonical).lower() != "cmd.exe"
+        or not _is_trusted_binary_path(canonical)
+    ):
+        raise MCPStdioLaunchError(
+            "trusted Windows command processor was not found or failed owner/DACL validation"
+        )
+    return canonical
+
+
+def _validate_windows_npx_arguments(npx_path: str, args: list[str]) -> None:
+    """Reject input that cmd.exe could reinterpret during the npx.cmd hop."""
+    for value in (npx_path, *args):
+        if any(char in _WINDOWS_CMD_METACHARACTERS for char in value):
+            raise MCPStdioLaunchError(
+                "local MCP launcher 'npx' argument contains a Windows command "
+                "metacharacter that cannot be passed safely through npx.cmd"
+            )
+
+
+def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
+    """Resolve a Windows stdio definition to a trusted, injection-safe argv."""
+    env = _safe_subprocess_env(entry.env)
+    args = list(entry.args or [])
+    command = (entry.command or "").strip()
+    lowered = command.lower()
+
+    if _is_trusted_codex_node_repl(command):
+        resolved = _canonical_windows_file(command)
+        return _StdioLaunchPlan(resolved, tuple(args), env, "node_repl.exe")
+
+    if lowered == "uvx":
+        uvx = _resolve_trusted_windows_launcher("uvx", ".exe", env)
+        return _StdioLaunchPlan(uvx, tuple(args), env, "uvx")
+
+    if lowered == "npx":
+        npx = _resolve_trusted_windows_launcher("npx", ".cmd", env)
+        _validate_windows_npx_arguments(npx, args)
+        command_processor = _trusted_windows_command_processor(env)
+        # CreateProcess cannot safely execute a batch wrapper as a native image.
+        # Pass each token separately so Python's Windows argv quoting handles
+        # spaces, while the metacharacter gate above prevents cmd.exe from
+        # reinterpreting user-controlled tokens. ``call`` is required for a
+        # quoted .cmd path followed by arguments; /d and /v:off disable AutoRun
+        # and delayed expansion.
+        wrapper_args = (
+            "/d",
+            "/s",
+            "/v:off",
+            "/c",
+            "call",
+            npx,
+            *args,
+        )
+        return _StdioLaunchPlan(command_processor, wrapper_args, env, "npx")
+
+    raise MCPStdioLaunchError(
+        f"local MCP command {command!r} has no supported Windows launch plan"
+    )
+
+
+def _exception_leaves(exc: BaseException) -> Iterator[BaseException]:
+    """Yield leaf exceptions without depending on ExceptionGroup on Python 3.10."""
+    children = getattr(exc, "exceptions", None)
+    if isinstance(children, (list, tuple)):
+        for child in children:
+            if isinstance(child, BaseException):
+                yield from _exception_leaves(child)
+        return
+    yield exc
+
+
+def _protocol_error_was_logged(errors: list[tuple[str, str]]) -> bool:
+    return any(
+        "parse jsonrpc" in message.lower()
+        or "invalid json" in message.lower()
+        or "validation error" in message.lower()
+        for _name, message in errors
+    )
+
+
+def _classify_windows_stdio_error(
+    exc: BaseException,
+    plan: _StdioLaunchPlan,
+    errors: list[tuple[str, str]],
+    stderr_size: int,
+    timeout_seconds: float,
+) -> MCPStdioLaunchError:
+    """Translate dependency exceptions into stable, secret-safe boundaries."""
+    leaves = list(_exception_leaves(exc))
+    leaf_text = " ".join(str(item).lower() for item in leaves)
+    stderr_note = (
+        "; launcher stderr was captured and withheld"
+        if stderr_size
+        else ""
+    )
+
+    if _protocol_error_was_logged(errors) or any(
+        type(item).__name__ in {"JSONDecodeError", "ValidationError"}
+        for item in leaves
+    ):
+        return MCPStdioLaunchError(
+            f"MCP stdio protocol failure for launcher {plan.launcher!r} during "
+            f"initialize/initialized/tools/list{stderr_note}"
+        )
+    if any(isinstance(item, TimeoutError) for item in leaves):
+        return MCPStdioLaunchError(
+            f"MCP stdio timeout for launcher {plan.launcher!r}: the server did not "
+            "complete initialize/initialized/tools/list within "
+            f"{timeout_seconds:g} seconds{stderr_note}"
+        )
+    if any(
+        token in leaf_text
+        for token in ("connection closed", "endofstream", "brokenresource")
+    ):
+        return MCPStdioLaunchError(
+            f"MCP stdio launcher {plan.launcher!r} exited before completing "
+            f"initialize/initialized/tools/list{stderr_note}"
+        )
+    # ``ConnectionError`` derives from ``OSError``. Check early-exit signals
+    # first so the MCP library's canonical closed-stream exception is not
+    # mislabeled as a CreateProcess/startup failure.
+    if any(isinstance(item, OSError) for item in leaves):
+        stage = "Windows npx wrapper" if plan.launcher == "npx" else "launcher"
+        return MCPStdioLaunchError(
+            f"{stage} startup failed for MCP stdio launcher {plan.launcher!r}"
+            f"{stderr_note}"
+        )
+    return MCPStdioLaunchError(
+        f"MCP stdio protocol failure for launcher {plan.launcher!r} during "
+        f"initialize/initialized/tools/list{stderr_note}"
+    )
+
+
+async def _scan_windows_stdio_tools(
+    scanner: object,
+    plan: _StdioLaunchPlan,
+    analyzers: list | None,
+    *,
+    timeout_seconds: float = _STDIO_SCAN_TIMEOUT_SECONDS,
+) -> tuple[list[object], int]:
+    """Run one same-task MCP session, returning SDK results and stderr size."""
+    import anyio
+    from mcp import StdioServerParameters
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import stdio_client
+
+    selected = analyzers
+    if selected is None:
+        # Preserve scanner 4.3's stdio default exactly. Its remote
+        # ``DEFAULT_ANALYZERS`` omits LLM, while ``scan_stdio_server_tools``
+        # explicitly defaults to API + YARA + LLM.
+        from mcpscanner.core.models import AnalyzerEnum
+
+        selected = [AnalyzerEnum.API, AnalyzerEnum.YARA, AnalyzerEnum.LLM]
+    validate = getattr(scanner, "_validate_analyzer_requirements", None)
+    analyze = getattr(scanner, "_analyze_tool", None)
+    if not callable(validate) or not callable(analyze):
+        raise MCPStdioLaunchError(
+            "installed cisco-ai-mcp-scanner is incompatible with the Windows stdio adapter"
+        )
+    validate(selected)
+
+    stderr_size = 0
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
+        try:
+            with anyio.fail_after(timeout_seconds):
+                params = StdioServerParameters(
+                    command=plan.command,
+                    args=list(plan.args),
+                    env=plan.env,
+                )
+                # Keep transport, session, and all protocol messages in this
+                # task. The child remains attached through tools/list and the
+                # official context manager owns process-tree cleanup.
+                with _contained_mcp_windows_process_factory():
+                    async with stdio_client(params, errlog=errlog) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            tool_list = await session.list_tools()
+            errlog.flush()
+            stderr_size = errlog.tell()
+        except BaseException as exc:
+            errlog.flush()
+            stderr_size = errlog.tell()
+            setattr(exc, "_defenseclaw_stderr_size", stderr_size)
+            raise
+
+    results = await asyncio.gather(
+        *(analyze(tool, selected) for tool in tool_list.tools)
+    )
+    return list(results), stderr_size
 
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
@@ -615,7 +1027,42 @@ class MCPScannerWrapper:
 
     def _scan_local(self, scanner: object, entry: MCPServerEntry,
                     analyzers: list | None) -> list[object]:
-        """Scan a local stdio MCP server via a temporary config file."""
+        """Scan local stdio with the platform-appropriate SDK adapter."""
+
+        if os.name == "nt":
+            plan = _windows_stdio_launch_plan(entry)
+            errors: list[tuple[str, str]] = []
+            try:
+                with _capture_sdk_error_logs(errors):
+                    results, _stderr_size = asyncio.run(
+                        _scan_windows_stdio_tools(scanner, plan, analyzers)
+                    )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except asyncio.CancelledError:
+                raise
+            except MCPStdioLaunchError:
+                raise
+            except BaseException as exc:
+                stderr_size = int(
+                    getattr(exc, "_defenseclaw_stderr_size", 0) or 0
+                )
+                raise _classify_windows_stdio_error(
+                    exc,
+                    plan,
+                    errors,
+                    stderr_size,
+                    _STDIO_SCAN_TIMEOUT_SECONDS,
+                ) from exc
+
+            all_findings: list[object] = []
+            for tool_result in results:
+                entity_name = getattr(tool_result, "tool_name", "")
+                for finding in _extract_findings(tool_result):
+                    finding._entity_name = entity_name
+                    finding._entity_type = "tool"
+                    all_findings.append(finding)
+            return all_findings
 
         server_def: dict = {"command": entry.command}
         if entry.args:

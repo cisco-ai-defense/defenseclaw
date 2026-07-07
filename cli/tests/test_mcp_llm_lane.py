@@ -191,6 +191,12 @@ class ScanLocalGracefulDegradeTests(unittest.TestCase):
     def setUp(self):
         self.entry = MCPServerEntry(name="local-srv", command="npx", args=["x"])
         self.wrapper = _wrapper("auto", model=True)
+        # These fakes exercise the legacy scanner config-file/log-degrade path,
+        # which remains the macOS/Linux implementation. Native Windows uses
+        # DefenseClaw's same-task stdio adapter and never calls this fake API.
+        platform = patch("defenseclaw.scanner.mcp.os.name", "posix")
+        platform.start()
+        self.addCleanup(platform.stop)
 
     def _run(self, scanner):
         captured = io.StringIO()
