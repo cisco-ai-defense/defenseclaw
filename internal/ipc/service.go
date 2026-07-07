@@ -1,0 +1,149 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package ipc
+
+import (
+	"strings"
+	"time"
+
+	"google.golang.org/grpc"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	pb "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1"
+)
+
+// service implements the three server-streaming RPCs defined by the
+// AVC contract. Backed by SidecarHealth for GetHealth, audit.Store
+// for GetStatsSnapshot, and the local broadcast for
+// WatchNotifications.
+type service struct {
+	pb.UnimplementedDefenseClawSecureClientServiceServer
+
+	health     *gateway.SidecarHealth
+	statsSrc   statsSource
+	bcast      *broadcast
+	version    string
+	nowFn      func() time.Time
+	statsPoll  time.Duration
+	healthWait time.Duration
+}
+
+// GetHealth streams health snapshots per the contract: the first
+// message is the current state; subsequent messages are sent when
+// the mapped ServiceAvailability changes. Sends are debounced by
+// healthWait so a flapping SetGateway does not storm the client.
+func (s *service) GetHealth(req *pb.GetHealthRequest, stream grpc.ServerStreamingServer[pb.HealthSnapshot]) error {
+	ctx := stream.Context()
+	notify, cancel := s.health.Subscribe()
+	defer cancel()
+
+	last := s.currentHealth()
+	if err := stream.Send(last); err != nil {
+		return err
+	}
+
+	debounce := time.NewTimer(0)
+	if !debounce.Stop() {
+		<-debounce.C
+	}
+	defer debounce.Stop()
+
+	pending := false
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case _, ok := <-notify:
+			if !ok {
+				return nil
+			}
+			if !pending {
+				debounce.Reset(s.healthWait)
+				pending = true
+			}
+		case <-debounce.C:
+			pending = false
+			cur := s.currentHealth()
+			if cur.Availability != last.Availability {
+				if err := stream.Send(cur); err != nil {
+					return err
+				}
+				last = cur
+			}
+		}
+	}
+}
+
+// GetStatsSnapshot streams aggregate counters. First message is
+// immediate; subsequent messages are sent when any counter changes
+// (or availability transitions) at a 2s poll cadence.
+func (s *service) GetStatsSnapshot(req *pb.GetStatsSnapshotRequest, stream grpc.ServerStreamingServer[pb.StatsSnapshot]) error {
+	ctx := stream.Context()
+
+	last, _ := snapshotStats(s.statsSrc)
+	if err := stream.Send(last); err != nil {
+		return err
+	}
+
+	ticker := time.NewTicker(s.statsPoll)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			cur, _ := snapshotStats(s.statsSrc)
+			if statsChanged(last, cur) {
+				if err := stream.Send(cur); err != nil {
+					return err
+				}
+				last = cur
+			}
+		}
+	}
+}
+
+// WatchNotifications streams user-visible notifications. On
+// subscribe, retained HISTORY / TRANSIENT_AND_HISTORY records within
+// the retention window are replayed; TRANSIENT-only records are not.
+func (s *service) WatchNotifications(req *pb.WatchNotificationsRequest, stream grpc.ServerStreamingServer[pb.NotificationRecord]) error {
+	ctx := stream.Context()
+	ch, cancel := s.bcast.subscribe()
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case rec, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err := stream.Send(rec); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// currentHealth composes the wire HealthSnapshot from the internal
+// SidecarHealth. version is a static, safe string ("v1.2.3" or
+// "dev") — we tolerate an empty version by omitting the field
+// rather than sending a placeholder that AVC might try to display.
+func (s *service) currentHealth() *pb.HealthSnapshot {
+	snap := s.health.Snapshot()
+	return &pb.HealthSnapshot{
+		SchemaVersion:      schemaVersion,
+		Availability:       mapHealth(snap),
+		DefenseClawVersion: strings.TrimSpace(s.version),
+	}
+}

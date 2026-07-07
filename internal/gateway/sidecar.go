@@ -80,6 +80,14 @@ type Sidecar struct {
 	osNotifier    *notifier.Dispatcher
 	configMgr     *ConfigManager
 
+	// ipcRunner is a lazily-injected runner for the local UDS gRPC
+	// server that serves the AVC contract. Started only when
+	// cfg.ManagedIPCEnabled() is true; the sidecar goroutine
+	// short-circuits when nil. Not embedded directly to avoid an
+	// import cycle (gateway ← ipc ← gateway); the CLI layer supplies
+	// a factory during construction.
+	ipcRunner IPCRunner
+
 	otelMu             sync.RWMutex
 	webhooksMu         sync.RWMutex
 	aiDiscoveryMu      sync.RWMutex
@@ -655,7 +663,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.attachApplicationProtectionObserver(runCtx, apiToken)
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 6)
+	errCh := make(chan error, 7)
 
 	configPath := s.currentConfig().ConfigFilePath
 	if strings.TrimSpace(configPath) == "" {
@@ -726,6 +734,20 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
+
+	// Goroutine 6: local UDS gRPC IPC server for AVC (opt-in via
+	// managed.enabled or deployment_mode=managed_enterprise). No-op
+	// when no IPCRunner has been installed by the CLI wiring layer.
+	if s.ipcRunner != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.ipcRunner.Run(runCtx); err != nil && runCtx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] ipc server exited with error: %v\n", err)
+				errCh <- err
+			}
+		}()
+	}
 
 	// Report telemetry (OTel) health — not a goroutine, just state
 	s.reportTelemetryHealth()
@@ -1626,6 +1648,12 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		s.health.SetGateway(StateRunning, "", map[string]interface{}{
 			"protocol": hello.Protocol,
 		})
+		if s.osNotifier != nil {
+			s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
+				State:  notifier.ServiceStateReconnected,
+				Reason: fmt.Sprintf("gateway ready (protocol=%d)", hello.Protocol),
+			})
+		}
 
 		s.subscribeToSessions(ctx)
 
@@ -1639,6 +1667,12 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
 			_ = s.logger.LogAction(string(audit.ActionSidecarDisconnected), "", "connection lost, reconnecting")
 			s.health.SetGateway(StateReconnecting, "connection lost", nil)
+			if s.osNotifier != nil {
+				s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
+					State:  notifier.ServiceStateDisconnected,
+					Reason: "connection lost, reconnecting",
+				})
+			}
 		}
 	}
 }

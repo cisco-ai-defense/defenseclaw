@@ -1,0 +1,129 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package defenseclaw.secureclient.v1;
+
+option go_package = "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1;defenseclawv1";
+
+// DefenseClaw local gRPC server contract (v1 draft).
+//
+// Consumed by AVC (Cisco Secure Client) over a local Unix domain socket.
+// All three RPCs are server-streaming and snapshot-first: the initial
+// message on each stream is the current state.
+service DefenseClawSecureClientService {
+  rpc GetHealth(GetHealthRequest) returns (stream HealthSnapshot);
+  rpc GetStatsSnapshot(GetStatsSnapshotRequest) returns (stream StatsSnapshot);
+  rpc WatchNotifications(WatchNotificationsRequest) returns (stream NotificationRecord);
+}
+
+message GetHealthRequest {
+  // Highest response schema version the AVC caller understands.
+  uint32 client_schema_version = 1;
+}
+
+message HealthSnapshot {
+  // Response schema version used by this snapshot.
+  uint32 schema_version = 1;
+
+  // Overall DefenseClaw availability for AVC/Secure Client presentation.
+  ServiceAvailability availability = 2;
+
+  // DefenseClaw product/runtime version, if available.
+  string defense_claw_version = 3;
+}
+
+enum ServiceAvailability {
+  SERVICE_AVAILABILITY_UNSPECIFIED = 0;
+  SERVICE_AVAILABILITY_STARTING = 1;
+  SERVICE_AVAILABILITY_READY = 2;
+  SERVICE_AVAILABILITY_DEGRADED = 3;
+  SERVICE_AVAILABILITY_UNAVAILABLE = 4;
+  SERVICE_AVAILABILITY_DISABLED_BY_POLICY = 5;
+  SERVICE_AVAILABILITY_ERROR = 6;
+}
+
+message GetStatsSnapshotRequest {
+  // Highest response schema version the AVC caller understands.
+  uint32 client_schema_version = 1;
+}
+
+message StatsSnapshot {
+  // Response schema version used by this snapshot.
+  uint32 schema_version = 1;
+
+  // Indicates whether the statistics are current, stale, or unavailable.
+  StatsAvailability availability = 2;
+
+  // Total scan count for the agreed statistics scope.
+  uint64 total_scans = 3;
+
+  // Current active alert count for the agreed statistics scope.
+  uint64 active_alerts = 4;
+
+  // Count of blocked skills for the agreed statistics scope.
+  uint64 blocked_skills = 5;
+
+  // Count of allowed skills for the agreed statistics scope.
+  uint64 allowed_skills = 6;
+
+  // Count of blocked MCP servers for the agreed statistics scope.
+  uint64 blocked_mcp_servers = 7;
+
+  // Count of allowed MCP servers for the agreed statistics scope.
+  uint64 allowed_mcp_servers = 8;
+}
+
+enum StatsAvailability {
+  STATS_AVAILABILITY_UNSPECIFIED = 0;
+  STATS_AVAILABILITY_AVAILABLE = 1;
+  STATS_AVAILABILITY_STALE = 2;
+  STATS_AVAILABILITY_UNAVAILABLE = 3;
+  STATS_AVAILABILITY_ERROR = 4;
+}
+
+message WatchNotificationsRequest {
+  // Highest response schema version the AVC caller understands.
+  uint32 client_schema_version = 1;
+}
+
+message NotificationRecord {
+  // Response schema version used by this notification record.
+  uint32 schema_version = 1;
+
+  // Severity of the user-visible condition.
+  NotificationSeverity severity = 2;
+
+  // DefenseClaw's intended delivery behavior for this notification.
+  NotificationPresentation presentation = 3;
+
+  // Short user-visible title. In v1, DefenseClaw provides ready-to-display text.
+  string title = 4;
+
+  // User-visible notification body. Must be safe for display and must not
+  // contain secrets, credentials, tokens, raw prompts, raw policy bodies, or
+  // sensitive payloads.
+  string body = 5;
+}
+
+enum NotificationSeverity {
+  NOTIFICATION_SEVERITY_UNSPECIFIED = 0;
+  NOTIFICATION_SEVERITY_INFO = 1;
+  NOTIFICATION_SEVERITY_WARNING = 2;
+  NOTIFICATION_SEVERITY_ERROR = 3;
+}
+
+enum NotificationPresentation {
+  NOTIFICATION_PRESENTATION_UNSPECIFIED = 0;
+  NOTIFICATION_PRESENTATION_TRANSIENT = 1;
+  NOTIFICATION_PRESENTATION_HISTORY = 2;
+  NOTIFICATION_PRESENTATION_TRANSIENT_AND_HISTORY = 3;
+}

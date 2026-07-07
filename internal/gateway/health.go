@@ -75,6 +75,10 @@ type HealthSnapshot struct {
 	// per-sink state for the TUI/CLI to render individual rows.
 	Sinks   SubsystemHealth  `json:"sinks"`
 	Sandbox *SubsystemHealth `json:"sandbox,omitempty"`
+	// Managed reports the local UDS gRPC server (internal/ipc) that
+	// serves the DefenseClaw ↔ AVC contract. Present only when the
+	// server has been started (managed_enterprise or managed.enabled).
+	Managed *SubsystemHealth `json:"managed,omitempty"`
 	// Connector is the primary/active connector, retained for back-compat
 	// with single-connector clients. Connectors lists every active
 	// connector with its own live counters (multi-connector view).
@@ -94,7 +98,17 @@ type SidecarHealth struct {
 	applicationProtection SubsystemHealth
 	sinks                 SubsystemHealth
 	sandbox               *SubsystemHealth
+	managed               *SubsystemHealth
 	startedAt             time.Time
+
+	// subscribers receive a non-blocking notification after every Set*
+	// call, so long-lived consumers (like the IPC GetHealth stream)
+	// can react to state changes without polling Snapshot() on a
+	// ticker. The channel buffer is size 1: writes are non-blocking
+	// and coalesce naturally into a single wake-up when a subscriber
+	// hasn't yet drained the previous notification.
+	subMu sync.Mutex
+	subs  []chan struct{}
 
 	// Per-connector health + counters. In multi-connector mode every active
 	// connector gets its own ConnectorHealth so live counters are truthful
@@ -166,90 +180,98 @@ func NewSidecarHealth() *SidecarHealth {
 
 func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.config = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetGateway(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.gateway = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetWatcher(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.watcher = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetAPI(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.api = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetGuardrail(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.guardrail = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetTelemetry(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.telemetry = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.aiDiscovery = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetApplicationProtection(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.applicationProtection = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 // SetSinks reports the aggregate audit-sink health. Details should
@@ -257,23 +279,88 @@ func (h *SidecarHealth) SetApplicationProtection(state SubsystemState, lastErr s
 // ([]map) with per-sink rows for richer rendering.
 func (h *SidecarHealth) SetSinks(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.sinks = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
 	}
+	h.mu.Unlock()
+	h.notifySubscribers()
 }
 
 func (h *SidecarHealth) SetSandbox(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.sandbox = &SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
 		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// SetManaged records the current state of the local UDS gRPC server
+// (internal/ipc) that serves the DefenseClaw ↔ AVC contract. Called
+// from the IPC package as it moves through Starting → Running → Stopped
+// / Error.
+func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	h.managed = &SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// Subscribe returns a channel that receives a non-blocking notification
+// (a single struct{} value, buffered depth 1) after every Set* call.
+// Consumers coalesce multiple rapid changes naturally: the channel
+// stays at depth 1, so a subscriber that hasn't drained the previous
+// wake-up simply sees one more pending event when they next read.
+//
+// The returned cancel closes and unregisters the channel; call it
+// exactly once when the subscriber exits so the internal slice does
+// not grow with dead entries.
+func (h *SidecarHealth) Subscribe() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	h.subMu.Lock()
+	h.subs = append(h.subs, ch)
+	h.subMu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			h.subMu.Lock()
+			for i, existing := range h.subs {
+				if existing == ch {
+					h.subs = append(h.subs[:i], h.subs[i+1:]...)
+					break
+				}
+			}
+			h.subMu.Unlock()
+			close(ch)
+		})
+	}
+	return ch, cancel
+}
+
+// notifySubscribers fans out a non-blocking wake-up to every current
+// subscriber. Never blocks: a full 1-element buffer means the
+// subscriber already has a pending notification, so we drop the extra.
+func (h *SidecarHealth) notifySubscribers() {
+	h.subMu.Lock()
+	subs := h.subs
+	h.subMu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -421,6 +508,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		ApplicationProtection: h.applicationProtection,
 		Sinks:                 h.sinks,
 		Sandbox:               h.sandbox,
+		Managed:               h.managed,
 	}
 
 	if len(h.connStats) > 0 {

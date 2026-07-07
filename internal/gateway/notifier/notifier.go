@@ -66,10 +66,32 @@ const (
 type Category string
 
 const (
-	CategoryBlock      Category = "block"
-	CategoryWouldBlock Category = "would_block"
-	CategoryApproval   Category = "approval"
+	CategoryBlock        Category = "block"
+	CategoryWouldBlock   Category = "would_block"
+	CategoryApproval     Category = "approval"
+	CategoryServiceState Category = "service_state"
 )
+
+// ServiceState labels a coarse DefenseClaw availability transition
+// that the operator should see as a toast. Emitted from the gateway
+// loop when the WebSocket connection to OpenClaw is lost / restored,
+// and consumed by both the OS toast surface (via dispatch) and the
+// local UDS IPC bridge (via AddObserver) for AVC.
+type ServiceState string
+
+const (
+	ServiceStateDisconnected ServiceState = "disconnected"
+	ServiceStateReconnected  ServiceState = "reconnected"
+)
+
+// ServiceStateEvent carries the payload for an OnServiceState call.
+// Reason is a short, redacted string ("connection lost" / "protocol
+// negotiated") — never a raw error containing endpoint URLs or
+// credentials.
+type ServiceStateEvent struct {
+	State  ServiceState
+	Reason string
+}
 
 // BlockEvent describes a single block / would-block decision.
 //
@@ -146,6 +168,32 @@ type ApprovalEvent struct {
 	RuleIDs      []string
 }
 
+// Observation is the shape passed to each registered observer.
+// It carries the fully composed notification (title/subtitle/body)
+// alongside the category/source that produced it and the original
+// event payload so downstream sinks (e.g. the AVC IPC bridge) can
+// extract fields not present in the toast — like severity, target,
+// or evaluation IDs — without recomposing.
+type Observation struct {
+	Category     Category
+	Source       Source
+	Notification notify.Notification
+	// Event holds the original typed payload:
+	//   BlockEvent    for CategoryBlock / CategoryWouldBlock
+	//   ApprovalEvent for CategoryApproval
+	//   ServiceStateEvent for CategoryServiceState
+	// Observers should type-assert on the category before reading it.
+	Event any
+}
+
+// Observer receives a copy of every observation that passes the
+// dispatcher's filter chain (master switch → per-category gate →
+// per-source gate → dedup/rate-limit). Registered via AddObserver and
+// invoked from a goroutine so a slow observer cannot block the block
+// path. Observers MUST NOT panic and MUST NOT block on external I/O
+// for more than a few milliseconds.
+type Observer func(Observation)
+
 // Dispatcher is the single fan-in point for OS notifications.
 // Construct one per gateway with New(cfg) and pass it to every block
 // emission site. Concurrency-safe — methods can be called from any
@@ -169,6 +217,12 @@ type Dispatcher struct {
 	suppressedInWin int
 	rollupAnnounced bool
 	lastSweep       time.Time
+
+	// observers is the set of registered non-OS sinks. Guarded by
+	// obsMu so AddObserver is safe to call from a different goroutine
+	// than the ones firing OnBlock / OnWouldBlock / OnApprovalPending.
+	obsMu     sync.RWMutex
+	observers []Observer
 }
 
 // New constructs a Dispatcher wired to the production OS notifier.
@@ -216,7 +270,7 @@ func (d *Dispatcher) OnBlock(ev BlockEvent) {
 		return
 	}
 	n := blockNotification(ev, false)
-	d.dispatch(CategoryBlock, ev.Source, ev.Target, ev.Reason, n)
+	d.dispatch(CategoryBlock, ev.Source, ev.Target, ev.Reason, n, ev)
 }
 
 // OnWouldBlock fires for an observe-mode "would have blocked"
@@ -231,7 +285,7 @@ func (d *Dispatcher) OnWouldBlock(ev BlockEvent) {
 		return
 	}
 	n := blockNotification(ev, true)
-	d.dispatch(CategoryWouldBlock, ev.Source, ev.Target, ev.Reason, n)
+	d.dispatch(CategoryWouldBlock, ev.Source, ev.Target, ev.Reason, n, ev)
 }
 
 // OnApprovalPending fires when a HITL/confirm prompt has been issued
@@ -247,7 +301,70 @@ func (d *Dispatcher) OnApprovalPending(ev ApprovalEvent) {
 		return
 	}
 	n := approvalNotification(ev)
-	d.dispatch(CategoryApproval, ev.Source, ev.Subject, ev.Reason, n)
+	d.dispatch(CategoryApproval, ev.Source, ev.Subject, ev.Reason, n, ev)
+}
+
+// OnServiceState fires when the DefenseClaw ↔ OpenClaw gateway
+// connection transitions between disconnected and reconnected. Unlike
+// the block/approval categories this is not user-scoped triage —
+// it is a coarse "protection is down" / "protection restored" signal
+// that the OS toast surface currently emits via watchdog code, and
+// that the AVC IPC bridge consumes to keep the Secure Client status
+// live.
+//
+// Gated by the master switch and, when reused for OS toasts, respects
+// the same rate/dedup rules as block notifications so a flapping
+// gateway does not spam.
+func (d *Dispatcher) OnServiceState(ev ServiceStateEvent) {
+	if d == nil || !d.cfg.Enabled {
+		return
+	}
+	n := serviceStateNotification(ev)
+	d.dispatch(CategoryServiceState, "", string(ev.State), ev.Reason, n, ev)
+}
+
+// AddObserver registers a non-OS sink for every observation that
+// passes the dispatcher's filter chain. Safe to call at any time; the
+// observer starts receiving events immediately after registration.
+// Observers are invoked from a fresh goroutine per event so a slow
+// observer cannot serialize block dispatch. Nil observers are ignored.
+func (d *Dispatcher) AddObserver(obs Observer) {
+	if d == nil || obs == nil {
+		return
+	}
+	d.obsMu.Lock()
+	d.observers = append(d.observers, obs)
+	d.obsMu.Unlock()
+}
+
+// notifyObservers hands off a single observation to every registered
+// observer via goroutines. Called from dispatch after the OS sender
+// has been scheduled, so the two lanes proceed in parallel.
+func (d *Dispatcher) notifyObservers(obs Observation) {
+	d.obsMu.RLock()
+	if len(d.observers) == 0 {
+		d.obsMu.RUnlock()
+		return
+	}
+	// Copy under the read lock so a concurrent AddObserver can't race
+	// with the goroutine spawns below.
+	observers := make([]Observer, len(d.observers))
+	copy(observers, d.observers)
+	d.obsMu.RUnlock()
+
+	for _, o := range observers {
+		go safeObserve(o, obs)
+	}
+}
+
+// safeObserve isolates panics so a buggy observer cannot crash the
+// gateway. Errors returned by observers are intentionally not
+// propagated — the OS toast + audit log are the authoritative record.
+func safeObserve(o Observer, obs Observation) {
+	defer func() {
+		_ = recover()
+	}()
+	o(obs)
 }
 
 func (d *Dispatcher) allowSource(s Source) bool {
@@ -273,7 +390,7 @@ func (d *Dispatcher) allowSource(s Source) bool {
 // happens under d.mu; the actual sender.Run is dispatched outside
 // the lock so a slow osascript invocation cannot serialize block
 // requests.
-func (d *Dispatcher) dispatch(cat Category, src Source, target, reason string, n notify.Notification) {
+func (d *Dispatcher) dispatch(cat Category, src Source, target, reason string, n notify.Notification, event any) {
 	if d == nil || d.sender == nil {
 		return
 	}
@@ -313,6 +430,35 @@ func (d *Dispatcher) dispatch(cat Category, src Source, target, reason string, n
 
 	for _, item := range toSend {
 		go d.send(item)
+	}
+
+	// Fan out to non-OS observers (e.g. the AVC IPC bridge). Observers
+	// see events after they pass the same filter chain as the OS toast,
+	// so downstream consumers inherit dedup / rate-limit for free.
+	d.notifyObservers(Observation{
+		Category:     cat,
+		Source:       src,
+		Notification: n,
+		Event:        event,
+	})
+}
+
+// serviceStateNotification renders a gateway-state transition toast.
+// Reason is short/redacted by the caller; we do not truncate here.
+func serviceStateNotification(ev ServiceStateEvent) notify.Notification {
+	var title string
+	switch ev.State {
+	case ServiceStateDisconnected:
+		title = "DefenseClaw protection paused"
+	case ServiceStateReconnected:
+		title = "DefenseClaw protection restored"
+	default:
+		title = "DefenseClaw protection state changed"
+	}
+	return notify.Notification{
+		Title:    title,
+		Subtitle: "gateway",
+		Body:     truncateReason(ev.Reason),
 	}
 }
 

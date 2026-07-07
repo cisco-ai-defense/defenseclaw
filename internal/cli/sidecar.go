@@ -27,7 +27,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 var (
@@ -102,6 +104,23 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell, otelProvider)
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
+	}
+
+	// Local UDS gRPC server for AVC (Cisco Secure Client). Only
+	// constructed when the deployment mode / operator opt-in asks
+	// for it — see internal/ipc for the wire contract.
+	if cfg.ManagedIPCEnabled() {
+		ipcSrv, err := ipc.NewServer(ipc.ServerOptions{
+			Config:     cfg,
+			Health:     sc.Health(),
+			Store:      sc.AuditStore(),
+			Dispatcher: sc.OSNotifier(),
+			Version:    version.Current().BinaryVersion,
+		})
+		if err != nil {
+			return fmt.Errorf("sidecar: ipc init: %w", err)
+		}
+		sc.SetIPCRunner(ipcSrv)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
