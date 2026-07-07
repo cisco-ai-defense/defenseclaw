@@ -30,10 +30,11 @@ jobs:
     name: Windows x64 Go suite
     runs-on: windows-latest
     timeout-minutes: 45
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-go
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-go
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-go')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-go')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -95,10 +96,11 @@ jobs:
     name: Windows complete Python suite (includes TUI)
     runs-on: windows-latest
     timeout-minutes: 75
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-python
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-python
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-python')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-python')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -147,10 +149,11 @@ jobs:
     name: Windows PowerShell harness validation
     runs-on: windows-latest
     timeout-minutes: 15
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-powershell
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-powershell
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-powershell')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-powershell')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -189,11 +192,12 @@ jobs:
     name: Windows packaged artifact build
     runs-on: windows-latest
     timeout-minutes: 35
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-package-build
-      DC_ARTIFACT_ROOT: ${{ runner.temp }}\windows-native-dist
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-package
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-package-build')" >> $env:GITHUB_ENV
+          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-package')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -234,11 +238,12 @@ jobs:
     needs: package-artifact
     runs-on: windows-latest
     timeout-minutes: 55
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-acceptance
-      DC_ARTIFACT_ROOT: ${{ runner.temp }}\windows-native-dist
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-acceptance
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-acceptance')" >> $env:GITHUB_ENV
+          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-acceptance')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -276,11 +281,12 @@ jobs:
       fail-fast: false
       matrix:
         connector: [codex, claudecode]
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-contract-${{ matrix.connector }}
-      DC_ARTIFACT_ROOT: ${{ runner.temp }}\windows-native-dist
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-${{ matrix.connector }}
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-contract-${{ matrix.connector }}')" >> $env:GITHUB_ENV
+          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-${{ matrix.connector }}')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
