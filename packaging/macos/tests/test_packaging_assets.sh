@@ -257,13 +257,23 @@ t_plist_validator_accepts_bundle_default_owned_by_user() {
   # Bundle default plist is owned by the current (non-root) uid — this
   # models the extracted-tarball flow. Mode is 0644 (safe).
   chmod 0644 "${bundle}/com.defenseclaw.gateway.plist"
+  # Run under `bash -x` so we can positively confirm two things:
+  #   1. PLIST_SRC actually resolved to the bundle-local plist (not the
+  #      repo default or an earlier candidate).
+  #   2. PLIST_SRC_ORIGIN is "bundle" so the validator applied the
+  #      relaxed policy (skip root-owner requirement).
+  # Without these, a regression that dies BEFORE the ownership branch
+  # or resolves PLIST_SRC to some other path would still pass the
+  # negative-only `assert_not_contains "must be owned by root"` check.
   local out rc=0
-  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
-  # Should NOT die on the ownership check.
+  local trace
+  trace="$(printf '%s' "${out}" | grep -E 'PLIST_SRC=|PLIST_SRC_ORIGIN=' || true)"
+  assert_contains "${trace}" "PLIST_SRC=${bundle}/com.defenseclaw.gateway.plist" "plist resolved from bundle"
+  assert_contains "${trace}" "PLIST_SRC_ORIGIN=bundle"                            "origin is bundle (relaxed policy)"
+  # And the ownership branch must not have fired.
   assert_not_contains "${out}" "must be owned by root" "bundle default plist accepted"
-  # It may still exit non-zero for OTHER reasons downstream in a stub
-  # fixture, but the specific "must be owned by root" branch must not fire.
 }
 
 t_plist_validator_rejects_bundle_default_that_is_world_writable() {
@@ -293,6 +303,26 @@ t_plist_validator_rejects_override_owned_by_non_root() {
   assert_status "${rc}" 1 "override plist owned by non-root rejected"
   assert_contains "${out}" "must be owned by root" "explains why"
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "names the override source"
+}
+
+t_plist_validator_rejects_missing_env_override() {
+  # Regression guard: if DEFENSECLAW_PLIST_SRC is set but the file it
+  # names doesn't exist, install.sh MUST die before the lookup loop
+  # rather than silently falling through to the bundle default. Silent
+  # fallback would substitute a different plist AND downgrade the
+  # ownership policy from `override` (strict) to `bundle` (relaxed).
+  local bundle
+  bundle="$(_setup_bundle_fixture true)"
+  local out rc=0
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
+    DEFENSECLAW_PLIST_SRC="${bundle}/does-not-exist.plist" \
+    "${bundle}/install.sh" \
+    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "missing env-override plist must fail"
+  assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "error names the env var"
+  assert_contains "${out}" "does not exist"        "error names the missing state"
+  # Must NOT silently install the bundle default.
+  assert_not_contains "${out}" "com.defenseclaw.gateway.plist installed" "no silent fallback"
 }
 
 t_plist_validator_fails_closed_when_stat_output_empty() {
@@ -333,5 +363,7 @@ run_case "plist validator rejects world-writable bundle default" \
   t_plist_validator_rejects_bundle_default_that_is_world_writable
 run_case "plist validator rejects --override owned by non-root" \
   t_plist_validator_rejects_override_owned_by_non_root
+run_case "plist validator rejects missing env-override (no silent fallback)" \
+  t_plist_validator_rejects_missing_env_override
 run_case "plist validator fails closed when stat output empty" \
   t_plist_validator_fails_closed_when_stat_output_empty

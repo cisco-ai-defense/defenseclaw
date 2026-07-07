@@ -45,6 +45,17 @@ BINARY_SRC=""
 # "no group/other write bits" there.
 PLIST_SRC=""
 PLIST_SRC_ORIGIN=""
+# If an explicit override was given via env var, it MUST exist. Silently
+# falling back to bundle/repo defaults would (a) install a different
+# plist than the operator asked for, and (b) downgrade the ownership
+# policy from the strict `override` tier (root-owned) to the relaxed
+# `bundle` tier (any owner) — so a typo in DEFENSECLAW_PLIST_SRC could
+# quietly bypass the very hardening the operator was trying to opt into.
+if [[ -n "${DEFENSECLAW_PLIST_SRC:-}" && ! -f "${DEFENSECLAW_PLIST_SRC}" ]]; then
+  printf '[install] ERROR: DEFENSECLAW_PLIST_SRC=%s does not exist; refusing to fall back to the default plist\n' \
+    "${DEFENSECLAW_PLIST_SRC}" >&2
+  exit 1
+fi
 for _candidate_origin in \
   "override:${DEFENSECLAW_PLIST_SRC:-}" \
   "bundle:${SCRIPT_DIR}/com.defenseclaw.gateway.plist" \
