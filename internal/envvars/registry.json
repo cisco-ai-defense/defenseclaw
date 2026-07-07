@@ -1034,6 +1034,20 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+      "category": "credential",
+      "purpose": "Generated HEC token for the owned bundled Local Splunk sink. Kept separate from remote Splunk Enterprise credentials.",
+      "default": "unset",
+      "accepted_values": ["cryptographically random HEC token", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/observability/local_splunk.py", "description": "Native Local Splunk credential contract"},
+        {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Owned local-splunk audit sink wiring"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
       "category": "credential",
       "purpose": "Alternative HEC token consulted by the Python sink wiring when the canonical splunk_hec.token_env points to a different var.",

@@ -1033,7 +1033,7 @@ class TestValidateGatewayToken(unittest.TestCase):
 
 
 class TestResolveSplunkBridgeBundle(unittest.TestCase):
-    def test_prefers_packaged_bundle_data(self):
+    def test_prefers_maintained_bundle_in_source_checkout(self):
         from defenseclaw.commands.cmd_init import _resolve_splunk_bridge_bundle
 
         def fake_is_dir(path):
@@ -1043,7 +1043,7 @@ class TestResolveSplunkBridgeBundle(unittest.TestCase):
         with patch("pathlib.Path.is_dir", autospec=True, side_effect=fake_is_dir):
             result = _resolve_splunk_bridge_bundle()
 
-        self.assertTrue(str(result).replace("\\", "/").endswith("_data/splunk_local_bridge"))
+        self.assertTrue(str(result).replace("\\", "/").endswith("bundles/splunk_local_bridge"))
 
 
 class TestInitSeedsSplunkBridge(unittest.TestCase):

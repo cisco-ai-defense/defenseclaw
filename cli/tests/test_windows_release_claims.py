@@ -27,7 +27,7 @@ def test_windows_release_metadata_is_exact() -> None:
     assert WINDOWS_NOT_CERTIFIED_ARCHITECTURES == {"arm64"}
     assert WINDOWS_UNSUPPORTED_FEATURES == {
         "sandbox", "enterprise-hooks", "openhands", "omnigent", "openclaw", "zeptoclaw",
-        "splunk-shell-stack", "native-desktop-toasts",
+        "native-desktop-toasts",
     }
 
 
@@ -39,6 +39,7 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "Codex CLI | `codex` | certified" in text
     assert "Claude Code | `claudecode` | certified" in text
     assert "local observability" in text
+    assert "Local Splunk" in text
     assert "Hyper-V backend" in text
     assert "Docker Desktop per-user and WSL-only installations" in text
     assert "```bash" not in text and "```sh" not in text

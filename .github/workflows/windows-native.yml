@@ -116,6 +116,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_cmd_doctor_windows_hooks.py', '-q') -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-doctor-windows-hooks.log') | Out-Null
+      - name: Run native Windows Local Splunk certification regressions
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          $uv = (Get-Command uv.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
       - name: Run every Python test, including headless TUI tests
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun

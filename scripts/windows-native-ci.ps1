@@ -309,7 +309,13 @@ function Invoke-BuildArtifacts {
         foreach ($required in @(
             'defenseclaw/_data/envvars/registry.json',
             'defenseclaw/_data/skills/codeguard/SKILL.md',
-            'defenseclaw/_data/llm/model_catalog.json'
+            'defenseclaw/_data/llm/model_catalog.json',
+            'defenseclaw/observability/local_splunk.py',
+            'defenseclaw/_data/splunk_local_bridge/compose/docker-compose.local.yml',
+            'defenseclaw/_data/splunk_local_bridge/splunk/default.yml',
+            'defenseclaw/_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/app.conf',
+            'defenseclaw/_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/lookups/dcso_risk_state_labels.csv',
+            'defenseclaw/_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/lookups/dcso_severity_labels.csv'
         )) {
             if ($required -notin $entries) { throw "wheel is missing packaged runtime data: $required" }
         }

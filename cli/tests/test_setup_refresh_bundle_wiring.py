@@ -89,12 +89,18 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             return_value=True,
         )
         self._local_stack_support.start()
+        self._native_local_splunk = patch(
+            "defenseclaw.commands.cmd_setup._native_windows_local_splunk",
+            return_value=False,
+        )
+        self._native_local_splunk.start()
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
 
     def tearDown(self) -> None:
         import shutil
 
+        self._native_local_splunk.stop()
         self._local_stack_support.stop()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 

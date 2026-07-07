@@ -25,17 +25,17 @@ class BuildPyWithRuntimeAssets(build_py):
     def run(self) -> None:
         super().run()
         root = Path(__file__).resolve().parent
-        source = root / "bundles" / "local_observability_stack"
-        destination = (
-            Path(self.build_lib)
-            / "defenseclaw"
-            / "_data"
-            / "local_observability_stack"
-        )
-        if not source.is_dir():
-            raise RuntimeError(f"required local observability bundle is missing: {source}")
-        shutil.rmtree(destination, ignore_errors=True)
-        shutil.copytree(source, destination)
+        for bundle_name in ("local_observability_stack", "splunk_local_bridge"):
+            source = root / "bundles" / bundle_name
+            destination = Path(self.build_lib) / "defenseclaw" / "_data" / bundle_name
+            if not source.is_dir():
+                raise RuntimeError(f"required runtime bundle is missing: {source}")
+            shutil.rmtree(destination, ignore_errors=True)
+            shutil.copytree(
+                source,
+                destination,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
 
         registry_source = root / "internal" / "envvars" / "registry.json"
         registry_destination = (

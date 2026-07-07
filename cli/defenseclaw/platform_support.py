@@ -47,8 +47,8 @@ PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 LOCAL_OBSERVABILITY_UNSUPPORTED_REASON = (
     "Bundled local observability is unavailable on this operating system."
 )
-LOCAL_SPLUNK_UNSUPPORTED_REASON = "Local Splunk is unsupported on native Windows."
-# Compatibility names remain scoped to the only shell-backed stack (Splunk).
+LOCAL_SPLUNK_UNSUPPORTED_REASON = "Bundled Local Splunk is unavailable on this operating system."
+# Compatibility name retained for callers that predate the native controller.
 LOCAL_SHELL_STACKS_UNSUPPORTED_REASON = LOCAL_SPLUNK_UNSUPPORTED_REASON
 
 
@@ -145,7 +145,6 @@ WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
         "omnigent",
         "openclaw",
         "zeptoclaw",
-        "splunk-shell-stack",
         "native-desktop-toasts",
     }
 )
@@ -228,14 +227,14 @@ def local_observability_stack_supported(os_name: str | None = None) -> bool:
 
 
 def local_splunk_stack_supported(os_name: str | None = None) -> bool:
-    """Whether the separate Bash-backed local Splunk stack may run."""
+    """Whether bundled Local Splunk has a certified lifecycle controller."""
 
     resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
-    return resolved_os != "windows"
+    return resolved_os in {"windows", "darwin", "linux"}
 
 
 def local_shell_stacks_supported(os_name: str | None = None) -> bool:
-    """Backward-compatible alias for the remaining local shell stack."""
+    """Backward-compatible alias for bundled Local Splunk availability."""
 
     return local_splunk_stack_supported(os_name)
 

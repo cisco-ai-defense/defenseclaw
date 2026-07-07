@@ -958,10 +958,18 @@ class TestSetupSplunkCommand(unittest.TestCase):
             return_value=True,
         )
         self._local_stack_support.start()
+        # These legacy regression cases pin the macOS/Linux bridge contract.
+        # Native Windows dispatch has dedicated controller/transaction suites.
+        self._native_local_splunk = patch(
+            "defenseclaw.commands.cmd_setup._native_windows_local_splunk",
+            return_value=False,
+        )
+        self._native_local_splunk.start()
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
 
     def tearDown(self):
+        self._native_local_splunk.stop()
         self._local_stack_support.stop()
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
@@ -1242,11 +1250,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.splunk.hec_token_env, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
         self.assertIn("Local Splunk is ready", result.output)
         self.assertIn("License: Free", result.output)
-        self.assertIn("Splunk Web login:", result.output)
-        self.assertIn("Username:  admin", result.output)
-        self.assertIn("Password:", result.output)
+        self.assertIn("Web authentication: disabled in Splunk Free mode", result.output)
+        self.assertIn("HEC token and runtime bootstrap secret: stored securely", result.output)
+        self.assertNotIn("Username:", result.output)
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
-        self.assertIn("Log in with admin", result.output)
+        self.assertIn("Web authentication is disabled in Splunk Free mode", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
@@ -1754,9 +1762,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Splunk Web Credentials", result.output)
-        self.assertIn("Username:  admin", result.output)
-        self.assertIn("Password:  test-splunk-pass", result.output)
+        self.assertIn("Local Splunk Generated Secrets", result.output)
+        self.assertIn("Web auth:  disabled in Splunk Free mode", result.output)
+        self.assertIn("Runtime bootstrap secret: test-splunk-pass", result.output)
+        self.assertIn("it is not a Web login", result.output)
+        self.assertNotIn("Username:", result.output)
 
 
 # ---------------------------------------------------------------------------

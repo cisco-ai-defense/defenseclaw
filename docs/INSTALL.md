@@ -65,12 +65,14 @@ Windows**: they require the local guardrail proxy, which DefenseClaw does not
 host there. They are hidden from the TUI/CLI connector pickers and rejected by
 setup on Windows with a clear error. Use them on macOS or Linux instead.
 
-Sandbox, enterprise hooks, the bundled local Splunk shell stack, and native
-desktop toasts are unsupported on Windows. The separate bundled local
-observability stack is supported from PowerShell/cmd on native Windows x64 when
-Docker Desktop runs Linux containers through Hyper-V on Windows Pro,
-Enterprise, or Education. Per-user and WSL-only Docker Desktop installations
-are outside that no-WSL certification. macOS/Linux behavior is unchanged.
+Sandbox, enterprise hooks, and native desktop toasts are unsupported on
+Windows. Bundled Local Splunk and the separate local observability stack are
+supported from PowerShell/cmd on native Windows x64 when Docker Desktop runs
+Linux containers through Hyper-V on Windows Pro, Enterprise, or Education.
+The Local Splunk controller calls native `docker.exe` and Compose v2 directly;
+it does not use Bash, WSL, MSYS, Git Bash, or command-script shims. Per-user and
+WSL-only Docker Desktop installations are outside that no-WSL certification.
+macOS/Linux retain the existing bridge behavior.
 
 ## Splunk Terms And Scope For The Local Preset
 
@@ -602,11 +604,18 @@ defenseclaw setup splunk
 | `--disable` | Disable integration(s); combine with `--o11y` / `--logs` / `--enterprise` to scope |
 | `--non-interactive` | Requires at least `--o11y`, `--logs`, or `--enterprise` |
 
-The `--logs` option requires Docker and sets up a local Splunk runtime with the
-DefenseClaw Splunk bridge (`splunk-claw-bridge`). That runtime starts directly
-in Splunk Free mode from day 1. In Splunk Free mode, alerting is disabled and
-authentication is not required. To use full Splunk Enterprise features later,
-apply a valid Splunk Enterprise license. For more details, see
+The `--logs` option requires Docker and sets up a local Splunk runtime. Native
+Windows uses the Python lifecycle controller and Docker Desktop's `docker.exe`;
+macOS/Linux retain the `splunk-claw-bridge` path. Setup validates the complete
+bundle, Docker/Compose/Linux-container prerequisites, exact project ownership,
+and ports before stopping or writing configuration. It waits for Splunk Web
+and HEC, writes the local sink, and reloads the gateway as one transaction.
+Failures restore the prior config and running owned stack. The runtime starts
+directly in Splunk Free mode from day 1. In Free mode, alerting is disabled and
+Web authentication is not required. A securely generated administrator secret
+is still retained because the container bootstrap requires it; it is not a Web
+login. Generated secrets are shown only by `--show-credentials`. To use full
+Splunk Enterprise features later, apply a valid Splunk Enterprise license. For more details, see
 https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free
 
 ```bash
@@ -626,6 +635,10 @@ defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
 # Disable both
 defenseclaw setup splunk --disable
 ```
+
+`--disable --logs` disables only the `local-splunk` HEC destination and stops
+only the exact owned Compose project. It does not pass `--volumes`, so the
+owned Splunk data volumes survive ordinary disable and subsequent setup.
 
 For `--enterprise`, the Splunk administrator must already have enabled HTTP
 Event Collector, created an active HEC token, and allowed the configured index.

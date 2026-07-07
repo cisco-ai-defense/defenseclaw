@@ -203,15 +203,31 @@ defenseclaw doctor
 ```
 
 Native Windows is hook-only. Sandbox, enterprise hooks, OpenHands, OmniGent,
-OpenClaw, ZeptoClaw, the bundled local Splunk shell stack, and native desktop toasts
-are unsupported on Windows. The separate bundled local observability
-stack is supported from PowerShell/cmd on native Windows x64 with Docker
-Desktop using Linux containers through the Hyper-V backend on Windows Pro,
-Enterprise, or Education. Docker Desktop per-user and WSL-only installations
-are outside this no-WSL certification. Remote observability sinks remain
-available independently. Inventory, scanners, audit storage, alerts, and the TUI remain available. The TUI accepts Windows
+OpenClaw, ZeptoClaw, and native desktop toasts are unsupported on Windows.
+Bundled Local Splunk and the separate local observability stack are supported
+from PowerShell/cmd on native Windows x64 with Docker Desktop using Linux
+containers through the Hyper-V backend on Windows Pro, Enterprise, or
+Education. Docker Desktop per-user and WSL-only installations are outside this
+no-WSL certification. Both controllers invoke `docker.exe compose` directly;
+they do not require Bash, WSL, MSYS, Git Bash, `.cmd`, or `.bat` lifecycle
+shims. Remote observability sinks remain available independently. Inventory,
+scanners, audit storage, alerts, and the TUI remain available. The TUI accepts Windows
 arrow-key sequences and falls back to numbered prompts when a console cannot
 redraw safely.
+
+```powershell
+defenseclaw setup splunk `
+  --logs `
+  --accept-splunk-license `
+  --non-interactive
+
+# Splunk Free mode does not require a Web login. Reveal the generated HEC and
+# runtime-only bootstrap secrets only when explicitly needed:
+defenseclaw setup splunk --show-credentials
+
+# Stop only the owned project; named volumes and indexed data remain:
+defenseclaw setup splunk --disable --logs
+```
 
 ## Troubleshooting
 

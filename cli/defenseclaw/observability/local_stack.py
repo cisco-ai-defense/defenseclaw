@@ -321,6 +321,147 @@ def _parse_json_object(raw: str, *, description: str) -> dict[str, object]:
     return value
 
 
+def resolve_native_docker_executable(
+    docker_path: str | os.PathLike[str] | None = None,
+    *,
+    os_name: str | None = None,
+) -> str:
+    """Resolve Docker and reject shell-backed shims on native Windows.
+
+    The returned value is always an absolute path.  Windows certification is
+    intentionally stricter than ``PATHEXT`` resolution: only a real ``.exe``
+    is accepted, so ``docker.cmd``, ``docker.bat``, and extensionless POSIX
+    launchers can never become part of a managed lifecycle.
+    """
+
+    resolved_os = host_os() if os_name is None else os_name.lower()
+    discovered = os.fspath(docker_path) if docker_path is not None else shutil.which("docker")
+    executable = str(Path(discovered).resolve()) if discovered else ""
+    if (
+        executable
+        and (resolved_os.startswith("win") or resolved_os == "windows")
+        and Path(executable).name.lower() != "docker.exe"
+    ):
+        raise LocalStackError(
+            "The certified native Windows path requires Docker Desktop's native "
+            "docker.exe; command-script shims are not supported."
+        )
+    return executable
+
+
+def _docker_desktop_wsl_setting(environment: Mapping[str, str]) -> bool | None:
+    appdata = environment.get("APPDATA")
+    if not appdata:
+        return None
+    for name in ("settings-store.json", "settings.json"):
+        path = Path(appdata) / "Docker" / name
+        try:
+            raw = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        try:
+            settings = json.loads(raw)
+        except ValueError:
+            return None
+        if isinstance(settings, dict):
+            value = settings.get("wslEngineEnabled")
+            if isinstance(value, bool):
+                return value
+    return None
+
+
+def _validate_windows_docker_certification(
+    docker_path: str,
+    info: Mapping[str, object],
+    environment: Mapping[str, str],
+    *,
+    feature_name: str,
+) -> None:
+    machine = platform.machine().lower()
+    if machine not in {"amd64", "x86_64"}:
+        raise LocalStackError(f"Native Windows {feature_name} is certified only for x64 systems.")
+    edition = platform.win32_edition().lower()
+    if not any(token in edition for token in ("professional", "enterprise", "education")):
+        raise LocalStackError(
+            f"The no-WSL {feature_name} path requires a supported Windows "
+            "Pro, Enterprise, or Education edition with Hyper-V."
+        )
+    operating_system = str(info.get("OperatingSystem", ""))
+    if "docker desktop" not in operating_system.lower():
+        raise LocalStackError(
+            "The certified Windows path requires Docker Desktop with Linux containers and the Hyper-V backend."
+        )
+    docker_executable = Path(docker_path)
+    for key in ("LOCALAPPDATA", "USERPROFILE"):
+        root_value = environment.get(key)
+        if not root_value:
+            continue
+        try:
+            docker_executable.relative_to(Path(root_value))
+        except ValueError:
+            continue
+        raise LocalStackError(
+            "This appears to be a per-user Docker Desktop installation. "
+            "Per-user and WSL-only installations are outside DefenseClaw's "
+            "certified Hyper-V/no-WSL configuration."
+        )
+    kernel = str(info.get("KernelVersion", "")).lower()
+    if "wsl" in kernel or "microsoft-standard" in kernel:
+        raise LocalStackError(
+            "Docker Desktop is using the WSL 2 backend. This no-WSL certification "
+            "requires the Hyper-V backend on a supported Windows edition."
+        )
+    backend_setting = _docker_desktop_wsl_setting(environment)
+    if backend_setting is True:
+        raise LocalStackError(
+            "Docker Desktop's WSL engine is enabled. Disable it and use the Hyper-V "
+            "backend for the certified no-WSL path."
+        )
+    if backend_setting is None and "linuxkit" not in kernel:
+        raise LocalStackError(
+            "DefenseClaw could not verify Docker Desktop's Hyper-V backend. "
+            "Per-user or WSL-only Docker Desktop installations are outside the "
+            "certified no-WSL configuration."
+        )
+
+
+def validate_native_docker_preflight(
+    docker_path: str,
+    runner: CommandRunner,
+    environment: Mapping[str, str],
+    *,
+    os_name: str,
+    feature_name: str = "local observability",
+) -> dict[str, object]:
+    """Validate Compose v2, the daemon, Linux containers, and Windows policy."""
+
+    if not docker_path:
+        raise LocalStackError("Docker CLI was not found on PATH. Install Docker Desktop and retry.")
+    compose = runner.run([docker_path, "compose", "version"], timeout=10, env=environment)
+    if compose.returncode != 0:
+        raise LocalStackError("Docker Compose v2 is unavailable. Install/enable the 'docker compose' plugin.")
+    info_result = runner.run(
+        [docker_path, "info", "--format", "{{json .}}"],
+        timeout=15,
+        env=environment,
+    )
+    if info_result.returncode != 0:
+        detail = (info_result.stderr or info_result.stdout).strip()
+        suffix = f" ({detail.splitlines()[0]})" if detail else ""
+        raise LocalStackError("Docker daemon is not reachable. Start Docker Desktop and retry" + suffix)
+    info = _parse_json_object(info_result.stdout.strip(), description="info")
+    if str(info.get("OSType", "")).lower() != "linux":
+        raise LocalStackError("Docker is using Windows containers. Switch Docker Desktop to Linux containers.")
+    if os_name.startswith("win") or os_name == "windows":
+        _validate_windows_docker_certification(
+            docker_path,
+            info,
+            environment,
+            feature_name=feature_name,
+        )
+    return info
+
+
 class LocalStackController:
     """Secure Docker Compose lifecycle for the DefenseClaw stack."""
 
@@ -336,17 +477,7 @@ class LocalStackController:
         self.stack_dir = _canonical_stack_dir(stack_dir)
         self.compose_file = (self.stack_dir / COMPOSE_FILE_NAME).resolve(strict=True)
         self.os_name = host_os() if os_name is None else os_name.lower()
-        discovered = os.fspath(docker_path) if docker_path is not None else shutil.which("docker")
-        self.docker_path = str(Path(discovered).resolve()) if discovered else ""
-        if (
-            self.docker_path
-            and (self.os_name.startswith("win") or self.os_name == "windows")
-            and Path(self.docker_path).suffix.lower() != ".exe"
-        ):
-            raise LocalStackError(
-                "The certified native Windows path requires Docker Desktop's native "
-                "docker.exe; command-script shims are not supported."
-            )
+        self.docker_path = resolve_native_docker_executable(docker_path, os_name=self.os_name)
         self.runner = runner or CommandRunner()
         self.environment = dict(os.environ if environment is None else environment)
         # The managed lifecycle always uses the Compose file's loopback default.
@@ -373,107 +504,12 @@ class LocalStackController:
 
     def preflight(self) -> dict[str, object]:
         """Validate Docker, Compose, daemon reachability, and container mode."""
-        if not self.docker_path:
-            raise LocalStackError(
-                "Docker CLI was not found on PATH. Install Docker Desktop and retry."
-            )
-        compose = self.runner.run(
-            [self.docker_path, "compose", "version"], timeout=10, env=self.environment
+        return validate_native_docker_preflight(
+            self.docker_path,
+            self.runner,
+            self.environment,
+            os_name=self.os_name,
         )
-        if compose.returncode != 0:
-            raise LocalStackError(
-                "Docker Compose v2 is unavailable. Install/enable the 'docker compose' plugin."
-            )
-        info_result = self.runner.run(
-            [self.docker_path, "info", "--format", "{{json .}}"],
-            timeout=15,
-            env=self.environment,
-        )
-        if info_result.returncode != 0:
-            detail = (info_result.stderr or info_result.stdout).strip()
-            suffix = f" ({detail.splitlines()[0]})" if detail else ""
-            raise LocalStackError(
-                "Docker daemon is not reachable. Start Docker Desktop and retry" + suffix
-            )
-        info = _parse_json_object(info_result.stdout.strip(), description="info")
-        if str(info.get("OSType", "")).lower() != "linux":
-            raise LocalStackError(
-                "Docker is using Windows containers. Switch Docker Desktop to Linux containers."
-            )
-        if self.os_name.startswith("win") or self.os_name == "windows":
-            self._validate_windows_certification(info)
-        return info
-
-    def _validate_windows_certification(self, info: Mapping[str, object]) -> None:
-        machine = platform.machine().lower()
-        if machine not in {"amd64", "x86_64"}:
-            raise LocalStackError(
-                "Native Windows local observability is certified only for x64 systems."
-            )
-        edition = platform.win32_edition().lower()
-        if not any(token in edition for token in ("professional", "enterprise", "education")):
-            raise LocalStackError(
-                "The no-WSL local observability path requires a supported Windows "
-                "Pro, Enterprise, or Education edition with Hyper-V."
-            )
-        operating_system = str(info.get("OperatingSystem", ""))
-        if "docker desktop" not in operating_system.lower():
-            raise LocalStackError(
-                "The certified Windows path requires Docker Desktop with Linux containers "
-                "and the Hyper-V backend."
-            )
-        docker_executable = Path(self.docker_path)
-        for key in ("LOCALAPPDATA", "USERPROFILE"):
-            root_value = self.environment.get(key)
-            if not root_value:
-                continue
-            try:
-                docker_executable.relative_to(Path(root_value))
-            except ValueError:
-                continue
-            raise LocalStackError(
-                "This appears to be a per-user Docker Desktop installation. "
-                "Per-user and WSL-only installations are outside DefenseClaw's "
-                "certified Hyper-V/no-WSL configuration."
-            )
-        kernel = str(info.get("KernelVersion", "")).lower()
-        if "wsl" in kernel or "microsoft-standard" in kernel:
-            raise LocalStackError(
-                "Docker Desktop is using the WSL 2 backend. This no-WSL certification "
-                "requires the Hyper-V backend on a supported Windows edition."
-            )
-        backend_setting = self._docker_desktop_wsl_setting()
-        if backend_setting is True:
-            raise LocalStackError(
-                "Docker Desktop's WSL engine is enabled. Disable it and use the Hyper-V "
-                "backend for the certified no-WSL path."
-            )
-        if backend_setting is None and "linuxkit" not in kernel:
-            raise LocalStackError(
-                "DefenseClaw could not verify Docker Desktop's Hyper-V backend. "
-                "Per-user or WSL-only Docker Desktop installations are outside the "
-                "certified no-WSL configuration."
-            )
-
-    def _docker_desktop_wsl_setting(self) -> bool | None:
-        appdata = self.environment.get("APPDATA")
-        if not appdata:
-            return None
-        for name in ("settings-store.json", "settings.json"):
-            path = Path(appdata) / "Docker" / name
-            try:
-                raw = path.read_text(encoding="utf-8-sig")
-            except OSError:
-                continue
-            try:
-                settings = json.loads(raw)
-            except ValueError:
-                return None
-            if isinstance(settings, dict):
-                value = settings.get("wslEngineEnabled")
-                if isinstance(value, bool):
-                    return value
-        return None
 
     def _run_compose(self, *args: str, timeout: float, capture: bool = True) -> CommandResult:
         return self.runner.run(
@@ -840,5 +876,7 @@ __all__ = [
     "LocalStackError",
     "ProbeResult",
     "UpResult",
+    "resolve_native_docker_executable",
     "resolve_stack_dir",
+    "validate_native_docker_preflight",
 ]
