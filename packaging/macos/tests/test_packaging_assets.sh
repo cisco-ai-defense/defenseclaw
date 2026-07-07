@@ -181,6 +181,78 @@ t_bundle_without_binary_and_no_repo_dies() {
   assert_contains "${out}" "no repo tree" "explains missing repo tree"
 }
 
+# PLIST validator regression: install.sh's plist-source ownership check
+# must be a TWO-TIER policy:
+#   - override (--plist or DEFENSECLAW_PLIST_SRC): require root-owned
+#   - bundle / repo default: allow the extracting user's uid (a plist
+#     extracted from our shipped tarball is owned by whoever ran `tar -x`,
+#     not root; requiring root there would break the documented
+#     `sudo ./install.sh` bundle flow — see PR #440 review feedback).
+# Group/world-writable bits must always be refused, regardless of origin.
+# We drive install.sh through DC_INSTALLER_SKIP_ROOT_CHECK=1 to bypass
+# the euid check but DO NOT set DC_INSTALLER_SKIP_PLIST_VALIDATION here —
+# we WANT the validator to run.
+t_plist_validator_accepts_bundle_default_owned_by_user() {
+  local bundle
+  bundle="$(_setup_bundle_fixture true)"
+  # Bundle default plist is owned by the current (non-root) uid — this
+  # models the extracted-tarball flow. Mode is 0644 (safe).
+  chmod 0644 "${bundle}/com.defenseclaw.gateway.plist"
+  local out rc=0
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
+    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+  # Should NOT die on the ownership check.
+  assert_not_contains "${out}" "must be owned by root" "bundle default plist accepted"
+  # It may still exit non-zero for OTHER reasons downstream in a stub
+  # fixture, but the specific "must be owned by root" branch must not fire.
+}
+
+t_plist_validator_rejects_bundle_default_that_is_world_writable() {
+  local bundle
+  bundle="$(_setup_bundle_fixture true)"
+  chmod 0646 "${bundle}/com.defenseclaw.gateway.plist"
+  local out rc=0
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
+    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "world-writable plist rejected"
+  assert_contains "${out}" "group/other writable" "explains why"
+}
+
+t_plist_validator_rejects_override_owned_by_non_root() {
+  # DEFENSECLAW_PLIST_SRC forces override policy; a non-root owner must
+  # be rejected even if the file is otherwise safe.
+  local bundle
+  bundle="$(_setup_bundle_fixture true)"
+  local override_plist="${bundle}/override.plist"
+  printf '<?xml version="1.0"?><plist/>' > "${override_plist}"
+  chmod 0644 "${override_plist}"
+  local out rc=0
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
+    DEFENSECLAW_PLIST_SRC="${override_plist}" \
+    "${bundle}/install.sh" \
+    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "override plist owned by non-root rejected"
+  assert_contains "${out}" "must be owned by root" "explains why"
+  assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "names the override source"
+}
+
+t_plist_validator_fails_closed_when_stat_output_empty() {
+  # Simulate stat failure by shimming a `stat` on PATH that outputs
+  # nothing. install.sh must die rather than silently skipping the check.
+  local bundle
+  bundle="$(_setup_bundle_fixture true)"
+  local shimbin="${bundle}/shim"
+  mkdir -p "${shimbin}"
+  printf '#!/bin/sh\nexit 0\n' > "${shimbin}/stat"
+  chmod 0755 "${shimbin}/stat"
+  local out rc=0
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 PATH="${shimbin}:${PATH}" \
+    "${bundle}/install.sh" \
+    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "stat empty must fail closed"
+  assert_contains "${out}" "cannot stat plist source" "explains why"
+}
+
 run_case "plist exists and lints"     t_plist_exists_and_parses
 run_case "plist references managed paths" t_plist_contains_managed_paths
 run_case "plist service user matches gateway expectation" t_plist_service_user_matches_gateway_expectation
@@ -194,3 +266,11 @@ run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
 run_case "install.sh has ensure_service_user + calls it before launchd" t_install_has_service_user_helper
 run_case "bundle layout: plist + binary resolve locally" t_bundle_layout_resolves_locally
 run_case "bundle without binary + no repo dies"          t_bundle_without_binary_and_no_repo_dies
+run_case "plist validator accepts bundle default owned by extracting user" \
+  t_plist_validator_accepts_bundle_default_owned_by_user
+run_case "plist validator rejects world-writable bundle default" \
+  t_plist_validator_rejects_bundle_default_that_is_world_writable
+run_case "plist validator rejects --override owned by non-root" \
+  t_plist_validator_rejects_override_owned_by_non_root
+run_case "plist validator fails closed when stat output empty" \
+  t_plist_validator_fails_closed_when_stat_output_empty

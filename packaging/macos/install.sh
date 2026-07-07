@@ -35,17 +35,28 @@ BINARY_SRC=""
 #   1. --plist / DEFENSECLAW_PLIST_SRC  (explicit override)
 #   2. next to the script            (standalone-bundle layout)
 #   3. under the repo tree           (dev-tree layout)
+#
+# PLIST_SRC_ORIGIN records which lookup won so the ownership validator
+# below can apply the right policy: an explicit --plist / env-var
+# override MUST be root-owned (installer treats it as an untrusted
+# operator input), whereas the bundle-local / repo-tree defaults are
+# ship-controlled — a tarball extracted by a regular user owns the plist
+# but its content came from the trusted bundle, so we only enforce
+# "no group/other write bits" there.
 PLIST_SRC=""
-for _candidate in \
-  "${DEFENSECLAW_PLIST_SRC:-}" \
-  "${SCRIPT_DIR}/com.defenseclaw.gateway.plist" \
-  "${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"; do
+PLIST_SRC_ORIGIN=""
+for _candidate_origin in \
+  "override:${DEFENSECLAW_PLIST_SRC:-}" \
+  "bundle:${SCRIPT_DIR}/com.defenseclaw.gateway.plist" \
+  "repo:${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"; do
+  _candidate="${_candidate_origin#*:}"
   if [[ -n "${_candidate}" && -f "${_candidate}" ]]; then
     PLIST_SRC="${_candidate}"
+    PLIST_SRC_ORIGIN="${_candidate_origin%%:*}"
     break
   fi
 done
-unset _candidate
+unset _candidate _candidate_origin
 SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
@@ -427,7 +438,7 @@ while [[ $# -gt 0 ]]; do
     --port)             API_PORT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
-    --plist)            PLIST_SRC="${2:?}"; shift 2;;
+    --plist)            PLIST_SRC="${2:?}"; PLIST_SRC_ORIGIN="override"; shift 2;;
     --service-user)     SERVICE_USER="${2:?}"; SERVICE_GROUP="${2:?}"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
     --skip-launchd)     SKIP_LAUNCHD="true"; shift;;
@@ -477,23 +488,41 @@ fi
 
 # Validate the plist source before we copy it into /Library/LaunchDaemons.
 # The plist gets installed root:wheel 0644 and executed as the DefenseClaw
-# service principal at boot; a plist owned or writable by a non-root user
-# is a privilege-escalation surface. Refuse to install one.
+# service principal at boot, so a tampered plist is a privesc surface.
 #
-# DC_INSTALLER_SKIP_ROOT_CHECK also skips this validator so bundle-fixture
-# tests can drive install.sh against a stub plist in a tmpdir.
-if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+# Two-tier policy based on PLIST_SRC_ORIGIN:
+#
+#   override — the operator passed --plist or DEFENSECLAW_PLIST_SRC. We
+#     treat that as an untrusted external path and require root:*
+#     ownership plus no group/other-write bits.
+#
+#   bundle / repo — the plist came from the shipped installer bundle
+#     (extracted from our tarball) or the repo tree. In the documented
+#     `sudo ./install.sh` bundle flow the plist is owned by the
+#     extracting user, not root — the content came from the trusted
+#     tarball but the extraction inherits the operator's uid. Enforce
+#     "no group/other-write bits" (a compromised umask can't slip a
+#     writable plist through) but skip the root-owner requirement.
+#
+# DC_INSTALLER_SKIP_PLIST_VALIDATION lets bundle-fixture tests drive
+# install.sh against a stub plist without also bypassing the euid check.
+# This is a separate seam from DC_INSTALLER_SKIP_ROOT_CHECK so tests can
+# exercise the validator against non-root-owned fixtures.
+if [[ "${DC_INSTALLER_SKIP_PLIST_VALIDATION:-}" != "1" ]]; then
   _plist_stat="$(stat -f '%Su %Lp' "${PLIST_SRC}" 2>/dev/null || echo '')"
-  if [[ -n "${_plist_stat}" ]]; then
-    _plist_owner="${_plist_stat%% *}"
-    _plist_mode="${_plist_stat##* }"
-    if [[ "${_plist_owner}" != "root" ]]; then
-      die "plist source ${PLIST_SRC} must be owned by root (got: ${_plist_owner}); refusing to install a potentially-tampered plist as a LaunchDaemon"
-    fi
-    # Refuse group-write or other-write bits (mode & 0o022).
-    if (( (8#${_plist_mode} & 8#022) != 0 )); then
-      die "plist source ${PLIST_SRC} is group/other writable (mode ${_plist_mode}); refusing to install"
-    fi
+  if [[ -z "${_plist_stat}" ]]; then
+    die "cannot stat plist source ${PLIST_SRC}; refusing to install"
+  fi
+  _plist_owner="${_plist_stat%% *}"
+  _plist_mode="${_plist_stat##* }"
+  if [[ "${PLIST_SRC_ORIGIN}" == "override" && "${_plist_owner}" != "root" ]]; then
+    die "plist source ${PLIST_SRC} was passed via --plist / DEFENSECLAW_PLIST_SRC and must be owned by root (got: ${_plist_owner}); refusing to install a potentially-tampered plist"
+  fi
+  # Refuse group-write or other-write bits (mode & 0o022) regardless of
+  # origin — an installer-bundle plist that's group/world-writable was
+  # tampered with post-extraction and shouldn't be trusted either.
+  if (( (8#${_plist_mode} & 8#022) != 0 )); then
+    die "plist source ${PLIST_SRC} is group/other writable (mode ${_plist_mode}); refusing to install"
   fi
   unset _plist_stat _plist_owner _plist_mode
 fi
