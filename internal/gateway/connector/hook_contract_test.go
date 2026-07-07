@@ -423,6 +423,15 @@ func TestHookContractCompatibilityDriftExcludesGeneratedArtifactChanges(t *testi
 	if !HookContractLockDrifted(previous, current) || !HookContractCompatibilityDrifted(previous, current) {
 		t.Fatal("agent version changes must remain compatibility and lock drift")
 	}
+
+	current = previous
+	current.NormalizedAgentVersion = "0.150.0"
+	if !HookContractCompatibilityDrifted(previous, current) {
+		t.Fatal("agent version changes must remain compatibility drift")
+	}
+	if !HookContractLockDrifted(previous, current) {
+		t.Fatal("agent version changes must remain lock drift")
+	}
 }
 
 func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {

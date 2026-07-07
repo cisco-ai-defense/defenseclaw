@@ -29,7 +29,6 @@ import platform
 import stat
 import subprocess
 import sys
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -67,6 +66,7 @@ from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
 from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_permissions import atomic_write_text_secure
 
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
@@ -2636,55 +2636,16 @@ def locked_config_yaml(path: str):
 def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     """Atomically write YAML without widening config.yaml permissions."""
     _assert_config_write_allowed(path, data)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    existing_mode: int | None = None
-    try:
-        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        existing_mode = None
+
+    def write_yaml(stream) -> None:
+        yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
 
     token_suffix = migration_state_helpers.upgrade_mutation_temp_suffix()
-    fd, tmp = tempfile.mkstemp(
+    atomic_write_text_secure(
+        path,
+        write_yaml,
         prefix=f".{os.path.basename(path)}.{token_suffix}",
-        suffix=".tmp",
-        dir=directory,
     )
-    descriptor_chmod = getattr(os, "fchmod", None)
-    if descriptor_chmod is not None:
-        descriptor_chmod(fd, 0o600)
-    else:
-        os.chmod(tmp, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-            f.flush()
-            os.fsync(f.fileno())
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-    if existing_mode is not None and existing_mode != 0o600:
-        target_mode = existing_mode & 0o600
-        if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
-            target_mode = 0o640
-        elif target_mode == 0:
-            target_mode = 0o600
-        try:
-            os.chmod(tmp, target_mode)
-        except OSError as exc:
-            _log.warning(
-                "config.save: cannot mirror %o mode onto %s (%s); writing as 0600",
-                existing_mode,
-                tmp,
-                exc,
-            )
-    os.replace(tmp, path)
     try:
         dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
     except OSError:

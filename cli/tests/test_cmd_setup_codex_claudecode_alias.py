@@ -460,9 +460,17 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertNotIn("pre-tool hook", result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
-        result = _invoke(["guardrail", "--help"], self.app)
+        host = "windows"
+        command = setup_group.commands["guardrail"]
+        connector_param = next(param for param in command.params if param.name == "agent_name")
+        windows_choices = platform_support.supported_connectors(connector_param.type.choices, host)
+        with (
+            patch("defenseclaw.platform_support.host_os", return_value=host),
+            patch.object(connector_param.type, "choices", windows_choices),
+        ):
+            result = _invoke(["guardrail", "--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in platform_support.supported_connectors(HOOK_ALIAS_CONNECTORS):
+        for connector in platform_support.supported_connectors(HOOK_ALIAS_CONNECTORS, host):
             self.assertIn(connector, result.output)
         choice_text = result.output.split("--connector, --agent [", 1)[1].split("]", 1)[0]
         for connector in platform_support.WINDOWS_UNSUPPORTED_CONNECTORS:
