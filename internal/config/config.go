@@ -202,6 +202,7 @@ type Config struct {
 	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
 	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
 	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
+	CloudAuth       CloudAuthConfig            `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
 	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
 	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
@@ -1963,6 +1964,23 @@ type GatewayConfigReloadConfig struct {
 	// file, records the reload, then shuts down so an external supervisor can
 	// start a fresh process with the full config.
 	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+}
+
+// CloudAuthMode values select the credential source used when the future
+// defenseclaw cloud client authenticates outbound requests.
+const (
+	CloudAuthModeCMID = "cmid"
+)
+
+// CloudAuthConfig selects how defenseclaw authenticates to the defenseclaw
+// cloud. The empty Mode disables cloud auth; today the only supported value
+// is "cmid", which sources credentials from the Cisco Secure Client Cloud
+// Management module via internal/managed/cloud. The consuming cloud client
+// is added in a follow-up branch — this struct exists so managed-mode
+// installers can begin rendering the block into config.yaml.
+type CloudAuthConfig struct {
+	Mode    string `mapstructure:"mode"     yaml:"mode,omitempty"`
+	LibPath string `mapstructure:"lib_path" yaml:"lib_path,omitempty"`
 }
 
 // WatchdogConfig controls the health watchdog that notifies users when the
