@@ -2217,8 +2217,9 @@ def test_fetch_ai_usage_uses_gateway_auth_and_accept_headers() -> None:
     try:
         config = SimpleNamespace(
             gateway=SimpleNamespace(
+                api_bind="127.0.0.1",
                 api_port=server.server_port,
-                host="127.0.0.1",
+                host="fleet.invalid",
                 resolved_token=lambda: "test-bearer-xyz",
             )
         )

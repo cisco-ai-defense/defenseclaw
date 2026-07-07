@@ -77,7 +77,8 @@ def test_overview_standalone_hint_and_notices() -> None:
 
     model.set_health(HealthSnapshot(gateway=SubsystemHealth(state="reconnecting")))
     notices = model.build_notices()
-    assert any(notice.level == "error" and "Gateway is offline" in notice.message for notice in notices)
+    assert not any("Gateway is offline" in notice.message for notice in notices)
+    assert any(notice.level == "info" and "Gateway is starting" in notice.message for notice in notices)
 
 
 def test_overview_mode_key_is_modal_owned_not_fake_command() -> None:

@@ -225,6 +225,7 @@ def build_readiness_checks(
     doctor: object | Mapping[str, Any] | None,
     credentials: Sequence[CredentialRow],
     queue: RestartQueue = RestartQueue(),
+    gateway_status: object | Mapping[str, Any] | None = None,
 ) -> tuple[ReadinessCheck, ...]:
     """Build Setup readiness rows using the same status/fix contract as Go."""
 
@@ -264,7 +265,36 @@ def build_readiness_checks(
 
     gateway_state = str(_get_path(health, "gateway.state", "") or "")
     api_state = str(_get_path(health, "api.state", "") or "")
-    if health is None:
+    availability_state = str(_get_path(gateway_status, "state", "") or "").strip().lower()
+    availability_detail = str(_get_path(gateway_status, "last_error", "") or "").strip()
+    if availability_state in {"error", "failed"}:
+        checks.append(
+            ReadinessCheck(
+                "Gateway / API Health",
+                availability_detail or "Gateway health probe failed.",
+                "fail",
+            ),
+        )
+    elif availability_state in {"offline", "stopped", "down"}:
+        checks.append(
+            ReadinessCheck(
+                "Gateway / API Health",
+                availability_detail or "Gateway health endpoint is offline.",
+                "fail",
+                _intent("defenseclaw-gateway", ("start",), "start", "daemon"),
+            ),
+        )
+    elif availability_state in {"starting", "reconnecting"}:
+        checks.append(
+            ReadinessCheck(
+                "Gateway / API Health",
+                availability_detail or "Gateway is starting.",
+                "warn",
+            ),
+        )
+    elif availability_state in {"running", "ready", "healthy", "ok"}:
+        checks.append(ReadinessCheck("Gateway / API Health", "Gateway and API are healthy.", "pass"))
+    elif health is None:
         checks.append(
             ReadinessCheck(
                 "Gateway / API Health",
@@ -273,7 +303,7 @@ def build_readiness_checks(
                 _intent("defenseclaw-gateway", ("start",), "start", "daemon"),
             ),
         )
-    elif not _state_healthy(gateway_state) or not _state_healthy(api_state):
+    elif not _state_healthy_or_disabled(gateway_state) or not _state_healthy(api_state):
         checks.append(
             ReadinessCheck(
                 "Gateway / API Health",
@@ -804,6 +834,10 @@ def _intent(binary: str, args: tuple[str, ...], label: str, category: str) -> Se
 
 def _state_healthy(state: str) -> bool:
     return state.strip().lower() in {"running", "ok", "healthy", "ready"}
+
+
+def _state_healthy_or_disabled(state: str) -> bool:
+    return state.strip().lower() == "disabled" or _state_healthy(state)
 
 
 def _doctor_missing_credentials(doctor: object | Mapping[str, Any] | None) -> tuple[str, ...]:

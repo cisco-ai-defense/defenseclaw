@@ -19,6 +19,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+import requests
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
 from rich.markup import escape as rich_escape
@@ -163,6 +164,15 @@ TOKENS = DEFAULT_TOKENS
 
 class _ConfigGenerationChangedError(RuntimeError):
     """The watched config moved while a background reload was in flight."""
+
+
+@dataclass(frozen=True)
+class GatewayHealthResult:
+    """One sidecar API probe and its optional fresh health payload."""
+
+    state: str
+    detail: str = ""
+    snapshot: HealthSnapshot | None = None
 
 
 def _load_config_generation(path: Path, expected: ConfigGeneration) -> object:
@@ -3721,13 +3731,8 @@ class DefenseClawTUI(App[None]):
         like a static palette dump.
         """
 
-        gateway_state = ""
-        cards = self.overview_model.service_cards()
-        for card in cards:
-            if card.name.lower() == "gateway":
-                gateway_state = (card.state or "").lower()
-                break
-        gateway_offline = gateway_state in {"", "unknown", "down", "stopped", "offline", "error", "failed"}
+        gateway_state = self.overview_model.gateway_availability().state.strip().lower()
+        gateway_offline = gateway_state in {"down", "stopped", "offline"}
         gateway_running = gateway_state in {"running", "ok", "healthy", "up"}
 
         ai_box = self.overview_model.ai_discovery_box()
@@ -4767,9 +4772,16 @@ class DefenseClawTUI(App[None]):
             if multi_connectors and not selected_connector
             else self._connector_health_for_metric(connector, use_single=not multi_connectors or bool(selected_connector))
         )
-        health = self.overview_model.health
-        gateway_state = (health.gateway.state if health is not None else "").strip().lower()
+        gateway_state = self.overview_model.gateway_availability().state.strip().lower()
         gateway_online = gateway_state in {"running", "ready", "healthy", "ok"}
+        gateway_unavailable_label = {
+            "starting": "gateway starting",
+            "reconnecting": "gateway reconnecting",
+            "error": "gateway health error",
+            "failed": "gateway health error",
+            "unknown": "gateway status pending",
+            "": "gateway status pending",
+        }.get(gateway_state, "gateway offline")
 
         sev = self._alert_severity_counts_for_connectors(scope_connectors)
         fleet_sev = self._alert_severity_counts("")
@@ -4869,7 +4881,7 @@ class DefenseClawTUI(App[None]):
                 if errors:
                     call_detail_parts.append(f"[{TOKENS.accent_red}]{errors}[/] errors")
             elif not gateway_online:
-                call_detail_parts.append(f"[{TOKENS.accent_amber}]gateway offline · press : then start[/]")
+                call_detail_parts.append(f"[{TOKENS.accent_amber}]{gateway_unavailable_label}[/]")
             elif requests == 0:
                 call_detail_parts.append("waiting for tool calls")
             else:
@@ -4890,7 +4902,7 @@ class DefenseClawTUI(App[None]):
                     )
                 elif not gateway_online:
                     block_detail_parts.append(
-                        f"[{TOKENS.text_muted}]0 persisted · gateway offline[/]"
+                        f"[{TOKENS.text_muted}]0 persisted · {gateway_unavailable_label}[/]"
                     )
                 else:
                     block_detail_parts.append("no blocks yet")
@@ -6071,7 +6083,7 @@ class DefenseClawTUI(App[None]):
         # Fallback status when the gateway doesn't expose connectors[] yet:
         # the gateway runs every connector in one process, so the gateway
         # state stands in for each connector.
-        gateway_state = self.overview_model.subsystem_state("gateway")
+        gateway_state = self.overview_model.gateway_availability().state
         fallback_status = "active" if gateway_state.strip().lower() == "running" else gateway_state
         now = datetime.now(timezone.utc)
         rows: list[ConnectorOverviewRow] = []
@@ -7971,10 +7983,12 @@ class DefenseClawTUI(App[None]):
         guardrail_detail = self.overview_model.service_detail("guardrail")
         guardrail = ServiceStatus("Guardrail", guardrail_state, guardrail_detail)
 
-        # Gateway / Watchdog mirror the live /health subsystem state
-        # so the strip and the SERVICES box agree.
-        gateway_state = self.overview_model.subsystem_state("gateway") or "unknown"
-        gateway_detail = self.overview_model.service_detail("gateway")
+        # Gateway reports authenticated sidecar API availability, not the
+        # optional fleet uplink in ``/health.gateway``.  The latter is
+        # intentionally disabled in healthy hook-only deployments.
+        gateway_availability = self.overview_model.gateway_availability()
+        gateway_state = gateway_availability.state or "unknown"
+        gateway_detail = gateway_availability.last_error or self.overview_model.service_detail("gateway")
 
         # Context pills (connector / redaction / policy) only render
         # when we have a loaded configuration to draw from. Before
@@ -10420,15 +10434,17 @@ class DefenseClawTUI(App[None]):
         "unknown" for every subsystem.
 
         We dispatch the actual fetch to a worker thread so the 3s
-        HTTP timeout never blocks Textual's event loop, and we tolerate
-        the gateway being offline by simply leaving ``health=None`` so
-        the existing "Gateway is offline" notice continues to render.
+        HTTP timeout never blocks Textual's event loop. Failed probes update
+        the explicit availability state while retaining the last live health
+        payload, so connector activity survives transient restarts.
         """
 
         if self.config is None or getattr(self, "_app_shutting_down", False):
             return
         api_port = _gateway_api_port(self.config)
         if api_port <= 0:
+            self.overview_model.set_gateway_probe("error", "sidecar API port is not configured")
+            self._sync_setup_readiness()
             return
         if self._health_poll_running:
             return
@@ -10469,25 +10485,30 @@ class DefenseClawTUI(App[None]):
             self._ai_usage_poll_running = False
 
     async def _poll_health(self) -> None:
-        # Use the configured token + host so a gateway that requires
-        # Authorization (the default when ``OPENCLAW_GATEWAY_TOKEN`` or
-        # ``gateway.token`` is set) doesn't 401 us into ``unknown``.
-        # The previous urllib fetcher couldn't attach the header and
-        # was the root cause of "I did everything but it still shows
-        # unknown" — the gateway was up, but the unauthenticated probe
-        # bounced.
-        snapshot = await asyncio.to_thread(_fetch_gateway_health, self.config)
-        # ``snapshot`` is None on connection refused / timeouts. We
-        # propagate that as ``set_health(None)`` so subsystem_state()
-        # returns "unknown" and the SERVICES rows clearly reflect
-        # "we don't know" instead of stale data from a previous run.
-        self.overview_model.set_health(snapshot)
-        self._propagate_connector(snapshot)
+        result = await asyncio.to_thread(_fetch_gateway_health, self.config)
+        # Compatibility for tests/extensions that replace the fetcher with
+        # the pre-WIN-AUD-047 return type.
+        if isinstance(result, HealthSnapshot):
+            result = GatewayHealthResult(
+                state=_gateway_state_from_snapshot(result),
+                snapshot=result,
+            )
+        elif result is None:
+            result = GatewayHealthResult("offline", "sidecar API is unreachable")
+        self.overview_model.set_gateway_probe(result.state, result.detail)
+        snapshot = result.snapshot
+        # A transient failed probe changes availability immediately but does
+        # not erase the last connector/activity payload.  The next successful
+        # poll replaces it and clears the failure without any latch.
+        if snapshot is not None:
+            self.overview_model.set_health(snapshot)
+            self._propagate_connector(snapshot)
         # Mirror Go: clear the queued-restart banner once the gateway
         # has actually restarted (its StartedAt moved). Without this
         # the banner sticks around forever even though the restart
         # already finished, since we never call mark_restart_started.
-        self._mark_restart_if_gateway_restarted(snapshot)
+        if snapshot is not None:
+            self._mark_restart_if_gateway_restarted(snapshot)
         # Rebuild Setup readiness now that we have a fresh health
         # snapshot (the gateway/api/guardrail rows depend on it).
         self._sync_setup_readiness()
@@ -10538,6 +10559,7 @@ class DefenseClawTUI(App[None]):
                 credentials=tuple(
                     getattr(self.setup_model.credential_snapshot, "rows", ()) or ()
                 ),
+                gateway_status=self.overview_model.gateway_availability(),
             )
         except AttributeError:
             # Older SetupPanelModel — silently skip; the readiness
@@ -10822,51 +10844,101 @@ def _gateway_api_port(config: object | None) -> int:
     return port if port > 0 else 0
 
 
-def _fetch_gateway_health(config: object | None) -> HealthSnapshot | None:
-    """Blocking ``/health`` fetcher, intended for ``asyncio.to_thread``.
+def _gateway_state_from_snapshot(snapshot: HealthSnapshot) -> str:
+    """Classify sidecar readiness using the Go daemon's required states."""
 
-    Uses :class:`OrchestratorClient` so the configured token, host, and
-    port all flow through automatically — that matters because a gateway
-    started with ``OPENCLAW_GATEWAY_TOKEN`` set will 401 any probe that
-    forgets the ``Authorization: Bearer …`` header, and the operator's
-    SERVICES box would silently stay at ``unknown``.
+    api_state = snapshot.api.state.strip().lower()
+    gateway_state = snapshot.gateway.state.strip().lower()
+    api_running = api_state in {"", "running", "ready", "healthy", "ok"}
+    gateway_running = gateway_state in {"", "running", "ready", "healthy", "ok", "disabled"}
+    if api_running and gateway_running:
+        return "running"
+    if api_state in {"stopped", "offline", "down"}:
+        return "offline"
+    if api_state in {"error", "failed"}:
+        return "error"
+    if gateway_state in {"stopped", "offline", "down"}:
+        return "offline"
+    if api_state in {"starting", "reconnecting"} or gateway_state in {"starting", "reconnecting", "error", "failed"}:
+        return "starting"
+    return "starting"
 
-    Any exception (connection refused, DNS failure, malformed JSON,
-    401/403) collapses to ``None`` so the caller can render "unknown"
-    without crashing the panel.
+
+def _gateway_snapshot_detail(snapshot: HealthSnapshot, state: str) -> str:
+    """Return a concise, non-secret diagnostic for a classified snapshot."""
+
+    if state == "running" and snapshot.gateway.state.strip().lower() == "disabled":
+        summary = snapshot.gateway.details.get("summary", "")
+        return summary.strip() if isinstance(summary, str) else ""
+    for name, subsystem in (("API", snapshot.api), ("gateway", snapshot.gateway)):
+        raw_state = subsystem.state.strip().lower()
+        if state == "starting" and raw_state in {"starting", "reconnecting", "error", "failed"}:
+            return subsystem.last_error.strip() or f"{name} {raw_state}"
+        if state in {"offline", "error"} and raw_state in {
+            "stopped",
+            "offline",
+            "down",
+            "error",
+            "failed",
+        }:
+            return subsystem.last_error.strip() or f"{name} {raw_state}"
+    return ""
+
+
+def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
+    """Probe the configured authenticated sidecar API without using proxy state.
+
+    ``gateway.api_bind`` / ``api_port`` identify the REST listener;
+    ``gateway.host`` / ``port`` identify the optional fleet uplink and must not
+    influence TUI liveness.  Authentication, configuration, startup, and
+    transport failures remain distinct so the footer can give useful guidance.
     """
 
     if config is None:
-        return None
+        return GatewayHealthResult("error", "sidecar API configuration is unavailable")
     gateway_cfg = getattr(config, "gateway", None)
     if gateway_cfg is None:
-        return None
+        return GatewayHealthResult("error", "sidecar API configuration is unavailable")
     try:
         port = int(getattr(gateway_cfg, "api_port", 0) or 0)
     except (TypeError, ValueError):
-        return None
+        return GatewayHealthResult("error", "sidecar API port is invalid")
     if port <= 0:
-        return None
-    host = str(getattr(gateway_cfg, "host", "") or "127.0.0.1") or "127.0.0.1"
-    # The gateway's API server binds 127.0.0.1 by default; ``0.0.0.0`` /
-    # empty values would resolve fine over the wire but make the client
-    # round-trip needlessly slow on macOS. Normalize to loopback.
-    if host in ("", "0.0.0.0"):
-        host = "127.0.0.1"
-    resolve_token = getattr(gateway_cfg, "resolved_token", None)
-    token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+        return GatewayHealthResult("error", "sidecar API port is not configured")
 
     try:
-        from defenseclaw.gateway import OrchestratorClient
-    except Exception:  # noqa: BLE001 — never let a bad import kill the TUI
-        return None
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+        host = gateway_api_client_host(config)
+        resolve_token = getattr(gateway_cfg, "resolved_token", None)
+        token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+        client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+    except Exception:  # noqa: BLE001 - configuration/import errors must not kill the TUI.
+        return GatewayHealthResult("error", "sidecar API client configuration is invalid")
+
     try:
         payload = client.health()
-    except Exception:  # noqa: BLE001 — offline / unauthenticated gateway is normal
-        return None
-    return _health_snapshot_from_mapping(payload)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status in {401, 403}:
+            return GatewayHealthResult(
+                "error",
+                f"authentication error: sidecar rejected the configured token (HTTP {status})",
+            )
+        label = f"HTTP {status}" if status else "HTTP error"
+        return GatewayHealthResult("error", f"sidecar health request failed ({label})")
+    except (requests.ConnectionError, requests.Timeout, OSError):
+        return GatewayHealthResult("offline", "sidecar API is unreachable")
+    except (requests.RequestException, ValueError):
+        return GatewayHealthResult("error", "sidecar health response is invalid")
+    except Exception:  # noqa: BLE001 - unexpected probe failures are errors, not outages.
+        return GatewayHealthResult("error", "sidecar health probe failed")
+
+    snapshot = _health_snapshot_from_mapping(payload)
+    if snapshot is None:
+        return GatewayHealthResult("error", "sidecar health response is invalid")
+    state = _gateway_state_from_snapshot(snapshot)
+    return GatewayHealthResult(state, _gateway_snapshot_detail(snapshot, state), snapshot)
 
 
 def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
@@ -10889,17 +10961,15 @@ def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
         return None
     if port <= 0:
         return None
-    host = str(getattr(gateway_cfg, "host", "") or "127.0.0.1") or "127.0.0.1"
-    if host in ("", "0.0.0.0"):
-        host = "127.0.0.1"
     resolve_token = getattr(gateway_cfg, "resolved_token", None)
     token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
 
     try:
-        from defenseclaw.gateway import OrchestratorClient
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
     except Exception:  # noqa: BLE001
         return None
 
+    host = gateway_api_client_host(config)
     client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
     client._session.headers["Accept"] = "application/json"  # noqa: SLF001 - mirrors Go fetchAIUsage.
     try:

@@ -563,6 +563,7 @@ class SetupPanelModel:
         health: Any = None,
         doctor: Any = None,
         credentials: tuple[Any, ...] | None = None,
+        gateway_status: Any = None,
     ) -> None:
         """Re-evaluate Setup readiness rows from the current inputs.
 
@@ -583,6 +584,7 @@ class SetupPanelModel:
             doctor,
             rows,
             self.restart_queue,
+            gateway_status,
         )
 
     def wizard_infos(self, *, now: datetime | None = None) -> tuple[SetupWizardInfo, ...]:
