@@ -56,6 +56,12 @@ def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
 
+@pytest.fixture
+def windows_host_no_path(monkeypatch) -> None:
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+
+
 def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"
     config_path = tmp_path / "managed" / "config.yaml"
@@ -284,7 +290,11 @@ def test_hermes_legacy_windows_config_is_not_current_configuration_evidence(
     assert signal.config_path == ""
 
 
-def test_hermes_native_windows_venv_is_discovered_without_path(monkeypatch, tmp_path):
+def test_hermes_native_windows_venv_is_discovered_without_path(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
     home = tmp_path / "home"
     local_app_data = tmp_path / "local-app-data"
     binary = (
@@ -302,8 +312,6 @@ def test_hermes_native_windows_venv_is_discovered_without_path(monkeypatch, tmp_
     _pin_home(monkeypatch, home)
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     monkeypatch.delenv("HERMES_HOME", raising=False)
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(ad, "hermes_config_path", lambda: str(config))
     monkeypatch.setattr(
         ad,
@@ -324,15 +332,17 @@ def test_hermes_native_windows_venv_is_discovered_without_path(monkeypatch, tmp_
     assert signal.version == "Hermes Agent v0.17.0"
 
 
-def test_antigravity_windows_cli_fallback_is_detected(monkeypatch, tmp_path):
+def test_antigravity_windows_cli_fallback_is_detected(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
     _pin_home(monkeypatch, tmp_path)
     local_app_data = tmp_path / "local-app-data"
     agy = local_app_data / "agy" / "bin" / "agy.exe"
     agy.parent.mkdir(parents=True)
     agy.write_bytes(b"test executable")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(
         ad,
         "_version_for_agent_binary",
@@ -349,15 +359,17 @@ def test_antigravity_windows_cli_fallback_is_detected(monkeypatch, tmp_path):
     assert signal.version == "1.0.13"
 
 
-def test_antigravity_gui_fallback_reads_metadata_without_launch(monkeypatch, tmp_path):
+def test_antigravity_gui_fallback_reads_metadata_without_launch(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
     _pin_home(monkeypatch, tmp_path)
     local_app_data = tmp_path / "local-app-data"
     gui = local_app_data / "Programs" / "antigravity" / "Antigravity.exe"
     gui.parent.mkdir(parents=True)
     gui.write_bytes(b"test executable")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(ad, "_windows_file_version_for_binary", lambda path, **_kwargs: ("2.2.1", ""))
     monkeypatch.setattr(
         ad.subprocess,
@@ -429,6 +441,7 @@ def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
 def test_windows_discovery_finds_known_binary_outside_path(
     monkeypatch,
     tmp_path,
+    windows_host_no_path,
     connector,
     relative_binary,
 ):
@@ -442,8 +455,6 @@ def test_windows_discovery_finds_known_binary_outside_path(
     _pin_home(monkeypatch, home)
     monkeypatch.setenv("LOCALAPPDATA", str(local))
     monkeypatch.setenv("APPDATA", str(roaming))
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
 
     resolved = ad._binary_path_for_agent(connector, ad._SPECS[connector])
 
