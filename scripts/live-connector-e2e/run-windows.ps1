@@ -148,10 +148,10 @@ function Write-Result([string]$Event, [string]$Status, [string]$Detail = '') {
     Write-Host "[$($Status.ToUpperInvariant())] $Connector/windows/$Event $($record.detail)"
 }
 
-function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0), [string]$Input = '', [int]$Timeout = $CommandTimeoutSeconds) {
+function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0), [string]$InputPath = '', [int]$Timeout = $CommandTimeoutSeconds) {
     $file = (Get-Command $Name -ErrorAction Stop).Source
     $log = Join-Path $script:LogRoot (("{0:D3}-{1}.log" -f (++$script:CommandIndex), ($Name -replace '[^A-Za-z0-9.-]', '_')))
-    return Invoke-NativeProcess -FilePath $file -ArgumentList $Arguments -InputPath $Input -TimeoutSeconds $Timeout -AllowedExitCodes $Allowed -LogPath $log
+    return Invoke-NativeProcess -FilePath $file -ArgumentList $Arguments -InputPath $InputPath -TimeoutSeconds $Timeout -AllowedExitCodes $Allowed -LogPath $log
 }
 
 function Wait-Gateway([int]$Timeout = 30) {
@@ -192,7 +192,7 @@ function Invoke-Teardown {
 
 function Invoke-Hook([string]$Event, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
-    $result = Invoke-Tool 'defenseclaw-hook' @('hook', '--connector', $Connector, '--event', $Event) @(0, 2) $Payload
+    $result = Invoke-Tool 'defenseclaw-hook' @('hook', '--connector', $Connector, '--event', $Event) @(0, 2) -InputPath $Payload
     Start-Sleep -Milliseconds 800
     if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $before)) { throw "$Event did not reach the gateway" }
     if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$Event should allow but exited $($result.ExitCode)" }

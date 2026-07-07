@@ -30,6 +30,14 @@ try {
     $block = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'block') -TimeoutSeconds 5 -AllowedExitCodes @(2)
     Assert-True ($block.ExitCode -eq 2 -and $block.StdOut -match 'block') 'mock block decision'
 
+    $payloadPath = Join-Path $temp 'hook-payload.json'
+    $payload = '{"hook":"stdin-sentinel"}'
+    [IO.File]::WriteAllText($payloadPath, $payload)
+    $script:LogRoot = Join-Path $temp 'logs'
+    $script:CommandIndex = 0
+    $stdin = Invoke-Tool 'pwsh' @('-NoProfile', '-File', $mock, '-Action', 'stdin') @(0) -InputPath $payloadPath
+    Assert-True ($stdin.StdOut.Trim() -eq $payload) 'Invoke-Tool forwards the payload file to native stdin'
+
     [Environment]::SetEnvironmentVariable('DC_E2E_TEST_SECRET', ('unit-test-' + 'sensitive-value'))
     $secret = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'secret') -TimeoutSeconds 5
     Assert-True ($secret.StdOut -notmatch 'unit-test-sensitive-value' -and $secret.StdOut -match 'REDACTED') 'secret redaction'
