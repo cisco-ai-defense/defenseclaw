@@ -49,7 +49,7 @@ on:
   # cross-platform smoke cell (codex / macOS) so there is a required
   # connector signal on each change; when the PR touches connector, hook,
   # registry, contract-script, or this workflow, the run expands to the full
-  # Linux + macOS + Windows x 9-connector matrix (see the `changes` job).
+  # supported Linux + macOS + Windows connector matrix (see the `changes` job).
   # Layer B (live) stays manual-only and never runs for pull requests.
   pull_request:
   workflow_dispatch:
@@ -133,9 +133,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Full 3-OS x 9-connector matrix for nightly + manual runs and for
-          # pull requests that touch connector-relevant code.
-          full='{"os":["ubuntu-latest","macos-latest","windows-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
+          # Full supported connector matrix for nightly + manual runs and for
+          # pull requests that touch connector-relevant code. OpenHands has no
+          # native Windows support, so do not schedule that impossible cell.
+          full='{"os":["ubuntu-latest","macos-latest","windows-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"],"exclude":[{"os":"windows-latest","connector":"openhands"}]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
           # chosen because ci.yml already guards the Windows hook path on every
           # PR but has no macOS coverage at all — this adds the missing native

@@ -1880,7 +1880,11 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
-		s.health.SetWatcher(StateError, "no directories configured", nil)
+		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
+			"skill_dirs":  0,
+			"plugin_dirs": 0,
+			"idle":        "no directories configured",
+		})
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: no directories to watch\n")
 		<-ctx.Done()
 		return nil

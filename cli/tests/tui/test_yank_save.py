@@ -335,7 +335,10 @@ def test_action_save_last_run_log_surfaces_oserror(tmp_path: Path) -> None:
     captured: list[tuple[str, str]] = []
     app.notify_toast = lambda level, msg: captured.append((level, msg))  # type: ignore[assignment]
 
-    with patch.object(Path, "write_text", side_effect=OSError("read-only fs")):
+    with patch(
+        "defenseclaw.tui.app._write_owner_only_text",
+        side_effect=OSError("read-only fs"),
+    ):
         app.action_save_last_run_log()
 
     assert captured, "expected an error toast"

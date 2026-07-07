@@ -95,7 +95,7 @@ func styledConnectorStateVerb(state string) string {
 	}
 }
 
-func sidecarHealthURL(c *config.Config) string {
+func gatewayBindHost(c *config.Config) string {
 	if c == nil {
 		c = config.DefaultConfig()
 	}
@@ -105,6 +105,14 @@ func sidecarHealthURL(c *config.Config) string {
 	} else if c.OpenShell.IsStandalone() && c.Guardrail.Host != "" && c.Guardrail.Host != "localhost" {
 		bind = c.Guardrail.Host
 	}
+	return bind
+}
+
+func sidecarHealthURL(c *config.Config) string {
+	if c == nil {
+		c = config.DefaultConfig()
+	}
+	bind := gatewayBindHost(c)
 	return fmt.Sprintf("http://%s:%d/health", bind, c.Gateway.APIPort)
 }
 
@@ -162,12 +170,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayKV("Uptime", formatDuration(uptime))
 	fmt.Println()
 
-	bind := "127.0.0.1"
-	if cfg.Gateway.APIBind != "" {
-		bind = cfg.Gateway.APIBind
-	} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
-		bind = cfg.Guardrail.Host
-	}
+	bind := gatewayBindHost(cfg)
 	if modes := fetchConnectorModes(client, bind, cfg.Gateway.APIPort); len(modes) > 0 {
 		printConnectorModes(modes)
 	}
