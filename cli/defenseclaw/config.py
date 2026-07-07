@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -2657,6 +2658,45 @@ class Config:
                 owned_base=self._loaded_owned_nested_values,
             )
             write_config_yaml_secure(path, merged)
+
+    def save_verified(self, verify: Callable[[str], None]) -> None:
+        """Persist atomically, verify the written file, and roll back on failure.
+
+        ``verify`` runs while the existing per-config lock is still held, so a
+        successful return proves the exact generation written by this call was
+        inspected.  If verification fails after the atomic replace, the prior
+        YAML document is atomically restored before the error is re-raised.
+        Callers should mutate a copy of the live :class:`Config` and publish
+        that copy back to their in-memory state only after this method returns.
+        """
+        path = str(config_path_for_data_dir(self.data_dir))
+        dataclass_data = _config_to_dict(self)
+        owned_keys = _owned_top_level_keys(self)
+        with locked_config_yaml(path):
+            existed = os.path.exists(path)
+            existing = _load_existing_config_yaml(path)
+            merged = _merge_preserving_unmodeled(
+                existing,
+                dataclass_data,
+                owned_keys,
+                authoritative_base=self._loaded_authoritative_dicts,
+                owned_base=self._loaded_owned_nested_values,
+            )
+            write_config_yaml_secure(path, merged)
+            try:
+                verify(path)
+            except Exception as verify_error:
+                try:
+                    if existed:
+                        write_config_yaml_secure(path, existing)
+                    else:
+                        os.unlink(path)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "config verification failed and the previous configuration "
+                        f"could not be restored: {rollback_error}"
+                    ) from verify_error
+                raise
 
 
 # ---------------------------------------------------------------------------

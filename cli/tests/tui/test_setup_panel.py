@@ -2696,3 +2696,55 @@ def test_per_connector_asset_policy_field_writes_typed_override() -> None:
 
     apply_config_field(cfg, "asset_policy.connectors.hermes.mcp.registry_required", "")
     assert entry.mcp.registry_required is None
+
+
+def test_global_registry_required_field_reconciles_every_active_connector() -> None:
+    from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.asset_policy.skill.registry_required = False
+    cfg.asset_policy.connectors = {
+        "codex": PerConnectorAssetPolicy(
+            mode="action",
+            skill=PerConnectorAssetTypePolicy(
+                default="deny", registry_required=False, registry_empty_action="warn",
+            ),
+        ),
+        "hermes": PerConnectorAssetPolicy(
+            skill=PerConnectorAssetTypePolicy(registry_required=True),
+        ),
+    }
+
+    apply_config_field(cfg, "asset_policy.skill.registry_required", "true")
+
+    assert cfg.asset_policy.skill.registry_required is True
+    for connector in ("codex", "hermes"):
+        assert cfg.asset_policy.effective_asset_type_policy(connector, "skill").registry_required is True
+        assert cfg.asset_policy.connectors[connector].skill.registry_required is None
+    assert cfg.asset_policy.connectors["codex"].mode == "action"
+    assert cfg.asset_policy.connectors["codex"].skill.default == "deny"
+    assert cfg.asset_policy.connectors["codex"].skill.registry_empty_action == "warn"
+
+
+def test_scoped_registry_required_field_uses_same_resolver_without_peer_changes() -> None:
+    from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.asset_policy.mcp.registry_required = True
+    cfg.asset_policy.connectors = {
+        "codex": PerConnectorAssetPolicy(mcp=PerConnectorAssetTypePolicy(registry_required=True)),
+        "hermes": PerConnectorAssetPolicy(
+            mode="observe",
+            mcp=PerConnectorAssetTypePolicy(default="deny", registry_required=True),
+        ),
+    }
+
+    apply_config_field(cfg, "asset_policy.connectors.codex.mcp.registry_required", "false")
+
+    assert cfg.asset_policy.mcp.registry_required is True
+    assert cfg.asset_policy.connectors["codex"].mcp.registry_required is False
+    assert cfg.asset_policy.connectors["hermes"].mcp.registry_required is True
+    assert cfg.asset_policy.connectors["hermes"].mcp.default == "deny"
+    assert cfg.asset_policy.connectors["hermes"].mode == "observe"

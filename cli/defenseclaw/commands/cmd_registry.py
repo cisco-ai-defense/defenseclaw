@@ -40,7 +40,7 @@ from typing import Any
 
 import click
 
-from defenseclaw import connector_paths, ux
+from defenseclaw import ux
 from defenseclaw.config import (
     REGISTRY_CONTENT_TYPES,
     REGISTRY_KINDS,
@@ -65,6 +65,11 @@ from defenseclaw.registries.sync import (
     ScanCallback,
     manual_set_verdict,
     promote_from_cache,
+)
+from defenseclaw.registry_policy import (
+    RegistryRequiredResult,
+    RegistryRequiredUpdateError,
+    set_registry_required,
 )
 
 # ---------------------------------------------------------------------------
@@ -1414,45 +1419,28 @@ def _do_manual_verdict(
 # require — toggle asset_policy.{type}.registry_required
 # ---------------------------------------------------------------------------
 
-def _resolve_per_connector_asset_block(
-    cfg: Config, connector: str, asset_type: str,
-):
-    """Resolve (creating if absent) the per-connector per-type scalar block
-    ``asset_policy.connectors[connector].<asset_type>`` (OTHER-7).
 
-    Returns ``(storage_key, block)``. An existing alias-equivalent key (via
-    ``connector_paths.normalize``) is reused rather than minting a second
-    entry, so the save round-trip never trips
-    :meth:`AssetPolicyConfig.validate`'s alias-collision guard. Mirrors the
-    lookup in :meth:`AssetPolicyConfig._connector_override`. Connector identity
-    is deliberately NOT validated here — matching ``validate()`` and the
-    guardrail per-connector writers, an unknown connector is left to the
-    gateway boot loop. Only the ``registry_required`` scalar is touched; any
-    existing per-connector ``mode`` / ``default`` / ``registry_empty_action``
-    and the other per-type blocks are preserved untouched.
-    """
-    from defenseclaw.config import (
-        PerConnectorAssetPolicy,
-        PerConnectorAssetTypePolicy,
-    )
-
-    conns = cfg.asset_policy.connectors
-    key = connector
-    if connector not in conns:
-        want = connector_paths.normalize(connector)
-        for name in conns:
-            if connector_paths.normalize(name) == want:
-                key = name
-                break
-    pc = conns.get(key)
-    if pc is None:
-        pc = PerConnectorAssetPolicy()
-        conns[key] = pc
-    block = getattr(pc, asset_type)
-    if block is None:
-        block = PerConnectorAssetTypePolicy()
-        setattr(pc, asset_type, block)
-    return key, block
+def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]:
+    return {
+        "asset_type": result.asset_type,
+        "connector": result.connector,
+        "registry_required": result.requested,
+        "global_changed": result.global_before != result.global_after,
+        "active_connectors": list(result.active_connectors),
+        "affected_connectors": [
+            {
+                "connector": change.connector,
+                "status": change.status,
+                "before": change.before,
+                "after": change.after,
+            }
+            for change in result.connectors
+        ],
+        "changed_connectors": list(result.changed_connectors),
+        "already_compliant_connectors": list(result.already_compliant_connectors),
+        "failed_connectors": [],
+        "preserved_inactive_connectors": list(result.preserved_inactive_connectors),
+    }
 
 
 @registry.command("require")
@@ -1492,51 +1480,90 @@ def require_cmd(
     the gateway: an empty registry list with require=on means "no
     asset is approved".
 
-    With ``--connector C`` the toggle is written to the per-connector
-    override ``asset_policy.connectors[C].<type>.registry_required``
-    (OTHER-7) instead of the global scalar, so one connector can require
-    a registry match while others inherit the global value. The registry
-    rule list itself stays global (rules are filtered by ``rule.connector``
-    at match time); only the scalar is per-connector.
+    With ``--connector C`` only that connector's override is changed. Without
+    ``--connector``, the global default is changed and every active connector
+    is reconciled to inherit it, so a stale opposite override cannot defeat
+    broad operator intent. Inactive connector overrides are preserved for
+    future activation. Registry rule lists stay global and continue to be
+    filtered by ``rule.connector`` at match time.
     """
     cfg = _require_cfg(app)
     asset = asset_type.lower()
     connector = (connector or "").strip()
 
-    if connector:
-        key, block = _resolve_per_connector_asset_block(cfg, connector, asset)
-        block.registry_required = bool(enabled)
-        scope_label = f"asset_policy.connectors.{key}.{asset}"
-    else:
-        key = ""
-        target = getattr(cfg.asset_policy, asset)
-        target.registry_required = bool(enabled)
-        scope_label = f"asset_policy.{asset}"
-    cfg.save()
+    try:
+        result = set_registry_required(cfg, asset, enabled, connector=connector)
+    except RegistryRequiredUpdateError as exc:
+        failed = [change.connector for change in exc.result.connectors]
+        rollback_failed = "could not be restored" in str(exc.cause)
+        if emit_json:
+            payload = _registry_required_payload(exc.result)
+            payload.update({
+                "status": "failed",
+                "error": str(exc.cause),
+                "rollback": "failed" if rollback_failed else "restored",
+                "changed_connectors": [],
+                "already_compliant_connectors": [],
+                "failed_connectors": failed,
+                "affected_connectors": [
+                    {
+                        "connector": change.connector,
+                        "status": "failed",
+                        "before": change.before,
+                        "after": change.before,
+                    }
+                    for change in exc.result.connectors
+                ],
+            })
+            _emit_json(payload)
+            raise click.exceptions.Exit(1) from exc
+        targets = ", ".join(failed) if failed else "global default"
+        rollback = "rollback failed" if rollback_failed else "previous configuration restored"
+        raise click.ClickException(
+            f"registry policy update failed for {targets}; {rollback}: {exc.cause}"
+        ) from exc
+
+    scope_label = (
+        f"asset_policy.connectors.{result.storage_key}.{asset}"
+        if result.storage_key is not None
+        else f"asset_policy.{asset}"
+    )
 
     # Messaging reads the *effective* per-type policy for the scope: rule
     # lists stay global, so the empty-list check sees the global registry;
     # the empty-action is the per-connector-resolved value when --connector
     # is in play (falls back to the global one when unset).
-    if connector:
-        effective = cfg.asset_policy.effective_asset_type_policy(connector, asset)
+    if result.connector:
+        effective = cfg.asset_policy.effective_asset_type_policy(result.connector, asset)
     else:
         effective = getattr(cfg.asset_policy, asset)
     empty_registry = len(effective.registry) == 0
     empty_action = getattr(effective, "registry_empty_action", "deny") or "deny"
 
     if emit_json:
-        _emit_json({
-            "asset_type": asset,
-            "connector": key or None,
-            "registry_required": bool(enabled),
+        payload = _registry_required_payload(result)
+        payload.update({
+            "status": "ok",
             "registry_size": len(effective.registry),
             "registry_empty_action": empty_action,
         })
+        _emit_json(payload)
         return
 
     state = "required" if enabled else "optional"
     ux.ok(f"{scope_label}.registry is now {state}.")
+    if result.connectors:
+        connector_status = ", ".join(
+            f"{change.connector} ({change.status.replace('_', ' ')})"
+            for change in result.connectors
+        )
+        ux.subhead(f"Affected connectors: {connector_status}.")
+    if result.preserved_inactive_connectors:
+        ux.subhead(
+            "Inactive connector overrides preserved: "
+            + ", ".join(result.preserved_inactive_connectors)
+            + "."
+        )
     if not enabled:
         return
 
