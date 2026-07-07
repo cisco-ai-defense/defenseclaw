@@ -15,12 +15,13 @@
 #   $4  BUNDLE_DIR       e.g. dist/defenseclaw-macos-0.8.0-darwin-arm64
 #   $5  DIST_DIR         e.g. dist
 #   $6  VERSION          e.g. 0.8.0
-#   $7  GOFLAGS_STR      e.g. -ldflags "-X main.version=0.8.0"
+#   $7  LDFLAGS          e.g. -X main.version=0.8.0
+#                        (passed to `go build -ldflags` as-is)
 
 set -euo pipefail
 
 if [[ $# -lt 7 ]]; then
-  echo "usage: $0 GOOS GOARCH BUNDLE_NAME BUNDLE_DIR DIST_DIR VERSION GOFLAGS" >&2
+  echo "usage: $0 GOOS GOARCH BUNDLE_NAME BUNDLE_DIR DIST_DIR VERSION LDFLAGS" >&2
   exit 64
 fi
 
@@ -30,7 +31,7 @@ BUNDLE_NAME="$3"
 BUNDLE_DIR="$4"
 DIST_DIR="$5"
 VERSION="$6"
-GOFLAGS_STR="$7"
+LDFLAGS="$7"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -54,13 +55,13 @@ mkdir -p "${BUNDLE_DIR}/lib"
 
 # ---- build gateway ------------------------------------------------------
 
-# GOFLAGS_STR is passed as a single string to preserve the `-ldflags "..."`
-# quoting; eval unpacks it in the go build invocation.
+# Array-form invocation so we don't re-parse a shell string via eval;
+# LDFLAGS is passed to `go build -ldflags <value>` as a single argument.
 build_arch() {
   local arch="$1" out="$2"
   echo "==> building gateway (darwin/${arch})"
-  eval GOOS=darwin GOARCH="${arch}" CGO_ENABLED=0 \
-    go build ${GOFLAGS_STR} -o "\"${out}\"" ./cmd/defenseclaw
+  local -a go_args=(build -ldflags "${LDFLAGS}" -o "${out}" ./cmd/defenseclaw)
+  GOOS=darwin GOARCH="${arch}" CGO_ENABLED=0 go "${go_args[@]}"
 }
 
 cd "${REPO_ROOT}"

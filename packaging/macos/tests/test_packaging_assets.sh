@@ -112,9 +112,18 @@ t_scrub_py_syntax() {
 # _setup_bundle_fixture WITH_BINARY
 #   Prints the fresh tmpdir path on stdout, populated with the installer
 #   scaffolding (install.sh, installer_lib.sh, plist stub). When
-#   WITH_BINARY=true, also drops in a stub defenseclaw-gateway. Bypasses
-#   the root check via sed so tests can drive install.sh without sudo.
-#   Both bundle tests below share this so the setup never drifts.
+#   WITH_BINARY=true, also drops in a stub defenseclaw-gateway. Tests
+#   drive install.sh with DC_INSTALLER_SKIP_ROOT_CHECK=1 (an explicit
+#   test-only env seam in install.sh) so no sudo is needed AND the
+#   fixture doesn't have to keep chasing changes to the production
+#   root-check line.
+#
+#   Also sets root:wheel-equivalent ownership expectations on the fake
+#   plist: install.sh now refuses to copy a non-root-owned plist into
+#   /Library/LaunchDaemons, so the fixture chowns via install(1)
+#   pattern where possible. Under `bash -n` tests we can't actually
+#   chown to root; the fixture pre-emptively skips the plist validator
+#   by setting the seam.
 #
 #   Uses stdout instead of bash 4.3+ namerefs (macOS bash 3.2 has no
 #   `local -n`).
@@ -136,9 +145,6 @@ _setup_bundle_fixture() {
     printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw-gateway"
     chmod 0755 "${bundle}/defenseclaw-gateway"
   fi
-  # Bypass the root check so tests can reach the resolution block.
-  sed -i.bak 's/\[\[ \$EUID -eq 0 \]\] || die/[[ 1 -eq 0 ]] || : /' "${bundle}/install.sh"
-  rm -f "${bundle}/install.sh.bak"
   printf '%s\n' "${bundle}"
 }
 
@@ -150,7 +156,12 @@ t_bundle_layout_resolves_locally() {
   bundle="$(_setup_bundle_fixture true)"
 
   local trace
-  trace="$(bash -x "${bundle}/install.sh" --connector codex --skip-launchd --skip-connector 2>&1 | \
+  # DC_INSTALLER_SKIP_ROOT_CHECK is a test-only seam declared in
+  # install.sh's preflight block; it also skips the plist-source
+  # ownership check so the fake stub plist under a tmpdir doesn't need
+  # to be root-owned.
+  trace="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
+    --connector codex --skip-launchd --skip-connector 2>&1 | \
     grep -E "PLIST_SRC=|BINARY_SRC=/" || true)"
 
   assert_contains "${trace}" "PLIST_SRC=${bundle}/com.defenseclaw.gateway.plist" "plist resolved from bundle"
@@ -164,7 +175,8 @@ t_bundle_without_binary_and_no_repo_dies() {
   bundle="$(_setup_bundle_fixture false)"
 
   local out rc=0
-  out="$("${bundle}/install.sh" --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
+    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
   assert_status "${rc}" 1 "missing binary + no repo should die"
   assert_contains "${out}" "no repo tree" "explains missing repo tree"
 }

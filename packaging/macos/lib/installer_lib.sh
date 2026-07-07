@@ -120,13 +120,21 @@ discover_agent_version() {
       done
       # Homebrew cask keeps the binary under Caskroom with a version
       # in the path itself: /opt/homebrew/Caskroom/codex/<version>/...
-      local caskroom
+      # Glob-based version pick (avoids shellcheck SC2010 on `ls | grep`).
+      local caskroom ver dir dname
       for caskroom in /opt/homebrew/Caskroom/codex /usr/local/Caskroom/codex; do
-        if [[ -d "${caskroom}" ]]; then
-          local ver
-          ver="$(ls -1 "${caskroom}" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+' | sort -V | tail -1)"
-          if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
-        fi
+        [[ -d "${caskroom}" ]] || continue
+        ver=""
+        for dir in "${caskroom}"/*/; do
+          [[ -d "${dir}" ]] || continue
+          dname="$(basename "${dir}")"
+          [[ "${dname}" =~ ^[0-9]+\.[0-9]+ ]] || continue
+          if [[ -z "${ver}" ]] || \
+             [[ "$(printf '%s\n%s\n' "${ver}" "${dname}" | sort -V | tail -1)" == "${dname}" ]]; then
+            ver="${dname}"
+          fi
+        done
+        if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
       done
       # Last resort: exec codex --version as the target user (not as
       # root). Requires TARGET_USER to be known to the caller.

@@ -629,6 +629,21 @@ func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
 			},
 		},
 		{
+			// Regression guard: an alert with NO AdditionalContext used
+			// to fall through to a nil Output map, which produced an
+			// empty response body and tripped Cursor's failClosed=true.
+			// Must return the default allow envelope so the tool call
+			// proceeds and the finding still surfaces via the audit
+			// pipeline / other channels.
+			name:      "alert_without_context_falls_through_to_allow",
+			action:    "alert",
+			rawAction: "alert",
+			expected: map[string]interface{}{
+				"continue":   true,
+				"permission": "allow",
+			},
+		},
+		{
 			// Regression: plain allow used to leave Output nil, which
 			// produced an empty stdout in the hook script and tripped
 			// Cursor's failClosed=true guard. Must be a concrete allow.

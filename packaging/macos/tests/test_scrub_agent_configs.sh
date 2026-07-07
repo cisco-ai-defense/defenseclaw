@@ -89,6 +89,7 @@ t_claudecode_drops_all_managed_env() {
 }
 JSON
   ${PY} "${SCRUB}" claudecode "${d}/settings.json"
+  local rc=$?; assert_status "${rc}" 0 "scrub exit 0"
   local out; out="$(cat "${d}/settings.json")"
   assert_not_contains "${out}" "\"env\"" "empty env block removed"
 }
@@ -171,6 +172,7 @@ model = "override"
 name = "user-owned-array-entry"
 TOML
   ${PY} "${SCRUB}" codex "${d}/config.toml"
+  local rc=$?; assert_status "${rc}" 0 "scrub exit 0"
   local out; out="$(cat "${d}/config.toml")"
   assert_not_contains "${out}" "[hooks]"                        "[hooks] removed"
   assert_not_contains "${out}" "defenseclaw"                    "no DC refs"
@@ -178,6 +180,31 @@ TOML
   assert_contains     "${out}" "trust_level = \"trusted\""      "dotted table content preserved"
   assert_contains     "${out}" "[[some.array.of.tables]]"       "array-of-tables preserved"
   assert_contains     "${out}" "user-owned-array-entry"         "array-of-tables content preserved"
+}
+
+t_codex_strips_notify_before_any_table_header() {
+  # Regression guard: `notify = [...]` at the very top of the file
+  # (before any table header) exercises the top-level notify path in
+  # scrub_codex, separate from the [otel]/[hooks] handling. Earlier
+  # fixtures placed notify after [otel] where TOML treats it as part
+  # of the [otel] table and the [otel] scrub swallowed it as a
+  # side-effect.
+  local d; d="$(mktest_tmp)"
+  cat > "${d}/config.toml" <<'TOML'
+notify = ["bash", "/Users/u/.defenseclaw/notify-bridge.sh"]
+
+model = "gpt-5"
+
+[projects."/Users/u/dev"]
+trust_level = "trusted"
+TOML
+  ${PY} "${SCRUB}" codex "${d}/config.toml"
+  local rc=$?; assert_status "${rc}" 0 "scrub exit 0"
+  local out; out="$(cat "${d}/config.toml")"
+  assert_not_contains "${out}" "notify ="                     "top-level notify removed"
+  assert_not_contains "${out}" "defenseclaw"                  "no DC refs"
+  assert_contains     "${out}" "model = \"gpt-5\""            "model preserved"
+  assert_contains     "${out}" "[projects.\"/Users/u/dev\"]"  "projects table preserved"
 }
 
 t_codex_skips_unrelated_otel_or_hooks_blocks() {
@@ -237,6 +264,7 @@ run_case "claudecode: drops env block if only DC keys"      t_claudecode_drops_a
 run_case "claudecode: preserves theme/env"                  t_claudecode_preserves_non_hook_state
 run_case "codex: strips managed sections"                   t_codex_strips_managed_sections
 run_case "codex: stops at dotted/array table headers"       t_codex_stops_at_dotted_table_header
+run_case "codex: strips top-level notify before any table" t_codex_strips_notify_before_any_table_header
 run_case "codex: leaves unrelated [otel]/[hooks] alone"     t_codex_skips_unrelated_otel_or_hooks_blocks
 run_case "missing file returns 2"                           t_missing_file_returns_2
 run_case "unsupported connector returns 3"                  t_unsupported_connector_returns_3

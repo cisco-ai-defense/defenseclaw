@@ -467,8 +467,36 @@ done
 # ---- preflight ----------------------------------------------------------
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS only (uname -s != Darwin)"
-[[ $EUID -eq 0 ]] || die "must run as root (try: sudo $0 $*)"
+# Env-var seam so tests can drive the arg-parsing / resolution paths
+# without sudo. This is intentionally namespaced so it can't be set
+# via a public DEFENSECLAW_* var and matches nothing in real deploys.
+if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  [[ $EUID -eq 0 ]] || die "must run as root (try: sudo $0 $*)"
+fi
 [[ -f "${PLIST_SRC}" ]] || die "missing plist source: ${PLIST_SRC}"
+
+# Validate the plist source before we copy it into /Library/LaunchDaemons.
+# The plist gets installed root:wheel 0644 and executed as the DefenseClaw
+# service principal at boot; a plist owned or writable by a non-root user
+# is a privilege-escalation surface. Refuse to install one.
+#
+# DC_INSTALLER_SKIP_ROOT_CHECK also skips this validator so bundle-fixture
+# tests can drive install.sh against a stub plist in a tmpdir.
+if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  _plist_stat="$(stat -f '%Su %Lp' "${PLIST_SRC}" 2>/dev/null || echo '')"
+  if [[ -n "${_plist_stat}" ]]; then
+    _plist_owner="${_plist_stat%% *}"
+    _plist_mode="${_plist_stat##* }"
+    if [[ "${_plist_owner}" != "root" ]]; then
+      die "plist source ${PLIST_SRC} must be owned by root (got: ${_plist_owner}); refusing to install a potentially-tampered plist as a LaunchDaemon"
+    fi
+    # Refuse group-write or other-write bits (mode & 0o022).
+    if (( (8#${_plist_mode} & 8#022) != 0 )); then
+      die "plist source ${PLIST_SRC} is group/other writable (mode ${_plist_mode}); refusing to install"
+    fi
+  fi
+  unset _plist_stat _plist_owner _plist_mode
+fi
 
 # Resolve target user (default: the user who invoked sudo)
 if [[ -z "${TARGET_USER}" ]]; then
@@ -751,12 +779,12 @@ Next steps:
     sudo tail -f ${LOGS_DIR}/gateway.log ${LOGS_DIR}/gateway.err.log
 
   Query audit DB:
-    sudo sqlite3 -header -column "${SUPPORT_DIR}/audit.db" \\
+    sudo sqlite3 -header -column "${RUNTIME_DIR}/audit.db" \\
       "SELECT datetime(timestamp,'localtime'),action,severity,substr(details,1,80) \\
        FROM audit_events ORDER BY timestamp DESC LIMIT 10;"
 
   Master gateway token (for direct curl tests):
-    sudo grep DEFENSECLAW_GATEWAY_TOKEN "${SUPPORT_DIR}/.env"
+    sudo grep DEFENSECLAW_GATEWAY_TOKEN "${RUNTIME_DIR}/.env"
 
   Repair user-space hooks (per connector):
 $(for c in "${CONNECTORS[@]}"; do

@@ -37,6 +37,18 @@ DEFAULT_MARKERS = (
     "notify-bridge.sh",
 )
 
+# Markers that identify a Codex [otel] block as DefenseClaw-managed even
+# when it doesn't contain a hooks-dir path. DefenseClaw configures Codex
+# to send OTLP to a loopback DefenseClaw gateway, so an endpoint value
+# pointing at 127.0.0.1 (or localhost) is a strong signal. We deliberately
+# DO NOT match on "otlp_endpoint" alone — a user with their own vendor
+# OTel setup would then get their block scrubbed too.
+CODEX_OTEL_DC_MARKERS = (
+    "127.0.0.1",
+    "localhost",
+    "defenseclaw",
+)
+
 
 def looks_owned(value: object, markers: tuple[str, ...]) -> bool:
     """Best-effort recursive check: does any string in the structure
@@ -197,24 +209,21 @@ def scrub_codex(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
     n = len(lines)
     changed = False
 
-    def section_references_dc(start: int) -> tuple[bool, int]:
+    def section_references_dc(start: int, extra_markers: tuple[str, ...] = ()) -> tuple[bool, int]:
         """Look ahead from `start` (line right after a [section] header)
-        until the next top-level section or EOF. Returns (matched, end_idx)
+        until the next table header or EOF. Returns (matched, end_idx)
         where end_idx is the line index where the next section starts
         (or n)."""
+        combined = markers + extra_markers
         j = start
         matched = False
         while j < n:
             line = lines[j]
             stripped = line.strip()
             # Stop at ANY table header — simple, dotted, or array-of-tables.
-            # A simple `[name]` regex would let a dotted `[projects.foo]`
-            # slip through and be considered part of the [hooks] body,
-            # which would then be deleted if [hooks] happened to reference
-            # DefenseClaw. That would delete unrelated user state.
             if TOML_TABLE_HEADER_RE.match(stripped):
                 break
-            if any(m in line for m in markers):
+            if any(m in line for m in combined):
                 matched = True
             j += 1
         return matched, j
@@ -226,7 +235,17 @@ def scrub_codex(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
         # Top-level [hooks] or [otel] table?
         m = TOML_TOP_LEVEL_RE.match(stripped)
         if m and m.group(1) in ("hooks", "otel"):
-            matched, end = section_references_dc(i + 1)
+            # `[hooks]` uses the standard marker scan (hook script paths
+            # under ~/.defenseclaw/hooks/ match the markers).
+            # `[otel]` needs extra Codex-specific markers because its body
+            # is scalars like `otlp_endpoint = "http://127.0.0.1:18970/v1/..."`
+            # that don't match the hook-path markers. Anything with an
+            # `otlp_endpoint` line pointing at loopback or defenseclaw is
+            # considered DefenseClaw-managed.
+            extra: tuple[str, ...] = ()
+            if m.group(1) == "otel":
+                extra = CODEX_OTEL_DC_MARKERS
+            matched, end = section_references_dc(i + 1, extra)
             if matched:
                 # Drop the header AND every line up to the next section.
                 changed = True

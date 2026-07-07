@@ -525,6 +525,9 @@ BUNDLE_GOOS  ?= darwin
 BUNDLE_GOARCH ?= universal
 BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
+# BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
+# argument (no shell re-parsing / eval).
+BUNDLE_LDFLAGS := -X main.version=$(VERSION)
 
 packaging-macos-bundle:
 	@scripts/build-macos-bundle.sh \
@@ -534,7 +537,7 @@ packaging-macos-bundle:
 	    "$(BUNDLE_DIR)" \
 	    "$(DIST_DIR)" \
 	    "$(VERSION)" \
-	    '$(GOFLAGS)'
+	    "$(BUNDLE_LDFLAGS)"
 
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.

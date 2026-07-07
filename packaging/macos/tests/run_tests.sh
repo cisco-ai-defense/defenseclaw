@@ -7,8 +7,15 @@
 #   packaging/macos/tests/run_tests.sh -v        # verbose (show every assert)
 #   packaging/macos/tests/run_tests.sh test_*.sh # run a subset
 #
-# Each test file is sourced inside its own subshell with helpers from
-# this script available. Failures print file:line + the failing assert.
+# Each test file is sourced in-process (not in a subshell) so it can
+# share the assertion counters and helpers defined below. `set -u` is
+# process-wide, so a fatal error in one test file will abort the
+# runner; keep test files defensive (no undefined-variable expansions
+# outside quoted `${var:-}` patterns).
+#
+# Failures print file:line of the failing assert (via `_fail`, which
+# resolves the appropriate BASH_SOURCE/BASH_LINENO stack frame based on
+# whether _fail was invoked through an assert_* wrapper or directly).
 
 set -u
 
@@ -49,8 +56,29 @@ CUR_TEST_NAME=""
 
 _fail() {
   local msg="$1"
-  printf 'FAIL  %s :: %s\n  at: %s\n  %s\n' \
-    "${CUR_TEST_FILE}" "${CUR_TEST_NAME}" "${BASH_SOURCE[2]}:${BASH_LINENO[1]}" "${msg}" >&2
+  # Resolve the "test call site" — the first frame in BASH_SOURCE that
+  # is a test file (test_*.sh), skipping run_tests.sh itself. This
+  # works whether _fail is called through an assert_* wrapper (2+
+  # frames deep) or directly from a test case function (1 frame deep).
+  # macOS bash 3.2 doesn't have BASH_SOURCE[@] with reliable @ indexing
+  # inside functions, but positional loop works fine.
+  local src="" line="" i
+  for (( i = 1; i < ${#BASH_SOURCE[@]}; i++ )); do
+    case "${BASH_SOURCE[$i]}" in
+      */test_*.sh)
+        src="${BASH_SOURCE[$i]}"
+        line="${BASH_LINENO[$((i-1))]}"
+        break
+        ;;
+    esac
+  done
+  if [[ -z "${src}" ]]; then
+    # Fallback: whatever the caller of _fail was.
+    src="${BASH_SOURCE[1]:-?}"
+    line="${BASH_LINENO[0]:-?}"
+  fi
+  printf 'FAIL  %s :: %s\n  at: %s:%s\n  %s\n' \
+    "${CUR_TEST_FILE}" "${CUR_TEST_NAME}" "${src}" "${line}" "${msg}" >&2
   TEST_FAIL_COUNT=$((TEST_FAIL_COUNT + 1))
   return 1
 }

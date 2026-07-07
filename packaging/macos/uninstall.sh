@@ -96,7 +96,9 @@ done
 # Resolve which service user to delete on --purge. Precedence:
 #   1. --service-user flag
 #   2. UserName in the installed plist (matches whatever install.sh set)
-#   3. _defenseclaw default
+#   3. SERVICE_USER_DEFAULT (= "defenseclaw", matching the gateway's
+#      trustedRuntimeOwner user.Lookup("defenseclaw") in
+#      internal/managed/trust_unix.go)
 if [[ -z "${SERVICE_USER}" ]]; then
   if [[ -f "${PLIST_DST}" ]]; then
     SERVICE_USER="$(/usr/bin/plutil -extract UserName raw "${PLIST_DST}" 2>/dev/null || true)"
@@ -229,23 +231,23 @@ if [[ "${PURGE}" == "true" ]]; then
     fi
   done
 
-  # Remove the service user + group if it looks like a DefenseClaw-created
-  # one (prefixed with an underscore per the install.sh convention). We
-  # refuse to delete an unprefixed name — an admin who used a custom
-  # unprefixed user probably shares it with another service.
+  # Remove the service user + group when SERVICE_USER matches one of
+  # our known installer-created names (SERVICE_USER_KNOWN allowlist —
+  # currently just "defenseclaw", matching the gateway's hardcoded
+  # trustedRuntimeOwner lookup). Never delete an admin-configured name
+  # that only happens to share the SERVICE_USER slot: we gate on the
+  # allowlist, not on any naming-convention heuristic like an
+  # underscore prefix.
   #
-  # Delete both /Users and /Groups records regardless of which reads
-  # succeed. Prior failed installs can leave a half-provisioned record
-  # (e.g. record exists with no PrimaryGroupID) where dscl -read fails
-  # but the record still needs cleanup — so we delete unconditionally
-  # when the name is underscore-prefixed.
+  # We handle /Groups and /Users independently — each gets its own
+  # dscl -read gate and its own delete. A half-provisioned prior
+  # install can leave an orphan Groups record even when the Users
+  # record is already gone; the independent gates make sure both are
+  # cleaned up.
   #
-  # Pin to /Local/Default like install.sh does. Otherwise a Mac bound to
-  # an unreachable network directory (AD/LDAP/managed OD) can hang or
-  # ENETUNREACH us on the read/delete calls.
-  # Auto-delete only if the service user matches one of our known
-  # installer names — never delete a random admin-configured user
-  # sharing the SERVICE_USER slot.
+  # Pin to /Local/Default like install.sh does. Otherwise a Mac bound
+  # to an unreachable network directory (AD/LDAP/managed OD) can hang
+  # or ENETUNREACH us on the read/delete calls.
   is_known="no"
   for known in "${SERVICE_USER_KNOWN[@]}"; do
     if [[ "${SERVICE_USER}" == "${known}" ]]; then
