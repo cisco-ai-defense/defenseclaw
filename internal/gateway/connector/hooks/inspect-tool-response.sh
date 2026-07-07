@@ -77,9 +77,8 @@ TOOL_OUTPUT="$(defenseclaw_read_stdin_capped)" || {
 API_ADDR="{{.APIAddr}}"
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
-# Transport failures (gateway down / 5xx) always allow unless
-# DEFENSECLAW_STRICT_AVAILABILITY=1. Response failures respect
-# FAIL_MODE.
+# Transport and response failures respect FAIL_MODE;
+# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
   defenseclaw_log_hook_failure inspect inspect-tool-response "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "tool-response" "$1"

@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // withConnectorState swaps cfg/flags into a known state for one test and
@@ -101,6 +102,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorTeardown(cmd, nil)
 	case "verify":
 		err = runConnectorVerify(cmd, nil)
+	case "reconcile":
+		err = runConnectorReconcile(cmd, nil)
 	default:
 		t.Fatalf("unknown subcommand for harness: %s", sub)
 	}
@@ -108,6 +111,70 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		fmt.Fprintln(&errb, err.Error())
 	}
 	return out.String(), errb.String(), exitCode
+}
+
+func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := t.TempDir()
+	codexPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claudeBefore := []byte(`{"sentinel":"peer-registration"}`)
+	if err := os.WriteFile(claudePath, claudeBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalCodexPath := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = originalCodexPath })
+
+	defer withConnectorState(t, dataDir, "codex")()
+	scopedToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Gateway.Token = "master-token-must-not-be-registered"
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {HookFailMode: "closed"},
+		"claudecode": {HookFailMode: "open"},
+	}
+	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	if stderr != "" {
+		t.Fatalf("reconcile stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, `"fail_mode":"closed"`) {
+		t.Fatalf("reconcile output = %s", stdout)
+	}
+	if _, err := os.Stat(codexPath); err != nil {
+		t.Fatalf("selected Codex registration missing: %v", err)
+	}
+	codexRegistration, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(codexRegistration, []byte(cfg.Gateway.Token)) {
+		t.Fatal("selected registration contains the gateway master token")
+	}
+	if !bytes.Contains(codexRegistration, []byte(scopedToken)) {
+		t.Fatal("selected registration does not contain the connector-scoped token")
+	}
+	claudeAfter, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(claudeAfter, claudeBefore) {
+		t.Fatalf("peer Claude registration changed: %s", claudeAfter)
+	}
+	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
+	if lock.HookFailMode != "closed" {
+		t.Fatalf("lock fail mode = %q, want closed", lock.HookFailMode)
+	}
 }
 
 func TestResolveActiveConnectorName_FlagWins(t *testing.T) {

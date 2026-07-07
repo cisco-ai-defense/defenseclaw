@@ -63,8 +63,8 @@ type Options struct {
 	// APIAddr is the gateway "host:port" the hook posts to.
 	APIAddr string
 	// FailMode is "open" or "closed"; it governs response-layer failures
-	// (4xx / bad JSON). Transport failures always fail open unless
-	// StrictAvailability is set. Empty defaults to "open".
+	// (4xx / bad JSON) and transport failures. StrictAvailability forces
+	// closed independently. Empty defaults to "open".
 	FailMode string
 
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
@@ -257,7 +257,13 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
 	}
 
-	action := rawStringOr(fields, "action", "allow")
+	action, ok := rawString(fields, "action")
+	if !ok || (action != "allow" && action != "block" && action != "confirm") {
+		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr {
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
+		}
+		action = "allow"
+	}
 	reason := rawStringOr(fields, "reason", "")
 	output := compactField(fields, sp.outputField)
 
@@ -335,9 +341,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability {
+	if opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
-			"defenseclaw: %s, blocking %s (DEFENSECLAW_STRICT_AVAILABILITY=1)\n", reason, sp.subject)
+			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
 	return emit(opts.Stdout, sp.openAllow)
@@ -353,17 +359,30 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 	return emit(opts.Stdout, sp.openAllow)
 }
 
-// failUnreachable mirrors the transport-layer failure path: always allow
-// unless the operator opted into strict availability.
+// failUnreachable applies the connector's effective fail mode to native hook
+// transport failures. Strict availability remains an unconditional closed
+// override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability {
+	if opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
-			"defenseclaw: gateway unreachable, blocking %s (DEFENSECLAW_STRICT_AVAILABILITY=1): %s\n", sp.subject, reason)
+			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
 	return emit(opts.Stdout, sp.openAllow)
+}
+
+func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return strings.ToLower(strings.TrimSpace(value)), true
 }
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.

@@ -425,8 +425,8 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 		t.Errorf("cursor HookFailMode=%q, want override %q", cursorOpts.HookFailMode, "closed")
 	}
 	windsurfOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}, "tok", "a", "b")
-	if windsurfOpts.HookFailMode != "open" {
-		t.Errorf("windsurf HookFailMode=%q, want observe-mode open", windsurfOpts.HookFailMode)
+	if windsurfOpts.HookFailMode != "closed" {
+		t.Errorf("windsurf HookFailMode=%q, want connector override independent of observe mode", windsurfOpts.HookFailMode)
 	}
 }
 

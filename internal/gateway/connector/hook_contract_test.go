@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -390,6 +391,37 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	changed.ContractID = "hermes-hooks-v0-other"
 	if !HookContractLockDrifted(loaded, changed) {
 		t.Fatalf("contract change should be drift")
+	}
+}
+
+func TestHookContractLockConcurrentUpdatesPreserveConnectorPeers(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entries := []HookContractLockEntry{
+		{Connector: "claudecode", ContractID: "claudecode-hooks-v1", HookFailMode: "closed"},
+		{Connector: "codex", ContractID: "codex-hooks-v1", HookFailMode: "open"},
+	}
+	var wg sync.WaitGroup
+	errors := make(chan error, len(entries))
+	for _, entry := range entries {
+		entry := entry
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errors <- SaveHookContractLockEntry(dir, entry)
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range entries {
+		loaded := LoadHookContractLockEntry(dir, entry.Connector)
+		if loaded.ContractID != entry.ContractID || loaded.HookFailMode != entry.HookFailMode {
+			t.Fatalf("connector %s lock entry lost during concurrent update: %+v", entry.Connector, loaded)
+		}
 	}
 }
 

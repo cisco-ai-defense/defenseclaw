@@ -160,6 +160,27 @@ func TestBuildHookOptionsSidecarFallback(t *testing.T) {
 	}
 }
 
+func TestBuildHookOptionsConnectorScopedSidecarMixedModes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	t.Setenv("DEFENSECLAW_GATEWAY_ADDR", "")
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
+	writeHookSidecarForTest(t, home, `{
+  "version": 2,
+  "gateway_addr": "127.0.0.1:12345",
+  "fail_modes": {"claudecode": "closed", "codex": "open"}
+}`)
+
+	claude := buildHookOptions("claudecode", "", "", "")
+	codex := buildHookOptions("codex", "", "", "")
+	if claude.FailMode != "closed" || codex.FailMode != "open" {
+		t.Fatalf("mixed sidecar collapsed: Claude=%q Codex=%q", claude.FailMode, codex.FailMode)
+	}
+	if claude.APIAddr != "127.0.0.1:12345" || codex.APIAddr != claude.APIAddr {
+		t.Fatalf("shared gateway address not preserved: Claude=%q Codex=%q", claude.APIAddr, codex.APIAddr)
+	}
+}
+
 func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)

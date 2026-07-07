@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -75,6 +76,7 @@ type HookContractLockEntry struct {
 	HookScriptDigests      map[string]string  `json:"hook_script_digests,omitempty"`
 	Locations              ConnectorLocations `json:"locations,omitempty"`
 	DefenseClawVersion     string             `json:"defenseclaw_version,omitempty"`
+	HookFailMode           string             `json:"hook_fail_mode,omitempty"`
 	UpdatedAt              string             `json:"updated_at"`
 }
 
@@ -180,52 +182,58 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(entry.Connector) == "" {
 		return nil
 	}
-	entry.Connector = normalizeConnectorName(entry.Connector)
-	if entry.UpdatedAt == "" {
-		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	lock := loadHookContractLock(dataDir)
-	if lock.Version == 0 {
-		lock.Version = 1
-	}
-	if lock.Connectors == nil {
-		lock.Connectors = map[string]HookContractLockEntry{}
-	}
-	if previous, ok := lock.Connectors[entry.Connector]; ok {
-		previousComparison := previous
-		entryComparison := entry
-		previousComparison.UpdatedAt = ""
-		entryComparison.UpdatedAt = ""
-		if reflect.DeepEqual(previousComparison, entryComparison) {
-			return nil
+	path := filepath.Join(dataDir, hookContractLockFile)
+	return withFileLock(path, func() error {
+		entry.Connector = normalizeConnectorName(entry.Connector)
+		if entry.UpdatedAt == "" {
+			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		}
-	}
-	if entry.UpdatedAt == "" {
-		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	lock.Connectors[entry.Connector] = entry
-	data, err := json.MarshalIndent(lock, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return atomicWriteFile(filepath.Join(dataDir, hookContractLockFile), data, 0o600)
+		lock := loadHookContractLock(dataDir)
+		if lock.Version == 0 {
+			lock.Version = 1
+		}
+		if lock.Connectors == nil {
+			lock.Connectors = map[string]HookContractLockEntry{}
+		}
+		if previous, ok := lock.Connectors[entry.Connector]; ok {
+			previousComparison := previous
+			entryComparison := entry
+			previousComparison.UpdatedAt = ""
+			entryComparison.UpdatedAt = ""
+			if reflect.DeepEqual(previousComparison, entryComparison) {
+				return nil
+			}
+		}
+		lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		lock.Connectors[entry.Connector] = entry
+		data, err := json.MarshalIndent(lock, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		return atomicWriteFile(path, data, 0o600)
+	})
 }
 
 func ClearHookContractLockEntry(dataDir, connectorName string) error {
-	lock := loadHookContractLock(dataDir)
-	if len(lock.Connectors) == 0 {
+	if strings.TrimSpace(dataDir) == "" {
 		return nil
 	}
-	delete(lock.Connectors, normalizeConnectorName(connectorName))
-	lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	data, err := json.MarshalIndent(lock, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return atomicWriteFile(filepath.Join(dataDir, hookContractLockFile), data, 0o600)
+	path := filepath.Join(dataDir, hookContractLockFile)
+	return withFileLock(path, func() error {
+		lock := loadHookContractLock(dataDir)
+		if len(lock.Connectors) == 0 {
+			return nil
+		}
+		delete(lock.Connectors, normalizeConnectorName(connectorName))
+		lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		data, err := json.MarshalIndent(lock, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		return atomicWriteFile(path, data, 0o600)
+	})
 }
 
 func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion string) HookContractLockEntry {
@@ -251,6 +259,7 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		HookScriptDigests:      HookScriptDigests(opts, conn),
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
+		HookFailMode:           normalizeHookFailMode(opts.HookFailMode),
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
 	if opts.HookContractID != "" {
@@ -354,10 +363,22 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 }
 
 func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
+	var paths []string
 	if provider, ok := conn.(HookRuntimeArtifactProvider); ok {
-		return uniqueNonEmptyStrings(provider.HookRuntimeArtifacts(opts))
+		paths = append(paths, provider.HookRuntimeArtifacts(opts)...)
+	} else {
+		paths = append(paths, hookScriptPathsForConnector(opts, conn)...)
 	}
-	return hookScriptPathsForConnector(opts, conn)
+	if runtime.GOOS == "windows" && conn != nil {
+		name := normalizeConnectorName(conn.Name())
+		if name == "claudecode" || name == "codex" {
+			// The registered Windows command executes this PE directly. Record
+			// its digest and exact location so status/no-op checks detect an
+			// obsolete launcher even when the agent config path is unchanged.
+			paths = append(paths, defenseclawHookBinary())
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
 }
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {

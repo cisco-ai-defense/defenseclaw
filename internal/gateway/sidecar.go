@@ -2172,7 +2172,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// default "open" is applied uniformly when the field is unset
 		// — matches the user-friendly default in defaultsFor() and
 		// avoids a partial install accidentally going fail-closed.
-		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
+		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,

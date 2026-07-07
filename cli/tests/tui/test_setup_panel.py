@@ -2493,6 +2493,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
     assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
     assert fields["guardrail.connectors.codex.hilt.min_severity"].value == "LOW"
@@ -2503,6 +2504,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # hermes has no override → inherits the global effective values.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
     assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
     assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
     assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"
@@ -2552,10 +2554,20 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
     cfg = _multi_connector_cfg()
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "closed")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "closed"
-    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "open"
+    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "closed"
     # Anything that is not "closed" normalizes to "open".
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    state = SimpleNamespace(runtime="open", desired="closed")
+    monkeypatch.setattr("defenseclaw.fail_mode.resolve_connector_fail_mode", lambda *_args: state)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "open"
 
 
 def test_per_connector_block_message_writes_string() -> None:

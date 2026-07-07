@@ -522,17 +522,15 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
-# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) for
-# guardian-installed managed hooks, or when an unmanaged operator explicitly
-# opts into strict availability via DEFENSECLAW_STRICT_AVAILABILITY=1. The
-# unmanaged default is to fail open on
-# transport failures (gateway down / network error / 5xx) regardless
-# of FAIL_MODE — a DefenseClaw outage must NEVER brick the user's
-# coding agent. FAIL_MODE still governs response-layer failures (4xx,
-# bad JSON, missing action) where the gateway answered but its answer
-# was wrong; those represent likely misconfiguration that the operator
-# should be told about loudly.
+# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
+# connector's effective fail mode is closed, for guardian-installed managed
+# hooks, or when strict availability is enabled. Fail mode therefore has one
+# consistent meaning across malformed responses, auth failures, and transport
+# failures instead of silently opening only the latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
+  case "${FAIL_MODE:-open}" in
+    closed) return 0 ;;
+  esac
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
   esac
@@ -562,7 +560,7 @@ defenseclaw_emit_unreachable_stderr() {
   local subject="${1:-tool}"
   local reason="${2:-unknown}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: gateway unreachable, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1): ${reason}" >&2
+    echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
@@ -575,19 +573,15 @@ defenseclaw_emit_unreachable_stderr() {
 # the historical behaviour was to exit 0 ("can't talk to gateway →
 # don't brick the agent"). That bypassed FAIL_MODE entirely.
 #
-# This helper preserves the historical default (allow-and-warn) but
-# routes the bypass through the same DEFENSECLAW_STRICT_AVAILABILITY
-# escape hatch as transport failures: an operator who explicitly opts
-# into strict availability gets fail-closed even on a missing-token
-# misconfiguration, AND every bypass — strict or not — is recorded in
-# hook-failures.jsonl so the audit log is honest about the missed
-# inspection.
+# This helper routes the bypass through the connector's FAIL_MODE and
+# the DEFENSECLAW_STRICT_AVAILABILITY force-closed override. Every bypass
+# is recorded in hook-failures.jsonl so the audit log is honest about the
+# missed inspection.
 #
 # Usage:
 #   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT
 #
-# Exits 0 (allow) on the historical default path or 2 (block) when
-# strict availability is set. Never returns to the caller.
+# Exits 0 for fail-open or 2 for fail-closed. Never returns to the caller.
 defenseclaw_handle_missing_token() {
   local connector="${1:-unknown}"
   local hook_name="${2:-unknown}"
@@ -595,7 +589,7 @@ defenseclaw_handle_missing_token() {
   local reason="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: ${reason}, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
+    echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)" >&2
     exit 2
   fi
   exit 0

@@ -343,9 +343,6 @@ func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if c == nil {
 		return "closed"
 	}
-	if !strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
-		return "open"
-	}
 	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
 		if strings.TrimSpace(pc.HookFailMode) != "" {
 			if strings.EqualFold(strings.TrimSpace(pc.HookFailMode), "open") {

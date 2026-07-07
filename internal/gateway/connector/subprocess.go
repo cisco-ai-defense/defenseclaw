@@ -18,6 +18,7 @@ package connector
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr       string
 	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode      string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
 	Managed       bool
 	TokenFile     string
 	ScopedToken   bool
@@ -54,20 +55,13 @@ type templateData struct {
 	HookTimeoutMS int    // Cursor adapter child timeout; zero for templates that do not use it
 }
 
-// defaultHookFailMode is the fail mode injected into the response-
-// layer ({{.FailMode}}) of every hook when the caller doesn't supply
-// an explicit override. It governs ONLY response-layer failures —
-// 4xx, malformed JSON, missing action — where the gateway answered
-// but the answer was wrong (typically misconfiguration). Transport-
-// layer failures (curl exit non-zero, 5xx) are handled by each
-// hook's fail_unreachable helper in _hardening.sh and ALWAYS fail
-// open unless the operator opts into strict availability via
-// DEFENSECLAW_STRICT_AVAILABILITY=1.
+// defaultHookFailMode is injected into every hook when the caller does not
+// supply an explicit override. It governs malformed/incomplete responses,
+// authorization failures, and transport failures consistently. Strict
+// availability remains an unconditional force-closed override.
 //
-// "closed" is the safer default: a response-layer failure (4xx,
-// malformed JSON, missing action) means the gateway answered but the
-// verdict is untrustworthy, so the hook BLOCKS the tool/prompt rather
-// than forwarding an uninspected action. Operators who would rather
+// "closed" is the safer default: an absent or untrustworthy verdict BLOCKS
+// rather than forwarding an uninspected action. Operators who would rather
 // accept an observability gap than a hard block during a DefenseClaw
 // outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
 // runtime, or through the per-connector setup flow (which also
@@ -419,7 +413,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 	}
 
-	if err := writeHookConfigSidecar(hookDir, apiAddr, defaultHookFailMode); err != nil {
+	if err := writeHookConfigSidecar(hookDir, apiAddr, "", defaultHookFailMode); err != nil {
 		return err
 	}
 
@@ -494,7 +488,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
-	if err := writeHookConfigSidecar(hookDir, apiAddr, normalizeHookFailMode(failMode)); err != nil {
+	if err := writeHookConfigSidecar(hookDir, apiAddr, connectorName, normalizeHookFailMode(failMode)); err != nil {
 		return err
 	}
 	return nil
@@ -531,29 +525,70 @@ func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
 }
 
 // hookConfigSidecarName is the file the native Go hook entrypoint reads on
-// Windows for the gateway address + fail mode. It lets the agent hook command
+// Windows for the gateway address + connector-scoped fail modes. It lets the agent hook command
 // stay free of per-install flags (so its trust-hash / match string is stable),
 // while still conveying the operator's enforcement choice and a non-default
 // API port. The Bash hooks (Unix) bake these values into the script and ignore
 // this file.
 const hookConfigSidecarName = ".hookcfg"
 
-// writeHookConfigSidecar persists the gateway address and fail mode the native
-// Go hook entrypoint resolves at runtime. It is only written on Windows, where
+type hookConfigSidecar struct {
+	Version     int               `json:"version"`
+	GatewayAddr string            `json:"gateway_addr"`
+	FailModes   map[string]string `json:"fail_modes,omitempty"`
+	// LegacyMode is migration-only fallback for connectors that do not yet
+	// have a map entry. Connector entries always win, so it cannot collapse a
+	// mixed-mode runtime and becomes inert after every peer is refreshed.
+	LegacyMode string `json:"legacy_fail_mode,omitempty"`
+}
+
+// writeHookConfigSidecar persists the gateway address and connector fail mode
+// the native Go hook entrypoint resolves at runtime. It is only written on Windows, where
 // connectors either invoke the native entrypoint directly or, for Cursor, via
 // the PowerShell input adapter. Unix keeps the .sh hooks unchanged and never
 // reads this file.
-func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
+func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string) error {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
-	body := fmt.Sprintf("DEFENSECLAW_GATEWAY_ADDR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
-		apiAddr, normalizeHookFailMode(failMode))
 	path := filepath.Join(hookDir, hookConfigSidecarName)
-	if err := atomicWriteFile(path, []byte(body), 0o600); err != nil {
-		return fmt.Errorf("write hook config sidecar: %w", err)
+	return withFileLock(path, func() error {
+		state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}}
+		if existing, err := os.ReadFile(path); err == nil {
+			var prior hookConfigSidecar
+			if json.Unmarshal(existing, &prior) == nil && prior.Version >= 2 {
+				if prior.FailModes != nil {
+					state.FailModes = prior.FailModes
+				}
+				state.LegacyMode = prior.LegacyMode
+			} else {
+				state.LegacyMode = legacyHookConfigValue(existing, "DEFENSECLAW_FAIL_MODE")
+			}
+		}
+		name := normalizeConnectorName(connectorName)
+		if name != "" {
+			state.FailModes[name] = normalizeHookFailMode(failMode)
+		}
+		body, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal hook config sidecar: %w", err)
+		}
+		body = append(body, '\n')
+		if err := atomicWriteFile(path, body, 0o600); err != nil {
+			return fmt.Errorf("write hook config sidecar: %w", err)
+		}
+		return nil
+	})
+}
+
+func legacyHookConfigValue(data []byte, wanted string) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok && strings.TrimSpace(strings.TrimPrefix(key, "export ")) == wanted {
+			return strings.Trim(strings.TrimSpace(value), `"'`)
+		}
 	}
-	return nil
+	return ""
 }
 
 func hookScriptNamesForConnector(opts SetupOpts, c Connector) []string {
@@ -634,10 +669,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields.
 //
-// Transport-layer failures (gateway unreachable / 5xx) are NOT
-// governed by FailMode — they always allow unless the operator opts
-// in via DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of which
-// connector or HookFailMode value.
+// Transport-layer failures (gateway unreachable / timeout / 5xx) follow
+// FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
+// force-closed override.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	var extras []string
 	if owner, ok := c.(HookScriptOwner); ok {

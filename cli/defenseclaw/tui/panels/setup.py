@@ -5597,6 +5597,14 @@ def _effective_guardrail_value(
     """
 
     guardrail = getattr(cfg, "guardrail", None)
+    if method_name == "effective_hook_fail_mode" and connector in {"claudecode", "codex"} and hasattr(cfg, "data_dir"):
+        try:
+            from defenseclaw.fail_mode import resolve_connector_fail_mode
+
+            state = resolve_connector_fail_mode(cfg, connector)
+            return state.runtime or state.desired
+        except Exception:  # noqa: BLE001 - config editor must remain available during drift.
+            pass
     resolver = getattr(guardrail, method_name, None) if guardrail is not None else None
     if callable(resolver):
         try:
@@ -5786,19 +5794,17 @@ def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> l
                 _effective_guardrail_bool(cfg, connector, "effective_enabled", "", default=True),
             )
         )
-        # E4d: hook-response fail mode (open=allow on failure, closed=block).
-        fail_field = _field(
-            cfg,
-            "Hook Fail Mode",
-            f"guardrail.connectors.{connector}.hook_fail_mode",
-            "choice",
-            ("open", "closed"),
-            f"Per-connector hook fail mode for {connector} (inherits the global mode when unset).",
-        )
+        # Fail-mode writes must use the Guardrail action so config and the
+        # installed registration are updated transactionally. Keep the live
+        # effective value visible here, but do not expose a raw config edit.
+        fail_value = _effective_guardrail_value(cfg, connector, "effective_hook_fail_mode", "guardrail.hook_fail_mode")
         rows.append(
-            _field_with_original(
-                fail_field,
-                _effective_guardrail_value(cfg, connector, "effective_hook_fail_mode", "guardrail.hook_fail_mode"),
+            ConfigField(
+                label="Hook Fail Mode (use Guardrail action)",
+                key=f"guardrail.connectors.{connector}.hook_fail_mode",
+                kind="header",
+                value=fail_value,
+                original=fail_value,
             )
         )
         # E4d: human-in-the-loop approval. A per-connector hilt block fully
@@ -5871,13 +5877,10 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         _header(".. Core .."),
         _field(cfg, "Enabled", "guardrail.enabled", "bool", hint="Master guardrail switch."),
         _field(cfg, "Mode", "guardrail.mode", "choice", ("observe", "action"), "observe=log only; action=block."),
-        _field(
-            cfg,
-            "Hook Fail Mode",
+        _header(
+            "Hook Fail Mode (use Guardrail action)",
             "guardrail.hook_fail_mode",
-            "choice",
-            ("open", "closed"),
-            "open=allow hook response failures; closed=block.",
+            _value(cfg, "guardrail.hook_fail_mode"),
         ),
         _field(
             cfg,

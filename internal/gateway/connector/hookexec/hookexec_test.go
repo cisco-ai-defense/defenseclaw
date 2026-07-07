@@ -508,6 +508,39 @@ func TestResponseFailure(t *testing.T) {
 	})
 }
 
+func TestMixedConnectorEffectiveFailModeResponseMatrix(t *testing.T) {
+	failures := []struct {
+		name string
+		rt   func() *stubRT
+	}{
+		{name: "malformed json", rt: func() *stubRT { return ok("not-json") }},
+		{name: "incomplete response", rt: func() *stubRT { return ok(`{"reason":"missing action"}`) }},
+		{name: "invalid action", rt: func() *stubRT { return ok(`{"action":"unexpected"}`) }},
+		{name: "unauthorized", rt: func() *stubRT { return &stubRT{status: 401, body: "unauthorized"} }},
+		{name: "server failure", rt: func() *stubRT { return &stubRT{status: 503, body: "unavailable"} }},
+		{name: "connection failure", rt: func() *stubRT { return &stubRT{err: errors.New("connection refused")} }},
+		{name: "timeout", rt: func() *stubRT { return &stubRT{err: context.DeadlineExceeded} }},
+	}
+	connectors := []struct {
+		name string
+		mode string
+		code int
+	}{
+		{name: "claudecode", mode: "closed", code: 2},
+		{name: "codex", mode: "open", code: 0},
+	}
+	for _, failure := range failures {
+		for _, connector := range connectors {
+			t.Run(failure.name+"/"+connector.name, func(t *testing.T) {
+				r := run(t, connector.name, failure.rt(), func(o *Options) { o.FailMode = connector.mode })
+				if r.code != connector.code {
+					t.Fatalf("code = %d, want %d; stderr=%q", r.code, connector.code, r.stderr)
+				}
+			})
+		}
+	}
+}
+
 // --- Missing token ---
 
 func TestMissingToken(t *testing.T) {
@@ -550,6 +583,16 @@ func TestMissingToken(t *testing.T) {
 		}
 		if !strings.Contains(r.stderr, "missing gateway token") {
 			t.Errorf("stderr = %q", r.stderr)
+		}
+	})
+
+	t.Run("closed fail mode blocks", func(t *testing.T) {
+		r := run(t, "claudecode", ok(`{"action":"allow"}`), func(o *Options) {
+			noToken(o)
+			o.FailMode = "closed"
+		})
+		if r.code != 2 {
+			t.Fatalf("code = %d, want 2", r.code)
 		}
 	})
 }

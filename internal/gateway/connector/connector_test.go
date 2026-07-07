@@ -5433,19 +5433,10 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailOpenOnUnreachable_Default asserts the post-PR
-// behavior: when the gateway is unreachable (transport failure), the
-// hook ALWAYS allows the agent to proceed by default — regardless of
-// FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
-// Operators who want strict availability must opt in explicitly via
-// DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
-//
-// NOTE on fail_mode in the failure log: this is metadata recording
-// the configured response-layer fail mode at write time, not the
-// transport-layer behavior under test. Post-, the safer default
-// for response-layer failures is "closed", so the metadata reflects
-// that. The transport-layer fail-open behavior remains unchanged.
-func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
+// TestHookScript_FailClosedOnUnreachable_Default asserts that the secure
+// low-level default applies consistently to transport and response failures.
+// Existing observe-only installs explicitly resolve "open" before setup.
+func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5468,8 +5459,10 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("hook error = %v, want fail-closed exit 2", err)
 	}
 
 	// Even though the hook allowed, a structured failure record must
@@ -5486,10 +5479,6 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		// The response-layer default is "closed", so the failure log
-		// metadata reflects that. The functional invariant under test
-		// (hook exits 0 / allows agent on transport failure) is
-		// unchanged — that is the `category=transport` dimension above.
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
@@ -5542,10 +5531,8 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 // TestHookScript_FailClosedOnUnreachable_StrictAvailability covers
 // the operator opt-in for strict availability: when
 // DEFENSECLAW_STRICT_AVAILABILITY=1 is set, the hook MUST exit 2 on
-// transport failures even though the response-layer FAIL_MODE
-// default is "open". This is the escape hatch for sites that prefer
-// to take the agent down rather than miss policy enforcement during
-// a gateway outage.
+// transport failures independently of the configured fail mode. This is the
+// force-closed escape hatch for sites that require strict availability.
 //
 // Also pins the operator-facing stderr contract: the verb the hook
 // prints MUST match what it actually does on exit. The pre-fix code
@@ -5669,12 +5656,8 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 }
 
 // TestHookScript_FailOpen_Override covers the legacy operator
-// override: DEFENSECLAW_FAIL_MODE=open forces the response-layer
-// handler to allow even if the baked-in template default was
-// "closed". Transport failures are NOT routed through this — they
-// have their own DEFENSECLAW_STRICT_AVAILABILITY toggle — but
-// response-layer failures (which won't fire here against an
-// unreachable gateway) would respect this override.
+// override: DEFENSECLAW_FAIL_MODE=open allows both response and transport
+// failures even if the baked-in template default was "closed".
 func TestHookScript_FailOpen_Override(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5701,7 +5684,7 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 //
 // Contract:
 //   - Explicit "closed" stays closed when the connector supports it.
-//   - Empty / invalid HookFailMode normalizes to "open".
+//   - Empty / invalid HookFailMode normalizes to the secure "closed" default.
 func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5869,7 +5852,7 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	}
 }
 
-func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
+func TestCodexHookScript_FailClosed_DefaultWithoutResolvedObserveMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5889,8 +5872,10 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("observability Codex hook should fail-open by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("Codex hook error = %v, want fail-closed exit 2", err)
 	}
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
 	if err != nil {
@@ -5906,10 +5891,6 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		// Response-layer default is "closed" — transport-layer
-		// fail-open behavior under test here is unchanged (the hook
-		// still exits 0 and the agent still proceeds when the gateway
-		// is unreachable).
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {

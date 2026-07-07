@@ -1828,11 +1828,9 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Transport-layer failures (gateway unreachable / 5xx) are
-    # handled separately by each hook's ``fail_unreachable`` helper
-    # and ALWAYS allow unless the operator opts into strict
-    # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
-    # regardless of this field's value. Mirrors
+    # Transport-layer failures (gateway unreachable / timeout / 5xx)
+    # follow this same mode. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    # remains an unconditional force-closed override. Mirrors
     # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
     hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
@@ -1917,13 +1915,19 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Observe always opens; action uses per-connector > global."""
-        if self.effective_mode(connector).strip().lower() != "action":
-            return "open"
+        """Explicit connector posture > observe compatibility > global.
+
+        Existing observe-only installs remain fail-open when they only carry
+        the legacy global value.  A connector-scoped value is an explicit
+        runtime response-integrity choice, however, and must not be collapsed
+        back to open merely because policy findings are being observed.
+        """
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":
                 return "closed"
+            return "open"
+        if self.effective_mode(connector).strip().lower() != "action":
             return "open"
         if self.hook_fail_mode.strip().lower() == "closed":
             return "closed"
