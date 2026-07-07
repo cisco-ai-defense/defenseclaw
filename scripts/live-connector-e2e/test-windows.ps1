@@ -23,6 +23,21 @@ try {
     Assert-True (@($errors).Count -eq 0) "PowerShell parser errors: $($errors -join '; ')"
     . $harness -NoRun
 
+    $private = Join-Path $temp 'private-state'
+    Protect-TestDirectory $private
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($private))
+    $owner = $security.GetOwner([Security.Principal.SecurityIdentifier])
+    Assert-True ($owner.Equals($identity.User)) 'private fixture owner is the current user'
+    Assert-True $security.AreAccessRulesProtected 'private fixture does not inherit the workspace ACL'
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $rules = $security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier])
+        Assert-True ($sid.Equals($identity.User) -or $sid.Equals($system)) "private fixture trusts unexpected principal $sid"
+    }
+
     $pwsh = (Get-Process -Id $PID).Path
     $allow = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'allow') -TimeoutSeconds 5
     Assert-True ($allow.ExitCode -eq 0 -and $allow.StdOut -match 'allow') 'mock allow decision'

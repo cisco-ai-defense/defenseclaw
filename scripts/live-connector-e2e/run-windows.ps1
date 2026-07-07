@@ -36,6 +36,31 @@ function Protect-LogText([AllowNull()][string]$Text) {
     return $safe
 }
 
+function Protect-TestDirectory([string]$Path) {
+    $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.User) { throw 'current Windows identity has no user SID' }
+
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    foreach ($sid in @($identity.User, $system)) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+    [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
+}
+
 function Invoke-NativeProcess {
     [CmdletBinding()]
     param(
@@ -151,7 +176,7 @@ function Invoke-Setup([string]$Mode) {
 }
 
 function Initialize-DefenseClawEnv {
-    [IO.Directory]::CreateDirectory($env:DEFENSECLAW_HOME) | Out-Null
+    Protect-TestDirectory $env:DEFENSECLAW_HOME
     $envPath = Join-Path $env:DEFENSECLAW_HOME '.env'
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($name in @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LLM_API_KEY')) {
@@ -292,7 +317,7 @@ if (-not $NoRun) {
     if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) { throw 'only native Windows x64 is certifying' }
     $StateRoot = [IO.Path]::GetFullPath($StateRoot)
     if ($StateRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw 'StateRoot must not be the real user profile' }
-    [IO.Directory]::CreateDirectory($StateRoot) | Out-Null
+    Protect-TestDirectory $StateRoot
     $script:ResultsPath = if ($ResultsPath) { [IO.Path]::GetFullPath($ResultsPath) } else { Join-Path $StateRoot 'results.jsonl' }
     $script:ArtifactPath = if ($ArtifactPath) { [IO.Path]::GetFullPath($ArtifactPath) } else { Join-Path $StateRoot 'artifacts' }
     [IO.Directory]::CreateDirectory((Split-Path -Parent $script:ResultsPath)) | Out-Null
@@ -301,7 +326,7 @@ if (-not $NoRun) {
     $script:CommandIndex = 0; $script:AgentVersion = 'unversioned'
     $env:USERPROFILE = Join-Path $StateRoot 'home'; $env:HOME = $env:USERPROFILE
     $env:DEFENSECLAW_HOME = Join-Path $StateRoot 'defenseclaw'
-    [IO.Directory]::CreateDirectory($env:USERPROFILE) | Out-Null
+    Protect-TestDirectory $env:USERPROFILE
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'
     if ($Operation -eq 'capture') { Stage-Diagnostics; return }
