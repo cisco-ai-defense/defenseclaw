@@ -279,6 +279,14 @@ judge_bodies_db: "${runtime_dir}/judge_bodies.db"
 gateway:
   api_bind: 127.0.0.1
   api_port: ${api_port}
+  # Pin device_key_file into RUNTIME_DIR (service-user writable) rather
+  # than letting the Go defaults compute it from DEFENSECLAW_HOME. The
+  # plist sets DEFENSECLAW_HOME to SUPPORT_DIR so managed_enterprise
+  # trust checks accept every ancestor of config.yaml, but SUPPORT_DIR
+  # itself is root:defenseclaw 0750 (no group write) — leaving the
+  # default would send the daemon's first-boot write to
+  # \${SUPPORT_DIR}/device.key and crash it with "permission denied".
+  device_key_file: "${runtime_dir}/device.key"
 
 privacy:
   disable_redaction: ${disable_redaction}

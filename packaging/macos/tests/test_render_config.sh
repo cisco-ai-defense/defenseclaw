@@ -51,6 +51,25 @@ t_runtime_paths_disjoint_from_config_parent() {
   assert_not_contains "${out}" "data_dir: \"${support}\"" "data_dir MUST NOT equal support dir (trust check fails)"
 }
 
+t_device_key_file_under_runtime_dir() {
+  # Regression guard: on macOS, the plist sets DEFENSECLAW_HOME to
+  # SUPPORT_DIR so the managed_enterprise trust check accepts every
+  # ancestor of config.yaml. But SUPPORT_DIR itself is root:defenseclaw
+  # 0750 — no group write — so the daemon (running as defenseclaw)
+  # cannot create files there. If the config leaves gateway.device_key_file
+  # unset, Go defaults compute it as \${DEFENSECLAW_HOME}/device.key,
+  # which points at SUPPORT_DIR and the first-boot write crashes with
+  # "permission denied". The renderer MUST explicitly pin it into
+  # RUNTIME_DIR so that first-boot write lands in the service-user-owned
+  # subdirectory.
+  local out support runtime
+  support="/Library/Application Support/DefenseClaw"
+  runtime="${support}/runtime"
+  out="$(render_config observe cursor 18970 false "${support}" cursor)"
+  assert_contains     "${out}" "device_key_file: \"${runtime}/device.key\"" "device_key_file under runtime dir"
+  assert_not_contains "${out}" "device_key_file: \"${support}/device.key\"" "device_key_file MUST NOT land in SUPPORT_DIR (no group-write there)"
+}
+
 t_redaction_pass_through_on() {
   # Pure rendering check: given "false", the block emits redaction on.
   # This proves the rendering layer respects the caller's choice; the
@@ -93,6 +112,8 @@ t_yaml_parses() {
 run_case "single-connector config"  t_single_connector
 run_case "multi-connector config"   t_multi_connector
 run_case "runtime paths under support (trust-check invariant)" t_runtime_paths_disjoint_from_config_parent
+run_case "device_key_file pinned under runtime dir (SUPPORT_DIR is not writable by service user)" \
+  t_device_key_file_under_runtime_dir
 run_case "renderer pass-through: redaction on"  t_redaction_pass_through_on
 run_case "renderer pass-through: redaction off" t_redaction_pass_through_off
 run_case "rendered YAML parses"     t_yaml_parses
