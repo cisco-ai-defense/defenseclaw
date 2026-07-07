@@ -176,7 +176,13 @@ function Invoke-Setup([string]$Mode) {
 }
 
 function Initialize-DefenseClawEnv {
-    Protect-TestDirectory $env:DEFENSECLAW_HOME
+    $privateDirectories = @(
+        $env:DEFENSECLAW_HOME,
+        (Join-Path $env:DEFENSECLAW_HOME 'quarantine'),
+        (Join-Path $env:DEFENSECLAW_HOME 'plugins'),
+        (Join-Path $env:DEFENSECLAW_HOME 'policies')
+    )
+    foreach ($directory in $privateDirectories) { Protect-TestDirectory $directory }
     $envPath = Join-Path $env:DEFENSECLAW_HOME '.env'
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($name in @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LLM_API_KEY')) {

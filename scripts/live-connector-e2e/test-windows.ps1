@@ -23,7 +23,9 @@ try {
     Assert-True (@($errors).Count -eq 0) "PowerShell parser errors: $($errors -join '; ')"
     . $harness -NoRun
 
-    $private = Join-Path $temp 'private-state'
+    $privateRoot = Join-Path $temp 'private-state'
+    Protect-TestDirectory $privateRoot
+    $private = Join-Path $privateRoot 'quarantine'
     Protect-TestDirectory $private
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($private))
