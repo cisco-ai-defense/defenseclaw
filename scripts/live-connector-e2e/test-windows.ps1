@@ -25,7 +25,7 @@ try {
 
     $privateRoot = Join-Path $temp 'private-state'
     Protect-TestDirectory $privateRoot
-    $private = Join-Path $privateRoot 'quarantine'
+    $private = Join-Path $privateRoot 'connector_backups\codex'
     Protect-TestDirectory $private
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($private))

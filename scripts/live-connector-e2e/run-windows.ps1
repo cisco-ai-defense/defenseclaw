@@ -180,7 +180,11 @@ function Initialize-DefenseClawEnv {
         $env:DEFENSECLAW_HOME,
         (Join-Path $env:DEFENSECLAW_HOME 'quarantine'),
         (Join-Path $env:DEFENSECLAW_HOME 'plugins'),
-        (Join-Path $env:DEFENSECLAW_HOME 'policies')
+        (Join-Path $env:DEFENSECLAW_HOME 'policies'),
+        (Join-Path $env:DEFENSECLAW_HOME 'connector_backups'),
+        (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\codex'),
+        (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\claudecode'),
+        (Join-Path $env:DEFENSECLAW_HOME 'hooks')
     )
     foreach ($directory in $privateDirectories) { Protect-TestDirectory $directory }
     $envPath = Join-Path $env:DEFENSECLAW_HOME '.env'
