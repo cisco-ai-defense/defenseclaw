@@ -39,6 +39,26 @@ The installer resolves the gateway binary and plist by looking next to
 \`install.sh\` first, so the bundle works verbatim from wherever you
 place it.
 
+### Custom plist overrides
+
+Two paths are supported for the LaunchDaemon plist source:
+
+- **Bundle default** (\`com.defenseclaw.gateway.plist\` next to
+  \`install.sh\`) — used automatically. The bundled plist inherits the
+  extracting user's uid when you unpack the tarball; that's fine
+  because its content came from this signed bundle.
+- **Explicit override** via \`--plist <path>\` or the
+  \`DEFENSECLAW_PLIST_SRC\` environment variable — treated as an
+  untrusted operator input and required to be **root-owned** (\`chown
+  root:wheel <path>\`) before install.sh will accept it.
+
+Both paths refuse any source that is group- or world-writable (mode
+must not include \`0022\`). Fix with:
+
+\`\`\`
+sudo chmod 0644 <path-to-plist>
+\`\`\`
+
 ## Uninstall
 
 Preserve config + audit DB (reversible reinstall):

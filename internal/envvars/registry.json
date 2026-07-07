@@ -628,7 +628,7 @@
         {"location": "packaging/macos/install.sh", "description": "macOS bundle installer plist resolution"}
       ],
       "since": "0.8.0",
-      "security_note": "Installer-only override — the resolved plist still needs to satisfy the CI test_launchd_gateway_plist_uses_managed_paths managed-path contract."
+      "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
     },
     {
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
