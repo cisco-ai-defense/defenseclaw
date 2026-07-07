@@ -161,9 +161,20 @@ dscl_read_prop() {
 # so this helper is more reliable than gating on -read.
 dscl_ensure_record() {
   local record="$1"
-  local err
-  err="$(dscl "${DS_NODE}" -create "${record}" 2>&1)"
-  local rc=$?
+  # Capture stderr AND status in a single assignment, matching the
+  # pattern used by dscl_ensure_prop below. Two things going on here:
+  #
+  # 1. `local err rc=0` on its own line means the `local` builtin has
+  #    already returned 0 by the time we look at $?. If we ran the
+  #    dscl command substitution on a `local err=...` line, `local`'s
+  #    exit status (always 0) would overwrite dscl's — that's the
+  #    exact footgun CodeRabbit flagged.
+  # 2. Under `set -e`, a failing command substitution on the RHS of a
+  #    plain assignment does NOT abort the script (set -e ignores the
+  #    subshell in that position). The `|| rc=$?` on the assignment
+  #    statement itself is what captures the failure status reliably.
+  local err rc=0
+  err="$(dscl "${DS_NODE}" -create "${record}" 2>&1)" || rc=$?
   if (( rc == 0 )); then
     return 0
   fi
