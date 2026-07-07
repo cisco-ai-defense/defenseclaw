@@ -51,20 +51,23 @@ defenseclaw_harden_env
 DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-response"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
+FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
 
 # Avarice F-2025 / chain F-3397: authenticate inspection calls. See
 # inspect-request.sh for the full rationale.
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+TOKEN_FILE="$(defenseclaw_shared_hook_token_file "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
+if [ ! -f "$TOKEN_FILE" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token inspect inspect-response "response"
 fi
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
-  {{if .ScopedToken}}
-  DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "${HOOK_DIR}/{{.TokenFile}}")"
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
+  if [ -n "$RUNTIME_CONNECTOR" ]; then
+    DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+  else
+    # shellcheck source=/dev/null
+    . "$TOKEN_FILE"
+  fi
   export DEFENSECLAW_GATEWAY_TOKEN
-  {{else}}
-  # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
-  {{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
@@ -74,7 +77,6 @@ CONTENT="$(defenseclaw_read_stdin_capped)" || {
 }
 
 API_ADDR="{{.APIAddr}}"
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 # Transport and response failures respect FAIL_MODE;
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
@@ -108,9 +110,9 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 CONNECTOR_HEADER_ARGS=()
-{{if .ConnectorName}}
-CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: {{.ConnectorName}}")
-{{end}}
+if [ -n "$RUNTIME_CONNECTOR" ]; then
+  CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
+fi
 
 RESPONSE=$(printf '%s' "$CONTENT" | curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/response" \
   -H "Content-Type: application/json" \

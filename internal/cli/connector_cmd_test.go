@@ -7,10 +7,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -20,6 +22,64 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+type testHookContractLock struct {
+	Version                 int                                        `json:"version"`
+	SharedHookScriptDigests map[string]string                          `json:"shared_hook_script_digests"`
+	Connectors              map[string]connector.HookContractLockEntry `json:"connectors"`
+}
+
+func readTestHookContractLock(t *testing.T, dataDir string) testHookContractLock {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(dataDir, "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatalf("read hook contract lock: %v", err)
+	}
+	var lock testHookContractLock
+	if err := json.Unmarshal(body, &lock); err != nil {
+		t.Fatalf("parse hook contract lock: %v", err)
+	}
+	return lock
+}
+
+func fileDigest(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read digest target %s: %v", path, err)
+	}
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func assertMixedHookContractsCurrent(t *testing.T, dataDir, home string) testHookContractLock {
+	t.Helper()
+	lock := readTestHookContractLock(t, dataDir)
+	if lock.Version != 2 || len(lock.SharedHookScriptDigests) == 0 {
+		t.Fatalf("shared contract schema not current: %+v", lock)
+	}
+	for name, expected := range lock.SharedHookScriptDigests {
+		if actual := fileDigest(t, filepath.Join(dataDir, "hooks", name)); actual != expected {
+			t.Fatalf("shared digest %s=%s want %s", name, actual, expected)
+		}
+	}
+	for _, name := range []string{"claudecode", "codex"} {
+		entry, ok := lock.Connectors[name]
+		if !ok {
+			t.Fatalf("missing %s contract entry", name)
+		}
+		for artifact, expected := range entry.HookScriptDigests {
+			path := filepath.Join(dataDir, "hooks", artifact)
+			if runtime.GOOS == "windows" && strings.EqualFold(artifact, "defenseclaw-hook.exe") {
+				path = filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
+			}
+			if actual := fileDigest(t, path); actual != expected {
+				t.Fatalf("%s artifact %s digest=%s want %s", name, artifact, actual, expected)
+			}
+		}
+	}
+	return lock
+}
 
 // withConnectorState swaps cfg/flags into a known state for one test and
 // restores the originals on teardown. The package-level globals are how
@@ -174,6 +234,149 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
 	if lock.HookFailMode != "closed" {
 		t.Fatalf("lock fail mode = %q, want closed", lock.HookFailMode)
+	}
+}
+
+func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	codexPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
+	if runtime.GOOS == "windows" {
+		if err := os.MkdirAll(filepath.Dir(launcher), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(launcher, []byte("MZ-native-hook-fixture"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousClaudePath := connector.ClaudeCodeSettingsPathOverride
+	previousCodexPath := connector.CodexConfigPathOverride
+	connector.ClaudeCodeSettingsPathOverride = claudePath
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() {
+		connector.ClaudeCodeSettingsPathOverride = previousClaudePath
+		connector.CodexConfigPathOverride = previousCodexPath
+	})
+	defer withConnectorState(t, dataDir, "claudecode")()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {HookFailMode: "open"},
+		"codex":      {HookFailMode: "open"},
+	}
+	for _, name := range []string{"claudecode", "codex"} {
+		if _, err := connector.EnsureHookAPIToken(dataDir, name); err != nil {
+			t.Fatalf("ensure %s token: %v", name, err)
+		}
+		_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", name, "--json")
+		if stderr != "" {
+			t.Fatalf("initial %s reconcile: %s", name, stderr)
+		}
+	}
+	initial := assertMixedHookContractsCurrent(t, dataDir, home)
+	codexBefore, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexOwnedBefore := initial.Connectors["codex"].HookScriptDigests["codex-hook.sh"]
+
+	claudeMode := cfg.Guardrail.Connectors["claudecode"]
+	claudeMode.HookFailMode = "closed"
+	cfg.Guardrail.Connectors["claudecode"] = claudeMode
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
+	if stderr != "" {
+		t.Fatalf("Claude close reconcile: %s", stderr)
+	}
+	closed := assertMixedHookContractsCurrent(t, dataDir, home)
+	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "open" {
+		t.Fatalf("mixed lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
+	}
+	codexAfter, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(codexAfter, codexBefore) || closed.Connectors["codex"].HookScriptDigests["codex-hook.sh"] != codexOwnedBefore {
+		t.Fatal("Claude-only reconciliation changed Codex registration or owned contract")
+	}
+
+	// Seed the exact legacy failure: every connector claims a different hash
+	// for the same shared paths, while disk can match only one.  The normal
+	// selected reconcile must render canonical bytes and migrate atomically.
+	legacyPath := filepath.Join(dataDir, "hook_contract_lock.json")
+	legacyDoc := map[string]interface{}{}
+	legacyBody, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(legacyBody, &legacyDoc); err != nil {
+		t.Fatal(err)
+	}
+	shared, _ := legacyDoc["shared_hook_script_digests"].(map[string]interface{})
+	delete(legacyDoc, "shared_hook_script_digests")
+	legacyDoc["version"] = float64(1)
+	entries, _ := legacyDoc["connectors"].(map[string]interface{})
+	for connectorName, rawEntry := range entries {
+		entry, _ := rawEntry.(map[string]interface{})
+		digests, _ := entry["hook_script_digests"].(map[string]interface{})
+		for artifact, digest := range shared {
+			if connectorName == "claudecode" {
+				digests[artifact] = "sha256:legacy-claude-divergent"
+			} else {
+				digests[artifact] = digest
+			}
+		}
+	}
+	legacyBody, err = json.MarshalIndent(legacyDoc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, append(legacyBody, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
+	if stderr != "" {
+		t.Fatalf("legacy migration reconcile: %s", stderr)
+	}
+	assertMixedHookContractsCurrent(t, dataDir, home)
+
+	// Reverse the mixed state and repeatedly switch one connector.  Every
+	// intermediate lock must validate both registrations simultaneously.
+	claudeMode = cfg.Guardrail.Connectors["claudecode"]
+	claudeMode.HookFailMode = "open"
+	cfg.Guardrail.Connectors["claudecode"] = claudeMode
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
+	if stderr != "" {
+		t.Fatalf("Claude reopen reconcile: %s", stderr)
+	}
+	codexMode := cfg.Guardrail.Connectors["codex"]
+	codexMode.HookFailMode = "closed"
+	cfg.Guardrail.Connectors["codex"] = codexMode
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	if stderr != "" {
+		t.Fatalf("Codex close reconcile: %s", stderr)
+	}
+	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
+	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "closed" {
+		t.Fatalf("reverse mixed modes are wrong: %+v", reverse.Connectors)
+	}
+	for _, mode := range []string{"closed", "open", "closed", "open"} {
+		claudeMode = cfg.Guardrail.Connectors["claudecode"]
+		claudeMode.HookFailMode = mode
+		cfg.Guardrail.Connectors["claudecode"] = claudeMode
+		_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
+		if stderr != "" {
+			t.Fatalf("repeated Claude %s reconcile: %s", mode, stderr)
+		}
+		assertMixedHookContractsCurrent(t, dataDir, home)
 	}
 }
 

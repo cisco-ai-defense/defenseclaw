@@ -3776,7 +3776,7 @@ func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
 	}
 }
 
-func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
+func TestZeptoClaw_Setup_UsesRuntimeFailModeForSharedHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -3807,8 +3807,91 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read inspect-tool.sh: %v", err)
 	}
-	if !strings.Contains(string(body), `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`) {
-		t.Fatalf("inspect-tool.sh did not render closed fail mode:\n%s", string(body))
+	if !strings.Contains(string(body), `defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR"`) {
+		t.Fatalf("inspect-tool.sh does not resolve fail mode at runtime:\n%s", string(body))
+	}
+	opts.HookFailMode = "open"
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("open-mode Setup: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "hooks", "inspect-tool.sh"))
+	if err != nil {
+		t.Fatalf("read open-mode inspect-tool.sh: %v", err)
+	}
+	if !bytes.Equal(after, body) {
+		t.Fatal("shared inspect hook changed when one connector changed fail mode")
+	}
+}
+
+func TestSharedInspectHookResolvesSingleConnectorRuntimeState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	for _, tc := range []struct {
+		mode     string
+		wantCode int
+	}{
+		{mode: "open", wantCode: 0},
+		{mode: "closed", wantCode: 2},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			var gotConnector, gotAuthorization string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotConnector = r.Header.Get("X-DefenseClaw-Connector")
+				gotAuthorization = r.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte("not-json"))
+			}))
+			defer srv.Close()
+			dir := t.TempDir()
+			hookDir := filepath.Join(dir, "hooks")
+			opts := SetupOpts{
+				DataDir:            dir,
+				APIAddr:            strings.TrimPrefix(srv.URL, "http://"),
+				HookFailMode:       tc.mode,
+				HookAPIToken:       "scoped-runtime-fixture",
+				HookAPITokenScoped: true,
+			}
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewZeptoClawConnector()); err != nil {
+				t.Fatalf("write shared hooks: %v", err)
+			}
+			// The parser-independent flat record must remain authoritative even
+			// when persistent/transient lock files and unrelated prefix matches
+			// are present. Those files must not become phantom connectors.
+			if err := os.WriteFile(filepath.Join(hookDir, ".hookcfg.lock"), nil, 0o600); err != nil {
+				t.Fatalf("write lock fixture: %v", err)
+			}
+			if err := os.WriteFile(
+				filepath.Join(hookDir, ".hookcfg.unrelated"),
+				[]byte("DEFENSECLAW_CONNECTOR=someone-else\nDEFENSECLAW_FAIL_MODE=closed\n"),
+				0o600,
+			); err != nil {
+				t.Fatalf("write unrelated sidecar fixture: %v", err)
+			}
+			cmd := exec.Command("bash", filepath.Join(hookDir, "inspect-request.sh"))
+			cmd.Stdin = strings.NewReader(`{"content":"hello"}`)
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + dir,
+				"DEFENSECLAW_HOME=" + dir,
+			}
+			err := cmd.Run()
+			code := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("run shared hook: %v", err)
+			}
+			if code != tc.wantCode {
+				t.Fatalf("shared hook exit=%d want %d", code, tc.wantCode)
+			}
+			if gotConnector != "zeptoclaw" {
+				t.Fatalf("connector header=%q", gotConnector)
+			}
+			if gotAuthorization != "Bearer scoped-runtime-fixture" {
+				t.Fatalf("authorization header did not use scoped runtime token")
+			}
+		})
 	}
 }
 
@@ -4021,11 +4104,11 @@ func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read generic hook %s: %v", name, err)
 		}
-		if !strings.Contains(string(body), ".hook-openclaw.token") {
-			t.Errorf("generic hook %s does not reference connector-scoped token sidecar", name)
+		if strings.Contains(string(body), ".hook-openclaw.token") || strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
+			t.Errorf("generic hook %s embeds OpenClaw-specific runtime state", name)
 		}
-		if !strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
-			t.Errorf("generic hook %s does not bind scoped token to OpenClaw", name)
+		if !strings.Contains(string(body), "defenseclaw_shared_hook_token_file") || !strings.Contains(string(body), "RUNTIME_CONNECTOR") {
+			t.Errorf("generic hook %s does not resolve connector state at runtime", name)
 		}
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
@@ -5818,6 +5901,19 @@ func TestManagedEnterpriseHookIgnoresUserControlledHomeAndDisableSentinel(t *tes
 	}
 	if !strings.Contains(rendered, "DEFENSECLAW_MANAGED_HOOK=1") {
 		t.Fatal("managed hook does not force fail-closed transport and missing-token behavior")
+	}
+	sharedBody, err := os.ReadFile(filepath.Join(dir, "inspect-request.sh"))
+	if err != nil {
+		t.Fatalf("read managed shared hook: %v", err)
+	}
+	shared := string(sharedBody)
+	if strings.Contains(shared, `DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"`) ||
+		strings.Contains(shared, `[ -f "${DEFENSECLAW_HOME}/.disabled" ]`) {
+		t.Fatal("managed shared hook retained a user-controlled home or disable sentinel")
+	}
+	if !strings.Contains(shared, `DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"`) ||
+		!strings.Contains(shared, "DEFENSECLAW_MANAGED_HOOK=1") {
+		t.Fatal("managed shared hook did not retain enterprise hardening")
 	}
 }
 

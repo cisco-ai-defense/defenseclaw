@@ -17,8 +17,10 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,10 +41,10 @@ func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
 		t.Skip("Windows connector-aware hook sidecar")
 	}
 	dir := t.TempDir()
-	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed"); err != nil {
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open"); err != nil {
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
@@ -68,7 +70,7 @@ func TestWindowsHookConfigSidecarMigratesLegacyScalar(t *testing.T) {
 	if err := os.WriteFile(path, legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed"); err != nil {
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -84,6 +86,105 @@ func TestWindowsHookConfigSidecarMigratesLegacyScalar(t *testing.T) {
 	}
 	if state.LegacyMode != "open" {
 		t.Fatalf("legacy fallback was not retained for unmigrated connector peers: %#v", state)
+	}
+}
+
+func TestHookConfigSidecarClearRemovesOnlySelectedConnector(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearHookConfigSidecarEntry(dir, "claudecode"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.FailModes["claudecode"]; ok {
+		t.Fatalf("selected connector survived clear: %#v", state.FailModes)
+	}
+	if state.FailModes["codex"] != "open" {
+		t.Fatalf("peer connector changed during clear: %#v", state.FailModes)
+	}
+	if _, err := os.Stat(filepath.Join(dir, hookConfigSidecarName+".claudecode")); !os.IsNotExist(err) {
+		t.Fatalf("selected flat runtime record survived clear: %v", err)
+	}
+	peer, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName+".codex"))
+	if err != nil || !strings.Contains(string(peer), "DEFENSECLAW_FAIL_MODE=open") {
+		t.Fatalf("peer flat runtime record changed: err=%v body=%q", err, peer)
+	}
+}
+
+func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	before := []byte(`{"version":2,"fail_modes":`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err == nil {
+		t.Fatal("malformed peer runtime state was overwritten")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("failed sidecar write changed malformed peer state")
+	}
+}
+
+func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	jsonPath := filepath.Join(dir, hookConfigSidecarName)
+	flatPath := filepath.Join(dir, hookConfigSidecarName+".claudecode")
+	jsonBefore, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatBefore, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	failSecond := func(path string, data []byte, mode os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return errors.New("injected flat sidecar failure")
+		}
+		return atomicWriteFile(path, data, mode)
+	}
+	if err := writeHookConfigSidecarUsing(
+		dir,
+		"127.0.0.1:18970",
+		"claudecode",
+		"closed",
+		false,
+		failSecond,
+	); err == nil {
+		t.Fatal("injected second-file failure was ignored")
+	}
+	jsonAfter, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatAfter, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(jsonAfter, jsonBefore) || !bytes.Equal(flatAfter, flatBefore) {
+		t.Fatal("second-file failure left JSON and flat runtime state changed")
 	}
 }
 

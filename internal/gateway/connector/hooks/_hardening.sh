@@ -167,6 +167,125 @@ defenseclaw_harden_env() {
   _defenseclaw_sweep_stale_hook_dirs
 }
 
+# Resolve optional connector identity for the shared inspect-* scripts.  The
+# selected connector is runtime state, never a render-time property of the one
+# physical shared script.  Reject anything outside the connector-name grammar
+# before it can participate in a token filename or HTTP header.
+defenseclaw_shared_runtime_connector() {
+  local connector="${DEFENSECLAW_CONNECTOR:-}"
+  # Non-managed shells may supply an ephemeral connector selection, matching
+  # the existing fail-mode/token override contract. Guardian-managed hooks do
+  # not trust process environment for connector identity and use only the
+  # installer-owned sidecars below.
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+    connector=""
+  fi
+  case "$connector" in
+    *[!a-z0-9_-]*) return 0 ;;
+    *) printf '%s' "$connector" ;;
+  esac
+  if [ -n "$connector" ]; then
+    return 0
+  fi
+  local hook_dir="${1:-}"
+  local candidate found="" suffix recorded
+  for candidate in "${hook_dir}"/.hookcfg.*; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    suffix="${candidate##*.hookcfg.}"
+    [ "$suffix" != "legacy" ] && [ "$suffix" != "lock" ] || continue
+    case "$suffix" in
+      ""|*[!a-z0-9_-]*) continue ;;
+    esac
+    # Ignore lock files, interrupted atomic-write debris, and unrelated files
+    # that merely share the prefix. A valid record must identify itself with
+    # the exact connector encoded in its filename.
+    recorded="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_CONNECTOR 2>/dev/null || true)"
+    [ "$recorded" = "$suffix" ] || continue
+    if [ -n "$found" ]; then
+      # Multiple connector records are intentionally ambiguous unless the
+      # caller supplies DEFENSECLAW_CONNECTOR.
+      return 0
+    fi
+    found="$suffix"
+  done
+  if [ -n "$found" ]; then
+    printf '%s' "$found"
+    return 0
+  fi
+  local config="${hook_dir}/.hookcfg"
+  if [ -f "$config" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      connector="$(jq -r '.fail_modes | keys | if length == 1 then .[0] else empty end' "$config" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+      connector="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); k=list((d.get("fail_modes") or {}).keys()); print(k[0] if len(k)==1 else "")' "$config" 2>/dev/null || true)"
+    fi
+    case "$connector" in
+      ""|*[!a-z0-9_-]*) return 0 ;;
+      *) printf '%s' "$connector" ;;
+    esac
+  fi
+}
+
+defenseclaw_flat_hookcfg_value() {
+  local config="$1"
+  local wanted="$2"
+  local key value
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  while IFS='=' read -r key value; do
+    if [ "$key" = "$wanted" ]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done < "$config"
+  return 1
+}
+
+# Return the shared legacy token path or the connector-scoped token path named
+# by runtime state.  This does not search token files and never embeds one
+# connector's credential path into shared script bytes.
+defenseclaw_shared_hook_token_file() {
+  local hook_dir="$1"
+  local connector="${2:-}"
+  if [ -n "$connector" ] && [ -f "${hook_dir}/.hook-${connector}.token" ]; then
+    printf '%s/.hook-%s.token' "$hook_dir" "$connector"
+  else
+    printf '%s/.token' "$hook_dir"
+  fi
+}
+
+# Resolve the selected connector's fail mode from the connector-aware shared
+# runtime state.  An explicit process value still wins for ephemeral shells;
+# malformed, ambiguous, or missing state fails closed.
+defenseclaw_shared_runtime_fail_mode() {
+  local hook_dir="$1"
+  local connector="${2:-}"
+  local mode="${DEFENSECLAW_FAIL_MODE:-}"
+  local config="${hook_dir}/.hookcfg"
+  local flat_config="${hook_dir}/.hookcfg.legacy"
+  if [ -n "$connector" ]; then
+    flat_config="${hook_dir}/.hookcfg.${connector}"
+  fi
+  if [ "$mode" != "open" ] && [ "$mode" != "closed" ]; then
+    mode="$(defenseclaw_flat_hookcfg_value "$flat_config" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
+  fi
+  if [ "$mode" != "open" ] && [ "$mode" != "closed" ] && [ -f "$config" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      if [ -n "$connector" ]; then
+        mode="$(jq -r --arg connector "$connector" '.fail_modes[$connector] // empty' "$config" 2>/dev/null || true)"
+      else
+        mode="$(jq -r '.legacy_fail_mode // empty' "$config" 2>/dev/null || true)"
+      fi
+    elif command -v python3 >/dev/null 2>&1; then
+      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; print((d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""))' "$config" "$connector" 2>/dev/null || true)"
+    fi
+  fi
+  if [ "$mode" = "open" ]; then
+    printf open
+  else
+    printf closed
+  fi
+}
+
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*
 # directories under DEFENSECLAW_HOME that haven't been touched in 60+
 # minutes. The 60-minute floor is the longest the hook itself can run

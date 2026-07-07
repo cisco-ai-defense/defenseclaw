@@ -14,6 +14,14 @@ from defenseclaw.commands import cmd_guardrail
 from defenseclaw.context import AppContext
 from defenseclaw.fail_mode import resolve_connector_fail_mode
 
+_SHARED_HOOK_SCRIPTS = (
+    "inspect-tool.sh",
+    "inspect-request.sh",
+    "inspect-response.sh",
+    "inspect-tool-response.sh",
+    "_hardening.sh",
+)
+
 
 @pytest.fixture(autouse=True)
 def _clear_global_fail_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,6 +75,11 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
     (home / ".codex" / "config.toml").write_text(
         '[hooks]\ndefenseclaw = "defenseclaw hook --connector codex"\n', encoding="utf-8"
     )
+    shared_digests = {}
+    for script_name in _SHARED_HOOK_SCRIPTS:
+        script_body = f"canonical shared hook: {script_name}\n".encode()
+        (hook_dir / script_name).write_bytes(script_body)
+        shared_digests[script_name] = "sha256:" + hashlib.sha256(script_body).hexdigest()
     entries = {}
     for name, mode in modes.items():
         script_name = "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
@@ -92,7 +105,8 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
     (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
+                "shared_hook_script_digests": shared_digests,
                 "connectors": entries,
             }
         ),
@@ -219,12 +233,20 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(tmp_path: P
     cfg, home = _runtime_cfg(tmp_path, {"claudecode": "open", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     original_settings = (home / ".claude" / "settings.json").read_bytes()
+    tracked_paths = [
+        Path(cfg.data_dir) / "hook_contract_lock.json",
+        Path(cfg.data_dir) / "hooks" / ".hookcfg",
+        *(Path(cfg.data_dir) / "hooks" / name for name in _SHARED_HOOK_SCRIPTS),
+    ]
+    original_runtime = {path: path.read_bytes() for path in tracked_paths}
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
 
     def fail_after_partial_write(_cfg: object, _connector: str) -> None:
         (home / ".claude" / "settings.json").write_text('{"partial":true}', encoding="utf-8")
+        for path in tracked_paths:
+            path.write_text("partial reconciliation", encoding="utf-8")
         raise OSError("setup failed")
 
     with (
@@ -242,6 +264,7 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(tmp_path: P
     assert result.exit_code != 0
     assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"
     assert (home / ".claude" / "settings.json").read_bytes() == original_settings
+    assert {path: path.read_bytes() for path in tracked_paths} == original_runtime
     assert "restored" in result.output
 
 
@@ -283,12 +306,88 @@ def test_stale_windows_launcher_digest_rejects_noop(tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     (home / ".local" / "bin" / "defenseclaw-hook.exe").write_bytes(b"MZstale-launcher")
-    with patch("defenseclaw.fail_mode.os.name", "nt"), patch(
-        "defenseclaw.fail_mode.Path.home", return_value=home
-    ):
+    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert not state.current
     assert "registration-digest-stale" in state.drift
+
+
+def test_runtime_digest_hashes_raw_windows_binary_bytes(tmp_path: Path) -> None:
+    artifact = tmp_path / "runtime.bin"
+    body = b"MZ\r\nraw-before\x1araw-after\r\n"
+    artifact.write_bytes(body)
+    assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def test_v2_shared_digest_is_authoritative_over_legacy_entry_duplicate(tmp_path: Path) -> None:
+    cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed", "codex": "open"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["connectors"]["claudecode"]["hook_script_digests"]["inspect-tool.sh"] = "sha256:legacy-stale"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert state.current
+
+
+def test_divergent_v1_shared_digests_require_controlled_migration(tmp_path: Path) -> None:
+    cfg, home = _runtime_cfg(tmp_path, {"claudecode": "open", "codex": "open"})
+    _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    shared = lock.pop("shared_hook_script_digests")
+    lock["version"] = 1
+    for name, entry in lock["connectors"].items():
+        for script_name, digest in shared.items():
+            entry["hook_script_digests"][script_name] = digest if name == "codex" else "sha256:divergent"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        claude = resolve_connector_fail_mode(cfg, "claudecode")
+        codex = resolve_connector_fail_mode(cfg, "codex")
+    assert "registration-shared-digest-divergent" in claude.drift
+    assert "registration-shared-digest-divergent" in codex.drift
+
+
+def test_single_connector_v1_shared_digests_remain_compatible(tmp_path: Path) -> None:
+    cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    shared = lock.pop("shared_hook_script_digests")
+    lock["version"] = 1
+    lock["connectors"]["claudecode"]["hook_script_digests"].update(shared)
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert state.current
+
+
+def test_single_connector_v1_missing_shared_digests_is_stale(tmp_path: Path) -> None:
+    cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock.pop("shared_hook_script_digests")
+    lock["version"] = 1
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert "registration-shared-digests-missing" in state.drift
+
+
+@pytest.mark.parametrize("version", [True, 2.5, 3])
+def test_unsupported_contract_lock_version_is_stale(tmp_path: Path, version: object) -> None:
+    cfg, home = _runtime_cfg(tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["version"] = version
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    with patch("defenseclaw.fail_mode.os.name", "nt"), patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    expected = "registration-lock-version-unsupported" if version == 3 else "registration-lock-malformed"
+    assert expected in state.drift
 
 
 def test_unix_registration_freshness_requires_current_script_path(tmp_path: Path) -> None:

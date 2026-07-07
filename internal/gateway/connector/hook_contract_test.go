@@ -11,6 +11,7 @@
 package connector
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -20,6 +21,19 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func sharedHookBytes(t *testing.T, hookDir string) map[string][]byte {
+	t.Helper()
+	out := make(map[string][]byte, len(genericHookScripts)+len(hookHelperScripts))
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		body, err := os.ReadFile(filepath.Join(hookDir, name))
+		if err != nil {
+			t.Fatalf("read shared hook %s: %v", name, err)
+		}
+		out[name] = body
+	}
+	return out
+}
 
 func TestHookContractResolution(t *testing.T) {
 	cases := []struct {
@@ -391,6 +405,309 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	changed.ContractID = "hermes-hooks-v0-other"
 	if !HookContractLockDrifted(loaded, changed) {
 		t.Fatalf("contract change should be drift")
+	}
+}
+
+func TestSharedInspectScriptsAreConnectorIndependent(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	claudeOpts := SetupOpts{
+		DataDir:            dir,
+		APIAddr:            "127.0.0.1:18970",
+		HookFailMode:       "closed",
+		HookAPIToken:       "claude-scoped-fixture",
+		HookAPITokenScoped: true,
+		ManagedEnterprise:  true,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, claudeOpts, NewClaudeCodeConnector()); err != nil {
+		t.Fatalf("write Claude hooks: %v", err)
+	}
+	before := sharedHookBytes(t, hookDir)
+
+	codexOpts := claudeOpts
+	codexOpts.HookFailMode = "open"
+	codexOpts.HookAPIToken = "codex-scoped-fixture"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, codexOpts, NewCodexConnector()); err != nil {
+		t.Fatalf("write Codex hooks: %v", err)
+	}
+	after := sharedHookBytes(t, hookDir)
+	for name, want := range before {
+		if !bytes.Equal(after[name], want) {
+			t.Fatalf("shared hook %s changed across connector/mode/token render", name)
+		}
+		for _, forbidden := range [][]byte{
+			[]byte(".hook-claudecode.token"),
+			[]byte(".hook-codex.token"),
+			[]byte("X-DefenseClaw-Connector: claudecode"),
+			[]byte("X-DefenseClaw-Connector: codex"),
+		} {
+			if bytes.Contains(after[name], forbidden) {
+				t.Fatalf("shared hook %s contains connector-specific data %q", name, forbidden)
+			}
+		}
+	}
+}
+
+func TestHookContractLockStoresSharedScriptsOnce(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	connectors := []struct {
+		conn Connector
+		mode string
+	}{
+		{NewClaudeCodeConnector(), "closed"},
+		{NewCodexConnector(), "open"},
+	}
+	for _, tc := range connectors {
+		opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: tc.mode}
+		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, tc.conn); err != nil {
+			t.Fatalf("write %s hooks: %v", tc.conn.Name(), err)
+		}
+		if err := SaveHookContractLockEntry(dir, NewHookContractLockEntry(opts, tc.conn, "test-build")); err != nil {
+			t.Fatalf("save %s lock: %v", tc.conn.Name(), err)
+		}
+	}
+	lock := loadHookContractLock(dir)
+	if lock.Version != hookContractLockVersion {
+		t.Fatalf("lock version=%d want %d", lock.Version, hookContractLockVersion)
+	}
+	if len(lock.SharedHookScriptDigests) != len(genericHookScripts)+len(hookHelperScripts) {
+		t.Fatalf("shared digests=%v", lock.SharedHookScriptDigests)
+	}
+	for _, tc := range connectors {
+		entry := lock.Connectors[tc.conn.Name()]
+		for name := range entry.HookScriptDigests {
+			if sharedHookScriptName(name) {
+				t.Fatalf("%s entry retained shared digest %s", tc.conn.Name(), name)
+			}
+		}
+		owned := "codex-hook.sh"
+		if tc.conn.Name() == "claudecode" {
+			owned = "claude-code-hook.sh"
+		}
+		if entry.HookScriptDigests[owned] == "" {
+			t.Fatalf("%s owned digest missing: %v", tc.conn.Name(), entry.HookScriptDigests)
+		}
+	}
+}
+
+func TestHookContractLockMigratesDivergentLegacySharedDigests(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: "closed"}
+	conn := NewClaudeCodeConnector()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatalf("write canonical hooks: %v", err)
+	}
+	selected := NewHookContractLockEntry(opts, conn, "test-build")
+	peerOwned := "sha256:peer-owned"
+	legacy := hookContractLock{
+		Version: 1,
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {
+				Connector:         "claudecode",
+				ContractID:        "claudecode-hooks-v1",
+				HookFailMode:      "open",
+				HookScriptDigests: map[string]string{"claude-code-hook.sh": "sha256:old-claude"},
+			},
+			"codex": {
+				Connector:         "codex",
+				ContractID:        "codex-hooks-v1",
+				HookFailMode:      "open",
+				HookScriptDigests: map[string]string{"codex-hook.sh": peerOwned},
+			},
+		},
+	}
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		legacy.Connectors["claudecode"].HookScriptDigests[name] = "sha256:legacy-claude"
+		legacy.Connectors["codex"].HookScriptDigests[name] = "sha256:legacy-codex"
+	}
+	body, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveHookContractLockEntry(dir, selected); err != nil {
+		t.Fatalf("migrate lock: %v", err)
+	}
+	migratedPath := filepath.Join(dir, hookContractLockFile)
+	migrated, err := os.ReadFile(migratedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := loadHookContractLock(dir)
+	if lock.Version != hookContractLockVersion {
+		t.Fatalf("migrated version=%d", lock.Version)
+	}
+	if lock.Connectors["codex"].HookFailMode != "open" || lock.Connectors["codex"].HookScriptDigests["codex-hook.sh"] != peerOwned {
+		t.Fatalf("peer metadata changed during migration: %+v", lock.Connectors["codex"])
+	}
+	for name, digest := range lock.SharedHookScriptDigests {
+		actual := HookScriptDigests(opts, conn)[name]
+		if digest != actual {
+			t.Fatalf("shared digest %s=%q want current %q", name, digest, actual)
+		}
+		for connectorName, entry := range lock.Connectors {
+			if _, exists := entry.HookScriptDigests[name]; exists {
+				t.Fatalf("legacy shared digest %s remains under %s", name, connectorName)
+			}
+		}
+	}
+	if err := SaveHookContractLockEntry(dir, NewHookContractLockEntry(opts, conn, "test-build")); err != nil {
+		t.Fatalf("repeat save: %v", err)
+	}
+	repeated, err := os.ReadFile(migratedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(repeated, migrated) {
+		t.Fatal("repeated reconciliation rewrote an already-current contract lock")
+	}
+}
+
+func TestHookContractLockRejectsMalformedOrFutureExistingLock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "malformed", body: `{not-json`},
+		{name: "future", body: `{"version":99,"future_field":"preserve","connectors":{"codex":{"connector":"codex"}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := testenv.PrivateTempDir(t)
+			path := filepath.Join(dir, hookContractLockFile)
+			before := []byte(tc.body)
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := SaveHookContractLockEntry(dir, HookContractLockEntry{Connector: "claudecode", ContractID: "claudecode-hooks-v1"})
+			if err == nil {
+				t.Fatal("save accepted an unreadable or unsupported existing lock")
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("failed save rewrote existing contract evidence")
+			}
+		})
+	}
+}
+
+func TestHookContractLockRejectsPartialSharedDigestSet(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entry := HookContractLockEntry{
+		Connector:         "claudecode",
+		HookScriptDigests: map[string]string{"inspect-tool.sh": "sha256:partial", "claude-code-hook.sh": "sha256:owned"},
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err == nil {
+		t.Fatal("partial shared digest set was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, hookContractLockFile)); !os.IsNotExist(err) {
+		t.Fatalf("partial save created a lock: %v", err)
+	}
+}
+
+func TestHookContractLockNormalizesSharedLauncherDigestAcrossPeers(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	legacy := hookContractLock{
+		Version: 1,
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {Connector: "claudecode", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-claude"}},
+			"codex":      {Connector: "codex", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-codex"}},
+		},
+	}
+	body, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selected := legacy.Connectors["claudecode"]
+	selected.HookScriptDigests[windowsHookBinaryName] = "sha256:current-launcher"
+	if err := SaveHookContractLockEntry(dir, selected); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"claudecode", "codex"} {
+		entry := LoadHookContractLockEntry(dir, name)
+		if got := entry.HookScriptDigests[windowsHookBinaryName]; got != "sha256:current-launcher" {
+			t.Fatalf("%s launcher digest=%q", name, got)
+		}
+	}
+}
+
+func TestHookContractClearRollsBackWhenRuntimeStateCannotBeUpdated(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := hookContractLock{
+		Version: hookContractLockVersion,
+		SharedHookScriptDigests: map[string]string{
+			"inspect-tool.sh": "sha256:shared",
+		},
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {Connector: "claudecode"},
+			"codex":      {Connector: "codex"},
+		},
+	}
+	body, err := json.MarshalIndent(lock, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, '\n')
+	lockPath := filepath.Join(dir, hookContractLockFile)
+	if err := os.WriteFile(lockPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, hookConfigSidecarName), []byte(`{"malformed":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClearHookContractLockEntry(dir, "claudecode"); err == nil {
+		t.Fatal("clear succeeded despite malformed runtime state")
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, body) {
+		t.Fatal("failed runtime clear did not restore the contract lock")
+	}
+}
+
+func TestHookContractClearCannotBeUndoneByStaleReconcileSave(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: "closed"}
+	conn := NewClaudeCodeConnector()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatal(err)
+	}
+	entry := NewHookContractLockEntry(opts, conn, "test-build")
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearHookContractLockEntry(dir, conn.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err == nil {
+		t.Fatal("stale reconcile save resurrected a contract after runtime teardown")
+	}
+	if got := LoadHookContractLockEntry(dir, conn.Name()); got.Connector != "" {
+		t.Fatalf("stale reconcile save restored cleared contract: %+v", got)
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(dir, NewHookContractLockEntry(opts, conn, "test-build")); err != nil {
+		t.Fatalf("fresh reconcile could not restore runtime and contract together: %v", err)
 	}
 }
 

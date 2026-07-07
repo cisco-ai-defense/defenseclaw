@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -274,6 +275,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if cfg != nil {
 		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
 		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
+		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	}
 	hookToken, err := connector.LoadHookAPIToken(dataDir, name)
 	if err != nil {

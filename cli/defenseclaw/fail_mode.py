@@ -27,6 +27,16 @@ _EXPECTED_CONTRACT = {
     "claudecode": "claudecode-hooks-v1",
     "codex": "codex-hooks-v1",
 }
+_SHARED_HOOK_SCRIPTS = frozenset(
+    {
+        "inspect-tool.sh",
+        "inspect-request.sh",
+        "inspect-response.sh",
+        "inspect-tool-response.sh",
+        "_hardening.sh",
+    }
+)
+_LEGACY_SHARED_HOOK_SCRIPTS = _SHARED_HOOK_SCRIPTS - {"_hardening.sh"}
 
 
 def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
@@ -225,24 +235,73 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
     }
     if expected_contract and not digests:
         return mode, "registration-digests-missing"
+
+    raw_lock_version = payload.get("version", 1)
+    if type(raw_lock_version) is not int or raw_lock_version < 1:
+        return mode, "registration-lock-malformed"
+    lock_version = raw_lock_version
+    if lock_version > 2:
+        return mode, "registration-lock-version-unsupported"
+    shared_digests: dict[str, object] = {}
+    if lock_version >= 2:
+        raw_shared = payload.get("shared_hook_script_digests")
+        if not isinstance(raw_shared, dict) or not _SHARED_HOOK_SCRIPTS.issubset(raw_shared):
+            return mode, "registration-shared-digests-missing"
+        shared_digests = raw_shared
+    else:
+        # A v1 lock duplicated shared-file expectations in every connector
+        # entry.  Divergent values cannot be reconciled by choosing whichever
+        # connector happens to match disk; require controlled setup to render
+        # canonical bytes and atomically migrate the whole lock to v2.
+        legacy_shared = False
+        if expected_contract and not _LEGACY_SHARED_HOOK_SCRIPTS.issubset(digests):
+            return mode, "registration-shared-digests-missing"
+        for filename in _SHARED_HOOK_SCRIPTS:
+            expected_values = {
+                str(candidate_digests.get(filename) or "")
+                for candidate in (connectors or {}).values()
+                if isinstance(candidate, dict)
+                for candidate_digests in [candidate.get("hook_script_digests")]
+                if isinstance(candidate_digests, dict) and filename in candidate_digests
+            }
+            legacy_shared = legacy_shared or bool(expected_values)
+            if len(expected_values) > 1:
+                return mode, "registration-shared-digest-divergent"
+        if legacy_shared and len(connectors or {}) > 1:
+            return mode, "registration-shared-lock-legacy"
     if os.name == "nt" and expected_contract:
         digest_names = {str(filename).casefold() for filename in digests}
         if "defenseclaw-hook.exe" not in digest_names:
             return mode, "registration-launcher-digest-missing"
-    for filename, expected in (digests or {}).items():
-        if expected_contract and Path(str(filename)).name != str(filename):
-            return mode, "registration-digest-path-stale"
-        if expected_contract:
-            path = (
-                Path.home() / ".local" / "bin" / "defenseclaw-hook.exe"
-                if str(filename).casefold() == "defenseclaw-hook.exe"
-                else Path(cfg.data_dir) / "hooks" / str(filename)
-            )
-        else:
-            path = path_by_name.get(str(filename), Path(cfg.data_dir) / "hooks" / str(filename))
-        actual = _sha256_regular_file(path)
-        if actual != str(expected or ""):
-            return mode, "registration-digest-stale"
+    digest_sets = [digests or {}]
+    if lock_version >= 2:
+        digest_sets.append(shared_digests)
+    for digest_set in digest_sets:
+        for filename, expected in digest_set.items():
+            if lock_version >= 2 and digest_set is digests and str(filename) in _SHARED_HOOK_SCRIPTS:
+                # Root shared evidence is authoritative in v2.  Ignore a
+                # lingering legacy duplicate until the next locked save strips
+                # it; never let the duplicate override the root digest.
+                continue
+            if expected_contract and Path(str(filename)).name != str(filename):
+                return mode, "registration-digest-path-stale"
+            if expected_contract:
+                # Prefer the exact setup-time location recorded by the lock.
+                # The Windows launcher can live outside the current process's
+                # notion of HOME (service accounts and isolated installs are
+                # common); hashing a guessed home path creates false drift.
+                path = path_by_name.get(str(filename))
+                if path is None:
+                    path = (
+                        Path.home() / ".local" / "bin" / "defenseclaw-hook.exe"
+                        if str(filename).casefold() == "defenseclaw-hook.exe"
+                        else Path(cfg.data_dir) / "hooks" / str(filename)
+                    )
+            else:
+                path = path_by_name.get(str(filename), Path(cfg.data_dir) / "hooks" / str(filename))
+            actual = _sha256_regular_file(path)
+            if actual != str(expected or ""):
+                return mode, "registration-digest-stale"
     return mode, None
 
 
@@ -309,7 +368,7 @@ def _read_small_bytes(path: Path) -> bytes | None:
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_RUNTIME_FILE:
             return None
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_RUNTIME_FILE:
@@ -333,7 +392,7 @@ def _sha256_regular_file(path: Path) -> str:
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_DIGEST_FILE:
             return ""
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         opened = os.fstat(descriptor)
         if (
@@ -396,6 +455,7 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
     paths.update(
         {
             hook_dir / ".hookcfg",
+            hook_dir / ".hookcfg.legacy",
             Path(cfg.data_dir) / "hook_contract_lock.json",
             hook_dir / "inspect-tool.sh",
             hook_dir / "inspect-request.sh",
@@ -411,6 +471,7 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
     for raw_name in connectors:
         name = normalize(raw_name)
         paths.add(hook_dir / f".hook-{name}.token")
+        paths.add(hook_dir / f".hookcfg.{name}")
         for config_path in connector_config_files(name, workspace_dir=workspace):
             paths.add(Path(config_path))
         paths.add(hook_dir / f"{name}-hook.sh")
@@ -461,7 +522,7 @@ def _snapshot_regular_file(path: Path) -> tuple[bytes, int]:
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_RUNTIME_FILE:
         raise OSError(f"unsafe transaction path: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)

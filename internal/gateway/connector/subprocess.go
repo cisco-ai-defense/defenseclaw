@@ -413,7 +413,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 	}
 
-	if err := writeHookConfigSidecar(hookDir, apiAddr, "", defaultHookFailMode); err != nil {
+	if err := writeHookConfigSidecar(hookDir, apiAddr, "", defaultHookFailMode, false); err != nil {
 		return err
 	}
 
@@ -460,7 +460,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		return err
 	}
 
-	data := templateData{
+	connectorData := templateData{
 		APIAddr:       apiAddr,
 		APIToken:      "",
 		FailMode:      normalizeHookFailMode(failMode),
@@ -471,15 +471,17 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		HookBinaryPS:  strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
 		HookTimeoutMS: cursorAdapterTimeoutMS,
 	}
-
-	scripts := hookScriptNamesFromExtras(extras)
-
-	for _, name := range scripts {
+	// The inspect-* family has one physical copy per data directory.  Its
+	// bytes must therefore depend only on install-wide inputs; connector mode,
+	// identity and scoped credential selection happen at invocation time.  The
+	// connector-owned lifecycle scripts retain the selected connector data.
+	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
+	renderAndWrite := func(name string, renderData templateData) error {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
 			return fmt.Errorf("read hook template %s: %w", name, err)
 		}
-		rendered, err := renderTemplate(string(content), data)
+		rendered, err := renderTemplate(string(content), renderData)
 		if err != nil {
 			return fmt.Errorf("render hook %s: %w", name, err)
 		}
@@ -487,8 +489,20 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
+		return nil
 	}
-	if err := writeHookConfigSidecar(hookDir, apiAddr, connectorName, normalizeHookFailMode(failMode)); err != nil {
+	for _, name := range genericHookScripts {
+		if err := renderAndWrite(name, sharedData); err != nil {
+			return err
+		}
+	}
+	scripts := hookScriptNamesFromExtras(extras)
+	for _, name := range scripts[len(genericHookScripts):] {
+		if err := renderAndWrite(name, connectorData); err != nil {
+			return err
+		}
+	}
+	if err := writeHookConfigSidecar(hookDir, apiAddr, connectorName, normalizeHookFailMode(failMode), managed); err != nil {
 		return err
 	}
 	return nil
@@ -524,18 +538,16 @@ func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
 	return filepath.Base(scopedPath), nil
 }
 
-// hookConfigSidecarName is the file the native Go hook entrypoint reads on
-// Windows for the gateway address + connector-scoped fail modes. It lets the agent hook command
-// stay free of per-install flags (so its trust-hash / match string is stable),
-// while still conveying the operator's enforcement choice and a non-default
-// API port. The Bash hooks (Unix) bake these values into the script and ignore
-// this file.
+// hookConfigSidecarName is the shared connector-aware runtime state read by
+// the native Windows hook and the generic Unix inspect scripts. It lets hook
+// commands stay free of per-install flags while preserving mixed fail modes.
 const hookConfigSidecarName = ".hookcfg"
 
 type hookConfigSidecar struct {
 	Version     int               `json:"version"`
 	GatewayAddr string            `json:"gateway_addr"`
 	FailModes   map[string]string `json:"fail_modes,omitempty"`
+	Managed     bool              `json:"managed_enterprise,omitempty"`
 	// LegacyMode is migration-only fallback for connectors that do not yet
 	// have a map entry. Connector entries always win, so it cannot collapse a
 	// mixed-mode runtime and becomes inert after every peer is refreshed.
@@ -543,42 +555,240 @@ type hookConfigSidecar struct {
 }
 
 // writeHookConfigSidecar persists the gateway address and connector fail mode
-// the native Go hook entrypoint resolves at runtime. It is only written on Windows, where
-// connectors either invoke the native entrypoint directly or, for Cursor, via
-// the PowerShell input adapter. Unix keeps the .sh hooks unchanged and never
-// reads this file.
-func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string) error {
-	if runtime.GOOS != "windows" {
-		return nil
+// resolved at runtime. Connector entries always win; the legacy fallback is
+// written only for unscoped callers and cannot collapse mixed connector state.
+func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, managed bool) error {
+	return writeHookConfigSidecarUsing(hookDir, apiAddr, connectorName, failMode, managed, atomicWriteFile)
+}
+
+type hookRuntimeFileSnapshot struct {
+	path    string
+	existed bool
+	data    []byte
+}
+
+func snapshotHookRuntimeFile(path string) (hookRuntimeFileSnapshot, error) {
+	snapshot := hookRuntimeFileSnapshot{path: path}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return snapshot, nil
 	}
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.existed = true
+	snapshot.data = data
+	return snapshot, nil
+}
+
+func restoreHookRuntimeFiles(snapshots []hookRuntimeFileSnapshot) error {
+	var failures []string
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		snapshot := snapshots[i]
+		if snapshot.existed {
+			if err := atomicWriteFile(snapshot.path, snapshot.data, 0o600); err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
+			}
+			continue
+		}
+		if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
+			failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("restore hook runtime files: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func writeHookConfigSidecarUsing(
+	hookDir, apiAddr, connectorName, failMode string,
+	managed bool,
+	writeFile func(string, []byte, os.FileMode) error,
+) error {
 	path := filepath.Join(hookDir, hookConfigSidecarName)
 	return withFileLock(path, func() error {
-		state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}}
-		if existing, err := os.ReadFile(path); err == nil {
+		name := normalizeConnectorName(connectorName)
+		runtimeName := name
+		if runtimeName == "" {
+			runtimeName = "legacy"
+		}
+		flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+runtimeName)
+		jsonSnapshot, err := snapshotHookRuntimeFile(path)
+		if err != nil {
+			return fmt.Errorf("read hook config sidecar: %w", err)
+		}
+		flatSnapshot, err := snapshotHookRuntimeFile(flatPath)
+		if err != nil {
+			return fmt.Errorf("read shell hook runtime sidecar: %w", err)
+		}
+		snapshots := []hookRuntimeFileSnapshot{jsonSnapshot, flatSnapshot}
+
+		state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}, Managed: managed}
+		if jsonSnapshot.existed {
 			var prior hookConfigSidecar
-			if json.Unmarshal(existing, &prior) == nil && prior.Version >= 2 {
+			if err := json.Unmarshal(jsonSnapshot.data, &prior); err == nil {
+				if prior.Version != 2 {
+					return fmt.Errorf("unsupported hook config sidecar version %d", prior.Version)
+				}
 				if prior.FailModes != nil {
 					state.FailModes = prior.FailModes
 				}
 				state.LegacyMode = prior.LegacyMode
 			} else {
-				state.LegacyMode = legacyHookConfigValue(existing, "DEFENSECLAW_FAIL_MODE")
+				legacyMode := legacyHookConfigValue(jsonSnapshot.data, "DEFENSECLAW_FAIL_MODE")
+				if legacyMode != "open" && legacyMode != "closed" {
+					return fmt.Errorf("parse hook config sidecar: %w", err)
+				}
+				state.LegacyMode = legacyMode
 			}
 		}
-		name := normalizeConnectorName(connectorName)
 		if name != "" {
 			state.FailModes[name] = normalizeHookFailMode(failMode)
+		} else {
+			state.LegacyMode = normalizeHookFailMode(failMode)
 		}
 		body, err := json.MarshalIndent(state, "", "  ")
 		if err != nil {
 			return fmt.Errorf("marshal hook config sidecar: %w", err)
 		}
 		body = append(body, '\n')
-		if err := atomicWriteFile(path, body, 0o600); err != nil {
+		if err := writeFile(path, body, 0o600); err != nil {
 			return fmt.Errorf("write hook config sidecar: %w", err)
+		}
+		// Shell hooks need a parser-independent connector record because jq and
+		// python3 are not guaranteed on the hardened macOS/Linux PATH.  One flat
+		// file per connector preserves mixed modes; an unscoped legacy record is
+		// a fallback only and never overrides a connector file.
+		runtimeBody := fmt.Sprintf(
+			"DEFENSECLAW_CONNECTOR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+			name,
+			normalizeHookFailMode(failMode),
+		)
+		if err := writeFile(flatPath, []byte(runtimeBody), 0o600); err != nil {
+			if restoreErr := restoreHookRuntimeFiles(snapshots); restoreErr != nil {
+				return fmt.Errorf("write shell hook runtime sidecar: %v (%v)", err, restoreErr)
+			}
+			return fmt.Errorf("write shell hook runtime sidecar: %w", err)
 		}
 		return nil
 	})
+}
+
+// clearHookConfigSidecarEntry removes only one connector's runtime selection.
+// The shared JSON state and every peer's flat record remain intact. Runtime
+// state is cleared before its contract entry, so a teardown can never leave a
+// removed connector selectable by the shared Unix hooks.
+func clearHookConfigSidecarEntry(hookDir, connectorName string) error {
+	name := normalizeConnectorName(connectorName)
+	if strings.TrimSpace(hookDir) == "" || name == "" {
+		return nil
+	}
+	if _, err := os.Stat(hookDir); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect hook runtime directory: %w", err)
+	}
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	return withFileLock(path, func() error {
+		_, err := clearHookConfigSidecarEntryLocked(hookDir, name)
+		return err
+	})
+}
+
+func clearHookConfigSidecarEntryLocked(hookDir, name string) ([]hookRuntimeFileSnapshot, error) {
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
+	jsonSnapshot, err := snapshotHookRuntimeFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read hook config sidecar: %w", err)
+	}
+	flatSnapshot, err := snapshotHookRuntimeFile(flatPath)
+	if err != nil {
+		return nil, fmt.Errorf("read shell hook runtime sidecar: %w", err)
+	}
+	snapshots := []hookRuntimeFileSnapshot{jsonSnapshot, flatSnapshot}
+	if jsonSnapshot.existed {
+		var state hookConfigSidecar
+		if err := json.Unmarshal(jsonSnapshot.data, &state); err != nil {
+			// A legacy scalar sidecar has no connector entry to remove and
+			// remains available for unmigrated callers. Unknown malformed JSON
+			// is not overwritten because that could destroy peer state.
+			legacyMode := legacyHookConfigValue(jsonSnapshot.data, "DEFENSECLAW_FAIL_MODE")
+			if legacyMode != "open" && legacyMode != "closed" {
+				return nil, fmt.Errorf("parse hook config sidecar: %w", err)
+			}
+		} else {
+			if state.Version != 2 {
+				return nil, fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
+			}
+			if _, ok := state.FailModes[name]; ok {
+				delete(state.FailModes, name)
+				body, err := json.MarshalIndent(state, "", "  ")
+				if err != nil {
+					return nil, fmt.Errorf("marshal hook config sidecar: %w", err)
+				}
+				body = append(body, '\n')
+				if err := atomicWriteFile(path, body, 0o600); err != nil {
+					return nil, fmt.Errorf("write hook config sidecar: %w", err)
+				}
+			}
+		}
+	}
+	if err := os.Remove(flatPath); err != nil && !os.IsNotExist(err) {
+		if restoreErr := restoreHookRuntimeFiles(snapshots); restoreErr != nil {
+			return nil, fmt.Errorf("remove shell hook runtime sidecar: %v (%v)", err, restoreErr)
+		}
+		return nil, fmt.Errorf("remove shell hook runtime sidecar: %w", err)
+	}
+	return snapshots, nil
+}
+
+// validateHookRuntimeStateForContract closes the reconcile/teardown race: a
+// contract entry is committed only while its connector-aware JSON and flat
+// runtime records still agree. Absence of the shared sidecar is tolerated for
+// legacy/direct lock writers that do not install hooks; once the sidecar
+// exists, a missing or stale selected entry is an error.
+func validateHookRuntimeStateForContract(dataDir, connectorName, failMode string) error {
+	name := normalizeConnectorName(connectorName)
+	if strings.TrimSpace(dataDir) == "" || name == "" {
+		return nil
+	}
+	if name != "claudecode" && name != "codex" {
+		return nil
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	body, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read hook config sidecar: %w", err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(body, &state); err != nil {
+		return fmt.Errorf("parse hook config sidecar: %w", err)
+	}
+	if state.Version != 2 {
+		return fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
+	}
+	want := normalizeHookFailMode(failMode)
+	if got := state.FailModes[name]; got != want {
+		return fmt.Errorf("connector %s JSON fail mode %q, want %q", name, got, want)
+	}
+	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
+	flat, err := os.ReadFile(flatPath)
+	if err != nil {
+		return fmt.Errorf("read connector shell runtime sidecar: %w", err)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
+		return fmt.Errorf("shell runtime connector %q, want %q", got, name)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != want {
+		return fmt.Errorf("connector %s shell fail mode %q, want %q", name, got, want)
+	}
+	return nil
 }
 
 func legacyHookConfigValue(data []byte, wanted string) string {

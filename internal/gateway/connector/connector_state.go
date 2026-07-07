@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,6 +32,13 @@ import (
 
 const activeConnectorFile = "active_connector.json"
 const hookContractLockFile = "hook_contract_lock.json"
+
+// hookContractLockVersion 2 separates artifacts that have one physical copy
+// per data directory from connector-owned registration artifacts.  Version 1
+// repeated the shared inspect-script hashes in every connector entry, which
+// could make a mixed installation impossible to validate when a selected
+// connector rendered different bytes into those shared paths.
+const hookContractLockVersion = 2
 
 // activeConnectorStateVersion is the schema version written by
 // SaveActiveConnectors. Version 2 introduced the multi-connector "names"
@@ -55,9 +63,10 @@ type connectorState struct {
 }
 
 type hookContractLock struct {
-	Version    int                              `json:"version"`
-	UpdatedAt  string                           `json:"updated_at"`
-	Connectors map[string]HookContractLockEntry `json:"connectors"`
+	Version                 int                              `json:"version"`
+	UpdatedAt               string                           `json:"updated_at"`
+	SharedHookScriptDigests map[string]string                `json:"shared_hook_script_digests,omitempty"`
+	Connectors              map[string]HookContractLockEntry `json:"connectors"`
 }
 
 // HookContractLockEntry is the persisted reproduction record for the hook
@@ -185,24 +194,81 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 	path := filepath.Join(dataDir, hookContractLockFile)
 	return withFileLock(path, func() error {
 		entry.Connector = normalizeConnectorName(entry.Connector)
-		if entry.UpdatedAt == "" {
-			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		entry.HookScriptDigests = cloneHookScriptDigests(entry.HookScriptDigests)
+		lock, err := loadHookContractLockForUpdate(dataDir)
+		if err != nil {
+			return fmt.Errorf("load hook contract lock for update: %w", err)
 		}
-		lock := loadHookContractLock(dataDir)
-		if lock.Version == 0 {
-			lock.Version = 1
+		if err := validateHookRuntimeStateForContract(dataDir, entry.Connector, entry.HookFailMode); err != nil {
+			return fmt.Errorf("validate hook runtime state for contract: %w", err)
 		}
 		if lock.Connectors == nil {
 			lock.Connectors = map[string]HookContractLockEntry{}
 		}
+
+		// Controlled setup has just rendered the canonical shared scripts.
+		// Extract their physical hashes once at the lock root and remove every
+		// legacy per-connector copy atomically.  We never choose between
+		// divergent v1 entries: the freshly rendered, on-disk artifacts are the
+		// sole migration input.
+		shared := takeSharedHookScriptDigests(entry.HookScriptDigests)
+		expectedShared := len(genericHookScripts) + len(hookHelperScripts)
+		if len(shared) > 0 && len(shared) != expectedShared {
+			return fmt.Errorf("incomplete shared hook digest set: got %d, want %d", len(shared), expectedShared)
+		}
+		lockChanged := false
+		if len(shared) > 0 {
+			if !reflect.DeepEqual(lock.SharedHookScriptDigests, shared) {
+				lock.SharedHookScriptDigests = shared
+				lockChanged = true
+			}
+			if lock.Version != hookContractLockVersion {
+				lock.Version = hookContractLockVersion
+				lockChanged = true
+			}
+		}
+		if len(lock.SharedHookScriptDigests) > 0 {
+			for name, peer := range lock.Connectors {
+				if removeSharedHookScriptDigests(peer.HookScriptDigests) {
+					lock.Connectors[name] = peer
+					lockChanged = true
+				}
+			}
+		}
+		// The Windows native launcher is also one physical artifact, but its
+		// per-connector location remains in the v1-compatible entry schema.
+		// Normalize every peer reference to the selected setup's current digest
+		// so legacy divergence cannot make registrations mutually exclusive.
+		if launcherDigest := entry.HookScriptDigests[windowsHookBinaryName]; launcherDigest != "" {
+			for name, peer := range lock.Connectors {
+				if peer.HookScriptDigests == nil {
+					peer.HookScriptDigests = map[string]string{}
+				}
+				if peer.HookScriptDigests[windowsHookBinaryName] != launcherDigest {
+					peer.HookScriptDigests[windowsHookBinaryName] = launcherDigest
+					lock.Connectors[name] = peer
+					lockChanged = true
+				}
+			}
+		}
+		removeSharedHookScriptDigests(entry.HookScriptDigests)
+
+		entryChanged := true
 		if previous, ok := lock.Connectors[entry.Connector]; ok {
 			previousComparison := previous
 			entryComparison := entry
 			previousComparison.UpdatedAt = ""
 			entryComparison.UpdatedAt = ""
 			if reflect.DeepEqual(previousComparison, entryComparison) {
-				return nil
+				entryChanged = false
+				entry.UpdatedAt = previous.UpdatedAt
 			}
+		}
+		if !entryChanged && !lockChanged {
+			return nil
+		}
+		if entry.UpdatedAt == "" {
+			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		}
 		lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		lock.Connectors[entry.Connector] = entry
@@ -219,20 +285,55 @@ func ClearHookContractLockEntry(dataDir, connectorName string) error {
 	if strings.TrimSpace(dataDir) == "" {
 		return nil
 	}
+	connectorName = normalizeConnectorName(connectorName)
 	path := filepath.Join(dataDir, hookContractLockFile)
 	return withFileLock(path, func() error {
-		lock := loadHookContractLock(dataDir)
-		if len(lock.Connectors) == 0 {
-			return nil
-		}
-		delete(lock.Connectors, normalizeConnectorName(connectorName))
-		lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		data, err := json.MarshalIndent(lock, "", "  ")
+		lock, err := loadHookContractLockForUpdate(dataDir)
 		if err != nil {
-			return err
+			return fmt.Errorf("load hook contract lock for clear: %w", err)
 		}
-		data = append(data, '\n')
-		return atomicWriteFile(path, data, 0o600)
+		_, contractExists := lock.Connectors[connectorName]
+		var contractBody []byte
+		if contractExists {
+			delete(lock.Connectors, connectorName)
+			if len(lock.Connectors) == 0 {
+				lock.SharedHookScriptDigests = nil
+			}
+			lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			contractBody, err = json.MarshalIndent(lock, "", "  ")
+			if err != nil {
+				return err
+			}
+			contractBody = append(contractBody, '\n')
+		}
+
+		hookDir := filepath.Join(dataDir, "hooks")
+		if _, err := os.Stat(hookDir); os.IsNotExist(err) {
+			if contractExists {
+				return atomicWriteFile(path, contractBody, 0o600)
+			}
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("inspect hook runtime directory: %w", err)
+		}
+
+		runtimePath := filepath.Join(hookDir, hookConfigSidecarName)
+		return withFileLock(runtimePath, func() error {
+			snapshots, err := clearHookConfigSidecarEntryLocked(hookDir, connectorName)
+			if err != nil {
+				return fmt.Errorf("clear hook runtime state for %s: %w", connectorName, err)
+			}
+			if !contractExists {
+				return nil
+			}
+			if err := atomicWriteFile(path, contractBody, 0o600); err != nil {
+				if restoreErr := restoreHookRuntimeFiles(snapshots); restoreErr != nil {
+					return fmt.Errorf("write cleared hook contract lock: %v (%v)", err, restoreErr)
+				}
+				return fmt.Errorf("write cleared hook contract lock: %w", err)
+			}
+			return nil
+		})
 	})
 }
 
@@ -362,12 +463,67 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 	return out
 }
 
+func sharedHookScriptName(name string) bool {
+	for _, candidate := range genericHookScripts {
+		if name == candidate {
+			return true
+		}
+	}
+	for _, candidate := range hookHelperScripts {
+		if name == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneHookScriptDigests(digests map[string]string) map[string]string {
+	if digests == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(digests))
+	for name, digest := range digests {
+		cloned[name] = digest
+	}
+	return cloned
+}
+
+func takeSharedHookScriptDigests(digests map[string]string) map[string]string {
+	if len(digests) == 0 {
+		return nil
+	}
+	shared := map[string]string{}
+	for name, digest := range digests {
+		if sharedHookScriptName(name) {
+			shared[name] = digest
+		}
+	}
+	if len(shared) == 0 {
+		return nil
+	}
+	return shared
+}
+
+func removeSharedHookScriptDigests(digests map[string]string) bool {
+	changed := false
+	for name := range digests {
+		if sharedHookScriptName(name) {
+			delete(digests, name)
+			changed = true
+		}
+	}
+	return changed
+}
+
 func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 	var paths []string
 	if provider, ok := conn.(HookRuntimeArtifactProvider); ok {
 		paths = append(paths, provider.HookRuntimeArtifacts(opts)...)
 	} else {
 		paths = append(paths, hookScriptPathsForConnector(opts, conn)...)
+		for _, name := range hookHelperScripts {
+			paths = append(paths, filepath.Join(opts.DataDir, "hooks", name))
+		}
 	}
 	if runtime.GOOS == "windows" && conn != nil {
 		name := normalizeConnectorName(conn.Name())
@@ -426,4 +582,32 @@ func loadHookContractLock(dataDir string) hookContractLock {
 		lock.Version = 1
 	}
 	return lock
+}
+
+func loadHookContractLockForUpdate(dataDir string) (hookContractLock, error) {
+	empty := hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
+	if strings.TrimSpace(dataDir) == "" {
+		return empty, nil
+	}
+	data, err := os.ReadFile(filepath.Join(dataDir, hookContractLockFile))
+	if os.IsNotExist(err) {
+		return empty, nil
+	}
+	if err != nil {
+		return hookContractLock{}, err
+	}
+	var lock hookContractLock
+	if err := json.Unmarshal(data, &lock); err != nil {
+		return hookContractLock{}, err
+	}
+	if lock.Version == 0 {
+		lock.Version = 1
+	}
+	if lock.Version < 1 || lock.Version > hookContractLockVersion {
+		return hookContractLock{}, fmt.Errorf("unsupported hook contract lock version %d", lock.Version)
+	}
+	if lock.Connectors == nil {
+		lock.Connectors = map[string]HookContractLockEntry{}
+	}
+	return lock, nil
 }
