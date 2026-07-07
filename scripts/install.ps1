@@ -396,7 +396,7 @@ function Install-ManagedWheel {
 
     $venvExit = Invoke-Uv -Arguments @("venv", $TargetVenv, "--python", "3.12", "--quiet")
     if ($venvExit -ne 0) {
-        $venvExit = Invoke-Uv -Arguments @("venv", $TargetVenv, "--allow-existing", "--quiet") `
+        $venvExit = Invoke-Uv -Arguments @("venv", $TargetVenv, "--python", "3.12", "--allow-existing", "--quiet") `
             -ShowFailureOutput
         if ($venvExit -ne 0) { throw "Failed to create Python virtual environment at $TargetVenv" }
     }

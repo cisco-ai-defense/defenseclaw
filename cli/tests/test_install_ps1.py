@@ -114,8 +114,11 @@ def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     assert "& uv venv" not in text
     assert "& uv pip install" not in text
     assert 'Invoke-Uv -Arguments @("python", "install", "3.12")' in text
-    assert 'Invoke-Uv -Arguments @("venv", $TargetVenv' in text
-    assert 'Invoke-Uv -Arguments @("venv", $TargetVenv, "--allow-existing", "--quiet")' in text
+    assert 'Invoke-Uv -Arguments @("venv", $TargetVenv, "--python", "3.12", "--quiet")' in text
+    assert (
+        '"venv", $TargetVenv, "--python", "3.12", '
+        '"--allow-existing", "--quiet")' in text
+    )
     assert 'Invoke-Uv -Arguments @("venv", $Venv, "--clear"' not in text
     assert '"pip", "install", "--python", $venvPython, "--quiet"' in text
     assert '"--reinstall", "--no-cache", "--strict", $WheelPath' in text
