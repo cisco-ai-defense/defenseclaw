@@ -1,8 +1,10 @@
 import hashlib
+import importlib.metadata
 import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import unittest
 import zipfile
@@ -12,6 +14,7 @@ from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_upgrade import (
+    _TUI_SMOKE_CODE,
     _api_bind_host,
     _assert_required_cli_migrations,
     _check_post_upgrade_drift,
@@ -100,6 +103,26 @@ class TestUpgradeBackup(unittest.TestCase):
 
 
 class TestUpgradeWheelInstall(unittest.TestCase):
+    def test_tui_smoke_code_mounts_real_app_with_textual8(self):
+        self.assertEqual(importlib.metadata.version("textual").split(".", 1)[0], "8")
+        managed_env = os.environ.copy()
+        managed_env.pop("PYTHONHOME", None)
+        managed_env.pop("PYTHONPATH", None)
+        with TemporaryDirectory() as cwd:
+            completed = subprocess.run(
+                [sys.executable, "-I", "-c", _TUI_SMOKE_CODE],
+                cwd=cwd,
+                env=managed_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_install_wheel_uses_managed_venv_python_after_creating_venv(self):
         with TemporaryDirectory() as home, patch.dict(os.environ, isolated_home_env(home)), \
              patch("shutil.which", return_value="/usr/bin/uv"), \
@@ -135,7 +158,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         tui_call = run_mock.call_args_list[-1].args[0]
         self.assertEqual(os.path.normcase(os.path.normpath(tui_call[0])), os.path.normcase(venv_python))
         self.assertEqual(tui_call[1:3], ["-I", "-c"])
-        self.assertIn("run_test", tui_call[3])
+        self.assertEqual(tui_call[3], _TUI_SMOKE_CODE)
 
     @staticmethod
     def _seed_windows_install(home):
@@ -260,19 +283,37 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             with open(shim, "w") as stream:
                 stream.write("existing launcher")
             venv_python = os.path.join(venv, "Scripts", "python.exe")
+            failing_tui_smoke = """
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
 
-            def fail_tui(args, **_kwargs):
-                if os.path.normcase(os.path.normpath(args[0])) == os.path.normcase(venv_python) and args[1:3] == ["-I", "-c"]:
-                    raise subprocess.CalledProcessError(
-                        1,
-                        args,
-                        output="",
-                        stderr="AttributeError: 'Tabs' object has no attribute 'get_tab'",
-                    )
+class FailingTUI(DefenseClawTUI):
+    def compose(self):
+        raise RuntimeError("deliberate TUI mount failure")
+
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = FailingTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+asyncio.run(smoke())
+"""
+            real_run = subprocess.run
+
+            def fail_tui(args, **kwargs):
+                if (
+                    os.path.normcase(os.path.normpath(args[0])) == os.path.normcase(venv_python)
+                    and args[1:3] == ["-I", "-c"]
+                ):
+                    self.assertEqual(args[3], failing_tui_smoke)
+                    return real_run([sys.executable, *args[1:]], **kwargs)
                 return Mock(returncode=0)
 
             with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
                  patch("shutil.which", return_value="uv"), \
+                 patch("defenseclaw.commands.cmd_upgrade._TUI_SMOKE_CODE", failing_tui_smoke), \
                  patch("subprocess.run", side_effect=fail_tui), \
                  patch("defenseclaw.commands.cmd_upgrade._publish_windows_cli_launcher") as publish, \
                  patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:

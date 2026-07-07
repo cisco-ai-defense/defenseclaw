@@ -52,6 +52,19 @@ _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _SHA256_HEX = set("0123456789abcdefABCDEF")
 _UPGRADE_PROTOCOL_VERSION = 1
 _UPGRADE_MANIFEST_FILENAME = "upgrade-manifest.json"
+_TUI_SMOKE_CODE = """
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
+
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+asyncio.run(smoke())
+"""
 
 
 @click.command("upgrade")
@@ -1435,22 +1448,9 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
         ux.err(f"Managed CLI dependency validation failed{suffix}", indent="  ")
         raise SystemExit(1) from exc
 
-    tui_smoke = """
-import asyncio
-import tempfile
-from defenseclaw.tui.app import DefenseClawTUI
-
-async def smoke():
-    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
-        app = DefenseClawTUI(data_dir=data_dir, gateway_url="http://127.0.0.1:1")
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-
-asyncio.run(smoke())
-"""
     try:
         subprocess.run(
-            [venv_python, "-I", "-c", tui_smoke],
+            [venv_python, "-I", "-c", _TUI_SMOKE_CODE],
             check=True,
             capture_output=True,
             text=True,
