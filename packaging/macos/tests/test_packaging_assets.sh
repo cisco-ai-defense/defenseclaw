@@ -103,6 +103,65 @@ t_install_has_service_user_helper() {
   fi
 }
 
+t_install_passes_guardian_auth_dir_to_cli() {
+  # Regression guard: the plist sets DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR
+  # to ${SUPPORT_DIR}/hook-guardian-state so the running daemon uses the
+  # installer-created dir. The `enterprise hooks install` CLI invocation
+  # inside install.sh MUST inherit that same env var — otherwise the
+  # CLI falls back to `${data_dir}-hook-guardian` (= runtime-hook-guardian)
+  # which doesn't exist, and every per-connector hook wiring call fails
+  # the authorization-directory trust check.
+  #
+  # This test locks in the contract by checking that every line that
+  # invokes `enterprise hooks install` in install.sh has
+  # DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR set on the same command.
+  # Squash backslash-continuations so multi-line env-var blocks appear
+  # as a single logical line, then find every logical line that runs
+  # `enterprise hooks install`. Each such line must set
+  # DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR.
+  local bad
+  bad="$(/usr/bin/python3 - "${PKG_DIR}/install.sh" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+# Join backslash-newline continuations into one logical line.
+joined = re.sub(r"\\\n\s*", " ", src)
+bad = []
+for i, line in enumerate(joined.splitlines(), start=1):
+    if "enterprise hooks install" not in line:
+        continue
+    # printf templates + log lines that only PRINT the command are
+    # tagged with 'printf' or 'log ' — we only care about invocations.
+    if re.search(r"\blog\b|\bwarn\b|\bprintf\b", line):
+        continue
+    if "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR" not in line:
+        bad.append((i, line.strip()[:200]))
+for i, l in bad:
+    print(f"{i}: {l}")
+PY
+)"
+  if [[ -n "${bad}" ]]; then
+    _fail "found 'enterprise hooks install' invocation(s) without DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR — the CLI will resolve to \${data_dir}-hook-guardian and fail the authorization-directory trust check:
+${bad}"
+    return 1
+  fi
+  # ALSO check the operator-facing repair-command hints (log/warn/printf
+  # lines that echo an example command back to the operator). Those
+  # should also carry the env var so a copy-pasted retry works.
+  local hints
+  hints=$(grep -n 'enterprise hooks install' "${PKG_DIR}/install.sh" | \
+          grep -E 'log |warn |printf ' | \
+          grep -v 'DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR' | \
+          grep -v 'log "  \[' || true)
+  # Filter out the pure-info "running:" trace line which doesn't need
+  # to include env vars (it's a status log, not a runnable snippet).
+  hints=$(printf '%s' "${hints}" | grep -v 'running: enterprise hooks install' || true)
+  if [[ -n "${hints}" ]]; then
+    _fail "found operator-facing 'enterprise hooks install' hint(s) without DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR — copy-pasted retries will fail:
+${hints}"
+    return 1
+  fi
+}
+
 t_scrub_py_syntax() {
   local rc=0
   /usr/bin/python3 -c "import ast; ast.parse(open('${PKG_DIR}/lib/scrub_agent_configs.py').read())" 2>&1 || rc=$?
@@ -264,6 +323,8 @@ run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
 run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
 run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
 run_case "install.sh has ensure_service_user + calls it before launchd" t_install_has_service_user_helper
+run_case "install.sh passes DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR on every hooks-install call" \
+  t_install_passes_guardian_auth_dir_to_cli
 run_case "bundle layout: plist + binary resolve locally" t_bundle_layout_resolves_locally
 run_case "bundle without binary + no repo dies"          t_bundle_without_binary_and_no_repo_dies
 run_case "plist validator accepts bundle default owned by extracting user" \

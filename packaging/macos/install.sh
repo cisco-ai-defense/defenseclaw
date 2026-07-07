@@ -695,7 +695,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     warn "  skipping user-space hook wiring. Gateway is still running."
     warn "  after fixing perms, finish wiring per-connector with:"
     for c in "${CONNECTORS[@]}"; do
-      warn "    sudo DEFENSECLAW_CONFIG=\"${CONFIG_PATH}\" ${GATEWAY_BIN} enterprise hooks install --connector ${c} --user ${TARGET_USER} --agent-version 'X.Y.Z' --json"
+      warn "    sudo DEFENSECLAW_CONFIG=\"${CONFIG_PATH}\" DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=\"${GUARDIAN_AUTH_DIR}\" ${GATEWAY_BIN} enterprise hooks install --connector ${c} --user ${TARGET_USER} --agent-version 'X.Y.Z' --json"
     done
     SKIP_CONNECTOR="true"
   fi
@@ -756,13 +756,24 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     fi
     if [[ -z "${AGENT_VER}" ]]; then
       warn "  [${c}] could not auto-detect agent version; skipping. Resume with:"
-      warn "    sudo DEFENSECLAW_CONFIG=\"${CONFIG_PATH}\" ${GATEWAY_BIN} enterprise hooks install --connector ${c} --user ${TARGET_USER} --agent-version 'X.Y.Z' --json"
+      warn "    sudo DEFENSECLAW_CONFIG=\"${CONFIG_PATH}\" DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=\"${GUARDIAN_AUTH_DIR}\" ${GATEWAY_BIN} enterprise hooks install --connector ${c} --user ${TARGET_USER} --agent-version 'X.Y.Z' --json"
       continue
     fi
 
     log "  [${c}] detected agent_version: ${AGENT_VER}"
     log "  [${c}] running: enterprise hooks install --connector ${c} --user ${TARGET_USER}"
-    if DEFENSECLAW_CONFIG="${CONFIG_PATH}" "${GATEWAY_BIN}" enterprise hooks install \
+    # DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR MUST match what the plist sets
+    # for the running daemon (see packaging/launchd/com.defenseclaw.gateway.plist).
+    # The CLI's default is `${data_dir}-hook-guardian` which resolves to
+    # ${SUPPORT_DIR}/runtime-hook-guardian and doesn't exist in our
+    # layout — the installer creates ${SUPPORT_DIR}/hook-guardian-state
+    # instead so the trust check walks a root-owned SUPPORT_DIR ancestor.
+    # Without explicitly passing this env var here, `enterprise hooks
+    # install` fails with:
+    #   authorization directory trust check failed: .../runtime-hook-guardian: no such file or directory
+    if DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+       DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR="${GUARDIAN_AUTH_DIR}" \
+       "${GATEWAY_BIN}" enterprise hooks install \
          --connector "${c}" \
          --user "${TARGET_USER}" \
          --agent-version "${AGENT_VER}" \
@@ -817,8 +828,8 @@ Next steps:
 
   Repair user-space hooks (per connector):
 $(for c in "${CONNECTORS[@]}"; do
-    printf '    sudo DEFENSECLAW_CONFIG="%s" %s enterprise hooks install --connector %s --user %s --agent-version "X.Y.Z" --json\n' \
-      "${CONFIG_PATH}" "${GATEWAY_BIN}" "${c}" "${TARGET_USER:-USER}"
+    printf '    sudo DEFENSECLAW_CONFIG="%s" DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR="%s" %s enterprise hooks install --connector %s --user %s --agent-version "X.Y.Z" --json\n' \
+      "${CONFIG_PATH}" "${GUARDIAN_AUTH_DIR}" "${GATEWAY_BIN}" "${c}" "${TARGET_USER:-USER}"
   done)
 
   Uninstall:
