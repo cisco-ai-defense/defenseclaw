@@ -512,6 +512,28 @@ func TestOpenClaw_Setup_RefusesPlaceholder(t *testing.T) {
 	}
 }
 
+// TestInsightClawNPMSource_IsVersionPinned fails the build if someone changes
+// insightClawNPMSource back to a bare/unversioned package spec. A bare spec
+// (e.g. "@outshift-open/insightclaw") silently fetches the latest published
+// version at setup time, which can introduce unreviewed or malicious code.
+// The spec must include an explicit version suffix (@major.minor.patch).
+func TestInsightClawNPMSource_IsVersionPinned(t *testing.T) {
+	t.Parallel()
+	// A scoped NPM package starts with "@", so the count of "@" in a
+	// versioned spec is 2 (@scope/pkg@version). A bare spec has only 1.
+	if strings.Count(insightClawNPMSource, "@") < 2 {
+		t.Fatalf("insightClawNPMSource %q is bare/unversioned — "+
+			"pin it to a reviewed version (e.g. @outshift-open/insightclaw@%s) "+
+			"and bump insightClawNPMVersion after security review",
+			insightClawNPMSource, insightClawNPMVersion)
+	}
+	// Confirm the embedded version constant matches what is in the source string.
+	if !strings.HasSuffix(insightClawNPMSource, "@"+insightClawNPMVersion) {
+		t.Fatalf("insightClawNPMSource %q does not end with insightClawNPMVersion %q — keep them in sync",
+			insightClawNPMSource, insightClawNPMVersion)
+	}
+}
+
 // --- ComponentScanner interface tests ---
 
 func TestClaudeCode_ImplementsComponentScanner(t *testing.T) {
@@ -736,7 +758,7 @@ func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
 	}
 	installs, _ := plugins["installs"].(map[string]interface{})
 	insightInstall, _ := installs["insightclaw"].(map[string]interface{})
-	if insightInstall == nil || insightInstall["source"] != "npm" || insightInstall["sourcePath"] != "@outshift-open/insightclaw" {
+	if insightInstall == nil || insightInstall["source"] != "npm" || insightInstall["sourcePath"] != insightClawNPMSource || insightInstall["version"] != insightClawNPMVersion {
 		t.Errorf("plugins.installs.insightclaw not installed as npm source, got %v", insightInstall)
 	}
 	// Unrelated sections untouched.
@@ -833,7 +855,7 @@ func TestPatchOpenClawConfig_PreservesDefenseClawPluginConfig(t *testing.T) {
 		}
 	}`), 0o644)
 
-	if err := patchOpenClawConfig(configPath, filepath.Join(dir, "extensions", "defenseclaw"), false); err != nil {
+	if err := patchOpenClawConfig(configPath, filepath.Join(dir, "extensions", "defenseclaw"), false, true); err != nil {
 		t.Fatalf("patchOpenClawConfig: %v", err)
 	}
 
@@ -893,7 +915,7 @@ func TestPatchOpenClawConfig_OverwritesInsightClawInstallMetadata(t *testing.T) 
 		}
 	}`), 0o644)
 
-	if err := patchOpenClawConfig(configPath, filepath.Join(dir, "extensions", "defenseclaw"), false); err != nil {
+	if err := patchOpenClawConfig(configPath, filepath.Join(dir, "extensions", "defenseclaw"), false, true); err != nil {
 		t.Fatalf("patchOpenClawConfig: %v", err)
 	}
 
@@ -5795,7 +5817,7 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false)
+			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false, true)
 		}(i)
 	}
 	wg.Wait()

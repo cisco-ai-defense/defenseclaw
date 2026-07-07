@@ -59,7 +59,15 @@ const openClawPlaceholderName = ".placeholder"
 
 const defenseClawOpenClawPluginID = "defenseclaw"
 const insightClawOpenClawPluginID = "insightclaw"
-const insightClawNPMSource = "@outshift-open/insightclaw"
+
+// insightClawNPMVersion is the reviewed, pinned release of the
+// insightclaw OpenClaw plugin fetched from NPM during setup. Bump
+// this constant (and update the matching entry in the release notes)
+// whenever a new version has been security-reviewed. Never use a bare
+// package spec — the test TestInsightClawNPMSource_IsVersionPinned
+// enforces this.
+const insightClawNPMVersion = "1.0.1"
+const insightClawNPMSource = "@outshift-open/insightclaw@" + insightClawNPMVersion
 
 var defaultInsightClawConfig = map[string]interface{}{
 	"captureContent":           false,
@@ -246,12 +254,17 @@ func installOpenClawExtension(ctx context.Context, ocHome string, enablePluginAp
 	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
 		return fmt.Errorf("write plugin files: %w", err)
 	}
+	insightClawInstalled := true
 	if err := installInsightClawNPMPlugin(ctx, ocHome); err != nil {
-		return fmt.Errorf("insightclaw plugin install: %w", err)
+		// insightclaw is an observability plugin; its absence does not affect
+		// the core DefenseClaw fetch interceptor. Log and continue so a
+		// transient NPM outage or missing CLI does not block connector setup.
+		fmt.Fprintf(os.Stderr, "[openclaw] insightclaw plugin install failed (non-fatal): %v\n", err)
+		insightClawInstalled = false
 	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
-	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals); err != nil {
+	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, insightClawInstalled); err != nil {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
 	return nil
@@ -393,7 +406,7 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 // patchOpenClawConfig reads openclaw.json (creates it if missing), ensures
 // the DefenseClaw plugin is allowed, enabled, and has its extension path
 // in plugins.load.paths. Other sections are left untouched.
-func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) error {
+func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, insightClawInstalled bool) error {
 	return withFileLock(configPath, func() error {
 		cfg := map[string]interface{}{}
 		if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
@@ -410,7 +423,6 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 		}
 
 		plugins["allow"] = appendUniqueString(plugins["allow"], defenseClawOpenClawPluginID)
-		plugins["allow"] = appendUniqueString(plugins["allow"], insightClawOpenClawPluginID)
 
 		entries, _ := plugins["entries"].(map[string]interface{})
 		if entries == nil {
@@ -422,23 +434,6 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 		}
 		defenseClawEntry["enabled"] = true
 		entries[defenseClawOpenClawPluginID] = defenseClawEntry
-
-		insightClawEntry, _ := entries[insightClawOpenClawPluginID].(map[string]interface{})
-		if insightClawEntry == nil {
-			insightClawEntry = map[string]interface{}{}
-		}
-		insightClawEntry["enabled"] = true
-		insightClawConfig, _ := insightClawEntry["config"].(map[string]interface{})
-		if insightClawConfig == nil {
-			insightClawConfig = map[string]interface{}{}
-		}
-		for k, v := range defaultInsightClawConfig {
-			if _, ok := insightClawConfig[k]; !ok {
-				insightClawConfig[k] = v
-			}
-		}
-		insightClawEntry["config"] = insightClawConfig
-		entries[insightClawOpenClawPluginID] = insightClawEntry
 		plugins["entries"] = entries
 
 		load, _ := plugins["load"].(map[string]interface{})
@@ -446,23 +441,49 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 			load = map[string]interface{}{}
 		}
 		load["paths"] = appendUniqueString(load["paths"], extDir)
-		insightClawExtDir := filepath.Join(filepath.Dir(configPath), "extensions", insightClawOpenClawPluginID)
-		load["paths"] = appendUniqueString(load["paths"], insightClawExtDir)
 		plugins["load"] = load
 
-		installs, _ := plugins["installs"].(map[string]interface{})
-		if installs == nil {
-			installs = map[string]interface{}{}
+		if insightClawInstalled {
+			insightClawExtDir := filepath.Join(filepath.Dir(configPath), "extensions", insightClawOpenClawPluginID)
+
+			plugins["allow"] = appendUniqueString(plugins["allow"], insightClawOpenClawPluginID)
+
+			insightClawEntry, _ := entries[insightClawOpenClawPluginID].(map[string]interface{})
+			if insightClawEntry == nil {
+				insightClawEntry = map[string]interface{}{}
+			}
+			insightClawEntry["enabled"] = true
+			insightClawConfig, _ := insightClawEntry["config"].(map[string]interface{})
+			if insightClawConfig == nil {
+				insightClawConfig = map[string]interface{}{}
+			}
+			for k, v := range defaultInsightClawConfig {
+				if _, ok := insightClawConfig[k]; !ok {
+					insightClawConfig[k] = v
+				}
+			}
+			insightClawEntry["config"] = insightClawConfig
+			entries[insightClawOpenClawPluginID] = insightClawEntry
+			plugins["entries"] = entries
+
+			load["paths"] = appendUniqueString(load["paths"], insightClawExtDir)
+			plugins["load"] = load
+
+			installs, _ := plugins["installs"].(map[string]interface{})
+			if installs == nil {
+				installs = map[string]interface{}{}
+			}
+			insightInstall, _ := installs[insightClawOpenClawPluginID].(map[string]interface{})
+			if insightInstall == nil {
+				insightInstall = map[string]interface{}{}
+			}
+			insightInstall["source"] = "npm"
+			insightInstall["sourcePath"] = insightClawNPMSource
+			insightInstall["version"] = insightClawNPMVersion
+			insightInstall["installPath"] = insightClawExtDir
+			installs[insightClawOpenClawPluginID] = insightInstall
+			plugins["installs"] = installs
 		}
-		insightInstall, _ := installs[insightClawOpenClawPluginID].(map[string]interface{})
-		if insightInstall == nil {
-			insightInstall = map[string]interface{}{}
-		}
-		insightInstall["source"] = "npm"
-		insightInstall["sourcePath"] = insightClawNPMSource
-		insightInstall["installPath"] = insightClawExtDir
-		installs[insightClawOpenClawPluginID] = insightInstall
-		plugins["installs"] = installs
 
 		cfg["plugins"] = plugins
 		if enablePluginApprovals {
