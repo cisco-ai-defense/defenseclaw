@@ -36,16 +36,21 @@ BINARY_SRC=""
 #   2. next to the script            (standalone-bundle layout)
 #   3. under the repo tree           (dev-tree layout)
 PLIST_SRC=""
-for _candidate in \
-  "${DEFENSECLAW_PLIST_SRC:-}" \
-  "${SCRIPT_DIR}/com.defenseclaw.gateway.plist" \
-  "${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"; do
-  if [[ -n "${_candidate}" && -f "${_candidate}" ]]; then
-    PLIST_SRC="${_candidate}"
-    break
-  fi
-done
-unset _candidate
+PLIST_SRC_EXPLICIT="false"
+if [[ -n "${DEFENSECLAW_PLIST_SRC:-}" && -f "${DEFENSECLAW_PLIST_SRC}" ]]; then
+  PLIST_SRC="${DEFENSECLAW_PLIST_SRC}"
+  PLIST_SRC_EXPLICIT="true"
+else
+  for _candidate in \
+    "${SCRIPT_DIR}/com.defenseclaw.gateway.plist" \
+    "${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"; do
+    if [[ -n "${_candidate}" && -f "${_candidate}" ]]; then
+      PLIST_SRC="${_candidate}"
+      break
+    fi
+  done
+  unset _candidate
+fi
 SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
@@ -427,7 +432,7 @@ while [[ $# -gt 0 ]]; do
     --port)             API_PORT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
-    --plist)            PLIST_SRC="${2:?}"; shift 2;;
+    --plist)            PLIST_SRC="${2:?}"; PLIST_SRC_EXPLICIT="true"; shift 2;;
     --service-user)     SERVICE_USER="${2:?}"; SERVICE_GROUP="${2:?}"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
     --skip-launchd)     SKIP_LAUNCHD="true"; shift;;
@@ -476,9 +481,10 @@ fi
 [[ -f "${PLIST_SRC}" ]] || die "missing plist source: ${PLIST_SRC}"
 
 # Validate the plist source before we copy it into /Library/LaunchDaemons.
-# The plist gets installed root:wheel 0644 and executed as the DefenseClaw
-# service principal at boot; a plist owned or writable by a non-root user
-# is a privilege-escalation surface. Refuse to install one.
+# The bundled plist normally lives in a user-owned extracted tarball (or dev
+# checkout), so owner=root is only required for explicit --plist /
+# DEFENSECLAW_PLIST_SRC overrides. Every source is still rejected if
+# group/other-writable.
 #
 # DC_INSTALLER_SKIP_ROOT_CHECK also skips this validator so bundle-fixture
 # tests can drive install.sh against a stub plist in a tmpdir.
@@ -487,7 +493,7 @@ if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
   if [[ -n "${_plist_stat}" ]]; then
     _plist_owner="${_plist_stat%% *}"
     _plist_mode="${_plist_stat##* }"
-    if [[ "${_plist_owner}" != "root" ]]; then
+    if [[ "${PLIST_SRC_EXPLICIT}" == "true" && "${_plist_owner}" != "root" ]]; then
       die "plist source ${PLIST_SRC} must be owned by root (got: ${_plist_owner}); refusing to install a potentially-tampered plist as a LaunchDaemon"
     fi
     # Refuse group-write or other-write bits (mode & 0o022).

@@ -103,6 +103,16 @@ t_install_has_service_user_helper() {
   fi
 }
 
+t_plist_source_validation_preserves_bundle_flow() {
+  local body
+  body="$(cat "${PKG_DIR}/install.sh")"
+  assert_contains "${body}" 'PLIST_SRC_EXPLICIT="false"' "bundled plist defaults to non-explicit source"
+  assert_contains "${body}" 'PLIST_SRC_EXPLICIT="true"' "explicit plist sources are tracked"
+  assert_contains "${body}" '--plist)            PLIST_SRC="${2:?}"; PLIST_SRC_EXPLICIT="true"' "--plist marks explicit source"
+  assert_contains "${body}" 'PLIST_SRC_EXPLICIT}" == "true" && "${_plist_owner}" != "root"' "root ownership required only for explicit plist override"
+  assert_contains "${body}" '(8#${_plist_mode} & 8#022)' "all plist sources reject group/other writable modes"
+}
+
 t_scrub_py_syntax() {
   local rc=0
   /usr/bin/python3 -c "import ast; ast.parse(open('${PKG_DIR}/lib/scrub_agent_configs.py').read())" 2>&1 || rc=$?
@@ -192,5 +202,6 @@ run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
 run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
 run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
 run_case "install.sh has ensure_service_user + calls it before launchd" t_install_has_service_user_helper
+run_case "plist validation preserves bundle flow" t_plist_source_validation_preserves_bundle_flow
 run_case "bundle layout: plist + binary resolve locally" t_bundle_layout_resolves_locally
 run_case "bundle without binary + no repo dies"          t_bundle_without_binary_and_no_repo_dies
