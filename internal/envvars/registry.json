@@ -686,6 +686,20 @@
       "since": "0.2.0"
     },
     {
+      "name": "DEFENSECLAW_OBSERVABILITY_BIN",
+      "category": "runtime_path",
+      "purpose": "Override the executable used by the backward-compatible POSIX local-observability bridge.",
+      "default": "defenseclaw-observability (resolved via PATH)",
+      "accepted_values": ["executable name or absolute path", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "bundles/local_observability_stack/bin/openclaw-observability-bridge:7", "description": "POSIX compatibility bridge selects the lifecycle-controller executable"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Executable selection — a non-default value changes which local program the compatibility bridge launches."
+    },
+    {
       "name": "DEFENSECLAW_OVERLAY_ROOT",
       "category": "runtime_path",
       "purpose": "Extra provider-catalog overlay dir merged on top of the built-in catalog.",
@@ -1540,11 +1554,50 @@
       "category": "test_fixture",
       "purpose": "Sentinel environment variable used by the ClawHub subprocess test fixture to verify the child receives the isolated allowlisted environment.",
       "default": "unset",
-      "accepted_values": ["test sentinel string", "unset"],
+      "accepted_values": ["temporary marker file path", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {"location": "cli/tests/test_cmd_skill.py:862", "description": "ClawHub subprocess environment isolation regression fixture"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_EXE",
+      "category": "test_fixture",
+      "purpose": "Absolute path to the temporary gateway executable invoked by the native Windows daemon executable tests.",
+      "default": "unset",
+      "accepted_values": ["absolute temporary executable path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness invokes the isolated gateway executable"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_COMMAND",
+      "category": "test_fixture",
+      "purpose": "Gateway subcommand selected by the native Windows daemon executable test harness.",
+      "default": "unset",
+      "accepted_values": ["start", "status", "restart", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness passes the selected gateway lifecycle command"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_PROCESS_HELPER",
+      "category": "test_fixture",
+      "purpose": "Activate the isolated subprocess entry point used by native Windows process-snapshot tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/inventory/process_snapshot_windows_test.go:148", "description": "Native Windows test binary enters its named-process helper mode"}
       ],
       "since": "0.8.0"
     },

@@ -19,6 +19,7 @@ UPGRADE_SMOKE_FROM ?= 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.
 # Linux/macOS. $(OS) is set to "Windows_NT" by Windows itself and inherited by
 # the MSYS/Git-Bash shell make runs there; it is unset elsewhere.
 ifeq ($(OS),Windows_NT)
+PYTHON ?= python
 # PowerShell's inherited PATH places System32 before MSYS. Make recipes rely on
 # POSIX utilities such as find, cp, ln, and rm, so prefer the MSYS toolchain;
 # otherwise Windows find.exe interprets GNU find arguments and prints
@@ -34,6 +35,7 @@ USER_HOME := $(shell if [ -n "$$USERPROFILE" ]; then cygpath -u "$$USERPROFILE" 
 VENV_BIN := $(VENV)/Scripts
 EXE      := .exe
 else
+PYTHON ?= python3
 USER_HOME := $(HOME)
 VENV_BIN := $(VENV)/bin
 EXE      :=
@@ -747,7 +749,8 @@ _bundle-data:
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
-	cp internal/envvars/registry.json cli/defenseclaw/_data/envvars/
+	@# Use the canonical generator without repairing tracked docs before CI checks.
+	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the

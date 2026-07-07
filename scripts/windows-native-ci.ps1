@@ -229,6 +229,12 @@ function Stage-PackageData([string]$PackageRoot) {
     if (Test-Path -LiteralPath $data) {
         Remove-SafeDisposableTree -Path $data -Root $data
     }
+    $uv = Get-RequiredCommand 'uv.exe'
+    Invoke-WindowsNativeProcess $uv @(
+        'run', '--no-project', '--python', '3.12', 'python',
+        'scripts/gen_envvars_docs.py', '--bundle-only'
+    ) `
+        -TimeoutSeconds 120 -WorkingDirectory $WorkspaceRoot | Out-Null
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\rego\*.rego') (Join-Path $data 'policies\rego') '*_test.rego'
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\rego\data.json') -Destination (Join-Path $data 'policies\rego') -Force
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\*.yaml') (Join-Path $data 'policies')
@@ -237,7 +243,14 @@ function Stage-PackageData([string]$PackageRoot) {
         Copy-Tree (Join-Path $WorkspaceRoot "policies\guardrail\$name") (Join-Path $data "policies\guardrail\$name")
     }
     [IO.Directory]::CreateDirectory((Join-Path $data 'envvars')) | Out-Null
-    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'internal\envvars\registry.json') -Destination (Join-Path $data 'envvars') -Force
+    $generatedRegistry = Join-Path $WorkspaceRoot 'cli\defenseclaw\_data\envvars\registry.json'
+    $targetRegistry = Join-Path $data 'envvars\registry.json'
+    if (-not ([IO.Path]::GetFullPath($generatedRegistry)).Equals(
+        [IO.Path]::GetFullPath($targetRegistry),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        Copy-Item -LiteralPath $generatedRegistry -Destination $targetRegistry -Force
+    }
     [IO.Directory]::CreateDirectory((Join-Path $data 'scripts')) | Out-Null
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'scripts\install-openshell-sandbox.sh') -Destination (Join-Path $data 'scripts') -Force
     Copy-Tree (Join-Path $WorkspaceRoot 'skills\codeguard') (Join-Path $data 'skills\codeguard')
