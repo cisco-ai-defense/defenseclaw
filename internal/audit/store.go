@@ -1354,6 +1354,39 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		description: "quarantine: separate physical provenance from connector enforcement decisions",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS quarantine_records (
+				id TEXT PRIMARY KEY,
+				target_type TEXT NOT NULL,
+				target_name TEXT NOT NULL,
+				original_path TEXT NOT NULL,
+				quarantine_path TEXT NOT NULL UNIQUE,
+				content_hash TEXT NOT NULL,
+				reason TEXT,
+				state TEXT NOT NULL DEFAULT 'pending',
+				ownership_json TEXT NOT NULL DEFAULT '{}',
+				restore_path TEXT,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS quarantine_record_connectors (
+				quarantine_id TEXT NOT NULL,
+				connector TEXT NOT NULL DEFAULT '',
+				associated_at DATETIME NOT NULL,
+				PRIMARY KEY (quarantine_id, connector),
+				FOREIGN KEY (quarantine_id) REFERENCES quarantine_records(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_quarantine_target
+				ON quarantine_records(target_type, target_name, state);
+			CREATE INDEX IF NOT EXISTS idx_quarantine_connector
+				ON quarantine_record_connectors(connector, quarantine_id);
+			`)
+			return err
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

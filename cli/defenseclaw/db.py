@@ -34,7 +34,14 @@ from defenseclaw.hook_metrics import (
     aggregate_connector_hook_decision,
     connector_hook_connector,
 )
-from defenseclaw.models import ActionEntry, ActionState, Counts, Event, TargetSnapshot
+from defenseclaw.models import (
+    ActionEntry,
+    ActionState,
+    Counts,
+    Event,
+    QuarantineRecord,
+    TargetSnapshot,
+)
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -85,6 +92,33 @@ CREATE TABLE IF NOT EXISTS actions (
     connector TEXT NOT NULL DEFAULT ''
 );
 
+-- Physical quarantine provenance is intentionally separate from logical
+-- allow/block/file/runtime decisions in actions.  Unblocking a connector may
+-- delete its action row without destroying the information needed to restore
+-- files that are still in quarantine.
+CREATE TABLE IF NOT EXISTS quarantine_records (
+    id TEXT PRIMARY KEY,
+    target_type TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    original_path TEXT NOT NULL,
+    quarantine_path TEXT NOT NULL UNIQUE,
+    content_hash TEXT NOT NULL,
+    reason TEXT,
+    state TEXT NOT NULL DEFAULT 'pending',
+    ownership_json TEXT NOT NULL DEFAULT '{}',
+    restore_path TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quarantine_record_connectors (
+    quarantine_id TEXT NOT NULL,
+    connector TEXT NOT NULL DEFAULT '',
+    associated_at DATETIME NOT NULL,
+    PRIMARY KEY (quarantine_id, connector),
+    FOREIGN KEY (quarantine_id) REFERENCES quarantine_records(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS network_egress_events (
     id TEXT PRIMARY KEY,
     timestamp DATETIME NOT NULL,
@@ -127,6 +161,10 @@ CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 -- so a 2-column UNIQUE index declared here would be recreated each open and
 -- would reject per-connector rows (SK-4).
 CREATE INDEX IF NOT EXISTS idx_egress_timestamp ON network_egress_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_quarantine_target
+    ON quarantine_records(target_type, target_name, state);
+CREATE INDEX IF NOT EXISTS idx_quarantine_connector
+    ON quarantine_record_connectors(connector, quarantine_id);
 CREATE INDEX IF NOT EXISTS idx_egress_hostname ON network_egress_events(hostname);
 CREATE INDEX IF NOT EXISTS idx_egress_blocked ON network_egress_events(blocked);
 CREATE INDEX IF NOT EXISTS idx_egress_session ON network_egress_events(session_id);
@@ -1048,6 +1086,250 @@ class Store:
                FROM actions ORDER BY updated_at DESC"""
         )
         return [self._row_to_action(r) for r in cur.fetchall()]
+
+    # -- Physical quarantine provenance --
+
+    def create_quarantine_record(
+        self,
+        target_type: str,
+        target_name: str,
+        original_path: str,
+        quarantine_path: str,
+        content_hash: str,
+        reason: str,
+        connector: str = "",
+        *,
+        ownership_json: str = "{}",
+        state: str = "pending",
+    ) -> QuarantineRecord:
+        """Create durable provenance before any filesystem move.
+
+        ``quarantine_path`` identifies the physical item.  Re-registering that
+        same item adds a connector association instead of creating a second
+        owner that could later orphan the shared files.
+        """
+        if state not in {"pending", "active", "restoring"}:
+            raise ValueError(f"invalid quarantine state {state!r}")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            row = self.db.execute(
+                """SELECT id, target_type, target_name, original_path, content_hash
+                   FROM quarantine_records WHERE quarantine_path = ?""",
+                (quarantine_path,),
+            ).fetchone()
+            if row is None:
+                record_id = str(uuid.uuid4())
+                self.db.execute(
+                    """INSERT INTO quarantine_records (
+                         id, target_type, target_name, original_path,
+                         quarantine_path, content_hash, reason, state,
+                         ownership_json, restore_path, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                    (
+                        record_id,
+                        target_type,
+                        target_name,
+                        original_path,
+                        quarantine_path,
+                        content_hash,
+                        reason,
+                        state,
+                        ownership_json or "{}",
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                record_id = str(row[0])
+                if (
+                    str(row[1]) != target_type
+                    or str(row[2]) != target_name
+                    or os.path.normcase(str(row[3])) != os.path.normcase(original_path)
+                    or str(row[4]) != content_hash
+                ):
+                    raise ValueError("quarantine path already belongs to a different asset")
+                self.db.execute(
+                    """UPDATE quarantine_records
+                       SET reason = CASE WHEN ? != '' THEN ? ELSE reason END,
+                           ownership_json = CASE WHEN ? != '{}' THEN ? ELSE ownership_json END,
+                           updated_at = ?
+                       WHERE id = ?""",
+                    (reason, reason, ownership_json, ownership_json, now, record_id),
+                )
+            self.db.execute(
+                """INSERT OR IGNORE INTO quarantine_record_connectors
+                     (quarantine_id, connector, associated_at)
+                   VALUES (?, ?, ?)""",
+                (record_id, connector, now),
+            )
+        record = self.get_quarantine_record(record_id)
+        if record is None:  # pragma: no cover - defensive against external DB mutation.
+            raise RuntimeError("quarantine provenance write did not persist")
+        return record
+
+    def associate_quarantine_connector(self, record_id: str, connector: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            exists = self.db.execute(
+                "SELECT 1 FROM quarantine_records WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+            if exists is None:
+                raise ValueError("quarantine record does not exist")
+            self.db.execute(
+                """INSERT OR IGNORE INTO quarantine_record_connectors
+                     (quarantine_id, connector, associated_at)
+                   VALUES (?, ?, ?)""",
+                (record_id, connector, now),
+            )
+            self.db.execute(
+                "UPDATE quarantine_records SET updated_at = ? WHERE id = ?",
+                (now, record_id),
+            )
+
+    def update_quarantine_record_state(
+        self,
+        record_id: str,
+        state: str,
+        *,
+        restore_path: str = "",
+    ) -> None:
+        if state not in {"pending", "active", "restoring"}:
+            raise ValueError(f"invalid quarantine state {state!r}")
+        cur = self.db.execute(
+            """UPDATE quarantine_records
+               SET state = ?, restore_path = ?, updated_at = ?
+               WHERE id = ?""",
+            (
+                state,
+                restore_path or None,
+                datetime.now(timezone.utc).isoformat(),
+                record_id,
+            ),
+        )
+        self.db.commit()
+        if cur.rowcount != 1:
+            raise ValueError("quarantine record does not exist")
+
+    def get_quarantine_record(self, record_id: str) -> QuarantineRecord | None:
+        row = self.db.execute(
+            """SELECT id, target_type, target_name, original_path,
+                      quarantine_path, content_hash, reason, state,
+                      ownership_json, restore_path, created_at, updated_at
+               FROM quarantine_records WHERE id = ?""",
+            (record_id,),
+        ).fetchone()
+        return self._row_to_quarantine_record(row) if row is not None else None
+
+    def list_quarantine_records(
+        self,
+        target_type: str,
+        target_name: str = "",
+        connector: str | None = None,
+    ) -> list[QuarantineRecord]:
+        params: list[str] = [target_type]
+        where = ["q.target_type = ?"]
+        if target_name:
+            where.append("q.target_name = ?")
+            params.append(target_name)
+        if connector is not None:
+            where.append(
+                "EXISTS (SELECT 1 FROM quarantine_record_connectors c "
+                "WHERE c.quarantine_id = q.id AND c.connector = ?)"
+            )
+            params.append(connector)
+        rows = self.db.execute(
+            """SELECT q.id, q.target_type, q.target_name, q.original_path,
+                      q.quarantine_path, q.content_hash, q.reason, q.state,
+                      q.ownership_json, q.restore_path, q.created_at, q.updated_at
+               FROM quarantine_records q
+               WHERE """ + " AND ".join(where) + " ORDER BY q.created_at, q.id",
+            tuple(params),
+        ).fetchall()
+        return [self._row_to_quarantine_record(row) for row in rows]
+
+    def delete_quarantine_record(self, record_id: str) -> None:
+        with self.db:
+            self.db.execute(
+                "DELETE FROM quarantine_record_connectors WHERE quarantine_id = ?",
+                (record_id,),
+            )
+            self.db.execute("DELETE FROM quarantine_records WHERE id = ?", (record_id,))
+
+    def complete_quarantine_restore(self, record_id: str, destination: str) -> None:
+        """Atomically retire provenance and reconcile logical file state.
+
+        The filesystem restore and hash verification happen before this call.
+        If this transaction fails, the ``restoring`` journal record remains so
+        a repeated restore can verify the destination and finish cleanup.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            row = self.db.execute(
+                """SELECT target_type, target_name FROM quarantine_records
+                   WHERE id = ?""",
+                (record_id,),
+            ).fetchone()
+            if row is None:
+                return
+            target_type, target_name = str(row[0]), str(row[1])
+            connectors = [
+                str(item[0])
+                for item in self.db.execute(
+                    """SELECT connector FROM quarantine_record_connectors
+                       WHERE quarantine_id = ? ORDER BY connector""",
+                    (record_id,),
+                ).fetchall()
+            ]
+            for connector in connectors:
+                self.db.execute(
+                    """INSERT INTO actions (
+                         id, target_type, target_name, source_path, actions_json,
+                         reason, updated_at, connector)
+                       VALUES (?, ?, ?, ?, '{}', '', ?, ?)
+                       ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+                         source_path = excluded.source_path,
+                         actions_json = json_remove(actions_json, '$.file'),
+                         updated_at = excluded.updated_at""",
+                    (
+                        str(uuid.uuid4()),
+                        target_type,
+                        target_name,
+                        destination,
+                        now,
+                        connector,
+                    ),
+                )
+            self.db.execute(
+                "DELETE FROM quarantine_record_connectors WHERE quarantine_id = ?",
+                (record_id,),
+            )
+            self.db.execute("DELETE FROM quarantine_records WHERE id = ?", (record_id,))
+
+    def _row_to_quarantine_record(self, row: Any) -> QuarantineRecord:
+        connectors = tuple(
+            str(item[0])
+            for item in self.db.execute(
+                """SELECT connector FROM quarantine_record_connectors
+                   WHERE quarantine_id = ? ORDER BY connector""",
+                (row[0],),
+            ).fetchall()
+        )
+        return QuarantineRecord(
+            id=str(row[0]),
+            target_type=str(row[1]),
+            target_name=str(row[2]),
+            original_path=str(row[3]),
+            quarantine_path=str(row[4]),
+            content_hash=str(row[5]),
+            reason=str(row[6] or ""),
+            state=str(row[7] or "active"),
+            ownership_json=str(row[8] or "{}"),
+            restore_path=str(row[9] or ""),
+            created_at=_parse_ts(row[10]),
+            updated_at=_parse_ts(row[11]),
+            connectors=connectors,
+        )
 
     def get_counts(self) -> Counts:
         def _count(sql: str) -> int:
