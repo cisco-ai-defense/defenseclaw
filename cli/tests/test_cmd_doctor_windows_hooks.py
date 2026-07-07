@@ -219,6 +219,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         with (
             patch("defenseclaw.doctor_hooks.is_link_or_reparse", return_value=False),
+            patch("defenseclaw.doctor_hooks.os.path.realpath", side_effect=os.path.abspath),
             patch(
                 "defenseclaw.doctor_hooks.os.lstat",
                 side_effect=[config_stat, config_stat, runtime_stat, changed],
