@@ -2089,6 +2089,18 @@ class DefenseClawTUI(App[None]):
             return
         self._panel_render_workers[panel] = worker
 
+    def _launch_pending_panel_render(
+        self,
+        panel: str,
+        request: tuple[int, DefenseClawTUI, tuple[str, object | None]],
+    ) -> None:
+        """Promote one still-current coalesced request without an idle gap."""
+
+        if self._panel_render_pending.get(panel) != request:
+            return
+        self._panel_render_pending.pop(panel, None)
+        self._launch_deferred_panel_render(panel, request)
+
     async def _run_deferred_panel_render(
         self,
         panel: str,
@@ -2123,11 +2135,18 @@ class DefenseClawTUI(App[None]):
         finally:
             self._panel_render_running.discard(panel)
             self._panel_render_workers.pop(panel, None)
-            pending = self._panel_render_pending.pop(panel, None)
+            pending = self._panel_render_pending.get(panel)
+            relaunch_scheduled = False
             if pending is not None and not getattr(self, "_app_shutting_down", False):
                 pending_generation = pending[0]
                 if pending_generation == self._panel_render_generation and panel == self.active_panel:
-                    self.call_later(self._launch_deferred_panel_render, panel, pending)
+                    # Keep the request visible as pending until the next-turn
+                    # launcher promotes it to running. Consumers waiting for a
+                    # stable panel must never observe a false idle window.
+                    self.call_later(self._launch_pending_panel_render, panel, pending)
+                    relaunch_scheduled = True
+            if not relaunch_scheduled:
+                self._panel_render_pending.pop(panel, None)
 
     def _detached_render_context(self, panel: str) -> DefenseClawTUI:
         """Copy render inputs so worker computation cannot race live mutation."""

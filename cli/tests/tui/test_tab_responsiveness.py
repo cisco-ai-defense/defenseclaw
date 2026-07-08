@@ -358,6 +358,9 @@ async def test_native_windows_high_volume_tab_ack_under_150ms(
             return original(detached, generation, source)
 
         monkeypatch.setattr(app, "_build_overview_render_snapshot", observed_builder)
+        monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+        monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+        monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.press("2")
             await _wait_for_panel(app, "alerts")

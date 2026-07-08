@@ -417,6 +417,7 @@ async def test_external_mode_refresh_preserves_filter_and_overview_scroll(
     monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_schedule_config_poll", lambda: None)
 
     async with app.run_test(size=(110, 18)) as pilot:
         app._set_connector_filter("codex")  # noqa: SLF001
@@ -518,14 +519,14 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
             status_output = status_result.stdout + status_result.stderr
             assert status_result.returncode == 0, status_output
             assert "action" in status_output.lower()
-            for _ in range(20):
+            for poll_number in range(1, 4):
                 # Exercise the same poll operation used by the one-second TUI
-                # timer without coupling this cross-process acceptance to a
-                # loaded runner's timer-delivery latency.
-                await app._poll_config_once()  # noqa: SLF001
+                # timer with deterministic intervals. Same-identity writes may
+                # need two stable observations; atomic replacements need one.
+                await app._poll_config_once(now=float(poll_number))  # noqa: SLF001
                 if app.overview_model.cfg and app.overview_model.cfg.guardrail_mode == "action":
                     break
-                await pilot.pause(0.25)
+                await pilot.pause()
 
             assert app.overview_model.cfg is not None
             assert app.overview_model.cfg.guardrail_mode == "action"
