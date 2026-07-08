@@ -1502,6 +1502,11 @@ async def test_catalog_control_action_uses_visible_table_cursor() -> None:
         await _wait_for_panel_render(app, "skills")
 
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(
+            lambda: not table.has_class("hidden")
+            and table.row_count == 2
+            and len(app._table_rows) == 2  # noqa: SLF001
+        )
         table.move_cursor(row=1, column=0, animate=False)
         await _wait_for_background(lambda: table.cursor_row == 1)
         skills.set_cursor(0)
