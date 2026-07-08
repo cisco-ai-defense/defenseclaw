@@ -124,6 +124,12 @@ func gatewayClientHost(c *config.Config) string {
 	case "::":
 		return "::1"
 	default:
+		if ip := net.ParseIP(bind); ip != nil && ip.IsUnspecified() {
+			if ip.To4() != nil {
+				return "127.0.0.1"
+			}
+			return "::1"
+		}
 		return bind
 	}
 }
@@ -190,7 +196,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	fmt.Println()
 
 	bind := gatewayBindHost(cfg)
-	if modes := fetchConnectorModes(client, bind, cfg.Gateway.APIPort); len(modes) > 0 {
+	if modes := fetchConnectorModes(client, cfg); len(modes) > 0 {
 		printConnectorModes(modes)
 	}
 
@@ -495,8 +501,8 @@ type connectorModeSummary struct {
 // connector) and falls back to the singular connector_mode field for older
 // sidecars that predate the roster — so a single-connector install and an
 // N-connector install both yield a non-empty slice rendered the same way.
-func fetchConnectorModes(client *http.Client, bind string, port int) []connectorModeSummary {
-	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
+func fetchConnectorModes(client *http.Client, c *config.Config) []connectorModeSummary {
+	addr := sidecarStatusURL(c)
 	req, err := http.NewRequest(http.MethodGet, addr, nil)
 	if err != nil {
 		return nil
@@ -512,8 +518,8 @@ func fetchConnectorModes(client *http.Client, bind string, port int) []connector
 	// token cannot be resolved, fall back to the previous
 	// best-effort behaviour rather than error out -- the rest of
 	// `defenseclaw status` is still useful without this section.
-	if cfg != nil {
-		if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+	if c != nil {
+		if token := strings.TrimSpace(c.Gateway.ResolvedToken()); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("X-DefenseClaw-Token", token)
 		}

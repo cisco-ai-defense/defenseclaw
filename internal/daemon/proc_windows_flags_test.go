@@ -27,18 +27,35 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestManagedGatewayCreationFlagsPermitExplicitJobBreakaway(t *testing.T) {
+func TestManagedGatewayCreationFlagsHonorJobBreakawayPolicy(t *testing.T) {
+	base := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	tests := []struct {
+		name       string
+		queryErr   error
+		limitFlags uint32
+		want       uint32
+	}{
+		{name: "outside job", queryErr: windows.ERROR_INVALID_HANDLE, want: base | windows.CREATE_BREAKAWAY_FROM_JOB},
+		{name: "restricted job", want: base},
+		{name: "explicit breakaway", limitFlags: windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK, want: base | windows.CREATE_BREAKAWAY_FROM_JOB},
+		{name: "silent breakaway", limitFlags: windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, want: base},
+		{name: "unknown query failure", queryErr: windows.ERROR_ACCESS_DENIED, want: base},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := daemonCreationFlagsForJob(tc.queryErr, tc.limitFlags); got != tc.want {
+				t.Fatalf("gateway creation flags = %#x, want %#x", got, tc.want)
+			}
+		})
+	}
+
 	cmd := &exec.Cmd{}
 	setSysProcAttr(cmd)
-
-	want := uint32(windows.CREATE_NEW_PROCESS_GROUP |
-		windows.DETACHED_PROCESS |
-		windows.CREATE_BREAKAWAY_FROM_JOB)
 	if cmd.SysProcAttr == nil {
 		t.Fatal("setSysProcAttr left SysProcAttr nil")
 	}
-	if got := cmd.SysProcAttr.CreationFlags; got != want {
-		t.Fatalf("gateway creation flags = %#x, want %#x", got, want)
+	if got := cmd.SysProcAttr.CreationFlags; got&base != base {
+		t.Fatalf("gateway creation flags = %#x, missing required detachment %#x", got, base)
 	}
 }
 

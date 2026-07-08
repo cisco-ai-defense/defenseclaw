@@ -445,6 +445,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
+                    "SFX_AUTH_TOKEN": "",
                     "SPLUNK_ACCESS_TOKEN": "",
                     "SPLUNK_O11Y_TOKEN": "",
                     "SPLUNK_REALM": "",

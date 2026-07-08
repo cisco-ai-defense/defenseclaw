@@ -746,14 +746,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if not os.path.isfile(cfg_path):
         return
 
-    try:
-        # newline="" preserves the file's existing line endings (CRLF on a
-        # Windows operator's config) so the surgical insert below does not
-        # silently normalize the whole file to LF.
-        with open(cfg_path, encoding="utf-8", newline="") as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
     block_match = _GUARDRAIL_HOOK_FAIL_MODE_RE.search(text)
@@ -1071,7 +1065,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
         if os.name == "nt" and mode > 0o600 and os.path.exists(path):
             copy_windows_dacl(path, tmp_path)
         else:
-            set_file_mode(fd, tmp_path, effective_mode)
+            set_file_mode(fd, tmp_path, effective_mode, set_owner=True)
         # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
         # translation), so a caller that preserved a file's CRLF endings
         # does not get them doubled to \r\r\n on Windows.

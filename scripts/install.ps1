@@ -93,7 +93,7 @@ $ConnectorChoices = @(
     "claudecode",
     "none"
 )
-$HookConnectors = @()
+$HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -103,6 +103,51 @@ function Write-Warn2 { param([string]$Msg) Write-Host "  ! $Msg" -ForegroundColo
 function Write-Err2  { param([string]$Msg) Write-Host "  x $Msg" -ForegroundColor Red }
 function Write-Step  { param([string]$Msg) Write-Host "`n--- $Msg" -ForegroundColor Cyan }
 function Die         { param([string]$Msg) throw $Msg }
+
+function Set-ManagedPathProtection {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to protect managed reparse path: $Path"
+    }
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.User) { throw "Current Windows identity has no user SID" }
+    $system = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+    if ($item.PSIsContainer) {
+        $security = [System.Security.AccessControl.DirectorySecurity]::new()
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else {
+        $security = [System.Security.AccessControl.FileSecurity]::new()
+    }
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($identity.User, $system)) {
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+    if ($null -ne $item.PSObject.Methods["SetAccessControl"]) {
+        $item.SetAccessControl($security)
+    } elseif ($item.PSIsContainer) {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl(
+            [System.IO.DirectoryInfo]$item,
+            [System.Security.AccessControl.DirectorySecurity]$security
+        )
+    } else {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl(
+            [System.IO.FileInfo]$item,
+            [System.Security.AccessControl.FileSecurity]$security
+        )
+    }
+}
 
 function Show-Help {
     @"
@@ -1263,6 +1308,7 @@ public static class DefenseClawWindowsFile {
         } else {
             [System.IO.File]::Move($temporary, $Target)
         }
+        Set-ManagedPathProtection -Path $Target
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
@@ -1572,6 +1618,9 @@ function Main {
     try {
         New-Item -ItemType Directory -Force -Path $DefenseClawHome | Out-Null
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        Set-ManagedPathProtection -Path $DefenseClawHome
+        Set-ManagedPathProtection -Path (Split-Path -Parent $InstallDir)
+        Set-ManagedPathProtection -Path $InstallDir
         Invoke-PairedInstallTransaction -Artifacts $artifacts
     } finally {
         if ($null -ne $artifacts -and (Test-Path -LiteralPath $artifacts.Root)) {

@@ -53,6 +53,7 @@ class PidLooksLikeGatewayTests(unittest.TestCase):
         with patch("builtins.open", return_value=FakeFile()):
             self.assertTrue(_pid_looks_like_gateway(12345))
 
+    @unittest.skipIf(os.name == "nt", "this assertion exercises the Linux /proc cmdline reader")
     def test_unrelated_binary_rejected(self):
         """A planted PID file pointing at /bin/sleep must be rejected."""
         fake_cmdline = b"/bin/sleep\x000\x00"
@@ -71,6 +72,7 @@ class PidLooksLikeGatewayTests(unittest.TestCase):
             self.assertFalse(_pid_looks_like_gateway(12345),
                              "regression: /bin/sleep accepted as gateway")
 
+    @unittest.skipIf(os.name == "nt", "this assertion exercises the Linux /proc cmdline reader")
     def test_empty_cmdline_rejected(self):
         class FakeFile:
             def __enter__(self_inner):

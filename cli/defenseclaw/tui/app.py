@@ -913,6 +913,7 @@ class DefenseClawTUI(App[None]):
         # Overview and Alerts can therefore prepare independently without a
         # slow SQLite aggregate starving the other panel.
         self._panel_render_generation = 0
+        self._panel_render_queued: dict[str, int] = {}
         self._panel_render_running: set[str] = set()
         self._panel_render_pending: dict[str, tuple[int, DefenseClawTUI, tuple[str, object | None]]] = {}
         self._panel_render_workers: dict[str, Any] = {}
@@ -1502,6 +1503,7 @@ class DefenseClawTUI(App[None]):
         # warnings that flake the visual snapshot suite.
         self._app_shutting_down = True
         self._panel_render_generation += 1
+        self._panel_render_queued.clear()
         self._panel_render_pending.clear()
         for worker in tuple(self._panel_render_workers.values()):
             try:
@@ -1515,6 +1517,34 @@ class DefenseClawTUI(App[None]):
             self.state_store.save()
         except Exception:  # noqa: BLE001
             pass
+
+    def export_screenshot(self, *, title: str | None = None, simplify: bool = False) -> str:
+        """Export the selected lightweight panel after applying queued chrome."""
+
+        panel = self.active_panel
+        if title is None:
+            label = next((label for name, _key, label in PANELS if name == panel), panel.title())
+            title = f"DefenseClaw — {label}"
+        generation = self._panel_render_queued.get(panel)
+        if panel not in {
+            "overview",
+            "alerts",
+            "audit",
+            "logs",
+        }:
+            if generation == self._panel_render_generation:
+                # Lightweight panels render synchronously once their post-paint
+                # callback starts. The queued-generation guard makes the later
+                # Textual callback a no-op.
+                self._start_deferred_panel_render(panel, generation)
+            else:
+                # The post-paint callback may already have consumed its marker
+                # while the final widget refresh is still queued. An explicit
+                # screenshot must describe the selected panel, so synchronize
+                # its cheap chrome directly instead of exporting the prior
+                # frame under a new active-panel value.
+                self._render_chrome_if_generation(panel, self._panel_render_generation)
+        return super().export_screenshot(title=title, simplify=simplify)
 
     def on_mount(self) -> None:
         self._app_shutting_down = False
@@ -1868,10 +1898,7 @@ class DefenseClawTUI(App[None]):
         # Textual now lets the selected tab and correct panel visibility paint
         # on the next event-loop opportunity.
         self._acknowledge_panel_switch(panel)
-        try:
-            self.call_after_refresh(self._start_deferred_panel_render, panel, generation)
-        except Exception:  # noqa: BLE001 - direct unit calls may not have an active loop.
-            self._start_deferred_panel_render(panel, generation)
+        self._queue_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
         # Mirror Go TUI: catalog + inventory panels auto-load on first
@@ -1996,9 +2023,25 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             pass
 
+    def _queue_deferred_panel_render(self, panel: str, generation: int) -> None:
+        """Track work before its post-paint callback enters the render lane."""
+
+        self._panel_render_queued[panel] = generation
+        try:
+            self.call_after_refresh(self._start_deferred_panel_render, panel, generation)
+        except Exception:  # noqa: BLE001 - direct unit calls may not have an active loop.
+            self._start_deferred_panel_render(panel, generation)
+
     def _start_deferred_panel_render(self, panel: str, generation: int) -> None:
         """Start content preparation only after the acknowledgement paint."""
 
+        # A newer request can replace this generation before Textual delivers
+        # the post-paint callback. Only the callback that still owns the queued
+        # marker may enter the lane; this also gives tests and diagnostics an
+        # exact idle signal instead of a scheduler-dependent pause.
+        if self._panel_render_queued.get(panel) != generation:
+            return
+        self._panel_render_queued.pop(panel, None)
         if (
             generation != self._panel_render_generation
             or panel != self.active_panel
@@ -2055,6 +2098,18 @@ class DefenseClawTUI(App[None]):
             return
         self._panel_render_workers[panel] = worker
 
+    def _launch_pending_panel_render(
+        self,
+        panel: str,
+        request: tuple[int, DefenseClawTUI, tuple[str, object | None]],
+    ) -> None:
+        """Promote one still-current coalesced request without an idle gap."""
+
+        if self._panel_render_pending.get(panel) != request:
+            return
+        self._panel_render_pending.pop(panel, None)
+        self._launch_deferred_panel_render(panel, request)
+
     async def _run_deferred_panel_render(
         self,
         panel: str,
@@ -2089,11 +2144,18 @@ class DefenseClawTUI(App[None]):
         finally:
             self._panel_render_running.discard(panel)
             self._panel_render_workers.pop(panel, None)
-            pending = self._panel_render_pending.pop(panel, None)
+            pending = self._panel_render_pending.get(panel)
+            relaunch_scheduled = False
             if pending is not None and not getattr(self, "_app_shutting_down", False):
                 pending_generation = pending[0]
                 if pending_generation == self._panel_render_generation and panel == self.active_panel:
-                    self.call_later(self._launch_deferred_panel_render, panel, pending)
+                    # Keep the request visible as pending until the next-turn
+                    # launcher promotes it to running. Consumers waiting for a
+                    # stable panel must never observe a false idle window.
+                    self.call_later(self._launch_pending_panel_render, panel, pending)
+                    relaunch_scheduled = True
+            if not relaunch_scheduled:
+                self._panel_render_pending.pop(panel, None)
 
     def _detached_render_context(self, panel: str) -> DefenseClawTUI:
         """Copy render inputs so worker computation cannot race live mutation."""
@@ -4081,7 +4143,15 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         if filter_input.value != model.filter_text:
-            filter_input.value = model.filter_text
+            if not model.loaded and filter_input.value:
+                # Initial catalog auto-loads can complete a repaint between
+                # Input.value changing and Textual delivering Input.Changed.
+                # Preserve that fresh operator text instead of copying the
+                # still-empty model value back over it; apply_loaded() will
+                # reapply the filter to the eventual rows.
+                model.set_filter(filter_input.value)
+            else:
+                filter_input.value = model.filter_text
 
     def _on_catalog_filter_input_changed(self, panel: str, value: str) -> None:
         """Live-filter the catalog model as the user types in the Input.
@@ -5912,10 +5982,7 @@ class DefenseClawTUI(App[None]):
         panel = self.active_panel
         self._panel_render_generation += 1
         generation = self._panel_render_generation
-        try:
-            self.call_after_refresh(self._start_deferred_panel_render, panel, generation)
-        except Exception:  # noqa: BLE001 - direct unit calls may lack a loop.
-            self._start_deferred_panel_render(panel, generation)
+        self._queue_deferred_panel_render(panel, generation)
         return generation
 
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
@@ -6746,6 +6813,9 @@ class DefenseClawTUI(App[None]):
         elif self._strip_state == "success":
             snippet = self._strip_summary
             snippet_color = TOKENS.accent_green
+        elif self._strip_state == "cancelled":
+            snippet = self._strip_summary
+            snippet_color = TOKENS.accent_amber
         else:
             snippet = self._strip_summary
             snippet_color = TOKENS.accent_red
@@ -6761,6 +6831,7 @@ class DefenseClawTUI(App[None]):
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
             "success": "press A for full output  ·  q or click Dismiss to clear",
             "failure": "press A for full output  ·  q or click Dismiss to clear",
+            "cancelled": "press A for full output  ·  q or click Dismiss to clear",
             "rejected": "press : to retry  ·  q or click Dismiss to clear",
         }.get(self._strip_state, "")
         self.query_one("#command-progress-hint", Static).update(

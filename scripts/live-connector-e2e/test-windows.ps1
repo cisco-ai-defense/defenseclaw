@@ -29,6 +29,28 @@ try {
     }
     . $harness -NoRun
 
+    $privateRoot = Join-Path $temp 'private-state'
+    Protect-TestDirectory $privateRoot
+    $private = Join-Path $privateRoot 'connector_backups\codex'
+    Protect-TestDirectory $private
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($private))
+    $owner = $security.GetOwner([Security.Principal.SecurityIdentifier])
+    Assert-True ($owner.Equals($identity.User)) 'private fixture owner is the current user'
+    Assert-True $security.AreAccessRulesProtected 'private fixture does not inherit the workspace ACL'
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $rules = $security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    $seenUser = $false
+    $seenSystem = $false
+    foreach ($rule in $rules) {
+        Assert-True ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) "private fixture contains non-allow ACE for $($rule.IdentityReference)"
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier])
+        Assert-True ($sid.Equals($identity.User) -or $sid.Equals($system)) "private fixture trusts unexpected principal $sid"
+        if ($sid.Equals($identity.User)) { $seenUser = $true }
+        if ($sid.Equals($system)) { $seenSystem = $true }
+    }
+    Assert-True ($seenUser -and $seenSystem) 'private fixture must grant only the current user and SYSTEM'
+
     $pwsh = (Get-Process -Id $PID).Path
     $profileTest = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
         '-NoProfile', '-File', $nativeHarness, '-Operation', 'self-test',
@@ -41,6 +63,14 @@ try {
 
     $block = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'block') -TimeoutSeconds 5 -AllowedExitCodes @(2)
     Assert-True ($block.ExitCode -eq 2 -and $block.StdOut -match 'block') 'mock block decision'
+
+    $payloadPath = Join-Path $temp 'hook-payload.json'
+    $payload = '{"hook":"stdin-sentinel"}'
+    [IO.File]::WriteAllText($payloadPath, $payload)
+    $script:LogRoot = Join-Path $temp 'logs'
+    $script:CommandIndex = 0
+    $stdin = Invoke-Tool 'pwsh' @('-NoProfile', '-File', $mock, '-Action', 'stdin') @(0) -InputPath $payloadPath
+    Assert-True ($stdin.StdOut.Trim() -eq $payload) 'Invoke-Tool forwards the payload file to native stdin'
 
     [Environment]::SetEnvironmentVariable('DC_E2E_TEST_SECRET', ('unit-test-' + 'sensitive-value'))
     $secret = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'secret') -TimeoutSeconds 5
@@ -58,6 +88,15 @@ try {
     $childPid = [int][IO.File]::ReadAllText($childPidPath)
     Assert-True ($null -eq (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'timeout killed the process tree'
 
+    $descendant = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Milliseconds 250
+        Stop-IsolatedProcessTree -Confirm:$false
+        Assert-True ($descendant.WaitForExit(5000)) 'isolated cleanup killed a descendant without StateRoot in its command line'
+    } finally {
+        Stop-Process -Id $descendant.Id -Force -ErrorAction SilentlyContinue
+    }
+
     $jsonl = Join-Path $temp 'gateway.jsonl'
     $database = Join-Path $temp 'audit.db'
     $requestId = [guid]::NewGuid().ToString()
@@ -67,10 +106,11 @@ try {
         @{ connector = 'codex'; request_id = $requestId; event_type = 'tool_invocation' }
     ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
     [IO.File]::WriteAllText($jsonl, ($fixtureEvents -join [Environment]::NewLine) + [Environment]::NewLine)
-    $liveWriter = [IO.File]::Open($jsonl, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $liveWriter = [IO.File]::Open($jsonl, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
     try {
         $sharedText = Read-SharedText $jsonl
         Assert-True ($sharedText -match 'hook_decision') 'diagnostics can read a live writer-owned JSONL'
+        Assert-True (@(Get-EventLines $jsonl).Count -eq 3) 'gateway JSONL remains readable while the gateway writer is open'
     } finally {
         $liveWriter.Dispose()
     }
@@ -120,12 +160,31 @@ try {
         Assert-True ($nativeWorkflowText -match [regex]::Escape($testName)) "native Windows Go DACL step reaches $testName"
     }
     Assert-True ($nativeWorkflowText -match '''test'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
-    Assert-True ($nativeWorkflowText -match 'go'', ''test'', ''\.\/\.\.\.''' -or $nativeWorkflowText -match "'test', './\.\.\.'") 'full Go suite is required'
+    Assert-True ($nativeWorkflowText -match "'test'.*'\./\.\.\.'") 'full Go suite is required'
+    Assert-True ($nativeWorkflowText -match '''-p=1''.*''-skip''.*\$windowsInapplicable') 'full Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
-    Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests', '-q'") 'complete Python suite is required'
+    Assert-True ($nativeWorkflowText -match "Get-ChildItem cli/tests -Recurse -File -Filter 'test_\*\.py'") 'complete Python suite discovers every test file'
+    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4\]' -and
+        $nativeWorkflowText -match '\(\$index % 4\) -eq \$shardIndex') `
+        'complete Python suite assigns every test file to one of four deterministic shards'
+    foreach ($node in @(
+        'test_existing_openclaw_integration_requires_pin',
+        'test_f0162_refuses_swapped_symlink',
+        'test_f0421_rechecks_pinned_home_before_chown'
+    )) {
+        Assert-True ($nativeWorkflowText -match "--deselect=.*$node") `
+            "native Windows suite excludes the POSIX-only sandbox assertion $node"
+    }
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
+    Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
+        $nativeHarnessText -match '\$env:TEMP = \$temp') `
+        'native test harness provides a private current-user-owned temp root'
+    Assert-True ([regex]::Matches(
+        $nativeWorkflowText,
+        'Initialize-WindowsNativeTestEnvironment \$env:DC_STATE_ROOT'
+    ).Count -ge 5) 'Go and Python test steps initialize the private temp root'
     Assert-True ($nativeHarnessText -match 'doctor'', ''--json-output' -and $nativeHarnessText -match 'skill'', ''scan' -and $nativeHarnessText -match 'mcp'', ''scan') 'installed artifact smoke covers doctor and scanners'
     $acceptance = [regex]::Match(
         $nativeHarnessText,
@@ -233,7 +292,12 @@ try {
     Assert-True ($harnessText -match 'WriteAllBytes\(\$configPath, \$originalConfig\)' -and $harnessText -match 'doctor:windows-hook-recovery') 'Doctor connector contract restores the registration byte-for-byte and validates recovery'
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome' -and $harnessText -match 'HomeRoot must be contained by StateRoot') 'connector contract keeps the installed runtime and agent home in one disposable ownership root'
     Assert-True ($harnessText -match 'Assert-DoctorHookRegistration' -and $harnessText -match 'doctor-hooks pass') 'contract validates setup-created hooks with Doctor'
-    $unpinned = [regex]::Matches($nativeWorkflowText, '(?m)^\s*-?\s*uses:\s*[^@\s]+@(?![0-9a-f]{40}\b)')
+    $workflowText = $nativeWorkflowText + "`n" + $liveWorkflowText
+    Assert-True ([regex]::Matches($workflowText, 'failure\(\) \|\| cancelled\(\)').Count -ge 2) 'failure and cancellation diagnostics are uploaded'
+    $checkoutCount = [regex]::Matches($workflowText, 'uses:\s*actions/checkout@').Count
+    $nonPersistentCheckoutCount = [regex]::Matches($workflowText, 'persist-credentials:\s*false').Count
+    Assert-True ($checkoutCount -eq $nonPersistentCheckoutCount) 'every checkout disables credential persistence'
+    $unpinned = [regex]::Matches($workflowText, '(?m)^\s*-?\s*uses:\s*[^@\s]+@(?![0-9a-f]{40}\b)')
     $unpinnedText = @($unpinned | ForEach-Object { $_.Value }) -join ', '
     Assert-True ($unpinned.Count -eq 0) "external actions must be SHA-pinned: $unpinnedText"
 

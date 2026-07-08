@@ -44,9 +44,7 @@ UNSUPPORTED: SupportStatus = "unsupported"
 
 PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 
-LOCAL_OBSERVABILITY_UNSUPPORTED_REASON = (
-    "Bundled local observability is unavailable on this operating system."
-)
+LOCAL_OBSERVABILITY_UNSUPPORTED_REASON = "Bundled local observability is unavailable on this operating system."
 LOCAL_SPLUNK_UNSUPPORTED_REASON = "Bundled Local Splunk is unavailable on this operating system."
 # Compatibility name retained for callers that predate the native controller.
 LOCAL_SHELL_STACKS_UNSUPPORTED_REASON = LOCAL_SPLUNK_UNSUPPORTED_REASON
@@ -102,7 +100,7 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "hermes": ConnectorPlatformSupport(
         NOT_CERTIFIED,
-        "The DefenseClaw Hermes integration remains preview and has not completed native Windows x64 certification.",
+        "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -255,12 +253,15 @@ def is_local_observability_stack_destination(
 
 def is_local_splunk_stack_destination(
     *,
+    preset_id: str = "",
     kind: str = "",
     endpoint: str = "",
 ) -> bool:
     """Classify loopback Splunk HEC state owned by the local Splunk stack."""
 
     if kind != "splunk_hec":
+        return False
+    if preset_id == "splunk-enterprise":
         return False
     parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
@@ -277,11 +278,41 @@ def is_local_shell_stack_destination(
 
     return is_local_observability_stack_destination(
         name=name, preset_id=preset_id, kind=kind, endpoint=endpoint
-    ) or is_local_splunk_stack_destination(kind=kind, endpoint=endpoint)
+    ) or is_local_splunk_stack_destination(
+        preset_id=preset_id,
+        kind=kind,
+        endpoint=endpoint,
+    )
 
 
-def supported_connectors(
-    names: Iterable[str], os_name: str | None = None
-) -> list[str]:
+def destination_platform_unsupported(
+    *,
+    name: str = "",
+    preset_id: str = "",
+    kind: str = "",
+    endpoint: str = "",
+    os_name: str | None = None,
+) -> bool:
+    """Whether a destination belongs to a local stack unavailable here."""
+
+    return (
+        not local_observability_stack_supported(os_name)
+        and is_local_observability_stack_destination(
+            name=name,
+            preset_id=preset_id,
+            kind=kind,
+            endpoint=endpoint,
+        )
+    ) or (
+        not local_splunk_stack_supported(os_name)
+        and is_local_splunk_stack_destination(
+            preset_id=preset_id,
+            kind=kind,
+            endpoint=endpoint,
+        )
+    )
+
+
+def supported_connectors(names: Iterable[str], os_name: str | None = None) -> list[str]:
     """Filter *names* to supported/preview entries, preserving order."""
     return [n for n in names if connector_supported_on_os(n, os_name)]

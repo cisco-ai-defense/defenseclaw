@@ -28,10 +28,9 @@ import platform
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Callable
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -66,7 +65,7 @@ from defenseclaw.connector_paths import (  # noqa: F401
 from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import atomic_write_text_secure
 
 _log = logging.getLogger(__name__)
 _privacy_disable_redaction_warned = False
@@ -2733,45 +2732,15 @@ def locked_config_yaml(path: str):
 def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     """Atomically write YAML without widening config.yaml permissions."""
     _assert_config_write_allowed(path, data)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    target_mode = 0o600
-    if os.name != "nt":
-        try:
-            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
-        except OSError:
-            existing_mode = None
-        if existing_mode is not None and existing_mode != 0o600:
-            target_mode = existing_mode & 0o600
-            if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
-                target_mode = 0o640
-            elif target_mode == 0:
-                target_mode = 0o600
 
-    fd = -1
-    tmp = ""
-    try:
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{os.path.basename(path)}.",
-            suffix=".tmp",
-            dir=directory,
-        )
-        set_file_mode(fd, tmp, target_mode)
-        stream = os.fdopen(fd, "w")
-        fd = -1
-        with stream as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if fd != -1:
-            with suppress(OSError):
-                os.close(fd)
-        if tmp:
-            with suppress(OSError):
-                os.unlink(tmp)
+    def write_yaml(stream) -> None:
+        yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
+
+    atomic_write_text_secure(
+        path,
+        write_yaml,
+        prefix=f".{os.path.basename(path)}.",
+    )
 
     try:
         dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)

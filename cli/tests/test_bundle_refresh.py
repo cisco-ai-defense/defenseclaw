@@ -34,6 +34,40 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
+def _make_dir_link_or_junction(link: Path, target: Path) -> None:
+    """Create a directory link, falling back to a junction on Windows."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+            raise
+        created = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    "New-Item -ItemType Junction -Path $env:DC_TEST_LINK "
+                    "-Target $env:DC_TEST_TARGET | Out-Null"
+                ),
+            ],
+            env={
+                **os.environ,
+                "DC_TEST_LINK": str(link),
+                "DC_TEST_TARGET": str(target),
+            },
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+        if created.returncode != 0:
+            raise AssertionError(created.stderr)
+
+
 class TestRsyncOverwrite(unittest.TestCase):
     """Cover the low-level :func:`_rsync_overwrite` primitive."""
 
@@ -493,36 +527,7 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         marker.write_text("outside unchanged\n", encoding="utf-8")
         grafana = Path(self._dest()) / "grafana"
         shutil.rmtree(grafana)
-        try:
-            grafana.symlink_to(outside, target_is_directory=True)
-        except OSError as exc:
-            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
-                created = subprocess.run(
-                    [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        (
-                            "New-Item -ItemType Junction -Path $env:DC_TEST_LINK "
-                            "-Target $env:DC_TEST_TARGET | Out-Null"
-                        ),
-                    ],
-                    env={
-                        **os.environ,
-                        "DC_TEST_LINK": str(grafana),
-                        "DC_TEST_TARGET": str(outside),
-                    },
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
-                    check=False,
-                )
-                self.assertEqual(created.returncode, 0, created.stderr)
-            else:
-                raise
+        _make_dir_link_or_junction(grafana, outside)
 
         result = refresh_local_observability_stack(self.tmp, refresh_config=True)
 
@@ -578,36 +583,7 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         actual = Path(self.tmp) / "actual-data"
         actual.mkdir()
         nominal = Path(self.tmp) / "linked-data"
-        try:
-            nominal.symlink_to(actual, target_is_directory=True)
-        except OSError as exc:
-            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
-                created = subprocess.run(
-                    [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        (
-                            "New-Item -ItemType Junction -Path $env:DC_TEST_LINK "
-                            "-Target $env:DC_TEST_TARGET | Out-Null"
-                        ),
-                    ],
-                    env={
-                        **os.environ,
-                        "DC_TEST_LINK": str(nominal),
-                        "DC_TEST_TARGET": str(actual),
-                    },
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
-                    check=False,
-                )
-                self.assertEqual(created.returncode, 0, created.stderr)
-            else:
-                raise
+        _make_dir_link_or_junction(nominal, actual)
 
         result = refresh_local_observability_stack(
             str(nominal), refresh_config=True
@@ -616,6 +592,22 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         self.assertTrue(result.errors)
         self.assertIn("reparse/symlink", " ".join(result.errors))
         self.assertFalse((actual / "observability-stack").exists())
+
+    def test_destination_guard_rejects_dangling_symlink_ancestor(self) -> None:
+        from defenseclaw.bundle_refresh import _assert_safe_bundle_destination
+
+        root = Path(self.tmp) / "guard-root"
+        root.mkdir()
+        dangling = root / "dangling"
+        try:
+            dangling.symlink_to(root / "missing", target_is_directory=True)
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                self.skipTest("creating dangling symlinks requires Windows privilege")
+            raise
+
+        with self.assertRaisesRegex(OSError, "reparse/symlink"):
+            _assert_safe_bundle_destination(root, dangling / "nested.json")
 
 
 class TestIsComposeProjectRunning(unittest.TestCase):

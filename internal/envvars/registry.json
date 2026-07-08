@@ -617,6 +617,20 @@
       "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks."
     },
     {
+      "name": "DEFENSECLAW_PLIST_SRC",
+      "category": "runtime_path",
+      "purpose": "Override the LaunchDaemon plist source file the macOS installer copies to /Library/LaunchDaemons. Precedence: --plist flag > this env var > plist next to install.sh > repo-tree plist. Intended for admin bootstrap scripts that ship a pre-modified plist alongside the DefenseClaw bundle.",
+      "default": "unset (installer picks plist alongside install.sh)",
+      "accepted_values": ["any-absolute-path-to-plist", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/macos/install.sh", "description": "macOS bundle installer plist resolution"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
+    },
+    {
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
       "category": "runtime_path",
       "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",
@@ -1578,19 +1592,6 @@
       "since": "0.7.0"
     },
     {
-      "name": "DEFENSECLAW_TEST_MARKER",
-      "category": "test_fixture",
-      "purpose": "Sentinel environment variable used by the ClawHub subprocess test fixture to verify the child receives the isolated allowlisted environment.",
-      "default": "unset",
-      "accepted_values": ["temporary marker file path", "unset"],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {"location": "cli/tests/test_cmd_skill.py:862", "description": "ClawHub subprocess environment isolation regression fixture"}
-      ],
-      "since": "0.8.0"
-    },
-    {
       "name": "DEFENSECLAW_TEST_EXE",
       "category": "test_fixture",
       "purpose": "Absolute path to the temporary gateway executable invoked by the native Windows daemon executable tests.",
@@ -1632,26 +1633,39 @@
     {
       "name": "DEFENSECLAW_CLAWHUB_LAUNCHER",
       "category": "hook_internal",
-      "purpose": "Absolute executable path passed through the generated Windows cmd wrapper used to launch ClawHub without shell interpolation.",
-      "default": "unset (set only for the child wrapper process)",
-      "accepted_values": ["absolute executable path", "unset"],
+      "purpose": "Absolute path to the trusted ClawHub .cmd or .bat launcher passed to the temporary Windows command adapter. Set only in the child process environment; inherited values are overwritten.",
+      "default": "unset (set by the ClawHub launcher adapter on Windows)",
+      "accepted_values": ["absolute path to a .cmd or .bat launcher"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_skill.py:202", "description": "Windows ClawHub launcher wrapper quotes and expands this internal value"}
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:202", "description": "Windows ClawHub command adapter publishes the selected trusted launcher to its generated batch file"}
       ],
       "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_CLAWHUB_CWD",
       "category": "hook_internal",
-      "purpose": "Validated working directory passed through the generated Windows cmd wrapper used to launch ClawHub.",
-      "default": "unset (set only for the child wrapper process)",
-      "accepted_values": ["absolute directory path", "unset"],
+      "purpose": "Working directory used by the temporary Windows ClawHub command adapter. Set only in the child process environment; inherited values are overwritten.",
+      "default": "unset (set by the ClawHub launcher adapter on Windows)",
+      "accepted_values": ["absolute directory path"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_skill.py:203", "description": "Windows ClawHub launcher wrapper changes to this internal working directory"}
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:203", "description": "Windows ClawHub command adapter publishes the selected launch directory to its generated batch file"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_MARKER",
+      "category": "test_fixture",
+      "purpose": "Test-only marker path used by the fake ClawHub launcher to record a single invocation.",
+      "default": "unset",
+      "accepted_values": ["absolute file path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_cmd_skill.py:858", "description": "Fake Windows ClawHub launcher appends an invocation marker during command-adapter tests"}
       ],
       "since": "0.8.0"
     },

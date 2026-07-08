@@ -62,9 +62,11 @@ func TestNativeWindowsProcessSnapshotSmoke(t *testing.T) {
 // TestNativeWindowsNamedAgentProcessRefresh exercises the actual Toolhelp
 // snapshot and usage refresh with disposable binaries whose basenames match
 // the supported Windows agent aliases. The Claude helper's process DACL
-// deliberately denies new metadata handles: Toolhelp must still retain and
-// classify its base row instead of turning an authorization failure into a
-// false "not running" result.
+// deliberately denies new metadata handles when the host token does not hold
+// an overriding debug privilege: Toolhelp must still retain and classify its
+// base row instead of turning an authorization failure into a false "not
+// running" result. Elevated CI images can bypass the fixture DACL, in which
+// case the same refresh must retain the metadata it can legitimately read.
 func TestNativeWindowsNamedAgentProcessRefresh(t *testing.T) {
 	helpersDir := t.TempDir()
 	codex := startNamedWindowsProcessHelper(t, helpersDir, "codex.exe")
@@ -72,8 +74,10 @@ func TestNativeWindowsNamedAgentProcessRefresh(t *testing.T) {
 	restrictWindowsProcessMetadata(t, claude.cmd.Process.Pid)
 
 	reader := nativeWindowsSnapshotReader{}
-	if _, err := reader.Details(claude.cmd.Process.Pid); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		t.Fatalf("restricted Claude metadata error = %v, want ERROR_ACCESS_DENIED", err)
+	_, restrictedErr := reader.Details(claude.cmd.Process.Pid)
+	restricted := errors.Is(restrictedErr, windows.ERROR_ACCESS_DENIED)
+	if restrictedErr != nil && !restricted {
+		t.Fatalf("restricted Claude metadata error = %v, want nil or ERROR_ACCESS_DENIED", restrictedErr)
 	}
 
 	procs, err := platformProcessSnapshot()
@@ -93,8 +97,11 @@ func TestNativeWindowsNamedAgentProcessRefresh(t *testing.T) {
 	if !ok || claudeProc.Connector != "claudecode" {
 		t.Fatalf("access-denied Claude snapshot row = %+v, present=%v", claudeProc, ok)
 	}
-	if claudeProc.User != "" || !claudeProc.StartedAt.IsZero() {
+	if restricted && (claudeProc.User != "" || !claudeProc.StartedAt.IsZero()) {
 		t.Fatalf("restricted Claude row fabricated unavailable metadata: %+v", claudeProc)
+	}
+	if !restricted && (claudeProc.User == "" || claudeProc.StartedAt.IsZero()) {
+		t.Fatalf("queryable Claude row dropped available metadata: %+v", claudeProc)
 	}
 
 	dataDir := t.TempDir()
@@ -135,8 +142,14 @@ func TestNativeWindowsNamedAgentProcessRefresh(t *testing.T) {
 		t.Fatalf("Codex usage runtime = %+v", codexRuntime)
 	}
 	claudeRuntime := runtimeByPID[claude.cmd.Process.Pid]
-	if claudeRuntime == nil || claudeRuntime.StartedAt != nil || claudeRuntime.User != "" || !strings.EqualFold(claudeRuntime.Comm, "claude.exe") {
+	if claudeRuntime == nil || !strings.EqualFold(claudeRuntime.Comm, "claude.exe") {
 		t.Fatalf("access-denied Claude usage runtime = %+v", claudeRuntime)
+	}
+	if restricted && (claudeRuntime.StartedAt != nil || claudeRuntime.User != "") {
+		t.Fatalf("restricted Claude usage runtime fabricated unavailable metadata: %+v", claudeRuntime)
+	}
+	if !restricted && (claudeRuntime.StartedAt == nil || claudeRuntime.User == "") {
+		t.Fatalf("queryable Claude usage runtime dropped available metadata: %+v", claudeRuntime)
 	}
 }
 

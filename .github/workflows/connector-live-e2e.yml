@@ -122,6 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          persist-credentials: false
           # Need history back to the PR base so the path diff below is accurate.
           fetch-depth: 0
       - id: decide
@@ -185,6 +186,8 @@ jobs:
       DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Select cell + resolve OS label
         id: select
@@ -368,6 +371,8 @@ jobs:
       DC_USE_BEDROCK: ${{ inputs.use_bedrock && '1' || vars.DC_USE_BEDROCK || '0' }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Select cell
         id: select
@@ -512,6 +517,8 @@ jobs:
           "run=$($selected.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         if: steps.select.outputs.run == 'true'
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: steps.select.outputs.run == 'true'
         with:
@@ -588,6 +595,8 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Download all cell results
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

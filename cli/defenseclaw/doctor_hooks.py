@@ -320,8 +320,9 @@ def _split_windows(command: str) -> list[str]:
     normalized: list[str] = []
     for part in parts:
         if len(part) >= 2 and part[0] == part[-1] and part[0] in {'"', "'"}:
+            quote = part[0]
             part = part[1:-1]
-            if parts and parts[0] == "&":
+            if parts and parts[0] == "&" and quote == "'":
                 part = part.replace("''", "'")
         normalized.append(part)
     return normalized

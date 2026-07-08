@@ -19,11 +19,13 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -56,11 +58,33 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	// daemon launch. It lets the PID-file-owned gateway survive a successful
 	// TUI command whose enclosing Job Object is closed, while ordinary TUI
 	// descendants remain in that kill-on-close job.
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP |
-			windows.DETACHED_PROCESS |
-			windows.CREATE_BREAKAWAY_FROM_JOB,
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: daemonCreationFlags()}
+}
+
+func daemonCreationFlags() uint32 {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	err := windows.QueryInformationJobObject(
+		0,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+		nil,
+	)
+	return daemonCreationFlagsForJob(err, info.BasicLimitInformation.LimitFlags)
+}
+
+func daemonCreationFlagsForJob(queryErr error, limitFlags uint32) uint32 {
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	// CREATE_BREAKAWAY_FROM_JOB fails with ERROR_ACCESS_DENIED when the
+	// enclosing job does not opt into explicit breakaway. This is common in
+	// CI runners and other process supervisors. A process outside a job may
+	// request the flag harmlessly; a job that permits it preserves the
+	// long-lived gateway behavior. SILENT_BREAKAWAY needs no creation flag.
+	if errors.Is(queryErr, windows.ERROR_INVALID_HANDLE) ||
+		(queryErr == nil && limitFlags&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0) {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
 	}
+	return flags
 }
 
 func daemonChildRegistersPID() bool { return true }

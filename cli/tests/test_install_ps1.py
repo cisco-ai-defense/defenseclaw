@@ -98,6 +98,7 @@ def _transaction_functions() -> str:
             "Test-ManagedFileRenameRoundTrip",
             "New-PairedInstallBackup",
             "Restore-PairedInstallBackup",
+            "Set-ManagedPathProtection",
             "Replace-ManagedInstallFile",
             "Invoke-PairedInstallTransaction",
         )
@@ -155,6 +156,26 @@ def test_release_staging_precedes_gateway_stop_and_mutation() -> None:
     assert '$headers["Authorization"]' in text
     assert "resolved_token()" in text
     assert "@(Get-Command defenseclaw -CommandType Application -ErrorAction Stop)[0]" in text
+
+
+def test_installer_protects_managed_windows_paths_and_replacements() -> None:
+    text = INSTALL_PS1.read_text()
+    main = text.split("function Main", 1)[1]
+    replacement = text.split("function Replace-ManagedInstallFile", 1)[1].split(
+        "function Test-PairedInstalledState", 1
+    )[0]
+
+    assert "function Set-ManagedPathProtection" in text
+    assert main.index("Set-ManagedPathProtection -Path $DefenseClawHome") < main.index(
+        "Invoke-PairedInstallTransaction"
+    )
+    assert main.index(
+        "Set-ManagedPathProtection -Path (Split-Path -Parent $InstallDir)"
+    ) < main.index("Invoke-PairedInstallTransaction")
+    assert main.index("Set-ManagedPathProtection -Path $InstallDir") < main.index(
+        "Invoke-PairedInstallTransaction"
+    )
+    assert "Set-ManagedPathProtection -Path $Target" in replacement
 
 
 def test_windows_installer_offers_only_native_connector_surface() -> None:
@@ -1295,6 +1316,7 @@ def test_existing_managed_file_is_atomically_replaced_without_residue(tmp_path: 
     command = (
         _extract_powershell_function("Test-StagedReleaseFile")
         + _extract_powershell_function("Assert-ManagedInstallFile")
+        + _extract_powershell_function("Set-ManagedPathProtection")
         + _extract_powershell_function("Replace-ManagedInstallFile")
         + rf"""
 $ErrorActionPreference = 'Stop'

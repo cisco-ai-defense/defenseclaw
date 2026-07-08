@@ -30,10 +30,11 @@ jobs:
     name: Windows x64 Go suite
     runs-on: windows-latest
     timeout-minutes: 45
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-go
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-go
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-go')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-go')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -44,7 +45,7 @@ jobs:
       - name: Run native Windows Go DACL regressions explicitly
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
-          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $go = (Get-Command go.exe -ErrorAction Stop).Source
           $daclTests = @(
             'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
@@ -67,9 +68,19 @@ jobs:
       - name: Full native Windows Go test, vet, and build
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
-          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $go = (Get-Command go.exe -ErrorAction Stop).Source
-          Invoke-WindowsNativeProcess $go @('test', './...') -TimeoutSeconds 2100 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-test.log') | Out-Null
+          # These tests contain POSIX mode-bit/script assertions that native
+          # Windows does not use. Equivalent token validation, reparse-point,
+          # private-DACL, and supported-connector coverage runs in this job.
+          $windowsInapplicable = '^(' + (@(
+            'TestAtomicWriteFile_PreservesSymlinkedDotfile',
+            'TestOpenHandsHookScript_BlockExitsTwo',
+            'TestLoadOTLPPathToken_RejectsUnsafeFiles'
+          ) -join '|') + ')$'
+          # Keep package execution serial on the four-core hosted runner so
+          # bounded discovery tests are not starved by concurrent packages.
+          Invoke-WindowsNativeProcess $go @('test', '-count=1', '-p=1', '-skip', $windowsInapplicable, './...') -TimeoutSeconds 2100 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-test.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('vet', './...') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-vet.log') | Out-Null
           $bin = Join-Path $env:DC_STATE_ROOT 'bin'
           New-Item -ItemType Directory -Force -Path $bin | Out-Null
@@ -92,13 +103,18 @@ jobs:
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
   windows-python:
-    name: Windows complete Python suite (includes TUI)
+    name: Windows complete Python suite (includes TUI) / shard ${{ matrix.shard }}
     runs-on: windows-latest
     timeout-minutes: 75
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-python
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-python
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-python-${{ matrix.shard }}')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-python-${{ matrix.shard }}')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -111,23 +127,51 @@ jobs:
       - name: Stage packaged runtime data with PowerShell
         run: ./scripts/windows-native-ci.ps1 -Operation stage-package-data
       - name: Validate registered Windows Codex and Claude hook commands
+        if: ${{ matrix.shard == 1 }}
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
-          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_cmd_doctor_windows_hooks.py', '-q') -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-doctor-windows-hooks.log') | Out-Null
       - name: Run native Windows Local Splunk certification regressions
+        if: ${{ matrix.shard == 1 }}
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
-          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
-      - name: Run every Python test, including headless TUI tests
+      - name: Run Python test shard ${{ matrix.shard }} of 4, including headless TUI tests
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
-          New-Item -ItemType Directory -Force -Path $env:DC_STATE_ROOT | Out-Null
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
-          Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests', '-q') -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest.log') | Out-Null
+          $testFiles = @(Get-ChildItem cli/tests -Recurse -File -Filter 'test_*.py' | Sort-Object FullName)
+          $shardIndex = [int]'${{ matrix.shard }}' - 1
+          $shardFiles = @(
+            for ($index = 0; $index -lt $testFiles.Count; $index++) {
+              if (($index % 4) -eq $shardIndex) {
+                $testFiles[$index].FullName
+              }
+            }
+          )
+          if (-not $shardFiles) {
+            throw "Python test shard $($shardIndex + 1) selected no files"
+          }
+          # These assertions exercise the POSIX-only OpenShell ownership path
+          # (pwd, root-owned mkdir/chown, and Linux sandbox users). Symlink
+          # capability alone is not enough to make that product path native to
+          # Windows, so keep the exact nodes in Linux CI and omit them here.
+          $windowsInapplicableTests = @(
+            '--deselect=cli/tests/test_cmd_setup_sandbox.py::TestTrustedPrivilegedCommands::test_existing_openclaw_integration_requires_pin',
+            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestSandboxInitIdempotentPin::test_f0162_refuses_swapped_symlink',
+            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestInitSandboxChownTOCTOU::test_f0421_rechecks_pinned_home_before_chown',
+            # Windows os.readlink returns the preserved absolute target with
+            # an equivalent \\?\ prefix, so this raw POSIX string assertion
+            # remains covered by the Linux suite.
+            '--deselect=cli/tests/test_migrations.py::TestMigrate050PurgeLegacyFlatPolicyBundle::test_symlinked_flat_data_json_is_left_alone'
+          )
+          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
+          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}.log') | Out-Null
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -135,7 +179,7 @@ jobs:
         if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-native-python-diagnostics
+          name: windows-native-python-diagnostics-${{ matrix.shard }}
           path: ${{ env.DC_DIAGNOSTICS }}\**
           if-no-files-found: ignore
           retention-days: 5
@@ -147,10 +191,11 @@ jobs:
     name: Windows PowerShell harness validation
     runs-on: windows-latest
     timeout-minutes: 15
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-powershell
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-powershell
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-powershell')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-powershell')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -189,11 +234,12 @@ jobs:
     name: Windows packaged artifact build
     runs-on: windows-latest
     timeout-minutes: 35
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-package-build
-      DC_ARTIFACT_ROOT: ${{ runner.temp }}\windows-native-dist
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-package
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-package-build')" >> $env:GITHUB_ENV
+          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-package')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -234,11 +280,12 @@ jobs:
     needs: package-artifact
     runs-on: windows-latest
     timeout-minutes: 55
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-acceptance
-      DC_ARTIFACT_ROOT: ${{ runner.temp }}\windows-native-dist
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-acceptance
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-acceptance')" >> $env:GITHUB_ENV
+          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-acceptance')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -276,11 +323,12 @@ jobs:
       fail-fast: false
       matrix:
         connector: [codex, claudecode]
-    env:
-      DC_STATE_ROOT: ${{ runner.temp }}\windows-native-contract-${{ matrix.connector }}
-      DC_ARTIFACT_ROOT: ${{ runner.temp }}\windows-native-dist
-      DC_DIAGNOSTICS: ${{ runner.temp }}\windows-native-diagnostics-${{ matrix.connector }}
     steps:
+      - name: Initialize isolated paths
+        run: |
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-contract-${{ matrix.connector }}')" >> $env:GITHUB_ENV
+          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-${{ matrix.connector }}')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false

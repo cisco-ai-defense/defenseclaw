@@ -99,6 +99,7 @@ from defenseclaw.observability.writer import (
 )
 from defenseclaw.platform_support import (
     LOCAL_SPLUNK_UNSUPPORTED_REASON,
+    destination_platform_unsupported,
     is_local_observability_stack_destination,
     is_local_splunk_stack_destination,
     local_observability_stack_supported,
@@ -109,10 +110,23 @@ from defenseclaw.platform_support import (
 # same command surface covers every preset; the writer ignores unknown
 # keys per preset.
 _ALL_PROMPT_FLAGS = (
-    "realm", "site", "region", "dataset",
-    "endpoint", "protocol", "project", "logstream",
-    "host", "port", "index", "source", "sourcetype",
-    "url", "method", "url_path", "verify_tls",
+    "realm",
+    "site",
+    "region",
+    "dataset",
+    "endpoint",
+    "protocol",
+    "project",
+    "logstream",
+    "host",
+    "port",
+    "index",
+    "source",
+    "sourcetype",
+    "url",
+    "method",
+    "url_path",
+    "verify_tls",
 )
 
 
@@ -144,19 +158,28 @@ def observability() -> None:
     type=click.Choice(preset_choices(), case_sensitive=False),
 )
 @click.option("--name", default=None, help="Destination name (default: derived from preset+inputs)")
-@click.option("--target", type=click.Choice(["otel", "audit_sinks"]), default=None,
-              help="Target for generic OTLP presets (otel exporter vs. otlp_logs sink)")
-@click.option("--signals", default=None,
-              help="Comma-separated OTel signals to enable (traces,metrics,logs)")
-@click.option("--token", "token_value", default=None,
-              help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env")
-@click.option("--enabled/--disabled", "enabled", default=True,
-              help="Mark destination enabled (default) or disabled")
-@click.option("--connector", default=None,
-              help="Scope this sink to a connector (omit = global). A connector's "
-                   "events route to its per-connector audit_sinks when set, "
-                   "falling back to the global audit_sinks otherwise. Applies to "
-                   "audit_sinks only (OTel destinations are process-wide).")
+@click.option(
+    "--target",
+    type=click.Choice(["otel", "audit_sinks"]),
+    default=None,
+    help="Target for generic OTLP presets (otel exporter vs. otlp_logs sink)",
+)
+@click.option("--signals", default=None, help="Comma-separated OTel signals to enable (traces,metrics,logs)")
+@click.option(
+    "--token",
+    "token_value",
+    default=None,
+    help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env",
+)
+@click.option("--enabled/--disabled", "enabled", default=True, help="Mark destination enabled (default) or disabled")
+@click.option(
+    "--connector",
+    default=None,
+    help="Scope this sink to a connector (omit = global). A connector's "
+    "events route to its per-connector audit_sinks when set, "
+    "falling back to the global audit_sinks otherwise. Applies to "
+    "audit_sinks only (OTel destinations are process-wide).",
+)
 @click.option("--dry-run", is_flag=True, help="Preview YAML/dotenv changes without writing")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts; use flags only")
 # Prompt flags — shared across all presets; writer resolves per-preset.
@@ -189,10 +212,23 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     connector: str | None,
     dry_run: bool,
     non_interactive: bool,
-    realm, site, region, dataset,
-    endpoint, protocol, project, logstream,
-    host, port, index, source, sourcetype,
-    url, method, url_path, verify_tls,
+    realm,
+    site,
+    region,
+    dataset,
+    endpoint,
+    protocol,
+    project,
+    logstream,
+    host,
+    port,
+    index,
+    source,
+    sourcetype,
+    url,
+    method,
+    url_path,
+    verify_tls,
 ) -> None:
     """Configure a telemetry destination.
 
@@ -211,34 +247,28 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     preset = resolve_preset(preset_id.lower())
 
     raw_inputs: dict[str, str | None] = {
-        "realm": realm, "site": site, "region": region, "dataset": dataset,
-        "endpoint": endpoint, "protocol": protocol,
-        "project": project, "logstream": logstream,
-        "host": host, "port": port, "index": index, "source": source,
+        "realm": realm,
+        "site": site,
+        "region": region,
+        "dataset": dataset,
+        "endpoint": endpoint,
+        "protocol": protocol,
+        "project": project,
+        "logstream": logstream,
+        "host": host,
+        "port": port,
+        "index": index,
+        "source": source,
         "sourcetype": sourcetype,
-        "url": url, "method": method, "url_path": url_path,
+        "url": url,
+        "method": method,
+        "url_path": url_path,
     }
     if verify_tls is not None:
         raw_inputs["verify_tls"] = "true" if verify_tls else "false"
 
     if not non_interactive:
         raw_inputs = _prompt_missing(preset, raw_inputs)
-
-    candidate_endpoint = str(raw_inputs.get("endpoint") or "")
-    candidate_host = str(raw_inputs.get("host") or "")
-    if (
-        not local_splunk_stack_supported()
-        and preset.id in {"splunk-hec", "splunk-enterprise"}
-        and is_local_splunk_stack_destination(
-            kind="splunk_hec",
-            endpoint=candidate_endpoint or candidate_host,
-        )
-    ):
-        raise click.ClickException(LOCAL_SPLUNK_UNSUPPORTED_REASON)
-
-    if not non_interactive:
-        if token_value is None:
-            token_value = _prompt_secret(preset, app.cfg.data_dir)
 
     inputs: dict[str, str] = {k: str(v) for k, v in raw_inputs.items() if v is not None}
 
@@ -254,6 +284,20 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
     connector_name = (connector or "").strip()
     try:
+        resolved_inputs = _resolve_inputs(preset, inputs)
+        candidate_endpoint = resolved_inputs.get("endpoint") or resolved_inputs.get("host", "")
+        if (
+            not local_splunk_stack_supported()
+            and preset.id in {"splunk-hec", "splunk-enterprise"}
+            and is_local_splunk_stack_destination(
+                preset_id=preset.id,
+                kind="splunk_hec",
+                endpoint=candidate_endpoint,
+            )
+        ):
+            raise click.ClickException(LOCAL_SPLUNK_UNSUPPORTED_REASON)
+        if not non_interactive and token_value is None:
+            token_value = _prompt_secret(preset, app.cfg.data_dir)
         if connector_name:
             result = _apply_sink_to_connector(
                 preset,
@@ -302,10 +346,13 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
 @observability.command("list")
 @click.option("--json", "emit_json", is_flag=True, help="Emit machine-readable JSON")
-@click.option("--connector", default=None,
-              help="List a connector's per-connector audit_sinks (omit = global). "
-                   "When the connector has no per-connector sinks it inherits the "
-                   "global audit_sinks.")
+@click.option(
+    "--connector",
+    default=None,
+    help="List a connector's per-connector audit_sinks (omit = global). "
+    "When the connector has no per-connector sinks it inherits the "
+    "global audit_sinks.",
+)
 @pass_ctx
 def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
     """List configured observability destinations."""
@@ -316,10 +363,7 @@ def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
             if emit_json:
                 click.echo("[]")
                 return
-            ux.subhead(
-                f"No per-connector audit_sinks for {connector_name!r} — "
-                "inherits the global audit_sinks."
-            )
+            ux.subhead(f"No per-connector audit_sinks for {connector_name!r} — inherits the global audit_sinks.")
             return
         if emit_json:
             click.echo(_json.dumps([_dest_to_dict(d) for d in dests], indent=2))
@@ -455,10 +499,7 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
         d.endpoint or "(no endpoint)",
         hide_path=d.target != "otel",
     )
-    click.echo(
-        f"  {ux.bold('Testing')} {ux.bold(name)} "
-        f"{ux.dim('[' + label + ']')}: {display_endpoint}"
-    )
+    click.echo(f"  {ux.bold('Testing')} {ux.bold(name)} {ux.dim('[' + label + ']')}: {display_endpoint}")
     if d.target == "otel":
         _test_otel(app.cfg.data_dir, name, timeout=timeout)
     elif d.kind == "splunk_hec":
@@ -527,10 +568,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     # Build the equivalent audit_sinks entry.
     host = "localhost"
     endpoint = str(legacy.get("hec_endpoint", "") or "")
-    if (
-        not local_splunk_stack_supported()
-        and is_local_splunk_stack_destination(kind="splunk_hec", endpoint=endpoint)
-    ):
+    if not local_splunk_stack_supported() and is_local_splunk_stack_destination(kind="splunk_hec", endpoint=endpoint):
         raise click.ClickException(LOCAL_SPLUNK_UNSUPPORTED_REASON)
     if endpoint:
         parsed = urlparse(endpoint)
@@ -557,8 +595,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     if legacy_verify_explicit_false:
         new_block["insecure_skip_verify"] = True
         click.echo(
-            "  ⚠ migrated legacy verify_tls=false → insecure_skip_verify=true; "
-            "remove this opt-out for production",
+            "  ⚠ migrated legacy verify_tls=false → insecure_skip_verify=true; remove this opt-out for production",
         )
     new_entry: dict[str, Any] = {
         "name": name,
@@ -601,7 +638,8 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     click.echo(f"  Migrated splunk: block to audit_sinks[{name}].")
     if app.logger:
         app.logger.log_action(
-            ACTION_SETUP_OBSERVABILITY, "config",
+            ACTION_SETUP_OBSERVABILITY,
+            "config",
             f"action=migrate-splunk name={name}",
         )
 
@@ -612,7 +650,8 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
 
 
 def _prompt_missing(
-    preset, raw_inputs: dict[str, str | None],
+    preset,
+    raw_inputs: dict[str, str | None],
 ) -> dict[str, str | None]:
     ux.section(f"{preset.display_name} Setup")
     ux.subhead(preset.description)
@@ -624,7 +663,9 @@ def _prompt_missing(
             continue
         prompt_text = f"  {desc}"
         resolved[flag_name] = click.prompt(
-            prompt_text, default=default or placeholder, show_default=True,
+            prompt_text,
+            default=default or placeholder,
+            show_default=True,
         )
     return resolved
 
@@ -639,7 +680,9 @@ def _prompt_secret(preset, data_dir: str) -> str | None:
     label = preset.token_label or preset.token_env
     val = click.prompt(
         f"  {label} [{hint}]",
-        default="", show_default=False, hide_input=True,
+        default="",
+        show_default=False,
+        hide_input=True,
     )
     if val:
         return val
@@ -694,10 +737,7 @@ def _test_otel(data_dir: str, name: str, *, timeout: float) -> None:
     using_named_destinations = isinstance(otel_root.get("destinations"), list)
     if using_named_destinations:
         otel = next(
-            (
-                item for item in otel_root["destinations"]
-                if isinstance(item, dict) and item.get("name") == name
-            ),
+            (item for item in otel_root["destinations"] if isinstance(item, dict) and item.get("name") == name),
             {},
         )
     else:
@@ -737,8 +777,11 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def http_error_301(self, req, fp, code, msg, headers):
         raise urllib.error.HTTPError(
-            req.full_url, code, "redirects disabled (token would be forwarded)",
-            headers, fp,
+            req.full_url,
+            code,
+            "redirects disabled (token would be forwarded)",
+            headers,
+            fp,
         )
 
     http_error_302 = http_error_301
@@ -754,8 +797,7 @@ def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tupl
     with open(cfg_path) as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     sink = next(
-        (s for s in (raw.get("audit_sinks") or [])
-         if isinstance(s, dict) and s.get("name") == name),
+        (s for s in (raw.get("audit_sinks") or []) if isinstance(s, dict) and s.get("name") == name),
         None,
     )
     if sink is None:
@@ -776,12 +818,14 @@ def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tupl
     # leak the HEC token to a MITM peer.
     insecure_skip_verify = bool(hec.get("insecure_skip_verify", False))
     verify_tls = not insecure_skip_verify
-    body = _json.dumps({
-        "event": "defenseclaw observability test",
-        "sourcetype": hec.get("sourcetype", "_json"),
-        "index": hec.get("index", "defenseclaw"),
-        "source": hec.get("source", "defenseclaw"),
-    }).encode()
+    body = _json.dumps(
+        {
+            "event": "defenseclaw observability test",
+            "sourcetype": hec.get("sourcetype", "_json"),
+            "index": hec.get("index", "defenseclaw"),
+            "source": hec.get("source", "defenseclaw"),
+        }
+    ).encode()
     req = urllib.request.Request(  # noqa: S310 — endpoint validated below
         endpoint,
         data=body,
@@ -821,8 +865,7 @@ def _test_otlp_logs(data_dir: str, name: str, *, timeout: float) -> None:
     with open(cfg_path) as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     sink = next(
-        (s for s in (raw.get("audit_sinks") or [])
-         if isinstance(s, dict) and s.get("name") == name),
+        (s for s in (raw.get("audit_sinks") or []) if isinstance(s, dict) and s.get("name") == name),
         None,
     )
     if sink is None:
@@ -842,8 +885,7 @@ def _test_http_jsonl(data_dir: str, name: str, *, timeout: float) -> None:
     with open(cfg_path) as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     sink = next(
-        (s for s in (raw.get("audit_sinks") or [])
-         if isinstance(s, dict) and s.get("name") == name),
+        (s for s in (raw.get("audit_sinks") or []) if isinstance(s, dict) and s.get("name") == name),
         None,
     )
     if sink is None:
@@ -934,10 +976,7 @@ def _print_write_result(
     scope = f" {ux.dim('@' + connector)}" if connector else ""
     display_action = action.upper()
     if action == "add":
-        updating = any(
-            "overwriting existing" in warning or "already existed" in warning
-            for warning in result.warnings
-        )
+        updating = any("overwriting existing" in warning or "already existed" in warning for warning in result.warnings)
         display_action = "UPDATE" if updating else "ADD"
     click.echo(
         f"  {mode_tag}{ux.bold(display_action)} "
@@ -965,13 +1004,10 @@ def _destination_signals(d: Destination) -> str:
 
 def _print_destination_header() -> None:
     click.echo(
-        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<8} "
+        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<11} "
         f"{'PROTOCOL':<10} {'SIGNALS':<22} {'PRESET':<18} ENDPOINT"
     )
-    click.echo(
-        f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 8} "
-        f"{'-' * 10} {'-' * 22} {'-' * 18} {'-' * 36}"
-    )
+    click.echo(f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 11} {'-' * 10} {'-' * 22} {'-' * 18} {'-' * 36}")
 
 
 def _print_destination_row(d: Destination) -> None:
@@ -993,19 +1029,15 @@ def _print_destination_row(d: Destination) -> None:
 
 
 def _gate_local_destination(destination: Destination) -> None:
-    if (
-        not local_observability_stack_supported()
-        and is_local_observability_stack_destination(
-            name=destination.name,
-            preset_id=destination.preset_id,
-            kind=destination.kind,
-            endpoint=destination.endpoint,
-        )
+    if not local_observability_stack_supported() and is_local_observability_stack_destination(
+        name=destination.name,
+        preset_id=destination.preset_id,
+        kind=destination.kind,
+        endpoint=destination.endpoint,
     ):
-        raise click.ClickException(
-            "Bundled local observability is unavailable on this platform."
-        )
+        raise click.ClickException("Bundled local observability is unavailable on this platform.")
     if not local_splunk_stack_supported() and is_local_splunk_stack_destination(
+        preset_id=destination.preset_id,
         kind=destination.kind,
         endpoint=destination.endpoint,
     ):
@@ -1013,14 +1045,9 @@ def _gate_local_destination(destination: Destination) -> None:
 
 
 def _destination_platform_status(destination: Destination) -> str:
-    if not local_observability_stack_supported() and is_local_observability_stack_destination(
+    if destination_platform_unsupported(
         name=destination.name,
         preset_id=destination.preset_id,
-        kind=destination.kind,
-        endpoint=destination.endpoint,
-    ):
-        return "unsupported"
-    if not local_splunk_stack_supported() and is_local_splunk_stack_destination(
         kind=destination.kind,
         endpoint=destination.endpoint,
     ):
@@ -1029,11 +1056,7 @@ def _destination_platform_status(destination: Destination) -> str:
 
 
 def _gate_named_local_destination(data_dir: str, name: str, connector: str) -> None:
-    destinations = (
-        _connector_destinations(data_dir, connector)
-        if connector
-        else list_destinations(data_dir)
-    )
+    destinations = _connector_destinations(data_dir, connector) if connector else list_destinations(data_dir)
     for destination in destinations or ():
         if destination.name == name:
             _gate_local_destination(destination)
@@ -1087,7 +1110,10 @@ def _obs_load_raw(path: str) -> dict[str, Any]:
 
 
 def _connector_audit_sinks_list(
-    raw: dict[str, Any], connector: str, *, create: bool,
+    raw: dict[str, Any],
+    connector: str,
+    *,
+    create: bool,
 ) -> list[Any] | None:
     """Return ``observability.connectors[connector].audit_sinks``.
 
@@ -1166,9 +1192,7 @@ def _apply_sink_to_connector(
     resolved_inputs = _resolve_inputs(preset, inputs)
     dest_name = _destination_name(preset, name, resolved_inputs)
     if not _SINK_NAME_RE.match(dest_name):
-        raise ValueError(
-            f"destination name {dest_name!r} must match {_SINK_NAME_RE.pattern}"
-        )
+        raise ValueError(f"destination name {dest_name!r} must match {_SINK_NAME_RE.pattern}")
     entry = _build_sink_entry(preset, resolved_inputs, name=dest_name, enabled=enabled)
 
     warnings: list[str] = []
@@ -1182,8 +1206,7 @@ def _apply_sink_to_connector(
             raw = _obs_load_raw(cfg_path)
             sinks = _connector_audit_sinks_list(raw, connector, create=True)
             idx = next(
-                (i for i, s in enumerate(sinks)
-                 if isinstance(s, dict) and s.get("name") == dest_name),
+                (i for i, s in enumerate(sinks) if isinstance(s, dict) and s.get("name") == dest_name),
                 -1,
             )
             if idx >= 0:
@@ -1242,21 +1265,21 @@ def _connector_destinations(data_dir: str, connector: str) -> list[Destination] 
 
 
 def _set_connector_sink_enabled(
-    data_dir: str, connector: str, name: str, enabled: bool,
+    data_dir: str,
+    connector: str,
+    name: str,
+    enabled: bool,
 ) -> WriteResult:
     cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _obs_load_raw(cfg_path)
         sinks = _connector_audit_sinks_list(raw, connector, create=False)
         idx = next(
-            (i for i, s in enumerate(sinks or [])
-             if isinstance(s, dict) and s.get("name") == name),
+            (i for i, s in enumerate(sinks or []) if isinstance(s, dict) and s.get("name") == name),
             -1,
         )
         if idx < 0:
-            raise ValueError(
-                f"no per-connector audit sink named {name!r} for connector {connector!r}"
-            )
+            raise ValueError(f"no per-connector audit sink named {name!r} for connector {connector!r}")
         sinks[idx]["enabled"] = bool(enabled)
         write_config_yaml_secure(cfg_path, raw)
     return WriteResult(
@@ -1278,14 +1301,10 @@ def _remove_connector_sink(data_dir: str, connector: str, name: str) -> WriteRes
         raw = _obs_load_raw(cfg_path)
         sinks = _connector_audit_sinks_list(raw, connector, create=False)
         if sinks is None:
-            raise ValueError(
-                f"no per-connector audit sinks for connector {connector!r}"
-            )
+            raise ValueError(f"no per-connector audit sinks for connector {connector!r}")
         new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
         if len(new) == len(sinks):
-            raise ValueError(
-                f"no per-connector audit sink named {name!r} for connector {connector!r}"
-            )
+            raise ValueError(f"no per-connector audit sink named {name!r} for connector {connector!r}")
         sinks[:] = new
         _prune_observability(raw, connector)
         write_config_yaml_secure(cfg_path, raw)
@@ -1302,6 +1321,7 @@ def _remove_connector_sink(data_dir: str, connector: str, name: str) -> WriteRes
 
 def _slug(value: str) -> str:
     import re
+
     out = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return out[:40] or "default"
 
@@ -1334,7 +1354,7 @@ def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
     tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
-        set_file_mode(fd, tmp, target_mode)
+        set_file_mode(fd, tmp, target_mode, set_owner=True)
         stream = os.fdopen(fd, "w")
         fd = -1
         with stream as f:

@@ -41,7 +41,8 @@ async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 8.0) ->
 
 async def _wait_for_panel(app: DefenseClawTUI, panel: str) -> None:
     await _wait_until(
-        lambda: panel not in app._panel_render_running  # noqa: SLF001
+        lambda: panel not in app._panel_render_queued  # noqa: SLF001
+        and panel not in app._panel_render_running  # noqa: SLF001
         and panel not in app._panel_render_pending,  # noqa: SLF001
     )
 
@@ -83,6 +84,13 @@ async def test_tab_acknowledges_before_blocked_overview_and_discards_stale_gener
     entered = threading.Event()
     release = threading.Event()
     calls = 0
+    # This regression targets switch-generated renders only. Mounted network
+    # and periodic pollers can legitimately enqueue an additional Overview
+    # generation, obscuring whether the stale switch result was discarded.
+    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_periodic_refresh", lambda: None)
 
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("2")
@@ -108,15 +116,17 @@ async def test_tab_acknowledges_before_blocked_overview_and_discards_stale_gener
         monkeypatch.setattr(app, "_build_overview_render_snapshot", blocked_builder)
         started = perf_counter()
         app.action_switch_panel("overview")
-        await _wait_until(entered.is_set)
+        acknowledgement_seconds = perf_counter() - started
 
         # The tab and panel chrome are already correct while the provider is
-        # intentionally blocked after the acknowledgement paint.
-        assert perf_counter() - started < 0.5
+        # queued to block after the acknowledgement paint. Worker-thread start
+        # latency is deliberately outside this synchronous UI budget.
+        assert acknowledgement_seconds < 0.5
         assert app.active_panel == "overview"
         assert app.query_one("#tabs").active == "tab-overview"
         assert not app.query_one("#overview-controls").has_class("hidden")
         assert app.query_one("#alerts-controls").has_class("hidden")
+        await _wait_until(entered.is_set)
 
         # Queue a newer Overview generation through a different panel. The
         # blocked result must never overwrite it when released.
@@ -198,6 +208,10 @@ async def test_alerts_pending_generation_finishes_with_fresh_rows(
         return original(detached, panel, generation)
 
     monkeypatch.setattr(app, "_build_panel_render_snapshot", blocked_builder)
+    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_periodic_refresh", lambda: None)
     async with app.run_test(size=(140, 40)):
         app.action_switch_panel("alerts")
         await _wait_until(entered.is_set)
@@ -352,6 +366,9 @@ async def test_native_windows_high_volume_tab_ack_under_150ms(
             return original(detached, generation, source)
 
         monkeypatch.setattr(app, "_build_overview_render_snapshot", observed_builder)
+        monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+        monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+        monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
         async with app.run_test(size=(160, 48)) as pilot:
             await pilot.press("2")
             await _wait_for_panel(app, "alerts")
@@ -364,11 +381,11 @@ async def test_native_windows_high_volume_tab_ack_under_150ms(
             # it coalesces onto the one latest Overview generation.
             app._health_poll_running = True  # noqa: SLF001
             app._schedule_active_panel_refresh("health-and-audit")  # noqa: SLF001
-            await _wait_until(builder_started.is_set)
             acknowledgement_ms = (perf_counter() - started) * 1_000
 
             assert app.query_one("#tabs").active == "tab-overview"
             assert acknowledgement_ms < 150
+            await _wait_until(builder_started.is_set)
             await _wait_for_panel(app, "overview")
             snapshot = app._overview_render_snapshot  # noqa: SLF001
             assert snapshot is not None

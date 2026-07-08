@@ -13,6 +13,12 @@ keywords:
 
 DefenseClaw is the **Cisco** governance layer for AI coding agents. It enforces one rule: untrusted agent capabilities are scanned, governed, logged, and blocked when policy says they are unsafe.
 
+<DefenseClawDemo scenario="modes-same-event" variant="hitl" />
+
+## What you just saw
+
+The same synthetic Claude Code `PreToolUse` event produces three deliberately different results. **Observe** allows execution and records evidence. **Action** blocks at the configured HIGH threshold. **Action + HITL** returns a native pause because Claude Code exposes an approval-capable pre-execution hook. CRITICAL findings always block, regardless of HITL.
+
 <Cards>
   <Card title="Quickstart in 5 minutes" href="/docs/get-started/quickstart" description="Install, pick a connector, watch a guardrail block a destructive command." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The central command. Modes, scanner backends, rule packs, judge, HITL." />

@@ -103,6 +103,29 @@ func TestWriteRefusesSymlink(t *testing.T) {
 	}
 }
 
+func TestProtectFileRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("real"), 0o644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if err := ProtectFile(link); err == nil {
+		t.Fatal("ProtectFile accepted a symlink")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
+		t.Fatalf("symlink target mode changed to %o", info.Mode().Perm())
+	}
+}
+
 func TestCreateExclusiveRefusesExisting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out")

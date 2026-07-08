@@ -1123,6 +1123,32 @@ class TestGatewayWindowsArchive(unittest.TestCase):
              self.assertRaises(SystemExit):
             _detect_platform()
 
+    def test_detect_platform_names_the_selected_uncertified_architecture(self):
+        with patch("platform.system", return_value="Windows"), \
+             patch("platform.machine", return_value="AMD64"), \
+             patch(
+                 "defenseclaw.commands.cmd_upgrade.WINDOWS_NOT_CERTIFIED_ARCHITECTURES",
+                 frozenset({"amd64"}),
+             ), \
+             patch("defenseclaw.commands.cmd_upgrade.ux.err") as err, \
+             self.assertRaises(SystemExit):
+            _detect_platform()
+
+        self.assertIn("Windows AMD64 is not certified", err.call_args.args[0])
+
+    def test_detect_platform_uses_windows_architecture_allowlists(self):
+        with patch("platform.system", return_value="Windows"), \
+             patch("platform.machine", return_value="ARM64"), \
+             patch(
+                 "defenseclaw.commands.cmd_upgrade.WINDOWS_CERTIFIED_ARCHITECTURES",
+                 frozenset({"arm64"}),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_upgrade.WINDOWS_NOT_CERTIFIED_ARCHITECTURES",
+                 frozenset(),
+             ):
+            self.assertEqual(_detect_platform(), ("windows", "arm64"))
+
     def test_detect_platform_preserves_linux_arm64(self):
         with patch("platform.system", return_value="Linux"), \
              patch("platform.machine", return_value="ARM64"):

@@ -114,7 +114,8 @@ func init() {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
-	cfg, cfgErr := loadDaemonConfig(cmd)
+	cfg, _ := loadDaemonConfig(cmd)
+	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
 	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
@@ -206,7 +207,8 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
-	cfg, cfgErr := loadDaemonConfig(cmd)
+	cfg, _ := loadDaemonConfig(cmd)
+	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
 	running, pid, err := inspectConfiguredListener(d, cfg, client)

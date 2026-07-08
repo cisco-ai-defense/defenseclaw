@@ -691,7 +691,7 @@ class TestSkillScannerWrapper(unittest.TestCase):
             api_key_env="MISSING_SKILL_TEST_KEY",
         )
         stderr = io.StringIO()
-        with patch.dict(os.environ, {}, clear=False), patch(
+        with patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": ""}, clear=False), patch(
             "sys.stderr", stderr
         ), patch.dict("sys.modules", {
             "skill_scanner": mock_sdk_module,

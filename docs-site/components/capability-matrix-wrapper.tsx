@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
+import { useScrollable } from '@/hooks/use-scrollable';
 
 // One-shot viewport observer for the capability matrix table. Flips
 // `data-animate="entered"` on the wrapper once the table scrolls into
@@ -11,13 +12,15 @@ import { useEffect, useRef, type ReactNode } from 'react';
 interface CapabilityMatrixWrapperProps {
   children: ReactNode;
   className?: string;
+  ariaLabel?: string;
 }
 
 export function CapabilityMatrixWrapper({
   children,
   className,
+  ariaLabel = 'Connector capability matrix',
 }: CapabilityMatrixWrapperProps) {
-  const ref = useRef<HTMLDivElement | null>(null);
+  const { ref, scrollable } = useScrollable<HTMLDivElement>();
 
   useEffect(() => {
     const el = ref.current;
@@ -44,7 +47,13 @@ export function CapabilityMatrixWrapper({
   }, []);
 
   return (
-    <div ref={ref} className={className}>
+    <div
+      ref={ref}
+      className={className}
+      role={scrollable ? 'region' : undefined}
+      aria-label={scrollable ? ariaLabel : undefined}
+      tabIndex={scrollable ? 0 : undefined}
+    >
       {children}
     </div>
   );

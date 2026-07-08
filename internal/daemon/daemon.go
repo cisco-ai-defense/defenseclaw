@@ -92,6 +92,13 @@ func (d *Daemon) LogFile() string { return d.logFile }
 // approach (re-wrapping in lumberjack) is what caused the EPIPE regression,
 // so rotation needs a SIGUSR1-reopen or supervised sidecar instead.
 func (d *Daemon) openLogFileForChild() (*os.File, error) {
+	if _, err := os.Lstat(d.logFile); err == nil {
+		if err := safefile.ProtectFile(d.logFile); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	f, err := os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err

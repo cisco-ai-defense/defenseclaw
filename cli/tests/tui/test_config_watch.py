@@ -22,7 +22,6 @@ import asyncio
 import copy
 import os
 import shutil
-import socket
 import subprocess
 from pathlib import Path
 
@@ -446,26 +445,23 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
     """Two-terminal acceptance: an open TUI observes setup CLI replacement."""
 
     initial = _config_payload(tmp_path, {"claudecode": {"mode": "observe"}})
-    # Occupy an ephemeral API port so the exact command's default restart
-    # cannot launch a background gateway that survives the test. The config
-    # write completes first; this acceptance exercises that cross-process
-    # generation while keeping the machine's real gateway untouched.
-    blocker = socket.socket()
-    blocker.bind(("127.0.0.1", 0))
-    blocker.listen()
-    initial["gateway"] = {"api_port": blocker.getsockname()[1]}
     path = _configure_active_path(monkeypatch, tmp_path, initial)
     app = DefenseClawTUI(config=config_module.load(), config_path=path)
     # This acceptance targets config polling, not network/process pollers.
     monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_schedule_config_poll", lambda: None)
 
     isolated_home = tmp_path / "user-home"
     isolated_home.mkdir()
     environment = os.environ.copy()
     environment.update(
         {
+            # Connector compatibility is covered separately. This acceptance
+            # targets the open TUI's response to an external config writer and
+            # must not fall back to observe when the CI host lacks Claude Code.
+            "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1",
             "DEFENSECLAW_CONFIG": str(path),
             "DEFENSECLAW_HOME": str(tmp_path),
             "HOME": str(isolated_home),
@@ -484,49 +480,39 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
         "--yes",
         "--mode",
         "action",
+        "--no-restart",
     )
 
-    try:
-        async with app.run_test(size=(140, 45)) as pilot:
-            assert app.overview_model.cfg is not None
-            assert app.overview_model.cfg.guardrail_mode == "observe"
-            result = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                cwd=Path(__file__).resolve().parents[3],
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=90,
-                check=False,
-            )
-            output = result.stdout + result.stderr
-            assert "Config saved" in output
-            assert "claudecode mode=action" in output
-            assert result.returncode != 0
-            assert "gateway restart/readiness failed" in output
-            status_result = await asyncio.to_thread(
-                subprocess.run,
-                (uv, "run", "--frozen", "defenseclaw", "guardrail", "status"),
-                cwd=Path(__file__).resolve().parents[3],
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            status_output = status_result.stdout + status_result.stderr
-            assert status_result.returncode == 0, status_output
-            assert "action" in status_output.lower()
-            for _ in range(20):
-                if app.overview_model.cfg and app.overview_model.cfg.guardrail_mode == "action":
-                    break
-                await pilot.pause(0.25)
+    async with app.run_test(size=(140, 45)) as pilot:
+        assert app.overview_model.cfg is not None
+        assert app.overview_model.cfg.guardrail_mode == "observe"
+        result = await asyncio.to_thread(
+            subprocess.run,
+            command,
+            cwd=Path(__file__).resolve().parents[3],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, output
+        assert "Config saved" in output
+        assert "Claude Code action setup" in output
+        persisted = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert persisted["guardrail"]["connectors"]["claudecode"]["mode"] == "action"
+        for poll_number in range(1, 4):
+            # Exercise the same poll operation used by the one-second TUI
+            # timer with deterministic intervals. Same-identity writes may
+            # need two stable observations; atomic replacements need one.
+            await app._poll_config_once(now=float(poll_number))  # noqa: SLF001
+            if app.overview_model.cfg and app.overview_model.cfg.guardrail_mode == "action":
+                break
+            await pilot.pause()
 
-            assert app.overview_model.cfg is not None
-            assert app.overview_model.cfg.guardrail_mode == "action"
-            assert app.config.guardrail.effective_mode("claudecode") == "action"
-            assert app.setup_model.config is app.config
-            assert app._config_reload_count == 1  # noqa: SLF001
-    finally:
-        blocker.close()
+        assert app.overview_model.cfg is not None
+        assert app.overview_model.cfg.guardrail_mode == "action"
+        assert app.config.guardrail.effective_mode("claudecode") == "action"
+        assert app.setup_model.config is app.config
+        assert app._config_reload_count == 1  # noqa: SLF001

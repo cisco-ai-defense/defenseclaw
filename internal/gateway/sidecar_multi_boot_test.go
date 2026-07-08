@@ -353,7 +353,7 @@ func TestSetupConnectorsIsolated_DN1_MiddleFailsOthersSurvive(t *testing.T) {
 	// Every connector's Setup must have been attempted — the failing one in
 	// the middle must not short-circuit the connector after it.
 	if first.setupCalls != 1 || middle.setupCalls != 1 || last.setupCalls != 1 {
-		t.Errorf("setupCalls codex=%d cursor=%d windsurf=%d, want 1/1/1",
+		t.Errorf("setupCalls first(codex)=%d middle(claudecode)=%d last(codex)=%d, want 1/1/1",
 			first.setupCalls, middle.setupCalls, last.setupCalls)
 	}
 	if middle.teardownCalls != 1 {

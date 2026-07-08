@@ -274,9 +274,7 @@ class WizardFormField:
     # Excluded from equality/repr so existing argv/parity tests that
     # compare fields by their data values stay stable when a predicate is
     # attached.
-    visible_when: Callable[[Mapping[str, str]], bool] | None = dataclass_field(
-        default=None, compare=False, repr=False
-    )
+    visible_when: Callable[[Mapping[str, str]], bool] | None = dataclass_field(default=None, compare=False, repr=False)
     # Optional model-picker hook. When set, pressing Enter on this field
     # opens the searchable ModelPickerScreen instead of submitting the
     # form. The string is the picker mode (currently only ``"llm"``).
@@ -597,8 +595,7 @@ class SetupPanelModel:
                 how_to=WIZARD_HOW_TO[int(wizard)],
                 status=(
                     "unsupported"
-                    if wizard == SetupWizard.LOCAL_OBSERVABILITY
-                    and not local_observability_stack_supported(self.os_name)
+                    if not self.wizard_available(wizard)
                     else self._formatted_wizard_status(wizard, now=now)
                 ),
             )
@@ -615,9 +612,7 @@ class SetupPanelModel:
 
         return bool(self._wizard_run_started)
 
-    def _formatted_wizard_status(
-        self, wizard: SetupWizard, *, now: datetime | None = None
-    ) -> str:
+    def _formatted_wizard_status(self, wizard: SetupWizard, *, now: datetime | None = None) -> str:
         """Return the user-facing status badge for a wizard row.
 
         The raw ``wizard_status`` value is a state machine string
@@ -648,10 +643,7 @@ class SetupPanelModel:
             description=WIZARD_DESCRIPTIONS[int(wizard)],
             how_to=WIZARD_HOW_TO[int(wizard)],
             status=(
-                "unsupported"
-                if wizard == SetupWizard.LOCAL_OBSERVABILITY
-                and not local_observability_stack_supported(self.os_name)
-                else self._formatted_wizard_status(wizard, now=now)
+                "unsupported" if not self.wizard_available(wizard) else self._formatted_wizard_status(wizard, now=now)
             ),
         )
 
@@ -1167,11 +1159,7 @@ class SetupPanelModel:
         overrides = _field_value_overrides(self.form_fields)
         if self.active_wizard in {SetupWizard.CONNECTOR_SETUP, SetupWizard.GUARDRAIL}:
             connector_field = next(
-                (
-                    field
-                    for field in self.form_fields
-                    if field.flag == "--connector" or field.label == "Connector"
-                ),
+                (field for field in self.form_fields if field.flag == "--connector" or field.label == "Connector"),
                 None,
             )
             if connector_field is not None and connector_field.value != connector_field.default:
@@ -1311,10 +1299,7 @@ class SetupPanelModel:
         # Credentials "set" feeds the secret over stdin (hidden prompt) so
         # it never lands in the child's argv. See F-0801.
         secret_stdin: str | None = None
-        if (
-            self.active_wizard == SetupWizard.CREDENTIALS
-            and wizard_field_value(self.form_fields, "Action") == "set"
-        ):
+        if self.active_wizard == SetupWizard.CREDENTIALS and wizard_field_value(self.form_fields, "Action") == "set":
             secret_value = wizard_field_value(self.form_fields, "Secret Value", raw=True)
             if secret_value:
                 secret_stdin = secret_value + "\n"
@@ -1805,9 +1790,7 @@ def _custom_providers_fields_for(overrides: Mapping[str, str] | None = None) -> 
     candidates: tuple[WizardFormField, ...] = (
         WizardFormField("Action", "choice", value="list", default="list", options=("list", "show", "add", "remove")),
         WizardFormField("Name", "string", visible_when=is_add_or_remove, required=True),
-        WizardFormField(
-            "Domains", "string", hint="LLM allow-list domains, comma-separated.", visible_when=is_add
-        ),
+        WizardFormField("Domains", "string", hint="LLM allow-list domains, comma-separated.", visible_when=is_add),
         WizardFormField(
             "Base Provider Type",
             "choice",
@@ -1875,9 +1858,7 @@ def _custom_providers_fields_for(overrides: Mapping[str, str] | None = None) -> 
         WizardFormField("Vertex AI", "section", visible_when=is_vertex),
         WizardFormField("Project ID", "string", "--vertex-project-id", visible_when=is_vertex),
         WizardFormField("Region", "string", "--vertex-region", visible_when=is_vertex),
-        WizardFormField(
-            "Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex
-        ),
+        WizardFormField("Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex),
         WizardFormField(
             "Service Account JSON Env", "string", "--vertex-service-account-json-env", visible_when=is_vertex
         ),
@@ -3000,9 +2981,7 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
 }
 
 
-def wizard_goals(
-    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
-) -> tuple[WizardGoal, ...]:
+def wizard_goals(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardGoal, ...]:
     """Resolve the goal menu for ``wizard``.
 
     Goals whose ``available_when`` predicate is False for the current config
@@ -3046,9 +3025,7 @@ def _seed_parametrized_fields(
     return None
 
 
-def wizard_state_summary(
-    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
-) -> str:
+def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
     Returns an empty string for wizards without a useful summary so the
@@ -3407,9 +3384,7 @@ def notifications_routing_wizard_fields(
         else:
             current = bool(get_config_value(cfg, f"notifications.{slot}", fallback == "yes"))
         value = "yes" if current else "no"
-        fields.append(
-            WizardFormField(label, "bool", value=value, default=value)
-        )
+        fields.append(WizardFormField(label, "bool", value=value, default=value))
     fields.append(
         WizardFormField(
             "Restart Gateway After",
@@ -3909,11 +3884,7 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
             missing.append("Name")
         # ``setup provider add`` accepts either a domain allow-list or a
         # --base-url; require at least one rather than mandating Domains.
-        if (
-            action == "add"
-            and not wizard_field_value(fields, "Domains")
-            and not wizard_field_value(fields, "Base URL")
-        ):
+        if action == "add" and not wizard_field_value(fields, "Domains") and not wizard_field_value(fields, "Base URL"):
             missing.append("Domains or Base URL")
     if wizard == SetupWizard.TRUSTED_PATHS:
         action = wizard_field_value(fields, "Action")
@@ -3961,9 +3932,7 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
     return mask_secret(field.value)
 
 
-def mask_wizard_secret_values(
-    fields: Sequence[WizardFormField], args: Sequence[str]
-) -> tuple[str, ...]:
+def mask_wizard_secret_values(fields: Sequence[WizardFormField], args: Sequence[str]) -> tuple[str, ...]:
     """Redact password-field values from a rendered wizard command preview.
 
     The wizard header echoes the exact ``defenseclaw …`` argv it will run.
@@ -4331,9 +4300,7 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
     return tuple(out)
 
 
-def _filter_fields_for_goal(
-    fields: Sequence[WizardFormField], goal: WizardGoal | None
-) -> tuple[WizardFormField, ...]:
+def _filter_fields_for_goal(fields: Sequence[WizardFormField], goal: WizardGoal | None) -> tuple[WizardFormField, ...]:
     """Narrow ``fields`` to the rows relevant for ``goal``.
 
     A row is kept when it is a required selector (so driver rows like
@@ -4459,7 +4426,9 @@ def _llm_wizard_fields_for(
         ),
         WizardFormField("Vertex AI", "section", visible_when=is_vertex),
         WizardFormField("Project ID", "string", "--vertex-project-id", visible_when=is_vertex),
-        WizardFormField("Region", "string", "--vertex-region", hint="GCP location, e.g. us-central1.", visible_when=is_vertex),
+        WizardFormField(
+            "Region", "string", "--vertex-region", hint="GCP location, e.g. us-central1.", visible_when=is_vertex
+        ),
         WizardFormField("Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex),
         WizardFormField(
             "Service Account JSON Env", "string", "--vertex-service-account-json-env", visible_when=is_vertex
@@ -5053,9 +5022,7 @@ def splunk_wizard_follow_up_intents(
 
 def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
     preset_options = tuple(
-        preset
-        for preset, _ in OBSERVABILITY_PRESETS
-        if preset != "local-otlp" or local_observability_stack_supported()
+        preset for preset, _ in OBSERVABILITY_PRESETS if preset != "local-otlp" or local_observability_stack_supported()
     )
     fields: list[WizardFormField] = [
         WizardFormField(
@@ -5571,9 +5538,7 @@ def _guardrail_connector_keys(cfg: object | Mapping[str, Any] | None) -> list[st
             names = []
     overrides = get_config_value(cfg, "guardrail.connectors", None)
     override_keys = (
-        [str(k).strip() for k in overrides.keys() if str(k).strip()]
-        if isinstance(overrides, Mapping)
-        else []
+        [str(k).strip() for k in overrides.keys() if str(k).strip()] if isinstance(overrides, Mapping) else []
     )
     # Merge, preserving active-set order then any override-only keys.
     seen: set[str] = set()
@@ -6295,9 +6260,7 @@ def _asset_policy_connector_keys(cfg: object | Mapping[str, Any] | None) -> list
     names = _active_connector_names_for_setup(cfg)
     overrides = get_config_value(cfg, "asset_policy.connectors", None)
     override_keys = (
-        [str(key).strip().lower() for key in overrides if str(key).strip()]
-        if isinstance(overrides, Mapping)
-        else []
+        [str(key).strip().lower() for key in overrides if str(key).strip()] if isinstance(overrides, Mapping) else []
     )
     seen: set[str] = set()
     merged: list[str] = []
@@ -6646,7 +6609,20 @@ def _connector_setup_alias(wire: str) -> str:
     normalized = wire.strip().lower().replace("_", "-")
     if normalized in {"claudecode", "claude-code"}:
         return "claude-code"
-    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}:
+    if normalized in {
+        "openclaw",
+        "zeptoclaw",
+        "codex",
+        "hermes",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+        "omnigent",
+    }:
         return normalized
     return ""
 

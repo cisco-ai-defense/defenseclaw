@@ -97,7 +97,7 @@ class AutoAnalyzerSelectionTests(unittest.TestCase):
     def test_auto_with_cloud_model_but_no_key_warns_and_runs_yara(self):
         s = _wrapper("auto", model=True, credential=False, provider="anthropic")
         captured = io.StringIO()
-        with patch("sys.stderr", captured):
+        with patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": ""}), patch("sys.stderr", captured):
             selected = s._parse_analyzers(_FakeAnalyzerEnum)
         self.assertEqual(self._values(selected), ["yara"])
         self.assertIn("LLM analyzer skipped", captured.getvalue())

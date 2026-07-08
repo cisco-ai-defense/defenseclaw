@@ -132,7 +132,10 @@ func TestF3287_SkillFetch_SymlinkEscapeBlocked(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
-	body := []byte(`{"target":"` + link + `"}`)
+	body, err := json.Marshal(map[string]string{"target": link})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/skill/fetch",
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

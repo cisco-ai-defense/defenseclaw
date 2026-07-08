@@ -1394,7 +1394,7 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(prefix=".dotenv.", suffix=".tmp", dir=directory)
-        set_file_mode(fd, tmp, 0o600)
+        set_file_mode(fd, tmp, 0o600, set_owner=True)
         stream = os.fdopen(fd, "w", encoding="utf-8")
         fd = -1
         with stream as f:

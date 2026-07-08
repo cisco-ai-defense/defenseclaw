@@ -55,6 +55,8 @@ func TestWindowsConnectorSupportTaxonomy(t *testing.T) {
 	for _, name := range windowsSupportedConnectorNames {
 		want[name] = PlatformSupported
 	}
+	// Keep this loop as an executable contract for any preview connectors that
+	// are reintroduced; the certified Windows surface currently has none.
 	for _, name := range windowsPreviewConnectorNames {
 		want[name] = PlatformPreview
 	}
