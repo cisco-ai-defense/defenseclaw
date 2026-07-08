@@ -1440,11 +1440,11 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
         assert table.row_count == 2
 
         await pilot.click("#panel-table", offset=(2, 2))
-        await pilot.pause()
+        await _wait_for_background(lambda: skills.cursor == 1)
         assert skills.cursor == 1
 
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_for_background(lambda: skills.detail_open and "Skill[/] beta" in app.detail_text)
         assert skills.detail_open is True
         # ``_format_skill_detail`` renders the header as
         # ``[bold]Skill[/] beta`` (no colon) — the assertion mirrors
@@ -1454,7 +1454,7 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
 
         await pilot.press("escape")
         await pilot.press("o")
-        await pilot.pause()
+        await _wait_for_background(lambda: app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen")
         assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
 
 
@@ -2287,24 +2287,24 @@ async def test_setup_panel_renders_wizards_and_form() -> None:
         assert table.row_count == len(WIZARD_NAMES)
 
         await pilot.click("#panel-table", offset=(2, 2))
-        await pilot.pause()
+        await _wait_for_background(lambda: int(setup.active_wizard) == 1)
         assert int(setup.active_wizard) == 1
 
         # Enter opens the goal menu first; a second Enter picks a goal
         # and opens the filtered form.
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_for_background(lambda: setup.goal_active and "What do you want to do?" in app.body_text)
         assert setup.goal_active is True
         assert "What do you want to do?" in app.body_text
 
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_for_background(lambda: setup.form_active and "Setup Wizard" in app.body_text)
         assert setup.form_active is True
         assert "Setup Wizard" in app.body_text
         assert app.query_one("#panel-table", DataTable).row_count > 0
 
         await pilot.press("escape")
-        await pilot.pause()
+        await _wait_for_background(lambda: not setup.form_active)
         assert setup.form_active is False
 
 
@@ -2429,17 +2429,23 @@ async def test_inventory_mouse_controls_switch_tabs_filters_and_scope() -> None:
         await _wait_for_panel_render(app, "inventory")
 
         await pilot.click("#inventory-tab-plugins")
-        await pilot.pause()
+        await _wait_for_background(
+            lambda: inventory.active_sub == "plugins"
+            and app.query_one("#panel-table", DataTable).row_count == 2
+        )
         assert inventory.active_sub == "plugins"
         assert app.query_one("#panel-table", DataTable).row_count == 2
 
         await pilot.click("#inventory-filter-disabled")
-        await pilot.pause()
+        await _wait_for_background(
+            lambda: inventory.filter == "disabled"
+            and app.query_one("#panel-table", DataTable).row_count == 1
+        )
         assert inventory.filter == "disabled"
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
         await pilot.click("#inventory-scope-fast")
-        await pilot.pause()
+        await _wait_for_background(lambda: set(inventory.category_scope) == {"skills", "plugins", "mcp"})
         assert set(inventory.category_scope) == {"skills", "plugins", "mcp"}
 
 
@@ -2529,7 +2535,7 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
         await _wait_for_panel_render(app, "setup")
 
         await pilot.click("#setup-mode-config")
-        await pilot.pause()
+        await _wait_for_background(lambda: setup.mode == "config")
         assert setup.mode == "config"
 
         setup.select_section(
@@ -2537,12 +2543,14 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
         )
         app._render_chrome()  # noqa: SLF001 - deterministic section switch.
         await pilot.click("#setup-edit-list")
-        await pilot.pause()
+        await _wait_for_background(
+            lambda: app.screen_stack[-1].__class__.__name__ == "SetupResourceEditorScreen"
+        )
         assert app.screen_stack[-1].__class__.__name__ == "SetupResourceEditorScreen"
 
         await pilot.press("escape")
         await pilot.press("q")
-        await pilot.pause(0.5)
+        await _wait_for_background(lambda: app.screen_stack[-1].__class__.__name__ == "Screen")
         assert app.screen_stack[-1].__class__.__name__ == "Screen"
         setup.sections = (
             ConfigSection(
@@ -2561,7 +2569,7 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
         # frame, producing a no-op that flakes this assertion.
         await pilot.pause()
         await pilot.click("#setup-save")
-        await pilot.pause(0.5)
+        await _wait_for_background(lambda: app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen")
         assert app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen"
 
 
@@ -5927,7 +5935,9 @@ async def test_overview_enter_drills_into_filtered_alerts() -> None:
         app.active_panel = "overview"
         app._set_connector_filter("cursor")
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_for_background(
+            lambda: app.active_panel == "alerts" and app.alerts_model.connector_filter == "cursor"
+        )
         assert app.active_panel == "alerts"
         assert app.alerts_model.connector_filter == "cursor"
 

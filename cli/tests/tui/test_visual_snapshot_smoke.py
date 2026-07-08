@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 from types import SimpleNamespace
 
@@ -50,6 +51,21 @@ TOP_LEVEL_PANELS = (
     ("registries", None, "Registries"),
     ("setup", "0", "Setup Wizards"),
 )
+
+
+async def _wait_for_panel_render(app: DefenseClawTUI, panel: str, *, timeout: float = 8.0) -> None:
+    """Wait for the selected panel's queued and coalesced frame to settle."""
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while (
+        app.active_panel != panel
+        or panel in app._panel_render_queued  # noqa: SLF001
+        or panel in app._panel_render_running  # noqa: SLF001
+        or panel in app._panel_render_pending  # noqa: SLF001
+    ):
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out waiting for {panel} snapshot frame")
+        await asyncio.sleep(0.01)
 
 
 def _snapshot_config(tmp_path) -> SimpleNamespace:
@@ -221,6 +237,7 @@ async def test_textual_top_level_panel_exports_svg_snapshot(
             app.action_switch_panel("registries")
         elif shortcut is not None:
             await pilot.press(shortcut)
+        await _wait_for_panel_render(app, panel)
         await pilot.pause()
         svg = app.export_screenshot()
 
