@@ -1523,18 +1523,24 @@ class DefenseClawTUI(App[None]):
 
         panel = self.active_panel
         generation = self._panel_render_queued.get(panel)
-        if generation == self._panel_render_generation and panel not in {
+        if panel not in {
             "overview",
             "alerts",
             "audit",
             "logs",
         }:
-            # Lightweight panels render synchronously once their post-paint
-            # callback starts. A screenshot is an explicit request for the
-            # current frame, so flush that callback rather than exporting a
-            # transient loading frame. The queued-generation guard makes the
-            # later Textual callback a no-op.
-            self._start_deferred_panel_render(panel, generation)
+            if generation == self._panel_render_generation:
+                # Lightweight panels render synchronously once their post-paint
+                # callback starts. The queued-generation guard makes the later
+                # Textual callback a no-op.
+                self._start_deferred_panel_render(panel, generation)
+            else:
+                # The post-paint callback may already have consumed its marker
+                # while the final widget refresh is still queued. An explicit
+                # screenshot must describe the selected panel, so synchronize
+                # its cheap chrome directly instead of exporting the prior
+                # frame under a new active-panel value.
+                self._render_chrome_if_generation(panel, self._panel_render_generation)
         return super().export_screenshot(title=title, simplify=simplify)
 
     def on_mount(self) -> None:
