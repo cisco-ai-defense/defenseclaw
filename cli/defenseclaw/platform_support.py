@@ -244,6 +244,8 @@ def is_local_shell_stack_destination(
         return True
     if kind != "splunk_hec":
         return False
+    if preset_id == "splunk-enterprise":
+        return False
     parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
 

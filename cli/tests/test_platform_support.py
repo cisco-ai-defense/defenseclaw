@@ -84,10 +84,24 @@ def test_destination_platform_unsupported_centralizes_local_stack_gate() -> None
         "kind": "otlp",
         "endpoint": "collector.example.test:4317",
     }
+    local_splunk = {
+        "name": "splunk-hec-localhost",
+        "preset_id": "splunk-hec",
+        "kind": "splunk_hec",
+        "endpoint": "http://localhost:8088/services/collector/event",
+    }
+    enterprise_splunk = {
+        "name": "splunk-enterprise-localhost",
+        "preset_id": "splunk-enterprise",
+        "kind": "splunk_hec",
+        "endpoint": "http://localhost:8088/services/collector/event",
+    }
 
     assert destination_platform_unsupported(**local, os_name="windows") is True
     assert destination_platform_unsupported(**local, os_name="linux") is False
     assert destination_platform_unsupported(**remote, os_name="windows") is False
+    assert destination_platform_unsupported(**local_splunk, os_name="windows") is True
+    assert destination_platform_unsupported(**enterprise_splunk, os_name="windows") is False
 
 
 def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:

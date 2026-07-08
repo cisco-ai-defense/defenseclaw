@@ -283,12 +283,31 @@ function Invoke-LiveRun {
     Write-Result teardown pass
 }
 
-function Stop-IsolatedProcesses {
+function Stop-IsolatedProcessTree {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
     $root = [IO.Path]::GetFullPath($StateRoot)
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
-    } | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $descendantIds = @{}
+    $frontier = @([int]$PID)
+    while ($frontier.Count -gt 0) {
+        $children = @($processes | Where-Object {
+            [int]$_.ProcessId -ne $PID -and
+            [int]$_.ParentProcessId -in $frontier -and
+            -not $descendantIds.ContainsKey([int]$_.ProcessId)
+        })
+        foreach ($child in $children) { $descendantIds[[int]$child.ProcessId] = $true }
+        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
+    }
+    foreach ($process in $processes) {
+        $processId = [int]$process.ProcessId
+        $matchesRoot = $process.CommandLine -and
+            $process.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($processId -ne $PID -and ($descendantIds.ContainsKey($processId) -or $matchesRoot) -and
+            $PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -326,7 +345,7 @@ if (-not $NoRun) {
     if ($Operation -eq 'capture') { Stage-Diagnostics; return }
     if ($Operation -eq 'cleanup') {
         try { Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 15 | Out-Null } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
-        Stop-IsolatedProcesses
+        Stop-IsolatedProcessTree
         Remove-Item -LiteralPath $StateRoot -Recurse -Force -ErrorAction SilentlyContinue
         return
     }
@@ -339,6 +358,6 @@ if (-not $NoRun) {
         try { Invoke-Teardown } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
         try { Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 15 | Out-Null } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
         Stage-Diagnostics
-        Stop-IsolatedProcesses
+        Stop-IsolatedProcessTree
     }
 }

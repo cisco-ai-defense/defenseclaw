@@ -243,6 +243,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             not local_shell_stacks_supported()
             and preset.id in {"splunk-hec", "splunk-enterprise"}
             and is_local_shell_stack_destination(
+                preset_id=preset.id,
                 kind="splunk_hec",
                 endpoint=candidate_endpoint,
             )

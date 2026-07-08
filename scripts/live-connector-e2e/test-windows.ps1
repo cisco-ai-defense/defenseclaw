@@ -54,6 +54,15 @@ try {
     $childPid = [int][IO.File]::ReadAllText($childPidPath)
     Assert-True ($null -eq (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'timeout killed the process tree'
 
+    $descendant = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Milliseconds 250
+        Stop-IsolatedProcessTree -Confirm:$false
+        Assert-True ($descendant.WaitForExit(5000)) 'isolated cleanup killed a descendant without StateRoot in its command line'
+    } finally {
+        Stop-Process -Id $descendant.Id -Force -ErrorAction SilentlyContinue
+    }
+
     $jsonl = Join-Path $temp 'gateway.jsonl'
     $database = Join-Path $temp 'audit.db'
     $requestId = [guid]::NewGuid().ToString()

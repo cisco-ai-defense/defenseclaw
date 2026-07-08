@@ -388,6 +388,38 @@ def test_generic_observability_resolves_local_splunk_defaults_before_gate(
     assert _snapshot(data_dir) == before
 
 
+def test_splunk_enterprise_loopback_is_not_treated_as_bundled_local_stack(
+    tmp_path: Path,
+) -> None:
+    from defenseclaw.commands.cmd_setup_observability import observability
+    from defenseclaw.observability import list_destinations
+
+    data_dir = tmp_path / "loopback enterprise"
+    app = _app(data_dir)
+    with patch(
+        "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+        return_value=False,
+    ):
+        result = CliRunner().invoke(
+            observability,
+            [
+                "add",
+                "splunk-enterprise",
+                "--endpoint",
+                "http://localhost:8088/services/collector/event",
+                "--token",
+                "synthetic-token",
+                "--non-interactive",
+            ],
+            obj=app,
+        )
+
+    assert result.exit_code == 0, result.output
+    destinations = list_destinations(str(data_dir))
+    assert len(destinations) == 1
+    assert destinations[0].preset_id == "splunk-enterprise"
+
+
 def test_legacy_local_splunk_migration_is_gated_before_config_write(tmp_path: Path) -> None:
     from defenseclaw.commands.cmd_setup_observability import observability
 
