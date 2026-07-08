@@ -361,6 +361,29 @@ def test_source_tree_link_is_rejected_without_target_mutation(tmp_path):
     assert not root.exists()
 
 
+def test_transaction_revalidates_staged_tree_after_copy(tmp_path):
+    source = _plugin(str(tmp_path / "source"), "linked")
+    root = tmp_path / "plugins"
+
+    with (
+        patch(
+            "defenseclaw.commands.cmd_plugin._reject_linked_tree",
+            side_effect=[None, PluginIdentityError("plugin source contains a linked entry: staged")],
+        ) as reject_links,
+        pytest.raises(PluginIdentityError, match="linked entry"),
+    ):
+        _PluginInstallTransaction.prepare(
+            source,
+            [("openclaw", str(root))],
+            "linked",
+            force=False,
+        )
+
+    assert reject_links.call_count == 2
+    assert root.exists()
+    assert list(root.iterdir()) == []
+
+
 @patch("defenseclaw.inventory.plugin_identity.os.lstat")
 def test_windows_reparse_attribute_is_treated_as_link(lstat):
     lstat.return_value = SimpleNamespace(

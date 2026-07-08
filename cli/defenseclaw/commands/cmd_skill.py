@@ -4043,6 +4043,23 @@ def _validate_staged_skill_tree(skill_root: str) -> bool:
     return True
 
 
+def _remove_skill_tree_path(path: str) -> None:
+    """Remove one staged/install tree without following a path alias."""
+    if not os.path.lexists(path):
+        return
+    if os.path.islink(path):
+        os.unlink(path)
+        return
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction and isjunction(path):
+        os.rmdir(path)
+        return
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
 def _copy_skill_tree_to_connector(
     source_path: str,
     install_root: str,
@@ -4050,6 +4067,8 @@ def _copy_skill_tree_to_connector(
     *,
     force: bool,
 ) -> str:
+    import tempfile
+
     if os.path.basename(skill_name) != skill_name or not _CLAWHUB_NAME_RE.fullmatch(skill_name):
         click.echo("error: invalid ClawHub skill identity", err=True)
         raise SystemExit(1)
@@ -4079,9 +4098,42 @@ def _copy_skill_tree_to_connector(
                 err=True,
             )
             raise SystemExit(1)
-        shutil.rmtree(target_path)
-    shutil.copytree(source_path, target_path, symlinks=True)
-    return target_path
+
+    # Copy into a private sibling stage while preserving links. Preserving a
+    # link here is intentional: dereferencing it could copy data outside the
+    # validated source tree. The staged-tree validation below rejects the link
+    # before the tree is published.
+    stage_path = tempfile.mkdtemp(prefix=f".dclaw-stage-{skill_name}-", dir=install_root)
+    try:
+        shutil.copytree(source_path, stage_path, symlinks=True, dirs_exist_ok=True)
+        if not _validate_staged_skill_tree(stage_path):
+            click.echo("error: copied ClawHub skill contains an unsafe path alias", err=True)
+            raise SystemExit(1)
+
+        if os.path.lexists(target_path):
+            if _is_path_alias(target_path):
+                click.echo("error: connector skill destination became a path alias", err=True)
+                raise SystemExit(1)
+            _remove_skill_tree_path(target_path)
+        os.replace(stage_path, target_path)
+        stage_path = ""
+
+        # Validate the installed name as a final mutation-boundary check before
+        # callers scan or expose the connector tree.
+        if not _validate_staged_skill_tree(target_path):
+            _remove_skill_tree_path(target_path)
+            click.echo("error: installed ClawHub skill contains an unsafe path alias", err=True)
+            raise SystemExit(1)
+        return target_path
+    finally:
+        if stage_path:
+            try:
+                _remove_skill_tree_path(stage_path)
+            except OSError as exc:
+                click.echo(
+                    f"[install] warning: could not remove staged skill tree {stage_path}: {exc}",
+                    err=True,
+                )
 
 
 def _rollback_skill_install_paths(paths: list[str]) -> None:

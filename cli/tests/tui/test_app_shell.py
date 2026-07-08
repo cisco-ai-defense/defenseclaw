@@ -2016,6 +2016,32 @@ async def test_health_poll_allows_scrolled_repaint_when_live_overview_changes(
     assert rows["codex"].last_activity_at == now
 
 
+@pytest.mark.asyncio
+async def test_health_poll_refreshes_overview_disk_models(monkeypatch, tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    refreshed: list[str] = []
+
+    monkeypatch.setattr("defenseclaw.tui.app._fetch_gateway_health", lambda _cfg: None)
+    monkeypatch.setattr(app, "_propagate_connector", lambda _snapshot: None)
+    monkeypatch.setattr(app, "_mark_restart_if_gateway_restarted", lambda _snapshot: None)
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: None)
+    monkeypatch.setattr(app, "_refresh_alerts", lambda: refreshed.append("alerts"))
+    monkeypatch.setattr(app, "_load_doctor_cache", lambda: refreshed.append("doctor"))
+    monkeypatch.setattr(
+        app,
+        "_load_silent_bypass_count",
+        lambda: refreshed.append("silent-bypass"),
+    )
+    monkeypatch.setattr(app, "_render_overview_scope_indicator", lambda: None)
+    monkeypatch.setattr(app, "_schedule_overview_sampled_refresh", lambda **_kwargs: None)
+    app.active_panel = "overview"
+    app.help_open = False
+
+    await app._poll_health()
+
+    assert refreshed == ["alerts", "doctor", "silent-bypass"]
+
+
 def test_slow_refresh_scheduler_is_single_flight(tmp_path) -> None:
     app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
     scheduled: list[object] = []

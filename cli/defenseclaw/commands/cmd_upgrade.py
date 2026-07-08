@@ -1436,6 +1436,12 @@ def _publish_windows_cli_launcher(cli_exe: str, install_dir: str) -> None:
 
         os.replace(temporary_shim, shim)
         temporary_shim = ""
+    except UnicodeEncodeError as exc:
+        ux.err(
+            f"Cannot publish Windows CLI launcher for non-ASCII path '{cli_exe}'",
+            indent="  ",
+        )
+        raise SystemExit(1) from exc
     finally:
         if fd >= 0:
             os.close(fd)

@@ -9488,14 +9488,18 @@ class DefenseClawTUI(App[None]):
             self._periodic_refresh_running = False
 
     def _refresh_models_from_disk(self) -> None:
-        self._refresh_alerts()
+        self._refresh_overview_disk_models()
         self.registries_model.refresh()
         self.logs_model.refresh()
         self.audit_model.refresh()
         self.tools_model.refresh()
+        self._load_activity_mutations()
+
+    def _refresh_overview_disk_models(self) -> None:
+        """Refresh disk-backed models needed while Overview owns the timer."""
+        self._refresh_alerts()
         self._load_doctor_cache()
         self._load_silent_bypass_count()
-        self._load_activity_mutations()
 
     def _refresh_alerts(self) -> None:
         """Single entry point for refreshing alerts from disk + audit DB.
@@ -9645,6 +9649,7 @@ class DefenseClawTUI(App[None]):
         # preserving live counts without performing a synchronous signature
         # pass here on the event loop.
         if self.active_panel == "overview" and not self.help_open:
+            self._refresh_overview_disk_models()
             self._render_overview_scope_indicator()
             self._schedule_overview_sampled_refresh(
                 allow_scrolled=True,

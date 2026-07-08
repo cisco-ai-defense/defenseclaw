@@ -283,7 +283,11 @@ server.handle_request()
                     evidence=native,
                     platform_name="win32",
                 )
-                self.assertEqual((result.passed, result.failed, result.skipped), (4, 0, 0), result.checks)
+                self.assertEqual(
+                    (result.passed, result.failed, result.warned, result.skipped),
+                    (4, 0, 0, 0),
+                    result.checks,
+                )
                 proc.wait(timeout=5)
             finally:
                 if proc.poll() is None:

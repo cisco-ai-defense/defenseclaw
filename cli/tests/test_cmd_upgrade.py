@@ -214,6 +214,25 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             self.assertFalse(os.path.lexists(os.path.join(install_dir, "defenseclaw.exe")))
             self.assertTrue(os.path.isfile(os.path.join(install_dir, "defenseclaw.cmd")))
 
+    def test_windows_launcher_reports_non_ascii_executable_path(self):
+        with TemporaryDirectory() as home:
+            install_dir = os.path.join(home, ".local", "bin")
+            scripts = os.path.join(home, "månaged", "Scripts")
+            os.makedirs(install_dir)
+            os.makedirs(scripts)
+            cli_exe = os.path.join(scripts, "defenseclaw.exe")
+            with open(cli_exe, "w", encoding="utf-8") as stream:
+                stream.write("managed")
+
+            with patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _publish_windows_cli_launcher(cli_exe, install_dir)
+
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertIn("non-ASCII path", err.call_args.args[0])
+            self.assertFalse(os.path.lexists(os.path.join(install_dir, "defenseclaw.cmd")))
+            self.assertEqual(os.listdir(install_dir), [])
+
     def test_non_windows_install_leaves_windows_exe_name_untouched(self):
         with TemporaryDirectory() as home:
             venv = os.path.join(home, ".defenseclaw", ".venv")
