@@ -76,6 +76,10 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 			output = map[string]interface{}{"context": in.AdditionalContext}
 		}
 	case "cursor":
+		// Cursor's adapter is fail-closed on empty stdout. Delegate every
+		// action and event to the event-aware shaper, which always returns a
+		// non-nil JSON object while preserving beforeSubmitPrompt's narrower
+		// continue-only schema.
 		output = cursorHookOutputForProfile(
 			in.Req.HookEventName,
 			in.Action,

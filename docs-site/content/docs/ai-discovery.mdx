@@ -14,6 +14,12 @@ keywords:
 
 Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is even running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
 
+<DefenseClawDemo scenario="ai-discovery-evidence" />
+
+## What you just saw
+
+Connector configuration, process, MCP, package, provider-domain, and environment-variable-name signals were classified and deduplicated into one sanitized inventory record. Discovery reports evidence and confidence; it does not prove that every detected component is active or safe.
+
 ![DefenseClaw TUI · AI Discovery view showing detected AI connectors, processes, package dependencies, and provider domains with identity and presence confidence scores](/images/tui/ai-discovery.jpg)
 
 The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents — a live table of every detected AI agent, model, MCP server, skill, and package dependency with per-signal identity / presence confidence scores.

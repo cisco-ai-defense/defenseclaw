@@ -1,5 +1,7 @@
 import matrix from '@/data/capability-matrix.json';
+import Link from 'next/link';
 import { CapabilityMatrixWrapper } from './capability-matrix-wrapper';
+import { ConnectorBrand } from './connector-brand';
 
 // Renders the connector × capability matrix as a horizontally-scrolling
 // table. Data lives in a JSON file (`data/capability-matrix.json`) so a
@@ -60,7 +62,7 @@ function Family({ family }: { family: ConnectorRow['family'] }) {
 
 export function CapabilityMatrix() {
   return (
-    <CapabilityMatrixWrapper className="not-prose my-6 overflow-x-auto rounded-xl border border-fd-border">
+    <CapabilityMatrixWrapper className="capability-matrix not-prose my-6 overflow-x-auto border border-fd-border">
       <table className="w-full min-w-[900px] border-collapse text-sm">
         <thead>
           <tr className="bg-fd-card text-left">
@@ -86,10 +88,11 @@ export function CapabilityMatrix() {
               style={{ animationDelay: `${i * 35}ms` }}
             >
               <Td>
-                <a href={`/docs/connectors/${c.id}`} className="font-medium text-[var(--brand-cisco-strong)] hover:underline">
-                  {c.label}
-                </a>
-                <div className="text-xs text-fd-muted-foreground">{c.id}</div>
+                <Link href={`/docs/connectors/${c.id}`} className="connector-matrix-name font-medium text-[var(--brand-cisco-strong)] hover:underline">
+                  <ConnectorBrand id={c.id} size="sm" />
+                  <span>{c.label}</span>
+                </Link>
+                <div className="connector-matrix-id text-xs text-fd-muted-foreground">{c.id}</div>
               </Td>
               <Td>
                 <Family family={c.family} />

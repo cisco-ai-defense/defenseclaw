@@ -199,7 +199,7 @@ export function QuickStart({
             <button
               type="button"
               onClick={() => setStepIdx((n) => Math.min(STEPS.length - 1, n + 1))}
-              className="rounded-lg bg-[var(--brand-cisco)] px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:opacity-95"
+              className="rounded-lg bg-[var(--brand-cisco)] px-4 py-1.5 text-sm font-semibold text-[var(--editorial-on-blue)] shadow-sm hover:opacity-95"
             >
               Next →
             </button>
@@ -258,7 +258,7 @@ function Stepper({
               className={[
                 'flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12px] font-medium transition',
                 state === 'active'
-                  ? 'bg-[var(--brand-cisco)] text-white'
+                  ? 'bg-[var(--brand-cisco)] text-[var(--editorial-on-blue)]'
                   : state === 'done'
                     ? 'bg-fd-card text-fd-foreground hover:border-fd-foreground/30'
                     : 'text-fd-muted-foreground hover:text-fd-foreground',

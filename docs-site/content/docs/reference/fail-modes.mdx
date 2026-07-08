@@ -33,7 +33,7 @@ If you remember nothing else: new installs fail closed on malformed or unauthori
 >
   <Node id="hook" kind="connector">{`Hook fires\ntool / prompt about to execute`}</Node>
   <Node id="reach" kind="decision">{`Can the hook reach\nthe gateway?`}</Node>
-  <Node id="strict" kind="decision">{`DEFENSECLAW_STRICT\n_AVAILABILITY=1?`}</Node>
+  <Node id="strict" kind="decision">{`Strict availability\nenabled?`}</Node>
   <Node id="block-strict" kind="policy">{`BLOCK tool\nexit 2 · loud stderr`}</Node>
   <Node id="allow-transport" kind="generic">{`ALLOW tool\nwarn + log to\nhook-failures.jsonl`}</Node>
   <Node id="wellformed" kind="decision">{`Response well-formed\nand authoritative?`}</Node>
@@ -42,8 +42,8 @@ If you remember nothing else: new installs fail closed on malformed or unauthori
   <Node id="allow-open" kind="generic">{`ALLOW tool\nwarn + log entry`}</Node>
   <Node id="block-closed" kind="policy">{`BLOCK tool\nexit 2`}</Node>
   <Edge from="hook" to="reach" />
-  <Edge from="reach" to="strict" label="transport fail" />
-  <Edge from="reach" to="wellformed" label="gateway answered" />
+  <Edge from="reach" to="strict" label="unreachable" />
+  <Edge from="reach" to="wellformed" label="answered" />
   <Edge from="strict" to="block-strict" label="yes" />
   <Edge from="strict" to="allow-transport" label="no" />
   <Edge from="wellformed" to="honor" label="yes" />
