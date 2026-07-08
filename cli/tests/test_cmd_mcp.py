@@ -1576,6 +1576,10 @@ class TestParseArgs(unittest.TestCase):
         result = _parse_args('  ["-y", "my-server"]  ')
         self.assertEqual(result, ["-y", "my-server"])
 
+    def test_json_array_preserves_literal_comma(self):
+        result = _parse_args('["--message", "hello, world"]')
+        self.assertEqual(result, ["--message", "hello, world"])
+
     def test_invalid_json_falls_back_to_comma(self):
         result = _parse_args("[not-valid-json")
         self.assertEqual(result, ["[not-valid-json"])

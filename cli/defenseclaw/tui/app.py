@@ -202,9 +202,19 @@ _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
     SetupWizard.CONNECTOR_SETUP: frozenset({"Connector", "Action"}),
     # The guardrail judge "Provider" row carries no flag (it is emitted as
     # ``--judge-provider`` by the arg builder), so it must be matched by label.
-    SetupWizard.GUARDRAIL: frozenset({"Provider"}),
+    SetupWizard.GUARDRAIL: frozenset({"Provider", "Scope"}),
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"Action"}),
 }
+
+
+def _managed_tui_process_tree(pid: int):
+    """Allow explicit breakaway only for TUI-managed gateway launch commands."""
+
+    if os.name != "nt":
+        return None
+    from defenseclaw.tui.windows_process import WindowsJob
+
+    return WindowsJob(pid, allow_breakaway=True)
 
 
 _DEFENSECLAW_LOGO = (
@@ -773,7 +783,7 @@ class DefenseClawTUI(App[None]):
         # moves a visible chunk of content.
         self.scroll_sensitivity_y = 6.0
         self.first_run_model = first_run_model or FirstRunPanelModel(active=first_run)
-        self.executor = CommandExecutor()
+        self.executor = CommandExecutor(process_tree_factory=_managed_tui_process_tree)
         self.config = config
         # ``run_textual_tui`` passes the active path explicitly. Keeping the
         # default disabled prevents model-only tests and embedded consumers

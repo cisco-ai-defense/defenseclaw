@@ -106,6 +106,8 @@ jobs:
     name: Windows complete Python suite (includes TUI) / shard ${{ matrix.shard }}
     runs-on: windows-latest
     timeout-minutes: 75
+    env:
+      PYTHON_SHARD: ${{ matrix.shard }}
     strategy:
       fail-fast: false
       matrix:
@@ -113,8 +115,8 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-python-${{ matrix.shard }}')" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-python-${{ matrix.shard }}')" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP ('windows-native-python-' + $env:PYTHON_SHARD))" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD))" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -146,7 +148,7 @@ jobs:
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           $testFiles = @(Get-ChildItem cli/tests -Recurse -File -Filter 'test_*.py' | Sort-Object FullName)
-          $shardIndex = [int]'${{ matrix.shard }}' - 1
+          $shardIndex = [int]$env:PYTHON_SHARD - 1
           $shardFiles = @(
             for ($index = 0; $index -lt $testFiles.Count; $index++) {
               if (($index % 4) -eq $shardIndex) {
@@ -171,7 +173,7 @@ jobs:
             '--deselect=cli/tests/test_migrations.py::TestMigrate050PurgeLegacyFlatPolicyBundle::test_symlinked_flat_data_json_is_left_alone'
           )
           $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
-          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}.log') | Out-Null
+          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}.log' -f $env:PYTHON_SHARD)) | Out-Null
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -319,6 +321,8 @@ jobs:
     needs: [powershell-static, package-artifact]
     runs-on: windows-latest
     timeout-minutes: 35
+    env:
+      CONNECTOR: ${{ matrix.connector }}
     strategy:
       fail-fast: false
       matrix:
@@ -326,9 +330,9 @@ jobs:
     steps:
       - name: Initialize isolated paths
         run: |
-          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-contract-${{ matrix.connector }}')" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP ('windows-native-contract-' + $env:CONNECTOR))" >> $env:GITHUB_ENV
           "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-${{ matrix.connector }}')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP ('windows-native-diagnostics-' + $env:CONNECTOR))" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -341,7 +345,7 @@ jobs:
           name: windows-native-package
           path: ${{ env.DC_ARTIFACT_ROOT }}
       - name: Required setup, allow/block, audit, telemetry, timeout, and teardown contract
-        run: ./scripts/windows-native-ci.ps1 -Operation contract -Connector '${{ matrix.connector }}' -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+        run: ./scripts/windows-native-ci.ps1 -Operation contract -Connector $env:CONNECTOR -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
       - name: Upload deterministic contract results
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

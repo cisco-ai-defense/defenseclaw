@@ -670,6 +670,32 @@ class TestPythonControllerRefreshWiring(unittest.TestCase):
         controller.down.assert_called_once_with()
         self.assertIn("Preserved local observability config", output.getvalue())
 
+    def test_refresh_failure_restores_previously_running_stack(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            _refresh_and_maybe_restart_local_observability,
+        )
+
+        controller = MagicMock()
+        controller.is_running.return_value = True
+        failed = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest="/dest",
+            bundle_source="/src",
+            errors=["copy failed"],
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack",
+            return_value=failed,
+        ):
+            result = _refresh_and_maybe_restart_local_observability(
+                "/data", refresh_config=False, controller=controller
+            )
+
+        self.assertEqual(result.errors, ["copy failed"])
+        controller.down.assert_called_once_with()
+        controller.up.assert_called_once_with(timeout=180, wait=False)
+
 
 if __name__ == "__main__":
     unittest.main()

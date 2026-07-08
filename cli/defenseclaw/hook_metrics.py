@@ -149,7 +149,7 @@ def connector_hook_decision(
         return "alert"
     if raw_action in _BLOCK_ACTIONS or would_block:
         return "alert"
-    return action or "allow"
+    return "allow"
 
 
 def aggregate_connector_hook_decision(

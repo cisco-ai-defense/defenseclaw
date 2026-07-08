@@ -1390,6 +1390,38 @@ def _check_post_upgrade_drift(target_version: str) -> None:
     )
 
 
+def _run_managed_validation(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    failure_message: str,
+) -> None:
+    """Run one bounded post-install check and preserve failure diagnostics."""
+
+    try:
+        subprocess.run(
+            argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            env=env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        def output_text(value: str | bytes | None) -> str:
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return value or ""
+
+        output = "\n".join((output_text(exc.stdout), output_text(exc.stderr)))
+        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
+        suffix = f": {detail[:1000]}" if detail else ""
+        ux.err(f"{failure_message}{suffix}", indent="  ")
+        raise SystemExit(1) from exc
+
+
 def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
     """Install a pre-downloaded Python CLI wheel.
 
@@ -1435,45 +1467,16 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
         check=True,
         env=managed_env,
     )
-    try:
-        subprocess.run(
-            [uv, "--no-config", "pip", "check", "--python", venv_python],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            env=managed_env,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        output = ""
-        if isinstance(exc, subprocess.CalledProcessError):
-            output = "\n".join((exc.stdout or "", exc.stderr or ""))
-        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
-        suffix = f": {detail[:1000]}" if detail else ""
-        ux.err(f"Managed CLI dependency validation failed{suffix}", indent="  ")
-        raise SystemExit(1) from exc
-
-    try:
-        subprocess.run(
-            [venv_python, "-I", "-c", _TUI_SMOKE_CODE],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            env=managed_env,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        output = ""
-        if isinstance(exc, subprocess.CalledProcessError):
-            output = "\n".join((exc.stdout or "", exc.stderr or ""))
-        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
-        suffix = f": {detail[:1000]}" if detail else ""
-        ux.err(f"Managed TUI launch validation failed{suffix}", indent="  ")
-        raise SystemExit(1) from exc
+    _run_managed_validation(
+        [uv, "--no-config", "pip", "check", "--python", venv_python],
+        env=managed_env,
+        failure_message="Managed CLI dependency validation failed",
+    )
+    _run_managed_validation(
+        [venv_python, "-I", "-c", _TUI_SMOKE_CODE],
+        env=managed_env,
+        failure_message="Managed TUI launch validation failed",
+    )
 
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)

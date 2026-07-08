@@ -1030,8 +1030,9 @@ def _build_sink_entry(
             "url": url,
             "method": method,
         }
-        if preset.token_env:
-            block["bearer_env"] = preset.token_env
+        effective_token_env = token_env or preset.token_env
+        if effective_token_env:
+            block["bearer_env"] = effective_token_env
         headers = dict(preset.otel_headers)  # usually empty for webhook
         if headers:
             block["headers"] = headers

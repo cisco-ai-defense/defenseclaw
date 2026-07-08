@@ -13,7 +13,7 @@ from ctypes import wintypes
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
-_TUI_JOB_LIMIT_FLAGS = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+_TUI_JOB_LIMIT_FLAGS = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _PROCESS_TERMINATE = 0x0001
@@ -72,10 +72,17 @@ class _JobObjectBasicAccountingInformation(ctypes.Structure):
     ]
 
 
+def _job_limit_flags(*, allow_breakaway: bool) -> int:
+    flags = _TUI_JOB_LIMIT_FLAGS
+    if allow_breakaway:
+        flags |= _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    return flags
+
+
 class WindowsJob:
     """Own one Windows subprocess tree until it has been fully reaped."""
 
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, *, allow_breakaway: bool = False) -> None:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -118,7 +125,9 @@ class WindowsJob:
             # DefenseClaw's managed gateway/watchdog launch sites request
             # CREATE_BREAKAWAY_FROM_JOB, allowing those PID-file-owned
             # daemons to survive after a successful TUI command exits.
-            limits.BasicLimitInformation.LimitFlags = _TUI_JOB_LIMIT_FLAGS
+            limits.BasicLimitInformation.LimitFlags = _job_limit_flags(
+                allow_breakaway=allow_breakaway
+            )
             if not kernel32.SetInformationJobObject(
                 self._job,
                 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,

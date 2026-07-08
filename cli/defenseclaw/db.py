@@ -119,6 +119,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_action_timestamp ON audit_events(action, ti
 CREATE INDEX IF NOT EXISTS idx_audit_severity_timestamp ON audit_events(severity, timestamp);
 CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 CREATE INDEX IF NOT EXISTS idx_scan_timestamp ON scan_results(timestamp);
+CREATE INDEX IF NOT EXISTS idx_scan_scanner_target_timestamp
+    ON scan_results(scanner, target, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 -- The actions uniqueness index is connector-aware (target_type, target_name,

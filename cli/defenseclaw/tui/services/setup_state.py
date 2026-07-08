@@ -292,7 +292,7 @@ def build_readiness_checks(
                 "warn",
             ),
         )
-    elif availability_state in {"running", "ready", "healthy", "ok"}:
+    elif availability_state in {"running", "ready", "healthy", "ok", "disabled"}:
         checks.append(ReadinessCheck("Gateway / API Health", "Gateway and API are healthy.", "pass"))
     elif health is None:
         checks.append(

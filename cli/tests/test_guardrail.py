@@ -2311,6 +2311,34 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         mock_restart.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_no_restart_honors_global_option(self, mock_restart):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.guardrail.enabled = True
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--disable", "--no-restart"],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_restart.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_idempotent_disable_no_restart_honors_global_option(self, mock_restart):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.guardrail.enabled = False
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--disable", "--no-restart"],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_restart.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
     def test_disable_shows_teardown_complete(self, mock_restart):
         """--disable runs teardown and shows completion message."""
         from defenseclaw.commands.cmd_setup import setup

@@ -276,6 +276,32 @@ class TestUpgradeWheelInstall(unittest.TestCase):
                 self.assertEqual(stream.read(), "existing launcher")
             self.assertIn("Managed CLI dependency validation failed", err.call_args.args[0])
 
+    def test_windows_pip_check_timeout_reports_captured_output(self):
+        with TemporaryDirectory() as home:
+            self._seed_windows_install(home)
+
+            def timeout_check(args, **_kwargs):
+                if args[2:4] == ["pip", "check"]:
+                    raise subprocess.TimeoutExpired(
+                        args,
+                        60,
+                        output=b"resolver still running",
+                        stderr=b"dependency lock timeout",
+                    )
+                return Mock(returncode=0)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run", side_effect=timeout_check), \
+                 patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(ctx.exception.code, 1)
+            message = err.call_args.args[0]
+            self.assertIn("resolver still running", message)
+            self.assertIn("dependency lock timeout", message)
+
     def test_windows_tui_failure_preserves_existing_launcher(self):
         with TemporaryDirectory() as home:
             venv, install_dir = self._seed_windows_install(home)

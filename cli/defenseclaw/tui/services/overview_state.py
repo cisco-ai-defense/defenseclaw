@@ -1149,7 +1149,9 @@ class OverviewPanelModel:
                     or (
                         not local_splunk_stack_supported()
                         and is_local_splunk_stack_destination(
-                            kind=str(item.get("kind", "")), endpoint=raw_endpoint
+                            kind=str(item.get("kind", "")),
+                            endpoint=raw_endpoint,
+                            preset_id=str(item.get("preset_id") or item.get("preset") or ""),
                         )
                     )
                 )

@@ -139,11 +139,23 @@ def test_managed_subprocess_is_suspended_only_on_windows() -> None:
 
 
 def test_windows_job_allows_only_explicit_managed_breakaway() -> None:
-    assert windows_process._TUI_JOB_LIMIT_FLAGS == (  # noqa: SLF001 - exact Win32 contract.
-        windows_process._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE  # noqa: SLF001
-        | windows_process._JOB_OBJECT_LIMIT_BREAKAWAY_OK  # noqa: SLF001
-    )
-    assert windows_process._TUI_JOB_LIMIT_FLAGS & 0x00001000 == 0  # noqa: SLF001 - no silent breakaway.
+    baseline = windows_process._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE  # noqa: SLF001
+    explicit = baseline | windows_process._JOB_OBJECT_LIMIT_BREAKAWAY_OK  # noqa: SLF001
+
+    assert windows_process._TUI_JOB_LIMIT_FLAGS == baseline  # noqa: SLF001
+    assert windows_process._job_limit_flags(allow_breakaway=False) == baseline  # noqa: SLF001
+    assert windows_process._job_limit_flags(allow_breakaway=True) == explicit  # noqa: SLF001
+    assert explicit & 0x00001000 == 0  # no silent breakaway.
+
+
+def test_tui_process_tree_opts_into_explicit_breakaway() -> None:
+    with patch.object(app_module.os, "name", "nt"), patch(
+        "defenseclaw.tui.windows_process.WindowsJob"
+    ) as job:
+        result = app_module._managed_tui_process_tree(42)
+
+    job.assert_called_once_with(42, allow_breakaway=True)
+    assert result is job.return_value
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows console allocation behavior")
