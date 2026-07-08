@@ -6319,7 +6319,17 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
             and "overview" not in app._panel_render_workers  # noqa: SLF001
         )
 
-        app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
+        # Establish one coherent deferred-render baseline after mount. Merely
+        # seeding the connector-row signature leaves the body/live-data
+        # signatures from an earlier generation, so a loaded full-suite run
+        # can legitimately apply that already-queued generation after the
+        # counter is installed and look like idle body churn.
+        previous_generation = app._panel_render_generation  # noqa: SLF001
+        manual_refresh()
+        await _wait_for_background(
+            lambda: app._overview_render_snapshot is not None  # noqa: SLF001
+            and app._overview_render_snapshot.generation > previous_generation  # noqa: SLF001
+        )
         body = app.query_one("#body", Static)
         body_updates = 0
         original_update = body.update
