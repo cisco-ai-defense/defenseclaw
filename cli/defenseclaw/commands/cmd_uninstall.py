@@ -641,7 +641,7 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
     if not os.path.isfile(shim) or _is_reparse_path(shim):
         raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
     try:
-        with open(shim, encoding="ascii", errors="strict") as stream:
+        with open(shim, encoding="utf-8-sig", errors="strict") as stream:
             contents = stream.read(16_385)
     except (OSError, UnicodeError) as exc:
         raise click.ClickException(f"could not verify Windows CLI shim ownership: {exc}") from exc

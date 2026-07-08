@@ -141,11 +141,11 @@ function Test-OtlpEvent([string]$Path, [string]$Name, [int]$Since) {
     return $false
 }
 
-function Write-Result([string]$Event, [string]$Status, [string]$Detail = '') {
-    $record = [ordered]@{ connector = $Connector; os = 'windows'; event = $Event; status = $Status; version = $script:AgentVersion; detail = (Protect-LogText $Detail) }
+function Write-Result([string]$EventName, [string]$Status, [string]$Detail = '') {
+    $record = [ordered]@{ connector = $Connector; os = 'windows'; event = $EventName; status = $Status; version = $script:AgentVersion; detail = (Protect-LogText $Detail) }
     $json = $record | ConvertTo-Json -Compress
     [IO.File]::AppendAllText($script:ResultsPath, $json + [Environment]::NewLine)
-    Write-Host "[$($Status.ToUpperInvariant())] $Connector/windows/$Event $($record.detail)"
+    Write-Host "[$($Status.ToUpperInvariant())] $Connector/windows/$EventName $($record.detail)"
 }
 
 function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0), [string]$InputPath = '', [int]$Timeout = $CommandTimeoutSeconds) {
@@ -190,17 +190,17 @@ function Invoke-Teardown {
     }
 }
 
-function Invoke-Hook([string]$Event, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
+function Invoke-Hook([string]$EventName, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
-    $result = Invoke-Tool 'defenseclaw-hook' @('hook', '--connector', $Connector, '--event', $Event) @(0, 2) -InputPath $Payload
+    $result = Invoke-Tool 'defenseclaw-hook' @('hook', '--connector', $Connector, '--event', $EventName) @(0, 2) -InputPath $Payload
     Start-Sleep -Milliseconds 800
-    if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $before)) { throw "$Event did not reach the gateway" }
-    if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$Event should allow but exited $($result.ExitCode)" }
-    if ($Expected -eq 'block' -and $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') { throw "$Event did not shape a block decision" }
-    if ($Expected -eq 'block' -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$Event has no gateway block verdict" }
-    if ($RequireGatewayBlock -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$Event has no observe-mode would-block verdict" }
-    Write-Result "$Event`:fires" pass "jsonl line $before"
-    Write-Result "$Event`:verdict" pass "exit=$($result.ExitCode) expected=$Expected"
+    if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $before)) { throw "$EventName did not reach the gateway" }
+    if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$EventName should allow but exited $($result.ExitCode)" }
+    if ($Expected -eq 'block' -and $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') { throw "$EventName did not shape a block decision" }
+    if ($Expected -eq 'block' -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no gateway block verdict" }
+    if ($RequireGatewayBlock -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no observe-mode would-block verdict" }
+    Write-Result "$EventName`:fires" pass "jsonl line $before"
+    Write-Result "$EventName`:verdict" pass "exit=$($result.ExitCode) expected=$Expected"
 }
 
 function Install-Agent {

@@ -66,5 +66,7 @@ def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     text = (ROOT / "scripts/live-connector-e2e/run-windows.ps1").read_text(encoding="utf-8").lower()
     assert "$agentargs =" in text
     assert "$eventrecord =" in text
+    assert "[string]$eventname," in text
     assert "$args =" not in text
     assert "$event =" not in text
+    assert "[string]$event," not in text

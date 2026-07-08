@@ -431,6 +431,8 @@ def test_tui_disables_local_actions_and_preserves_remote_options() -> None:
     info = next(item for item in model.wizard_infos() if item.wizard == SetupWizard.LOCAL_OBSERVABILITY)
     assert info.status == "unsupported"
     assert model.wizard_available(SetupWizard.LOCAL_OBSERVABILITY) is False
+    model.active_wizard = SetupWizard.LOCAL_OBSERVABILITY
+    assert model.active_wizard_info().status == "unsupported"
     assert model.open_goal_menu(SetupWizard.LOCAL_OBSERVABILITY) is False
     assert model.form_active is False
 

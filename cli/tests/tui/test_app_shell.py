@@ -623,7 +623,7 @@ async def test_command_progress_strip_cancelled_keeps_warning_guidance() -> None
         assert "press A for full output" in hint
         assert "Dismiss" in hint
         snippet = app.query_one("#command-progress-snippet", Static)
-        assert app_module.TOKENS.accent_amber in str(snippet._Static__content)  # noqa: SLF001
+        assert app_module.TOKENS.accent_amber in str(snippet.content)
 
 
 @pytest.mark.asyncio

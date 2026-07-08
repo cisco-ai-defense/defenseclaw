@@ -230,7 +230,7 @@ def test_all_connector_lists_share_one_taxonomy() -> None:
     assert set(_HOOK_ENFORCED_CONNECTORS) == ALL_CONNECTORS - set(PROXY_CONNECTORS)
 
 
-def test_windows_views_hide_unsupported_and_mark_hermes_preview() -> None:
+def test_windows_views_hide_unsupported_and_have_no_preview() -> None:
     expected = WINDOWS_SUPPORTED
     assert set(supported_connector_choices("windows")) == expected
     assert set(visible_connector_choices("windows")) == expected

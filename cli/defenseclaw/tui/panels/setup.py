@@ -576,8 +576,7 @@ class SetupPanelModel:
                 how_to=WIZARD_HOW_TO[int(wizard)],
                 status=(
                     "unsupported"
-                    if wizard == SetupWizard.LOCAL_OBSERVABILITY
-                    and not local_shell_stacks_supported(self.os_name)
+                    if not self.wizard_available(wizard)
                     else self._formatted_wizard_status(wizard, now=now)
                 ),
             )
@@ -628,8 +627,7 @@ class SetupPanelModel:
             how_to=WIZARD_HOW_TO[int(wizard)],
             status=(
                 "unsupported"
-                if wizard == SetupWizard.LOCAL_OBSERVABILITY
-                and not local_shell_stacks_supported(self.os_name)
+                if not self.wizard_available(wizard)
                 else self._formatted_wizard_status(wizard, now=now)
             ),
         )
