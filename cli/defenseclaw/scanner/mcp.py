@@ -371,7 +371,7 @@ async def _create_contained_windows_process(
     from defenseclaw.tui.windows_process import WindowsJob
 
     try:
-        job = WindowsJob(process.pid)
+        job = WindowsJob(process.pid, allow_breakaway=False)
     except BaseException:
         process.kill()
         await process.wait()

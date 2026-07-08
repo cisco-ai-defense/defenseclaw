@@ -148,16 +148,6 @@ def test_windows_job_allows_only_explicit_managed_breakaway() -> None:
     assert explicit & 0x00001000 == 0  # no silent breakaway.
 
 
-def test_tui_process_tree_opts_into_explicit_breakaway() -> None:
-    with patch.object(app_module.os, "name", "nt"), patch(
-        "defenseclaw.tui.windows_process.WindowsJob"
-    ) as job:
-        result = app_module._managed_tui_process_tree(42)
-
-    job.assert_called_once_with(42, allow_breakaway=True)
-    assert result is job.return_value
-
-
 @pytest.mark.skipif(os.name != "nt", reason="Windows console allocation behavior")
 @pytest.mark.asyncio
 async def test_executor_captured_child_has_no_windows_console() -> None:

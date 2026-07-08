@@ -82,7 +82,7 @@ def _job_limit_flags(*, allow_breakaway: bool) -> int:
 class WindowsJob:
     """Own one Windows subprocess tree until it has been fully reaped."""
 
-    def __init__(self, pid: int, *, allow_breakaway: bool = False) -> None:
+    def __init__(self, pid: int, *, allow_breakaway: bool = True) -> None:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
