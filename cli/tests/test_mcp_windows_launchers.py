@@ -223,6 +223,18 @@ class _RecordingScanner:
         return SimpleNamespace(tool_name=tool.name, findings=[])
 
 
+def _build_python_fixture_wheel(source: Path, dist: Path) -> Path:
+    dist.mkdir(parents=True)
+    subprocess.run(
+        [os.fspath(HOST_UV), "build", "--wheel", "--out-dir", os.fspath(dist), os.fspath(source)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    return next(dist.glob("defenseclaw_mcp_launcher_fixture-*.whl"))
+
+
 def _python_plan(env: dict[str, str]) -> mcp._StdioLaunchPlan:
     return mcp._StdioLaunchPlan(
         command=sys.executable,
@@ -358,6 +370,7 @@ def test_native_npx_cmd_acceptance_with_quoted_local_package(
 @pytest.mark.allow_subprocess
 @pytest.mark.skipif(not (HOST_UVX and HOST_LOCALAPPDATA), reason="native uvx.exe is unavailable")
 def test_native_uvx_exe_acceptance(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The suite redirects Windows identity roots, while setup-uv may install
@@ -366,13 +379,14 @@ def test_native_uvx_exe_acceptance(
     # still apply to the executable and its chain through this narrow prefix.
     monkeypatch.setenv("LOCALAPPDATA", HOST_LOCALAPPDATA)
     monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", os.fspath(Path(HOST_UVX).parent))
+    fixture_wheel = _build_python_fixture_wheel(FIXTURES / "python", tmp_path / "fixture wheel")
     entry = MCPServerEntry(
         name="native-uvx",
         command="uvx",
         args=[
             "--offline",
             "--from",
-            os.fspath(FIXTURES / "python"),
+            os.fspath(fixture_wheel),
             "defenseclaw-mcp-launcher-fixture",
         ],
         env={},
@@ -543,6 +557,10 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
     python_fixture = fixture_root / "python fixture with spaces"
     shutil.copytree(FIXTURES / "node", node_fixture)
     shutil.copytree(FIXTURES / "python", python_fixture)
+    python_fixture_wheel = _build_python_fixture_wheel(
+        python_fixture,
+        fixture_root / "python wheel dist with spaces",
+    )
 
     traces = tmp_path / "traces"
     traces.mkdir()
@@ -559,7 +577,7 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
     uvx_args = [
         "--offline",
         "--from",
-        os.fspath(python_fixture),
+        os.fspath(python_fixture_wheel),
         "defenseclaw-mcp-launcher-fixture",
     ]
     env = dict(os.environ)
