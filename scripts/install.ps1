@@ -553,8 +553,8 @@ function Main {
     }
 
     Save-PickedConnector
-    Invoke-Quickstart
     Add-ToPath
+    Invoke-Quickstart
     Write-Success
 }
 

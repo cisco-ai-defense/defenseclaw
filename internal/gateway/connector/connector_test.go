@@ -1394,11 +1394,30 @@ func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t
 	foreignFound := false
 	managedCount := 0
 	currentCommand := hookInvocationCommandFor("windows", "claudecode", "")
-	for _, rawEntries := range settings["hooks"].(map[string]interface{}) {
-		for _, rawEntry := range rawEntries.([]interface{}) {
-			entry := rawEntry.(map[string]interface{})
-			for _, rawHook := range entry["hooks"].([]interface{}) {
-				command, _ := rawHook.(map[string]interface{})["command"].(string)
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks = %T, want object", settings["hooks"])
+	}
+	for eventType, rawEntries := range hooks {
+		entries, ok := rawEntries.([]interface{})
+		if !ok {
+			t.Fatalf("hooks[%q] = %T, want array", eventType, rawEntries)
+		}
+		for entryIndex, rawEntry := range entries {
+			entry, ok := rawEntry.(map[string]interface{})
+			if !ok {
+				t.Fatalf("hooks[%q][%d] = %T, want object", eventType, entryIndex, rawEntry)
+			}
+			rawHooks, ok := entry["hooks"].([]interface{})
+			if !ok {
+				t.Fatalf("hooks[%q][%d].hooks = %T, want array", eventType, entryIndex, entry["hooks"])
+			}
+			for hookIndex, rawHook := range rawHooks {
+				hook, ok := rawHook.(map[string]interface{})
+				if !ok {
+					t.Fatalf("hooks[%q][%d].hooks[%d] = %T, want object", eventType, entryIndex, hookIndex, rawHook)
+				}
+				command, _ := hook["command"].(string)
 				installedFound = installedFound || command == installedCommand
 				repoFound = repoFound || command == repoCommand
 				foreignFound = foreignFound || command == foreignCommand
@@ -1911,6 +1930,62 @@ func TestClaudeCode_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "/usr/bin/true") || !strings.Contains(string(data), "/tmp/user-added-hook") {
 		t.Fatalf("user hooks were not preserved:\n%s", data)
+	}
+}
+
+func TestClaudeCode_Teardown_UsesTrackedManagedCommandsDuringSurgicalCleanup(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	managedCommand := `"C:\\moved\\defenseclaw-gateway.exe" hook --connector claudecode`
+	foreignCommand := "/usr/bin/user-hook"
+	settings := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": managedCommand},
+				}},
+				map[string]interface{}{"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": foreignCommand},
+				}},
+			},
+		},
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	if err := c.saveBackup(dir, claudeCodeBackup{
+		HadHooksKey:         true,
+		ManagedHookCommands: []string{managedCommand},
+	}); err != nil {
+		t.Fatalf("save backup: %v", err)
+	}
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	restored, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	if strings.Contains(string(restored), managedCommand) {
+		t.Fatalf("tracked managed command survived teardown:\n%s", restored)
+	}
+	if !strings.Contains(string(restored), foreignCommand) {
+		t.Fatalf("foreign hook was removed:\n%s", restored)
 	}
 }
 

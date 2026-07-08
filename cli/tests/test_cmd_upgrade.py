@@ -998,6 +998,53 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             with open(installed_hook, "rb") as stream:
                 self.assertEqual(stream.read(), b"hook")
 
+    def test_windows_install_rolls_back_hook_if_gateway_replace_fails(self):
+        with TemporaryDirectory() as staging, TemporaryDirectory() as fake_home:
+            install_dir = os.path.join(fake_home, ".local", "bin")
+            os.makedirs(install_dir)
+            gateway_target = os.path.join(install_dir, "defenseclaw-gateway.exe")
+            hook_target = os.path.join(install_dir, "defenseclaw-hook.exe")
+            with open(gateway_target, "wb") as stream:
+                stream.write(b"old gateway")
+            with open(hook_target, "wb") as stream:
+                stream.write(b"old hook")
+
+            gateway = os.path.join(staging, "defenseclaw.exe")
+            hook = os.path.join(staging, "defenseclaw-hook.exe")
+            with open(gateway, "wb") as stream:
+                stream.write(b"new gateway")
+            with open(hook, "wb") as stream:
+                stream.write(b"new hook")
+
+            real_replace = os.replace
+
+            def fail_gateway_replace(source, destination):
+                if os.path.normpath(destination) == os.path.normpath(gateway_target):
+                    raise PermissionError("gateway is locked")
+                return real_replace(source, destination)
+
+            def fake_expanduser(path):
+                return path.replace("~", fake_home, 1)
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade.os.path.expanduser",
+                side_effect=fake_expanduser,
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.os.replace",
+                side_effect=fail_gateway_replace,
+            ):
+                with self.assertRaises(PermissionError):
+                    _install_gateway(gateway, "windows")
+
+            with open(gateway_target, "rb") as stream:
+                self.assertEqual(stream.read(), b"old gateway")
+            with open(hook_target, "rb") as stream:
+                self.assertEqual(stream.read(), b"old hook")
+            self.assertEqual(
+                sorted(os.listdir(install_dir)),
+                ["defenseclaw-gateway.exe", "defenseclaw-hook.exe"],
+            )
+
 
 class TestPostInstallVersionVerification(unittest.TestCase):
     """The freshly-installed gateway must report the expected version, or
