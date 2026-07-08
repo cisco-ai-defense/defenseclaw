@@ -679,7 +679,7 @@ func TestCodexNotifyGuardBranchesDoNotSendRequests(t *testing.T) {
 				t.Fatalf("exit code = %d, want 0", code)
 			}
 			if rt.requests != 0 {
-			t.Fatalf("gateway called %d times, want 0", rt.requests)
+				t.Fatalf("gateway called %d times, want 0", rt.requests)
 			}
 		})
 	}
