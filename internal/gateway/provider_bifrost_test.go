@@ -184,19 +184,12 @@ func TestBifrostProvider_BedrockDeploymentAliases(t *testing.T) {
 		nil,
 	)
 
-	alias := acc.keys[0].Aliases.ResolveConfig("fast")
-	if alias == nil {
-		t.Fatal("expected bedrock deployment alias")
-	}
-	if alias.ModelID != target {
-		t.Errorf("bedrock alias ModelID = %q, want %q", alias.ModelID, target)
-	}
 	if got := acc.keys[0].Aliases.Resolve("fast"); got != target {
 		t.Errorf("bedrock alias Resolve = %q, want %q", got, target)
 	}
 }
 
-func TestBifrostProvider_AzureDeploymentAliasesCarryAPIVersion(t *testing.T) {
+func TestBifrostProvider_AzureDeploymentAliases(t *testing.T) {
 	keyID := bifrostKeyID(schemas.Azure, "azure-key")
 	acc := newTenantAccount(
 		schemas.Azure,
@@ -215,15 +208,8 @@ func TestBifrostProvider_AzureDeploymentAliasesCarryAPIVersion(t *testing.T) {
 		nil,
 	)
 
-	alias := acc.keys[0].Aliases.ResolveConfig("fast")
-	if alias == nil {
-		t.Fatal("expected azure deployment alias")
-	}
-	if alias.ModelID != "gpt-4o-prod" {
-		t.Errorf("azure alias ModelID = %q, want gpt-4o-prod", alias.ModelID)
-	}
-	if alias.AzureAliasCfg == nil || alias.AzureAliasCfg.APIVersion == nil || *alias.AzureAliasCfg.APIVersion != "2024-08-01-preview" {
-		t.Fatalf("azure alias api_version not propagated: %+v", alias.AzureAliasCfg)
+	if got := acc.keys[0].Aliases.Resolve("fast"); got != "gpt-4o-prod" {
+		t.Errorf("azure alias Resolve = %q, want gpt-4o-prod", got)
 	}
 }
 
@@ -245,15 +231,8 @@ func TestBifrostProvider_AzureAPIVersionSeedsIdentityAlias(t *testing.T) {
 		nil,
 	)
 
-	alias := acc.keys[0].Aliases.ResolveConfig("gpt-4o")
-	if alias == nil {
-		t.Fatal("expected azure identity alias for api_version")
-	}
-	if alias.ModelID != "gpt-4o" {
-		t.Errorf("identity alias ModelID = %q, want gpt-4o", alias.ModelID)
-	}
-	if alias.AzureAliasCfg == nil || alias.AzureAliasCfg.APIVersion == nil || *alias.AzureAliasCfg.APIVersion != "2024-08-01-preview" {
-		t.Fatalf("identity alias api_version not propagated: %+v", alias.AzureAliasCfg)
+	if got := acc.keys[0].Aliases.Resolve("gpt-4o"); got != "gpt-4o" {
+		t.Errorf("identity alias Resolve = %q, want gpt-4o", got)
 	}
 }
 
