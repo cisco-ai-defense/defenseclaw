@@ -46,6 +46,7 @@ struct DefenseClawApp: App {
                         NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                     }
                 }
+                .disabled(appState.updateOperationInProgress)
             }
             CommandGroup(after: .toolbar) {
                 Button("Refresh Panel") {
@@ -172,7 +173,9 @@ private struct MenuBarIcon: View {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var recreateMainWindow: (() -> Void)?
     private var miniaturizeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -231,11 +234,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        // Window was released — ask SwiftUI to recreate it via the openWindow URL scheme fallback.
-        if let window = NSApp.windows.first(where: { $0.canBecomeKey && !($0 is NSPanel) }) {
-            if window.isMiniaturized { window.deminiaturize(nil) }
-            window.makeKeyAndOrderFront(nil)
-        }
+        // A non-main utility window must never be promoted as the dashboard.
+        // Ask SwiftUI to recreate the released WindowGroup instead.
+        recreateMainWindow?()
     }
 }
 

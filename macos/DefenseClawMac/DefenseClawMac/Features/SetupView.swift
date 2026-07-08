@@ -67,16 +67,15 @@ struct WizardDefinition: Identifiable {
     /// True for subcommands with no flags — they only run as interactive
     /// terminal wizards, so the sheet offers Copy Command instead of Apply.
     var interactiveOnly: Bool = false
-    /// When set, this wizard applies via the gateway instead of the CLI:
-    /// each non-empty field becomes PATCH /config/patch on
-    /// "<prefix>.<field key>" — mirroring the TUI's config-editor sections.
-    var configPatchPrefix: String? = nil
     /// Optional exact argv builder for setup areas whose command shape is
     /// conditional or emits follow-up commands. The Bool requests masked
     /// secret values for review display.
     var commandBuilder: (([String: String], Bool) -> [[String]])? = nil
     /// Field delivered through stdin instead of argv (currently `keys set`).
     var secretInputField: String? = nil
+    /// Secret fields exported only to the child process environment. Values
+    /// are masked in review and Activity history and never enter argv.
+    var secretEnvironment: (([String: String]) -> [String: String])? = nil
     /// Optional form validation. Returning a message keeps Review disabled and
     /// surfaces the same requirement before invoking the CLI.
     var validation: (([String: String]) -> String?)? = nil
@@ -186,8 +185,10 @@ struct WizardSheet: View {
             case .flagOnly:
                 if value == "yes" { args.append("--\(field.key)") }
             case .secure:
-                guard !value.isEmpty else { continue }
-                args.append("--\(field.key)=\(maskSecrets ? "••••••" : value)")
+                // Secrets are transported only via stdin, a child-only
+                // environment variable, or an explicit command builder.
+                // Never let the generic argument builder place one in argv.
+                continue
             default:
                 guard !value.isEmpty else { continue }
                 args.append("--\(field.key)=\(value)")
@@ -207,8 +208,23 @@ struct WizardSheet: View {
 
     private var cliCommands: [[String]] { buildCommands(maskSecrets: false) }
 
+    private var commandEnvironment: [String: String] {
+        let visibleKeys = Set(visibleFields.map(\.key))
+        let scopedValues = values.filter { visibleKeys.contains($0.key) }
+        return wizard.secretEnvironment?(scopedValues) ?? [:]
+    }
+
     private var validationMessage: String? {
-        wizard.validation?(values)
+        if let message = wizard.validation?(values) { return message }
+        if wizard.commandBuilder == nil,
+           wizard.secretEnvironment == nil,
+           let field = visibleFields.first(where: { field in
+               guard case .secure = field.kind else { return false }
+               return !(values[field.key] ?? "").isEmpty && wizard.secretInputField != field.key
+           }) {
+            return "\(field.label) has no secure CLI transport configured."
+        }
+        return nil
     }
 
     private var replacesConnectorRoster: Bool {
@@ -217,30 +233,14 @@ struct WizardSheet: View {
                 || (values["action"] == "setup" && values["replace"] == "yes"))
     }
 
-    /// Gateway-applied wizards: one PATCH /config/patch per non-empty field.
-    private var patchOperations: [(path: String, value: String, secure: Bool)] {
-        guard let prefix = wizard.configPatchPrefix else { return [] }
-        return visibleFields.compactMap { field in
-            let value = values[field.key] ?? ""
-            guard !value.isEmpty else { return nil }
-            if case .secure = field.kind {
-                return ("\(prefix).\(field.key)", value, true)
-            }
-            return ("\(prefix).\(field.key)", value, false)
-        }
-    }
-
     private var displayCommand: String {
-        if wizard.configPatchPrefix != nil {
-            guard !patchOperations.isEmpty else { return "(no fields set — nothing to apply)" }
-            return patchOperations
-                .map { "PATCH /config/patch  \($0.path) = \($0.secure ? "••••••" : $0.value)" }
-                .joined(separator: "\n")
-        }
         let commands = buildCommands(maskSecrets: true)
         guard !commands.isEmpty else { return "(no changes selected — nothing to apply)" }
         return commands
-            .map { (["defenseclaw"] + $0).joined(separator: " ") }
+            .map { command in
+                let environment = commandEnvironment.keys.sorted().map { "\($0)=••••••" }
+                return (environment + ["defenseclaw"] + command).joined(separator: " ")
+            }
             .joined(separator: "\n")
     }
 
@@ -361,9 +361,7 @@ struct WizardSheet: View {
     private var reviewBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Review").font(.subheadline.weight(.semibold))
-            Text(wizard.configPatchPrefix != nil
-                 ? "These values apply through the gateway (PATCH /config/patch), exactly like the TUI's config-editor section:"
-                 : wizard.interactiveOnly
+            Text(wizard.interactiveOnly
                  ? "This subcommand is an interactive terminal wizard (it takes no flags). Copy it and run it in your terminal:"
                  : "This exact command will run (matching the terminal TUI’s behavior):")
                 .font(.caption)
@@ -415,10 +413,6 @@ struct WizardSheet: View {
                             .keyboardShortcut(.defaultAction)
                             .buttonStyle(.borderedProminent)
                             .tint(Cisco.blue)
-                            .disabled(wizard.configPatchPrefix != nil && !appState.gatewayReachable)
-                            .help(wizard.configPatchPrefix != nil && !appState.gatewayReachable
-                                  ? "Gateway offline — config patches need the gateway running."
-                                  : "")
                     }
                 }
             }
@@ -461,10 +455,6 @@ struct WizardSheet: View {
     private func apply() {
         phase = .running
         output = ""
-        if wizard.configPatchPrefix != nil {
-            applyPatches()
-            return
-        }
         Task {
             let commands = cliCommands
             guard !commands.isEmpty else {
@@ -486,6 +476,7 @@ struct WizardSheet: View {
                     binary: "defenseclaw",
                     arguments: arguments,
                     standardInput: secret,
+                    environment: index == 0 ? commandEnvironment : [:],
                     category: "setup",
                     origin: "Setup",
                     refreshOnSuccess: true
@@ -502,31 +493,6 @@ struct WizardSheet: View {
         }
     }
 
-    private func applyPatches() {
-        let operations = patchOperations
-        guard !operations.isEmpty else {
-            output = "Nothing to apply — all fields are empty."
-            exitCode = 1
-            phase = .done
-            return
-        }
-        Task {
-            var failures = 0
-            for op in operations {
-                do {
-                    let value = dcCoerceConfigValue(op.value, forPath: op.path)
-                    try await appState.gateway.patchConfig(path: op.path, value: value)
-                    output += "✓ \(op.path)\n"
-                } catch {
-                    failures += 1
-                    output += "✗ \(op.path): \(error.localizedDescription)\n"
-                }
-            }
-            exitCode = failures == 0 ? 0 : Int32(failures)
-            phase = .done
-            if failures == 0 { appState.reloadConfig() }
-        }
-    }
 }
 
 // MARK: - Config editor
@@ -1022,23 +988,5 @@ private struct ConfigDiffSheet: View {
     private func displayTruncated(_ value: String) -> String {
         let display = value.isEmpty ? "(empty)" : value
         return display.count <= 72 ? display : String(display.prefix(71)) + "…"
-    }
-}
-// MARK: - Shared helpers
-
-/// Coerce a string value typed into a wizard or config-editor field to the
-/// YAML scalar the gateway expects — int for *_ms / *_seconds keys, bool for
-/// "true"/"false". Wizard apply and direct config editor share this so the
-/// two write paths never drift on type-handling.
-fileprivate func dcCoerceConfigValue(_ raw: String, forPath path: String) -> Any {
-    let pathLower = path.lowercased()
-    if (pathLower.hasSuffix("_ms") || pathLower.hasSuffix("_seconds")),
-       let intValue = Int(raw) {
-        return intValue
-    }
-    switch raw.lowercased() {
-    case "true": return true
-    case "false": return false
-    default: return raw
     }
 }

@@ -29,6 +29,7 @@ struct ReleaseInfo: Sendable, Equatable {
     var version: String      // e.g. "0.3.1"
     var assetName: String
     var assetURL: String     // browser_download_url
+    var assetSHA256: String  // GitHub asset digest, without "sha256:"
     var htmlURL: String
     var notes: String
 }
@@ -53,8 +54,13 @@ actor UpdateChecker {
 
     /// Numeric dotted-version comparison: true when `candidate` > `current`.
     static func isNewer(_ candidate: String, than current: String) -> Bool {
-        let a = candidate.split(separator: ".").map { Int($0) ?? 0 }
-        let b = current.split(separator: ".").map { Int($0) ?? 0 }
+        func components(_ version: String) -> [Int]? {
+            let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+            guard parts.count >= 2 else { return nil }
+            let values = parts.compactMap { Int($0) }
+            return values.count == parts.count ? values : nil
+        }
+        guard let a = components(candidate), let b = components(current) else { return false }
         for i in 0..<max(a.count, b.count) {
             let x = i < a.count ? a[i] : 0
             let y = i < b.count ? b[i] : 0
@@ -109,6 +115,8 @@ actor UpdateChecker {
             version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
             assetName: (zip?["name"] as? String) ?? "",
             assetURL: (zip?["browser_download_url"] as? String) ?? "",
+            assetSHA256: ((zip?["digest"] as? String) ?? "")
+                .replacingOccurrences(of: "sha256:", with: ""),
             htmlURL: (dict["html_url"] as? String) ?? "https://github.com/\(repo)/releases",
             notes: (dict["body"] as? String) ?? ""
         )
@@ -119,8 +127,14 @@ actor UpdateChecker {
     /// Downloads the release zip, swaps the current bundle, and relaunches.
     /// Returns an error message, or never returns (the app restarts) on success.
     func downloadAndInstall(_ release: ReleaseInfo, progress: @Sendable @escaping (UpgradeState) -> Void) async -> String? {
+        guard Self.isNewer(release.version, than: Self.currentVersion) else {
+            return "Refusing to install version \(release.version) over \(Self.currentVersion)."
+        }
         guard let assetURL = URL(string: release.assetURL), !release.assetURL.isEmpty else {
             return "The latest release has no downloadable zip asset."
+        }
+        guard release.assetSHA256.count == 64 else {
+            return "The release asset has no SHA-256 digest; refusing to install an unverifiable update."
         }
 
         progress(.downloading)
@@ -131,7 +145,14 @@ actor UpdateChecker {
         let zipPath = stage.appendingPathComponent(release.assetName.isEmpty ? "update.zip" : release.assetName)
 
         do {
-            let (tmp, response) = try await URLSession.shared.download(from: assetURL)
+            var request = URLRequest(url: assetURL, timeoutInterval: 30)
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = 30
+            configuration.timeoutIntervalForResource = 300
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let (tmp, response) = try await session.download(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 return "Download failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1))."
             }
@@ -140,17 +161,47 @@ actor UpdateChecker {
         } catch {
             return "Download failed: \(error.localizedDescription)"
         }
+        guard RuntimePayload.sha256(of: zipPath) == release.assetSHA256.lowercased() else {
+            return "Downloaded update failed SHA-256 verification."
+        }
 
         progress(.installing)
         // Unpack with ditto (preserves bundle structure + signature).
         let unpackDir = stage.appendingPathComponent("unpacked")
         try? FileManager.default.createDirectory(at: unpackDir, withIntermediateDirectories: true)
-        let unzip = Self.runProcess("/usr/bin/ditto", ["-xk", zipPath.path, unpackDir.path])
+        let unzip = await Self.runProcess("/usr/bin/ditto", ["-xk", zipPath.path, unpackDir.path])
         guard unzip.exitCode == 0 else { return "Unpack failed: \(unzip.output)" }
-        guard let appName = (try? FileManager.default.contentsOfDirectory(atPath: unpackDir.path))?
-            .first(where: { $0.hasSuffix(".app") })
-        else { return "No .app bundle inside the release zip." }
+        let appNames = (try? FileManager.default.contentsOfDirectory(atPath: unpackDir.path))?
+            .filter { $0.hasSuffix(".app") } ?? []
+        guard appNames.count == 1, let appName = appNames.first else {
+            return "The release zip must contain exactly one .app bundle."
+        }
         let newApp = unpackDir.appendingPathComponent(appName)
+
+        guard let bundle = Bundle(url: newApp),
+              bundle.bundleIdentifier == "com.cisco.defenseclaw.macos",
+              (bundle.infoDictionary?["CFBundleShortVersionString"] as? String) == release.version
+        else {
+            return "The downloaded app has an unexpected bundle identifier or version."
+        }
+        let runtimePayload = newApp.appendingPathComponent("Contents/Resources/RuntimePayload")
+        guard !FileManager.default.fileExists(atPath: runtimePayload.path) else {
+            return "The app-only update unexpectedly contains a runtime payload."
+        }
+        let signature = await Self.runProcess(
+            "/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", newApp.path]
+        )
+        guard signature.exitCode == 0 else {
+            return "The downloaded app failed code-signature verification: \(signature.output)"
+        }
+        if !release.assetName.contains("-unverified") {
+            let assessment = await Self.runProcess(
+                "/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", newApp.path]
+            )
+            guard assessment.exitCode == 0 else {
+                return "The downloaded app failed Gatekeeper assessment: \(assessment.output)"
+            }
+        }
 
         // Swap the running bundle: move the old aside (the running process keeps
         // executing from the moved inode), copy the new one into place.
@@ -161,13 +212,23 @@ actor UpdateChecker {
         } catch {
             return "Could not replace \(targetPath): \(error.localizedDescription)"
         }
-        let copy = Self.runProcess("/usr/bin/ditto", [newApp.path, targetPath])
-        guard copy.exitCode == 0 else {
-            // Roll back.
-            try? FileManager.default.moveItem(atPath: backup.path, toPath: targetPath)
-            return "Install failed: \(copy.output)"
+        let copy = await Self.runProcess("/usr/bin/ditto", [newApp.path, targetPath])
+        if copy.exitCode != 0 {
+            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
+            return "Install failed: \(copy.output)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
         }
-        _ = Self.runProcess("/usr/bin/xattr", ["-dr", "com.apple.quarantine", targetPath])
+        let installedSignature = await Self.runProcess(
+            "/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", targetPath]
+        )
+        if installedSignature.exitCode != 0 {
+            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
+            return "Installed app failed code-signature verification: \(installedSignature.output)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
+        }
+        let xattr = await Self.runProcess("/usr/bin/xattr", ["-dr", "com.apple.quarantine", targetPath])
+        if xattr.exitCode != 0 {
+            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
+            return "Could not prepare the installed app for launch: \(xattr.output)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
+        }
 
         // Relaunch: detached child outlives this process. It must WAIT for
         // this process to fully exit before calling open — with the old
@@ -179,10 +240,19 @@ actor UpdateChecker {
         let relaunch = Process()
         relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
         relaunch.arguments = ["-c", """
-            for _ in $(seq 1 150); do kill -0 \(pid) 2>/dev/null || break; sleep 0.2; done; \
-            /usr/bin/open "\(targetPath)"
-            """]
-        try? relaunch.run()
+            pid="$1"; target="$2"; stage="$3"
+            for _ in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+            /usr/bin/open "$target"
+            rc=$?
+            /bin/rm -rf "$stage"
+            exit $rc
+            """, "defenseclaw-relaunch", "\(pid)", targetPath, stage.path]
+        do {
+            try relaunch.run()
+        } catch {
+            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
+            return "Could not start the app relaunch helper: \(error.localizedDescription)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
+        }
 
         await MainActor.run { NSApp.terminate(nil) }
         return nil // unreachable in practice
@@ -190,18 +260,51 @@ actor UpdateChecker {
 
     // MARK: - Process helper
 
-    nonisolated static func runProcess(_ launchPath: String, _ arguments: [String]) -> (exitCode: Int32, output: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: launchPath)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do { try process.run() } catch {
-            return (126, "failed to launch \(launchPath): \(error.localizedDescription)")
+    nonisolated static func runProcess(
+        _ launchPath: String,
+        _ arguments: [String]
+    ) async -> (exitCode: Int32, output: String) {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: launchPath)
+            process.arguments = arguments
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            let readTask = Task.detached {
+                pipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            process.terminationHandler = { process in
+                Task {
+                    let data = await readTask.value
+                    continuation.resume(returning: (
+                        process.terminationStatus,
+                        String(decoding: data, as: UTF8.self)
+                    ))
+                }
+            }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                try? pipe.fileHandleForWriting.close()
+                continuation.resume(returning: (
+                    126,
+                    "failed to launch \(launchPath): \(error.localizedDescription)"
+                ))
+            }
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
+    nonisolated private static func restoreBackup(backup: URL, targetPath: String) -> String? {
+        do {
+            if FileManager.default.fileExists(atPath: targetPath) {
+                try FileManager.default.removeItem(atPath: targetPath)
+            }
+            try FileManager.default.moveItem(atPath: backup.path, toPath: targetPath)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }

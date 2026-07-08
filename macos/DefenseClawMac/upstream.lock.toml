@@ -1,4 +1,3 @@
-#!/bin/bash
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,19 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-onboarding-tests.XXXXXX")"
-trap 'rm -rf "$BUILD_DIR"' EXIT
-MODULE_CACHE="$BUILD_DIR/ModuleCache"
-mkdir -p "$MODULE_CACHE"
-
-CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
-  -module-cache-path "$MODULE_CACHE" \
-  "$ROOT/DefenseClawMac/DataLayer/ConnectorOnboarding.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/CommandRegistry.swift" \
-  "$ROOT/Tests/ConnectorOnboardingTests.swift" \
-  -o "$BUILD_DIR/ConnectorOnboardingTests"
-
-"$BUILD_DIR/ConnectorOnboardingTests"
+repository = "keitheobrien/defenseclaw_mac"
+tag = "v1.1.4"
+commit = "9fcd1f18ce67da70d54d7c41dc5c86e7f0b89362"
+source_version = "1.1.4"
+imported_at = "2026-07-08"

@@ -20,13 +20,15 @@
 import Foundation
 
 actor GatewayClient {
-    private var baseURL: URL
+    private var baseURL: URL?
     private var token: String?
     private let session: URLSession
 
     static let defaultTimeout: TimeInterval = 5
     static let pluginTimeout: TimeInterval = 90
     static let scanTimeout: TimeInterval = 120
+    private static let pathSegmentCharacters = CharacterSet.alphanumerics
+        .union(CharacterSet(charactersIn: "-._~"))
 
     init(config: DefenseClawConfig = DefenseClawConfig()) {
         self.baseURL = config.baseURL
@@ -47,10 +49,20 @@ actor GatewayClient {
     private func request(
         _ method: String, _ path: String,
         body: [String: Any]? = nil,
+        queryItems: [URLQueryItem] = [],
         timeout: TimeInterval = GatewayClient.defaultTimeout
     ) async throws -> Data {
-        guard let url = URL(string: path, relativeTo: baseURL) else {
+        guard let baseURL, Self.isLoopback(baseURL) else {
+            throw GatewayError.badResponse("refusing non-loopback gateway URL")
+        }
+        guard let relativeURL = URL(string: path, relativeTo: baseURL),
+              var components = URLComponents(url: relativeURL, resolvingAgainstBaseURL: true)
+        else {
             throw GatewayError.badResponse("bad path \(path)")
+        }
+        if !queryItems.isEmpty { components.queryItems = queryItems }
+        guard let url = components.url, Self.isLoopback(url) else {
+            throw GatewayError.badResponse("refusing non-loopback request URL")
         }
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
@@ -94,6 +106,27 @@ actor GatewayClient {
     private func getJSON(_ path: String, timeout: TimeInterval = GatewayClient.defaultTimeout) async throws -> Any {
         let data = try await request("GET", path, timeout: timeout)
         return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private func encodedPathSegment(_ value: String) throws -> String {
+        guard let encoded = value.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentCharacters) else {
+            throw GatewayError.badResponse("could not encode URL path segment")
+        }
+        return encoded
+    }
+
+    private static func isLoopback(_ url: URL) -> Bool {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return false }
+        let host = (url.host ?? "").lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        if host == "localhost" || host == "::1" { return true }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4,
+              octets.allSatisfy({ part in
+                  guard !part.isEmpty, part.allSatisfy(\.isNumber), let value = Int(part) else { return false }
+                  return (0...255).contains(value)
+              })
+        else { return false }
+        return octets[0] == "127"
     }
 
     @discardableResult
@@ -437,10 +470,6 @@ actor GatewayClient {
                        ["targetType": targetType, "targetName": targetName, "reason": reason])
     }
 
-    func patchConfig(path: String, value: Any) async throws {
-        _ = try await request("PATCH", "/config/patch", body: ["path": path, "value": value])
-    }
-
     func reloadPolicy() async throws {
         try await post("/policy/reload")
     }
@@ -520,14 +549,18 @@ actor GatewayClient {
     }
 
     func aiComponentLocations(ecosystem: String, name: String) async throws -> [String] {
-        let json = try await getJSON("/api/v1/ai-usage/components/\(ecosystem)/\(name)/locations")
+        let ecosystemSegment = try encodedPathSegment(ecosystem)
+        let nameSegment = try encodedPathSegment(name)
+        let json = try await getJSON("/api/v1/ai-usage/components/\(ecosystemSegment)/\(nameSegment)/locations")
         if let arr = json as? [String] { return arr }
         let rows = ((json as? [String: Any])?["locations"] as? [Any]) ?? (json as? [Any]) ?? []
         return rows.compactMap { ($0 as? String) ?? ($0 as? [String: Any])?["path"] as? String }
     }
 
     func aiComponentHistory(ecosystem: String, name: String) async throws -> [ConfidencePoint] {
-        let json = try await getJSON("/api/v1/ai-usage/components/\(ecosystem)/\(name)/history")
+        let ecosystemSegment = try encodedPathSegment(ecosystem)
+        let nameSegment = try encodedPathSegment(name)
+        let json = try await getJSON("/api/v1/ai-usage/components/\(ecosystemSegment)/\(nameSegment)/history")
         let rows = (json as? [[String: Any]]) ?? ((json as? [String: Any])?["history"] as? [[String: Any]]) ?? []
         return rows.compactMap { r in
             guard let ts = DCDates.parse(r["timestamp"] ?? r["captured_at"]) else { return nil }
@@ -540,7 +573,11 @@ actor GatewayClient {
     }
 
     func confidencePolicy(source: String = "merged") async throws -> String {
-        let data = try await request("GET", "/api/v1/ai-usage/confidence/policy?source=\(source)")
+        let data = try await request(
+            "GET",
+            "/api/v1/ai-usage/confidence/policy",
+            queryItems: [URLQueryItem(name: "source", value: source)]
+        )
         return String(data: data, encoding: .utf8) ?? ""
     }
 

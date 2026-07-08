@@ -180,7 +180,10 @@ enum ScannerProbe {
             guard !line.isEmpty, !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { continue }
             let name = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
             // A name with an empty value doesn't count as set.
-            if !String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces).isEmpty {
+            let value = String(line[line.index(after: eq)...])
+                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if !value.isEmpty {
                 names.insert(name)
             }
         }

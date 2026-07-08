@@ -47,6 +47,14 @@ struct LogsView: View {
     private static let eventTypeOptions = ["all", "verdict", "judge", "lifecycle", "error", "diagnostic",
                                            "scan", "scan_finding", "activity", "audit", "hook", "egress",
                                            "skill", "mcp", "plugin"]
+    private static let humanMessageExpressions: [NSRegularExpression] = [
+        #"^\s*[-–—]?\s*\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s+"#,
+        #"<redacted(?:\s+[^>]*)?>"#,
+        #"\b(?:call_id|session|run_id|audit_id|content_hash|payload_hmac|sha(?:256)?|len|body_bytes|request_bytes|response_bytes)=[^\s]+"#,
+        #"\b(?:sha|a)=[A-Fa-f0-9]{8,}>"#,
+        #"\s+(?:cause|msg)=\s*$"#,
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
+    private static let whitespaceExpression = try? NSRegularExpression(pattern: #"\s+"#)
 
     private func applyFilter() {
         let query = search.lowercased()
@@ -298,21 +306,15 @@ struct LogsView: View {
     }
 
     private func humanMessage(_ source: String) -> String {
-        let patterns = [
-            #"^\s*[-–—]?\s*\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s+"#,
-            #"<redacted(?:\s+[^>]*)?>"#,
-            #"\b(?:call_id|session|run_id|audit_id|content_hash|payload_hmac|sha(?:256)?|len|body_bytes|request_bytes|response_bytes)=[^\s]+"#,
-            #"\b(?:sha|a)=[A-Fa-f0-9]{8,}>"#,
-            #"\s+(?:cause|msg)=\s*$"#,
-        ]
         let range = { (value: String) in NSRange(value.startIndex..., in: value) }
         var result = source
-        for pattern in patterns {
-            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+        for expression in Self.humanMessageExpressions {
             result = expression.stringByReplacingMatches(in: result, range: range(result), withTemplate: "")
         }
-        result = result.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let expression = Self.whitespaceExpression {
+            result = expression.stringByReplacingMatches(in: result, range: range(result), withTemplate: " ")
+        }
+        result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         return result
     }
 

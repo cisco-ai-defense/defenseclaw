@@ -39,6 +39,9 @@ struct DefenseClawConfig: Sendable {
     /// Non-empty when guardrail.connectors exists but failed to parse — the
     /// TUI's roster-degraded error notice.
     var rosterError = ""
+    /// Last config read failure. The last-good snapshot remains active while
+    /// this is non-empty so a transient filesystem error cannot wipe tokens.
+    var loadError = ""
     var guardrailEnabled = false
     var guardrailMode: String?
     var guardrailPort: Int?
@@ -70,8 +73,16 @@ struct DefenseClawConfig: Sendable {
         var lastStatus: String
     }
 
-    var baseURL: URL {
-        URL(string: "http://\(gatewayHost):\(gatewayPort)")!
+    var baseURL: URL? {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = gatewayHost
+        components.port = gatewayPort
+        // URLComponents brackets IPv6 hosts correctly. Invalid configured
+        // hosts stay on the loopback fallback and are reported by health.
+        // Invalid operator-controlled values become nil and are rejected by
+        // GatewayClient before any token-bearing request is constructed.
+        return components.url
     }
 }
 
@@ -212,8 +223,29 @@ enum MiniYAML {
     }
 
     private static func unquote(_ s: String) -> String {
-        var t = s
-        if let hash = t.range(of: " #") { t = String(t[..<hash.lowerBound]) } // trailing comment
+        var t = ""
+        var inSingle = false
+        var inDouble = false
+        var escaped = false
+        for character in s {
+            if escaped {
+                t.append(character)
+                escaped = false
+                continue
+            }
+            if character == "\\" && inDouble {
+                t.append(character)
+                escaped = true
+                continue
+            }
+            if character == "'" && !inDouble { inSingle.toggle() }
+            if character == "\"" && !inSingle { inDouble.toggle() }
+            if character == "#" && !inSingle && !inDouble,
+               t.last?.isWhitespace == true {
+                break
+            }
+            t.append(character)
+        }
         t = t.trimmingCharacters(in: .whitespaces)
         if t.count >= 2, (t.hasPrefix("\"") && t.hasSuffix("\"")) || (t.hasPrefix("'") && t.hasSuffix("'")) {
             t = String(t.dropFirst().dropLast())
@@ -288,6 +320,13 @@ actor ConfigStore {
     @discardableResult
     func reload() -> DefenseClawConfig {
         guard let text = try? String(contentsOf: Self.configURL, encoding: .utf8) else {
+            // A temporary permission/read race must not wipe the last-good
+            // token and endpoint. Reset only when the config was actually
+            // removed (the normal first-run/uninstall state).
+            if FileManager.default.fileExists(atPath: Self.configURL.path) {
+                config.loadError = "config.yaml exists but could not be read as UTF-8; using the last-good configuration"
+                return config
+            }
             config = DefenseClawConfig()
             return config
         }

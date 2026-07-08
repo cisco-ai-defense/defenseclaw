@@ -272,9 +272,9 @@ private struct GeneralSettings: View {
 }
 
 private struct MonitoringSettings: View {
-    @AppStorage("pulseInterval") private var pulseInterval: Double = 5
-    @AppStorage("backgroundInterval") private var backgroundInterval: Double = 60
-    @AppStorage("backgroundMonitoring") private var backgroundMonitoring = true
+    @AppStorage(SettingsKeys.pulseInterval) private var pulseInterval: Double = 5
+    @AppStorage(SettingsKeys.backgroundInterval) private var backgroundInterval: Double = 60
+    @AppStorage(SettingsKeys.backgroundMonitoring) private var backgroundMonitoring = true
 
     var body: some View {
         Form {
@@ -324,10 +324,10 @@ private struct MonitoringSettings: View {
 }
 
 private struct NotificationSettings: View {
-    @AppStorage("notifyCritical") private var notifyCritical = true
-    @AppStorage("notifyHigh") private var notifyHigh = true
-    @AppStorage("notifyGatewayOffline") private var notifyGatewayOffline = true
-    @AppStorage("seenAlertHighWater") private var seenAlertHighWater: Double = 0
+    @AppStorage(SettingsKeys.notifyCritical) private var notifyCritical = true
+    @AppStorage(SettingsKeys.notifyHigh) private var notifyHigh = true
+    @AppStorage(SettingsKeys.notifyGatewayOffline) private var notifyGatewayOffline = true
+    @AppStorage(SettingsKeys.seenAlertHighWater) private var seenAlertHighWater: Double = 0
 
     var body: some View {
         Form {

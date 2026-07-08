@@ -21,6 +21,8 @@ import SwiftUI
 import Charts
 
 struct AlertsView: View {
+    private static let alertSeverities: [Severity] = [.critical, .high, .medium, .low]
+
     @Environment(AppState.self) private var appState
     @State private var search = ""
     @State private var severityFilter: Severity? = nil
@@ -30,9 +32,12 @@ struct AlertsView: View {
     @State private var findingDetails: [ScanFindingEvent] = []
     @State private var findingHistory: [AuditEvent] = []
 
+    private var connectorScopedAlerts: [AlertRow] {
+        appState.unackedAlerts.filter { appState.connectorFilterAllows($0.connectorName) }
+    }
+
     private var rows: [AlertRow] {
-        appState.unackedAlerts.filter { row in
-            if !appState.connectorFilterAllows(row.connectorName) { return false }
+        connectorScopedAlerts.filter { row in
             if let severityFilter, row.severity != severityFilter { return false }
             if kindFilter == "blocks" {
                 guard isBlock(row) else { return false }
@@ -175,6 +180,7 @@ struct AlertsView: View {
                 Spacer()
                 Button { selection = [] } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel("Close alert details")
             }
             KeyValueGrid(pairs: [
                 ("Target", row.target),
@@ -252,14 +258,18 @@ struct AlertsView: View {
             findingHistory = []
             return
         }
+        let selectedID = row.id
         Task {
-            findingDetails = await appState.audit.scanFindings(
+            let details = await appState.audit.scanFindings(
                 runID: row.runID.nonEmpty,
                 target: row.target.nonEmpty,
                 limit: 20
             )
-            findingHistory = await appState.audit.relatedEvents(target: row.target, limit: 10)
+            let history = await appState.audit.relatedEvents(target: row.target, limit: 10)
                 .filter { $0.id != row.id }
+            guard selectedRow?.id == selectedID else { return }
+            findingDetails = details
+            findingHistory = history
         }
     }
 
@@ -268,8 +278,8 @@ struct AlertsView: View {
         @Bindable var state = appState
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                ForEach([Severity.critical, .high, .medium, .low], id: \.self) { sev in
-                    let count = appState.unackedAlerts.filter { $0.severity == sev }.count
+                ForEach(Self.alertSeverities, id: \.self) { sev in
+                    let count = connectorScopedAlerts.filter { $0.severity == sev }.count
                     StatCard(title: sev.rawValue, value: "\(count)", tint: Cisco.severityColor(sev))
                 }
             }
@@ -278,7 +288,7 @@ struct AlertsView: View {
                 FilterChipRow(
                     "Severity",
                     options: [("All", Optional<Severity>.none)] +
-                        [Severity.critical, .high, .medium, .low].map { ($0.rawValue, Optional($0)) },
+                        Self.alertSeverities.map { ($0.rawValue, Optional($0)) },
                     selection: $severityFilter
                 )
                 Spacer()

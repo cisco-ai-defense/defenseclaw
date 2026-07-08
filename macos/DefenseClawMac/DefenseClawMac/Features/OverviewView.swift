@@ -274,6 +274,7 @@ struct OverviewView: View {
                             copyToPasteboard("defenseclaw gateway start")
                         } label: { Image(systemName: "doc.on.doc") }
                         .buttonStyle(.borderless)
+                        .accessibilityLabel("Copy gateway start command")
                     }
                 }
             }
@@ -399,7 +400,7 @@ struct OverviewView: View {
                     }
                 }
                 TableColumn("Action") { c in
-                    if c.state == "not configured" {
+                    if c.state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "not configured" {
                         let candidate = appState.detectedUnconfiguredConnectors.first { $0.name == c.name }
                         if appState.isConnectorSetupInFlight(c.name) {
                             ProgressView().controlSize(.small)
@@ -957,8 +958,8 @@ struct OverviewView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                // Rich-panel parity: first 6 rows + "+N more" (overflow vs 8).
-                ForEach(box.rows.prefix(6)) { row in
+                // Rich-panel parity: first 8 rows + "+N more".
+                ForEach(box.rows) { row in
                     HStack(spacing: 8) {
                         Text(row.badge)
                             .font(.caption2.weight(.bold).monospaced())
@@ -979,8 +980,7 @@ struct OverviewView: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
-                // TUI math: overflow counts only rows beyond the 8-cap (the
-                // hidden 7th/8th rendered rows are NOT added).
+                // TUI math: overflow counts rows beyond the rendered 8-cap.
                 if box.overflow > 0 {
                     Text("+\(box.overflow) more")
                         .font(.caption2)
@@ -1003,25 +1003,12 @@ struct OverviewView: View {
 
     // MARK: Actions
 
-    /// Same TUI-parity Findings count used by the menu bar.
-    private var findingsCount: Int {
-        appState.overviewEnforcementMetrics.findings
-    }
-
     /// Severity-bearing alert rows within the live session window (TUI's
     /// session-scoped "Active alerts"); all rows when no session start.
     private var sessionActiveAlerts: Int {
         let severityBearing = appState.unackedAlerts.filter { $0.severity > .info }
         guard let start = appState.sessionStart else { return severityBearing.count }
         return severityBearing.filter { $0.timestamp >= start }.count
-    }
-
-    private var heroHookCalls: Int {
-        appState.overviewEnforcementMetrics.hookCalls
-    }
-
-    private var heroBlocks: Int {
-        appState.overviewEnforcementMetrics.blocks
     }
 
     private func summaryItem(_ title: String, _ value: String) -> some View {
@@ -1054,6 +1041,7 @@ struct OverviewView: View {
     }
 
     private func runDoctor() {
+        guard !doctorRunning else { return }
         doctorRunning = true
         doctorOutput = ""
         Task {

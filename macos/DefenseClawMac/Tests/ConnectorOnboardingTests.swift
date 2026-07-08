@@ -23,7 +23,9 @@ struct ConnectorOnboardingTests {
         usesObserveAllForDetectedConnectors()
         scopesActionToExplicitConnectors()
         fallsBackToLegacySingleConnectorOnlyWhenDiscoveryIsEmpty()
-        print("ConnectorOnboardingTests passed")
+        parsesCommandArguments()
+        rejectsMalformedCommandArguments()
+        print("ConnectorOnboardingTests and CommandArgumentParser tests passed")
     }
 
     private static func parsesInstalledConnectorsInSupportedOrder() {
@@ -71,6 +73,35 @@ struct ConnectorOnboardingTests {
         expect(index != nil, "empty discovery emits explicit fallback connector")
         expect(index.map { arguments[$0 + 1] } == "codex", "fallback connector is preserved")
         expect(!arguments.contains("--observe-all"), "empty discovery does not emit observe-all")
+    }
+
+    private static func parsesCommandArguments() {
+        expect(
+            (try? CommandArgumentParser.parse(#""" ''"#)) == ["", ""],
+            "empty quoted command arguments"
+        )
+        expect(
+            (try? CommandArgumentParser.parse(#"hello\ world"#)) == ["hello world"],
+            "escaped command whitespace"
+        )
+        expect(
+            (try? CommandArgumentParser.parse(#"pre"mid dle"post tail"#)) == ["premid dlepost", "tail"],
+            "quoted and unquoted command token boundaries"
+        )
+    }
+
+    private static func rejectsMalformedCommandArguments() {
+        expectParseFailure(#""unclosed"#, "unclosed command quote")
+        expectParseFailure("trailing\\", "trailing command backslash")
+    }
+
+    private static func expectParseFailure(_ input: String, _ label: String) {
+        do {
+            _ = try CommandArgumentParser.parse(input)
+            expect(false, label)
+        } catch {
+            expect(true, label)
+        }
     }
 
     private static func makeArguments(

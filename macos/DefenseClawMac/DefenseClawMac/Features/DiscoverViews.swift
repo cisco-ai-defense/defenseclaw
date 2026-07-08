@@ -483,7 +483,10 @@ struct AIDiscoveryView: View {
                 discoveryTable
             }
         }
-        .inspector(isPresented: .constant(selected != nil)) {
+        .inspector(isPresented: Binding(
+            get: { selected != nil },
+            set: { if !$0 { selected = nil } }
+        )) {
             if let row = selected {
                 rowInspector(row)
                     .inspectorColumnWidth(min: 320, ideal: 400)

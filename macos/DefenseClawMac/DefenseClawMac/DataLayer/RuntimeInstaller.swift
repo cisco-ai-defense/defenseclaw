@@ -161,10 +161,10 @@ extension AppState {
         }
 
         // A ~/.local/bin/defenseclaw symlink resolving outside ~/.defenseclaw
-        // is a source-checkout (dev) install — never clobber it.
+        // or a regular file at that path is not managed by this installer.
         if let devTarget = Self.devInstallTarget(home: home) {
             runtimeInstallState = .failed(
-                "~/.local/bin/defenseclaw points at \(devTarget) — this looks like a development install. Refusing to overwrite it; remove the symlink first if you want the bundled runtime."
+                "~/.local/bin/defenseclaw is already managed at \(devTarget). Refusing to overwrite it; move or remove that path first if you want the bundled runtime."
             )
             return
         }
@@ -221,6 +221,7 @@ extension AppState {
         // dependency resolution has succeeded) ────────────────────────────
         let venvDir = home + "/.defenseclaw/.venv"
         let stagingDir = venvDir + ".staging"
+        let previousDir = venvDir + ".previous"
 
         runtimeInstallState = .running("Creating Python environment")
         let venv = await installerStep(
@@ -262,19 +263,77 @@ extension AppState {
             }
             return
         }
+        let stagedVerify = await installerStep(
+            "Verify staged DefenseClaw CLI",
+            binary: stagingDir + "/bin/defenseclaw",
+            arguments: ["--version"],
+            category: "info"
+        )
+        guard stagedVerify.succeeded,
+              UpdateChecker.parseVersion(stagedVerify.output) == payload.version
+        else {
+            try? FileManager.default.removeItem(atPath: stagingDir)
+            runtimeInstallState = .failed(
+                "Staged CLI did not report the expected version \(payload.version). An existing runtime was left untouched."
+            )
+            return
+        }
 
         runtimeInstallState = .running("Activating new environment")
-        for (title, binary, arguments) in [
-            ("Remove previous runtime environment", "/bin/rm", ["-rf", venvDir]),
-            ("Activate new runtime environment", "/bin/mv", [stagingDir, venvDir]),
-        ] {
-            let result = await installerStep(title, binary: binary, arguments: arguments)
-            guard result.succeeded else {
-                fail(result, step: title)
+        // Recover a previous interrupted swap before moving anything else.
+        if !FileManager.default.fileExists(atPath: venvDir),
+           FileManager.default.fileExists(atPath: previousDir) {
+            let recover = await installerStep(
+                "Recover previous runtime environment",
+                binary: "/bin/mv",
+                arguments: [previousDir, venvDir]
+            )
+            guard recover.succeeded else {
+                fail(recover, step: "Previous runtime recovery")
                 return
             }
         }
-
+        let clearPrevious = await installerStep(
+            "Clear stale runtime backup",
+            binary: "/bin/rm",
+            arguments: ["-rf", previousDir]
+        )
+        guard clearPrevious.succeeded else {
+            fail(clearPrevious, step: "Stale runtime backup cleanup")
+            return
+        }
+        let hadExistingVenv = FileManager.default.fileExists(atPath: venvDir)
+        if hadExistingVenv {
+            let preserve = await installerStep(
+                "Preserve previous runtime environment",
+                binary: "/bin/mv",
+                arguments: [venvDir, previousDir]
+            )
+            guard preserve.succeeded else {
+                fail(preserve, step: "Preserve previous runtime environment")
+                return
+            }
+        }
+        let activate = await installerStep(
+            "Activate new runtime environment",
+            binary: "/bin/mv",
+            arguments: [stagingDir, venvDir]
+        )
+        guard activate.succeeded else {
+            var rollbackFailure = ""
+            if hadExistingVenv {
+                let rollback = await installerStep(
+                    "Restore previous runtime environment",
+                    binary: "/bin/mv",
+                    arguments: [previousDir, venvDir]
+                )
+                if !rollback.succeeded { rollbackFailure = " Rollback also failed; see Activity." }
+            }
+            runtimeInstallState = .failed(
+                "Runtime activation failed (exit \(activate.exitCode)).\(rollbackFailure)"
+            )
+            return
+        }
         // ── Gateway binary (mirrors install_gateway, minus the ad-hoc
         // codesign: the bundled gateway already carries the release's
         // Developer ID signature when credentials are configured, or its
@@ -282,16 +341,20 @@ extension AppState {
         runtimeInstallState = .running("Installing gateway \(payload.version)")
         let binDir = home + "/.local/bin"
         let gatewayDest = binDir + "/defenseclaw-gateway"
+        let gatewayStage = gatewayDest + ".new"
         for (title, binary, arguments) in [
             ("Prepare ~/.local/bin", "/bin/mkdir", ["-p", binDir]),
-            // Unlink first so a running gateway keeps executing its old inode.
-            ("Remove previous gateway binary", "/bin/rm", ["-f", gatewayDest]),
-            ("Install gateway \(payload.version)", "/bin/cp", [payload.gatewayURL.path, gatewayDest]),
-            ("Mark gateway executable", "/bin/chmod", ["755", gatewayDest]),
+            ("Clear staged gateway binary", "/bin/rm", ["-f", gatewayStage]),
+            ("Stage gateway \(payload.version)", "/bin/cp", [payload.gatewayURL.path, gatewayStage]),
+            ("Mark staged gateway executable", "/bin/chmod", ["755", gatewayStage]),
+            // rename(2) within ~/.local/bin atomically replaces the path;
+            // a live gateway continues running the old inode.
+            ("Activate gateway \(payload.version)", "/bin/mv", ["-f", gatewayStage, gatewayDest]),
             ("Link defenseclaw CLI", "/bin/ln", ["-sfh", venvDir + "/bin/defenseclaw", binDir + "/defenseclaw"]),
         ] {
             let result = await installerStep(title, binary: binary, arguments: arguments)
             guard result.succeeded else {
+                try? FileManager.default.removeItem(atPath: gatewayStage)
                 fail(result, step: title)
                 return
             }
@@ -308,12 +371,37 @@ extension AppState {
             suggestedNextAction: "Run Initialize DefenseClaw to create the configuration."
         )
         guard verify.succeeded, let reported = UpdateChecker.parseVersion(verify.output) else {
-            fail(verify, step: "Installed CLI version check")
+            var rollbackFailure: String?
+            if hadExistingVenv {
+                rollbackFailure = await restorePreviousVenv(venvDir: venvDir, previousDir: previousDir)
+            }
+            runtimeInstallState = .failed(
+                "Installed CLI version check failed (exit \(verify.exitCode))."
+                    + (rollbackFailure.map { " Rollback failed: \($0)." } ?? "")
+            )
             return
         }
         guard reported == payload.version else {
+            var rollback: String?
+            if hadExistingVenv {
+                rollback = await restorePreviousVenv(venvDir: venvDir, previousDir: previousDir)
+            }
             runtimeInstallState = .failed("Installed CLI reports \(reported), expected \(payload.version).")
+            if let rollback {
+                runtimeInstallState = .failed("Installed CLI reports \(reported), expected \(payload.version). Rollback failed: \(rollback)")
+            }
             return
+        }
+        if hadExistingVenv {
+            let cleanup = await installerStep(
+                "Remove previous runtime backup",
+                binary: "/bin/rm",
+                arguments: ["-rf", previousDir]
+            )
+            guard cleanup.succeeded else {
+                fail(cleanup, step: "Previous runtime backup cleanup")
+                return
+            }
         }
 
         // ── Restart a live gateway so it runs the new binary (upgrade-in-
@@ -368,43 +456,78 @@ extension AppState {
             : .failed("\(step) failed (exit \(result.exitCode)). See Activity for output.")
     }
 
+    private func restorePreviousVenv(venvDir: String, previousDir: String) async -> String? {
+        let remove = await installerStep(
+            "Remove failed runtime environment",
+            binary: "/bin/rm",
+            arguments: ["-rf", venvDir]
+        )
+        guard remove.succeeded else { return "could not remove failed environment" }
+        let restore = await installerStep(
+            "Restore previous runtime environment",
+            binary: "/bin/mv",
+            arguments: [previousDir, venvDir]
+        )
+        return restore.succeeded ? nil : "could not restore previous environment"
+    }
+
     /// Fetch uv from astral-sh GitHub releases as a checksum-verified binary
     /// download — deliberately not `curl | sh` (install.sh's approach) per
     /// the no-remote-scripts policy.
     private func bootstrapUV(home: String) async -> String? {
         runtimeInstallState = .running("Downloading uv (network)")
+        let uvVersion = "0.11.28"
         let asset = "uv-aarch64-apple-darwin.tar.gz"
-        let base = "https://github.com/astral-sh/uv/releases/latest/download/"
+        // Pinned from the immutable astral-sh/uv GitHub release. Updating uv
+        // requires reviewing that release and replacing both values together.
+        let expectedSHA256 = "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232"
+        let base = "https://github.com/astral-sh/uv/releases/download/\(uvVersion)/"
         let stage = FileManager.default.temporaryDirectory.appendingPathComponent("dc-uv-bootstrap")
         try? FileManager.default.removeItem(at: stage)
         try? FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
         let tarball = stage.appendingPathComponent(asset).path
-        let shaFile = stage.appendingPathComponent(asset + ".sha256").path
 
-        for (title, target, url) in [
-            ("Download uv (astral-sh, latest)", tarball, base + asset),
-            ("Download uv checksum", shaFile, base + asset + ".sha256"),
-        ] {
-            let fetch = await installerStep(
-                title,
-                binary: "/usr/bin/curl",
-                arguments: ["-fsSL", "--proto", "=https", "--tlsv1.2", "-o", target, url]
-            )
-            guard fetch.succeeded else {
-                runtimeInstallState = fetch.cancelled
-                    ? .failed("Installation cancelled during: uv download.")
-                    : .failed("uv download failed (exit \(fetch.exitCode)). Install uv manually (brew install uv) and retry.")
-                return nil
-            }
+        let fetch = await installerStep(
+            "Download pinned uv \(uvVersion) (astral-sh)",
+            binary: "/usr/bin/curl",
+            arguments: [
+                "-fsSL", "--proto", "=https", "--tlsv1.2",
+                "--connect-timeout", "15", "--max-time", "300",
+                "--retry", "3", "--retry-connrefused",
+                "-o", tarball, base + asset,
+            ]
+        )
+        guard fetch.succeeded else {
+            runtimeInstallState = fetch.cancelled
+                ? .failed("Installation cancelled during: uv download.")
+                : .failed("uv download failed (exit \(fetch.exitCode)). Install uv manually (brew install uv) and retry.")
+            return nil
         }
 
-        guard let shaLine = try? String(contentsOfFile: shaFile, encoding: .utf8),
-              let expected = shaLine.split(separator: " ").first.map(String.init),
-              expected.count == 64,
-              let actual = RuntimePayload.sha256(of: URL(fileURLWithPath: tarball)),
-              actual == expected
+        guard let actual = RuntimePayload.sha256(of: URL(fileURLWithPath: tarball)),
+              actual == expectedSHA256
         else {
             runtimeInstallState = .failed("uv download failed checksum verification — not installing it.")
+            return nil
+        }
+
+        let list = await installerStep(
+            "Inspect uv archive",
+            binary: "/usr/bin/tar",
+            arguments: ["-tzf", tarball],
+            category: "info"
+        )
+        let archiveRoot = "uv-aarch64-apple-darwin"
+        let entriesAreSafe = list.succeeded && !list.output.split(separator: "\n").isEmpty
+            && list.output.split(separator: "\n").allSatisfy { rawEntry in
+                let entry = rawEntry.trimmingCharacters(in: .whitespacesAndNewlines)
+                let components = entry.split(separator: "/", omittingEmptySubsequences: false)
+                return !entry.hasPrefix("/")
+                    && !components.contains("..")
+                    && (entry == archiveRoot || entry.hasPrefix(archiveRoot + "/"))
+            }
+        guard entriesAreSafe else {
+            runtimeInstallState = .failed("uv archive contains an unexpected or unsafe path — not extracting it.")
             return nil
         }
 
@@ -449,15 +572,15 @@ extension AppState {
     /// no link at all.
     private static func devInstallTarget(home: String) -> String? {
         let link = home + "/.local/bin/defenseclaw"
-        guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: link) else {
-            return nil
+        if let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: link) {
+            let resolved = destination.hasPrefix("/")
+                ? destination
+                : home + "/.local/bin/" + destination
+            let standardized = (resolved as NSString).standardizingPath
+            guard FileManager.default.fileExists(atPath: standardized) else { return nil }
+            return standardized.hasPrefix(home + "/.defenseclaw/") ? nil : standardized
         }
-        let resolved = destination.hasPrefix("/")
-            ? destination
-            : home + "/.local/bin/" + destination
-        let standardized = (resolved as NSString).standardizingPath
-        guard FileManager.default.fileExists(atPath: standardized) else { return nil }
-        return standardized.hasPrefix(home + "/.defenseclaw/") ? nil : standardized
+        return FileManager.default.fileExists(atPath: link) ? link : nil
     }
 
     /// PID from ~/.defenseclaw/gateway.pid when that process is alive.

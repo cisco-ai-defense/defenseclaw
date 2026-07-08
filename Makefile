@@ -31,7 +31,7 @@ endif
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-build macos-app-test macos-app-release \
+        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -548,6 +548,9 @@ packaging-macos-bundle:
 macos-app-license-check:
 	python3 scripts/macos_license_headers.py
 
+macos-app-upstream-check:
+	python3 scripts/check-macos-upstream.py
+
 macos-app-build: macos-app-license-check
 	xcodebuild \
 	    -project macos/DefenseClawMac/DefenseClawMac.xcodeproj \
@@ -560,12 +563,15 @@ macos-app-build: macos-app-license-check
 	    CODE_SIGNING_ALLOWED=NO \
 	    build
 
-macos-app-test: macos-app-license-check
+macos-app-test:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check extensions dist-cli
 	scripts/build-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
+
+macos-app-release-verify:
+	scripts/verify-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
 
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.

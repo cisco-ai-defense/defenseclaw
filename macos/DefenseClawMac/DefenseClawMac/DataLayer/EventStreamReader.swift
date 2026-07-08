@@ -49,6 +49,8 @@ actor EventStreamReader {
     /// Scan blocks grouped by scan_id — mirrors load_gateway_scan_blocks,
     /// which reads the bounded gateway.jsonl tail (512 KiB / 2,000 lines).
     private var scanBlockMap: [String: ScanBlockEvent] = [:]
+    private var scanSummaryCounts: [String: Int] = [:]
+    private var observedFindingCounts: [String: Int] = [:]
 
     var scanBlocks: [ScanBlockEvent] {
         scanBlockMap.values.sorted { $0.timestamp > $1.timestamp }
@@ -72,6 +74,8 @@ actor EventStreamReader {
     private func refreshScanBlocksFromTail() {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
             scanBlockMap = [:]
+            scanSummaryCounts = [:]
+            observedFindingCounts = [:]
             return
         }
         defer { try? handle.close() }
@@ -82,6 +86,8 @@ actor EventStreamReader {
         try? handle.seek(toOffset: start)
         guard let data = try? handle.read(upToCount: Int(readSize)), !data.isEmpty else {
             scanBlockMap = [:]
+            scanSummaryCounts = [:]
+            observedFindingCounts = [:]
             return
         }
 
@@ -95,6 +101,8 @@ actor EventStreamReader {
         }
 
         scanBlockMap = [:]
+        scanSummaryCounts = [:]
+        observedFindingCounts = [:]
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).suffix(Self.tailLineLimit) {
             guard line.contains("\"event_type\":\"scan") || line.contains("\"event_type\": \"scan") else { continue }
             guard let lineData = line.data(using: .utf8),
@@ -124,8 +132,9 @@ actor EventStreamReader {
             // ("claudecode:PostToolUse"), not a top-level field.
             let resolved = !connector.isEmpty ? connector : ConnectorAttribution.fromTarget(block.target)
             if !resolved.isEmpty { block.connector = resolved }
-            if let total = scan["total_count"] as? Int, total > block.findingCount {
-                block.findingCount = total
+            if let total = scan["total_count"] as? Int {
+                scanSummaryCounts[scanID] = total
+                block.findingCount = max(total, observedFindingCounts[scanID] ?? 0)
             }
             scanBlockMap[scanID] = block
         } else if eventType == "scan_finding", let finding = obj["scan_finding"] as? [String: Any],
@@ -137,7 +146,11 @@ actor EventStreamReader {
                 severity: Severity.parse(obj["severity"] as? String),
                 verdict: "", findingCount: 0, findingTitles: []
             )
-            block.findingCount += 1
+            observedFindingCounts[scanID, default: 0] += 1
+            block.findingCount = max(
+                scanSummaryCounts[scanID] ?? 0,
+                observedFindingCounts[scanID] ?? 0
+            )
             let findingSeverity = Severity.parse((finding["severity"] as? String) ?? (obj["severity"] as? String))
             if findingSeverity > block.severity { block.severity = findingSeverity }
             if let title = finding["title"] as? String, block.findingTitles.count < 5 {
@@ -167,10 +180,15 @@ actor EventStreamReader {
                 offset = size > UInt64(Self.tailBudget) ? size - UInt64(Self.tailBudget) : 0
             }
             if size > offset {
+                if size - offset > UInt64(Self.tailBudget) {
+                    offset = size - UInt64(Self.tailBudget)
+                }
                 try? handle.seek(toOffset: offset)
-                if let data = try? handle.readToEnd(), !data.isEmpty {
-                    offset = size
-                    let text = String(decoding: data, as: UTF8.self)
+                let requested = Int(size - offset)
+                if let data = try? handle.read(upToCount: requested),
+                   let complete = completeLinePrefix(data), !complete.isEmpty {
+                    offset += UInt64(complete.count)
+                    let text = String(decoding: complete, as: UTF8.self)
                     for line in text.split(separator: "\n") {
                         guard let lineData = line.data(using: .utf8),
                               let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
@@ -206,6 +224,8 @@ actor EventStreamReader {
         activity = []
         egress = []
         scanBlockMap = [:]
+        scanSummaryCounts = [:]
+        observedFindingCounts = [:]
         gatewayLogOffset = 0
         watchdogLogOffset = 0
         return poll()
@@ -219,17 +239,31 @@ actor EventStreamReader {
             offset = size > UInt64(Self.tailBudget) ? size - UInt64(Self.tailBudget) : 0
         }
         guard size > offset else { return }
+        if size - offset > UInt64(Self.tailBudget) {
+            offset = size - UInt64(Self.tailBudget)
+        }
 
         try? handle.seek(toOffset: offset)
-        guard let data = try? handle.readToEnd(), !data.isEmpty else { return }
-        offset = size
+        let requested = Int(size - offset)
+        guard let data = try? handle.read(upToCount: requested),
+              let complete = completeLinePrefix(data), !complete.isEmpty
+        else { return }
+        offset += UInt64(complete.count)
 
-        let text = String(decoding: data, as: UTF8.self)
+        let text = String(decoding: complete, as: UTF8.self)
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let raw = String(line)
             guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             delta.logRows.append(plainLogRow(raw, stream: stream))
         }
+    }
+
+    /// Return only newline-terminated bytes. A writer may be midway through a
+    /// JSON/log line when the size is sampled; leaving that suffix unconsumed
+    /// makes the next poll re-read and complete it instead of dropping it.
+    private func completeLinePrefix(_ data: Data) -> Data? {
+        guard let newline = data.lastIndex(of: 0x0A) else { return nil }
+        return data.prefix(through: newline)
     }
 
     private func plainLogRow(_ line: String, stream: LogStream) -> LogRow {
@@ -312,7 +346,6 @@ actor EventStreamReader {
     private func ingest(_ obj: [String: Any], raw: String, into delta: inout StreamDelta) {
         // Gateway rows carry their kind in "event_type" (scan / scan_finding / activity).
         let rowType = (obj["event_type"] as? String) ?? (obj["type"] as? String) ?? (obj["row_type"] as? String) ?? "event"
-        ingestScanBlock(obj) // keeps the scan_id-grouped block map current
         let ts = DCDates.parse(obj["ts"] ?? obj["timestamp"] ?? obj["time"]) ?? Date()
         let severity = Severity.parse(obj["severity"] as? String)
         let parsed = parseLogFields(obj, rowType: rowType)

@@ -20,7 +20,6 @@
 import Foundation
 
 struct CommandDefinition: Identifiable, Hashable, Sendable {
-    let id: Int
     let title: String
     let binary: String
     let arguments: [String]
@@ -28,6 +27,30 @@ struct CommandDefinition: Identifiable, Hashable, Sendable {
     let category: String
     let requiresInput: Bool
     let usage: String
+
+    /// Stable command identity derived from the command itself. The legacy
+    /// numeric initializer argument is accepted for source-table parity but
+    /// cannot create duplicate SwiftUI identifiers when rows are reordered.
+    var id: String { ([binary] + arguments + [title]).joined(separator: "\u{1F}") }
+
+    init(
+        id _: Int,
+        title: String,
+        binary: String,
+        arguments: [String],
+        summary: String,
+        category: String,
+        requiresInput: Bool,
+        usage: String
+    ) {
+        self.title = title
+        self.binary = binary
+        self.arguments = arguments
+        self.summary = summary
+        self.category = category
+        self.requiresInput = requiresInput
+        self.usage = usage
+    }
 
     var isDestructive: Bool {
         let tokens = arguments.map { $0.lowercased() }
@@ -95,7 +118,7 @@ enum CommandRegistry {
         CommandDefinition(id: 36, title: "setup observability remove", binary: "defenseclaw", arguments: ["setup", "observability", "remove", "--yes"], summary: "Remove an observability destination", category: "setup", requiresInput: true, usage: "<name>"),
         CommandDefinition(id: 37, title: "setup observability test", binary: "defenseclaw", arguments: ["setup", "observability", "test"], summary: "Probe an observability destination", category: "setup", requiresInput: true, usage: "<name>"),
         CommandDefinition(id: 38, title: "setup observability migrate-splunk", binary: "defenseclaw", arguments: ["setup", "observability", "migrate-splunk", "--apply"], summary: "Migrate legacy splunk: block into audit_sinks[]", category: "setup", requiresInput: false, usage: ""),
-        CommandDefinition(id: 39, title: "setup webhook add", binary: "defenseclaw", arguments: ["setup", "webhook", "add"], summary: "Add a notifier webhook", category: "setup", requiresInput: true, usage: "<name> --type <slack|teams|pagerduty|generic>"),
+        CommandDefinition(id: 39, title: "setup webhook add", binary: "defenseclaw", arguments: ["setup", "webhook", "add"], summary: "Add a notifier webhook", category: "setup", requiresInput: true, usage: "<name> --type <slack|pagerduty|webex|generic>"),
         CommandDefinition(id: 40, title: "setup webhook list", binary: "defenseclaw", arguments: ["setup", "webhook", "list"], summary: "List notifier webhooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 41, title: "setup webhook show", binary: "defenseclaw", arguments: ["setup", "webhook", "show"], summary: "Show a notifier webhook", category: "setup", requiresInput: true, usage: "<name>"),
         CommandDefinition(id: 42, title: "setup webhook enable", binary: "defenseclaw", arguments: ["setup", "webhook", "enable"], summary: "Enable a notifier webhook", category: "setup", requiresInput: true, usage: "<name>"),
@@ -283,4 +306,59 @@ enum CommandRegistry {
         CommandDefinition(id: 224, title: "readiness", binary: "defenseclaw", arguments: ["doctor"], summary: "Run health checks that feed Setup Readiness", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 225, title: "help", binary: "defenseclaw", arguments: ["--help"], summary: "Show CLI help", category: "info", requiresInput: false, usage: ""),
     ]
+}
+
+enum CommandArgumentParser {
+    struct ParseError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    static func parse(_ input: String) throws -> [String] {
+        var result: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaped = false
+        var tokenStarted = false
+
+        for character in input {
+            if escaped {
+                current.append(character)
+                escaped = false
+                tokenStarted = true
+                continue
+            }
+            if character == "\\" && quote != "'" {
+                escaped = true
+                tokenStarted = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote { quote = nil }
+                else {
+                    current.append(character)
+                    tokenStarted = true
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                tokenStarted = true
+            } else if character.isWhitespace {
+                if tokenStarted {
+                    result.append(current)
+                    current = ""
+                    tokenStarted = false
+                }
+            } else {
+                current.append(character)
+                tokenStarted = true
+            }
+        }
+
+        if escaped { throw ParseError(message: "The final backslash does not escape a character.") }
+        if quote != nil { throw ParseError(message: "A quoted argument is not closed.") }
+        if tokenStarted { result.append(current) }
+        return result
+    }
 }

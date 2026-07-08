@@ -22,7 +22,28 @@ Use this procedure to refresh `macos/DefenseClawMac` from the standalone [`keith
 
 ## 1. Prepare the update
 
-Start from an updated `main` and create a feature branch. Clone or fetch the upstream repository outside this working tree, record the exact commit SHA, and review its changes since the SHA in [UPSTREAM.md](UPSTREAM.md).
+Start from an updated `main` and create a feature branch. Confirm the current pin and online freshness state:
+
+```bash
+python3 scripts/check-macos-upstream.py --offline
+python3 scripts/check-macos-upstream.py
+```
+
+Prepare the latest stable update with:
+
+```bash
+scripts/update-macos-app.sh
+```
+
+Pass an explicit stable release tag to reproduce or select an update:
+
+```bash
+scripts/update-macos-app.sh v1.2.0
+```
+
+The updater performs a three-way merge using the commit in [upstream.lock.toml](upstream.lock.toml) as the base, the checked-in Cisco app as `ours`, and the requested stable upstream release as `theirs`. This preserves Cisco integration while surfacing real conflicts for review. It updates the lock and this provenance record, reapplies license headers, and runs the macOS checks. If a conflict occurs, the script leaves the merge under `build/macos-upstream-sync-<tag>` and does not modify the checked-in app.
+
+Review upstream changes since the old locked SHA before accepting the generated diff.
 
 Only sync these maintained paths:
 
@@ -60,7 +81,7 @@ Any retained upstream attribution belongs in [UPSTREAM.md](UPSTREAM.md), not in 
 
 ## 3. Apply and verify license headers
 
-Update [UPSTREAM.md](UPSTREAM.md) with the new SHA, title, and import date, then run:
+The updater changes [UPSTREAM.md](UPSTREAM.md) and [upstream.lock.toml](upstream.lock.toml) together. Confirm the stable tag resolves to the recorded immutable commit, then run:
 
 ```bash
 python3 scripts/macos_license_headers.py --fix
@@ -79,9 +100,14 @@ make macos-app-test
 make extensions
 make dist-cli
 make macos-app-release
+make macos-app-release-verify
 ```
 
 Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Applications` symlink, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Confirm the zip contains the app without `RuntimePayload`, preserving the independent runtime update track. Verify both artifact names contain `-unverified` unless Developer ID signing and notarization were deliberately configured.
+
+The first-run runtime installer pins its fallback `uv` download by version and SHA-256 in `RuntimeInstaller.swift`. When updating that pin, use an immutable `astral-sh/uv` release, copy the Apple Silicon archive digest from the release asset, and verify the archive locally before changing both constants together.
+
+Until Apple credentials are available, releases intentionally publish the clearly named `-unverified` artifacts. When enabling verified distribution, configure all five release-environment secrets together (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`), then set the release-environment variable `MACOS_REQUIRE_NOTARIZATION=true`. Partial credentials fail the build, and the variable prevents any future release from falling back to unverified artifacts.
 
 ## 5. Review before merging
 
@@ -89,4 +115,6 @@ Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Appli
 - Confirm no credentials, signing certificates, developer-team IDs, generated build products, or local user paths were imported.
 - Confirm every GitHub Action is pinned to an immutable commit SHA.
 - Confirm the release job downloads both the DMG and zip before regenerating `checksums.txt` and publishing the atomic GitHub release.
+- Confirm `python3 scripts/check-macos-upstream.py` succeeds online. The release preflight fails before signing if the pin is stale.
+- Confirm the scheduled `macOS Upstream Freshness` workflow is enabled. It opens one update issue when the latest stable standalone release advances.
 - Record exact commands and observed results in the pull request test plan.

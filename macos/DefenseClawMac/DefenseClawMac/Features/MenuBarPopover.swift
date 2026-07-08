@@ -50,7 +50,7 @@ struct MenuBarPopover: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("DefenseClaw").font(.headline)
                 Text(appState.gatewayReachable
-                     ? "Gateway up · \(uptimeText) · \(appState.health.connectors.count) connector(s)"
+                     ? "Gateway up · \(uptimeText) · \(displayedConnectors.count) connector(s)"
                      : "Gateway offline")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -69,7 +69,7 @@ struct MenuBarPopover: View {
 
     @ViewBuilder
     private var connectorLines: some View {
-        ForEach(appState.health.connectors) { c in
+        ForEach(displayedConnectors) { c in
             HStack(spacing: 6) {
                 Circle().fill(Cisco.stateColor(raw: c.state)).frame(width: 6, height: 6)
                 Text(c.name).font(.caption.weight(.medium))
@@ -190,8 +190,30 @@ struct MenuBarPopover: View {
     }
 
     private func openMainWindow() {
+        AppDelegate.recreateMainWindow = { openWindow(id: "main") }
         AppDelegate.openMainWindow()
-        openWindow(id: "main")
+    }
+
+    private var displayedConnectors: [ConnectorHealth] {
+        if !appState.health.connectors.isEmpty { return appState.health.connectors }
+        guard let primary = appState.health.primaryConnector else { return [] }
+        let mode = appState.config.connectorModes.first {
+            $0.key.caseInsensitiveCompare(primary.name) == .orderedSame
+        }?.value ?? primary.toolInspectionMode.nonEmpty ?? appState.config.guardrailMode ?? "observe"
+        let rulePack = appState.config.connectorRulePacks.first {
+            $0.key.caseInsensitiveCompare(primary.name) == .orderedSame
+        }?.value ?? "default"
+        return [ConnectorHealth(
+            name: primary.name,
+            mode: mode,
+            rulePack: rulePack,
+            lastActivity: primary.since,
+            calls: primary.requests,
+            blocks: primary.toolBlocks + primary.subprocessBlocks,
+            alerts: 0,
+            state: primary.state,
+            since: primary.since
+        )]
     }
 
     @ViewBuilder

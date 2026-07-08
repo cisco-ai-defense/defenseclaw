@@ -54,7 +54,7 @@ enum ConnectorOnboarding {
     ) -> [String] {
         var arguments = ["init", "--non-interactive", "--yes", "--json-summary"]
         if detectedConnectors.isEmpty {
-            arguments += ["--connector", normalizedConnector(fallbackConnector), "--profile", profile]
+            arguments += ["--connector", normalizedConnector(fallbackConnector)]
         } else {
             arguments.append("--observe-all")
             if profile == "action" {
@@ -66,6 +66,7 @@ enum ConnectorOnboarding {
                 }
             }
         }
+        arguments += ["--profile", profile]
         arguments += [
             "--scanner-mode", scannerMode,
             llmJudge ? "--with-judge" : "--no-judge",

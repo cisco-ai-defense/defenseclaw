@@ -28,6 +28,8 @@ struct ActivityView: View {
     @State private var mutations: [ActivityMutation] = []
     @State private var search = ""
     @State private var selectedMutation: ActivityMutation?
+    @State private var mutationLoadTask: Task<Void, Never>?
+    @State private var mutationLoadGeneration = 0
 
     private var commandEntries: [CommandActivityEntry] {
         appState.activity.entries.filter { entry in
@@ -103,6 +105,7 @@ struct ActivityView: View {
         .task { loadMutations() }
         .task(id: appState.health.fetchedAt) { loadMutations() }
         .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in loadMutations() }
+        .onDisappear { mutationLoadTask?.cancel() }
     }
 
     @ViewBuilder
@@ -169,7 +172,7 @@ struct ActivityView: View {
                     Text(mutation.targetType.isEmpty ? mutation.targetID : "\(mutation.targetType)/\(mutation.targetID)")
                         .font(.caption).lineLimit(1)
                 }
-                TableColumn("From to To") { mutation in
+                TableColumn("Version Change") { mutation in
                     Text(mutation.versionFrom.isEmpty && mutation.versionTo.isEmpty ? "—" : "\(mutation.versionFrom) to \(mutation.versionTo)")
                         .font(.caption2.monospaced()).foregroundStyle(.secondary)
                 }
@@ -208,6 +211,7 @@ struct ActivityView: View {
                 }
                 Button { appState.activity.selectedID = nil } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel("Close command details")
             }
             KeyValueGrid(pairs: [
                 ("Status", entry.statusLabel),
@@ -230,6 +234,7 @@ struct ActivityView: View {
                 } label: { Image(systemName: "doc.on.doc") }
                 .buttonStyle(.borderless)
                 .help("Copy Output")
+                .accessibilityLabel("Copy command output")
             }
             ScrollView {
                 Text(entry.output.isEmpty ? (entry.status == .running ? "Waiting for output..." : "No output") : entry.output)
@@ -249,6 +254,7 @@ struct ActivityView: View {
                 Spacer()
                 Button { selectedMutation = nil } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel("Close mutation details")
             }
             KeyValueGrid(pairs: [
                 ("Actor", mutation.actor),
@@ -263,8 +269,12 @@ struct ActivityView: View {
     }
 
     private func loadMutations() {
-        Task {
+        mutationLoadTask?.cancel()
+        mutationLoadGeneration += 1
+        let generation = mutationLoadGeneration
+        mutationLoadTask = Task {
             let fromDB = await appState.audit.activityEvents(limit: 500)
+            guard !Task.isCancelled else { return }
             let fromStream = await appState.stream.activity
             var seen = Set<String>()
             var merged: [ActivityMutation] = []
@@ -272,6 +282,7 @@ struct ActivityView: View {
                 let key = "\(mutation.timestamp.timeIntervalSince1970)-\(mutation.action)-\(mutation.targetID)"
                 if seen.insert(key).inserted { merged.append(mutation) }
             }
+            guard !Task.isCancelled, generation == mutationLoadGeneration else { return }
             if merged.map(\.id) != mutations.map(\.id) { mutations = merged }
         }
     }

@@ -22,7 +22,7 @@ struct CommandPaletteView: View {
 
     @State private var search = ""
     @State private var category = "all"
-    @State private var selectedID: Int? = CommandRegistry.all.first?.id
+    @State private var selectedID: String? = CommandRegistry.all.first?.id
     @State private var extraArguments = ""
     @State private var output = ""
     @State private var exitCode: Int32?
@@ -51,7 +51,7 @@ struct CommandPaletteView: View {
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 8) {
-                TextField("Search 226 commands", text: $search)
+                TextField("Search \(CommandRegistry.sourceCount) commands", text: $search)
                     .textFieldStyle(.roundedBorder)
                     .padding(.horizontal, 10)
                     .padding(.top, 10)
@@ -254,51 +254,5 @@ struct CommandPaletteView: View {
             exitCode = result.exitCode
             running = false
         }
-    }
-}
-
-private enum CommandArgumentParser {
-    struct ParseError: LocalizedError {
-        let message: String
-        var errorDescription: String? { message }
-    }
-
-    static func parse(_ input: String) throws -> [String] {
-        var result: [String] = []
-        var current = ""
-        var quote: Character?
-        var escaped = false
-
-        for character in input {
-            if escaped {
-                current.append(character)
-                escaped = false
-                continue
-            }
-            if character == "\\" && quote != "'" {
-                escaped = true
-                continue
-            }
-            if let activeQuote = quote {
-                if character == activeQuote { quote = nil }
-                else { current.append(character) }
-                continue
-            }
-            if character == "'" || character == "\"" {
-                quote = character
-            } else if character.isWhitespace {
-                if !current.isEmpty {
-                    result.append(current)
-                    current = ""
-                }
-            } else {
-                current.append(character)
-            }
-        }
-
-        if escaped { throw ParseError(message: "The final backslash does not escape a character.") }
-        if quote != nil { throw ParseError(message: "A quoted argument is not closed.") }
-        if !current.isEmpty { result.append(current) }
-        return result
     }
 }

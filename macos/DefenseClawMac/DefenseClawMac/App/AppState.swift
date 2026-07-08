@@ -76,6 +76,16 @@ enum AlertPanelRequest: Equatable {
     case blocks
 }
 
+enum SettingsKeys {
+    static let pulseInterval = "pulseInterval"
+    static let backgroundInterval = "backgroundInterval"
+    static let backgroundMonitoring = "backgroundMonitoring"
+    static let notifyCritical = "notifyCritical"
+    static let notifyHigh = "notifyHigh"
+    static let notifyGatewayOffline = "notifyGatewayOffline"
+    static let seenAlertHighWater = "seenAlertHighWater"
+}
+
 struct LogPanelRequest: Equatable {
     var stream: LogStream = .gateway
     var preset: LogPreset
@@ -128,6 +138,17 @@ final class AppState {
     var lastCheckFailed = false
     var appUpdateCheckFailed = false
     var runtimeUpdateCheckFailed = false
+    @ObservationIgnored private var alertRefreshInProgress = false
+
+    var updateOperationInProgress: Bool {
+        func busy(_ state: UpgradeState) -> Bool {
+            switch state {
+            case .checking, .downloading, .installing: true
+            default: false
+            }
+        }
+        return busy(upgradeState) || busy(runtimeUpgradeState) || runtimeInstallState.isRunning
+    }
 
     // Pulse state
     var health: HealthSnapshot = HealthSnapshot()
@@ -200,12 +221,12 @@ final class AppState {
     var commandPalettePresented = false
 
     // Settings (mirrored via @AppStorage in views; defaults here)
-    @ObservationIgnored @AppStorage("pulseInterval") var pulseInterval: Double = 5
-    @ObservationIgnored @AppStorage("backgroundInterval") var backgroundInterval: Double = 60
-    @ObservationIgnored @AppStorage("notifyCritical") var notifyCritical = true
-    @ObservationIgnored @AppStorage("notifyHigh") var notifyHigh = true
-    @ObservationIgnored @AppStorage("notifyGatewayOffline") var notifyGatewayOffline = true
-    @ObservationIgnored @AppStorage("seenAlertHighWater") var seenAlertHighWater: Double = 0
+    @ObservationIgnored @AppStorage(SettingsKeys.pulseInterval) var pulseInterval: Double = 5
+    @ObservationIgnored @AppStorage(SettingsKeys.backgroundInterval) var backgroundInterval: Double = 60
+    @ObservationIgnored @AppStorage(SettingsKeys.notifyCritical) var notifyCritical = true
+    @ObservationIgnored @AppStorage(SettingsKeys.notifyHigh) var notifyHigh = true
+    @ObservationIgnored @AppStorage(SettingsKeys.notifyGatewayOffline) var notifyGatewayOffline = true
+    @ObservationIgnored @AppStorage(SettingsKeys.seenAlertHighWater) var seenAlertHighWater: Double = 0
 
     private var pulseTask: Task<Void, Never>?
     private var wasReachable: Bool?
@@ -284,10 +305,10 @@ final class AppState {
             connectorStatsAllTimeCache = await audit.connectorStatsAllTime()
             for i in snap.connectors.indices {
                 let name = snap.connectors[i].name
-                snap.connectors[i].mode = config.connectorModes[name]
+                snap.connectors[i].mode = connectorValue(config.connectorModes, for: name)
                     ?? config.guardrailMode ?? "observe"
-                snap.connectors[i].rulePack = config.connectorRulePacks[name] ?? "default"
-                if let s = stats[name] {
+                snap.connectors[i].rulePack = connectorValue(config.connectorRulePacks, for: name) ?? "default"
+                if let s = stats.first(where: { $0.key.caseInsensitiveCompare(name) == .orderedSame })?.value {
                     if snap.connectors[i].calls == 0 { snap.connectors[i].calls = s.hookCalls }
                     if snap.connectors[i].blocks == 0 { snap.connectors[i].blocks = s.blocks }
                     snap.connectors[i].alerts = s.alerts
@@ -354,6 +375,9 @@ final class AppState {
     }
 
     func refreshAlerts() async {
+        guard !alertRefreshInProgress else { return }
+        alertRefreshInProgress = true
+        defer { alertRefreshInProgress = false }
         // Parity with the TUI's flat_rows: audit alert queue (severity-bearing
         // rows from list_alerts) + one row per scan block grouped by scan_id
         // from gateway.jsonl + egress rows. Nested findings stay inside their
@@ -366,13 +390,19 @@ final class AppState {
         // the last 300s (passthrough+looks_like_llm, or the shape branch).
         let bypassCutoff = Date().addingTimeInterval(-300)
         silentBypassCount = egress.filter {
-            $0.timestampParsed && $0.timestamp >= bypassCutoff && $0.decision == "allow"
-                && (($0.branch == "passthrough" && $0.looksLikeLLM) || $0.branch == "shape")
+            let decision = $0.decision.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let branch = $0.branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return $0.timestampParsed && $0.timestamp >= bypassCutoff
+                && (decision == "allow" || decision == "allowed")
+                && ((branch == "passthrough" && $0.looksLikeLLM) || branch == "shape")
         }.count
 
         var rows: [AlertRow] = queue.map { .audit($0) }
         rows += blocks.map { .scan($0) }
-        rows += egress.suffix(100).filter { $0.decision.lowercased() != "allowed" || $0.looksLikeLLM }.map { .egress($0) }
+        rows += egress.suffix(100).filter {
+            let decision = $0.decision.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return (decision != "allow" && decision != "allowed") || $0.looksLikeLLM
+        }.map { .egress($0) }
         rows.sort { $0.timestamp > $1.timestamp }
 
         let fresh = rows.filter { !dismissedIDs.contains($0.id) }
@@ -419,6 +449,7 @@ final class AppState {
         binary: String = "defenseclaw",
         arguments: [String],
         standardInput: String? = nil,
+        environment: [String: String] = [:],
         category: String = "other",
         origin: String,
         successEffects: [String] = [],
@@ -431,6 +462,7 @@ final class AppState {
             binary: binary,
             arguments: arguments,
             standardInput: standardInput,
+            environment: environment,
             category: category,
             origin: origin,
             successEffects: successEffects,
@@ -523,13 +555,17 @@ final class AppState {
 
     /// `defenseclaw alerts dismiss --severity <S|all>` — same DB semantics as the TUI.
     func dismissViaCLI(severity: Severity?) async {
-        _ = await runCommand(
+        ackError = nil
+        let result = await runCommand(
             title: "Dismiss alerts",
             arguments: ["alerts", "dismiss", "--severity", severity?.rawValue ?? "all"],
             category: "alerts",
             origin: "Alerts",
             successEffects: ["Alert queue updated"]
         )
+        if !result.succeeded {
+            ackError = "alerts dismiss \(severity?.rawValue ?? "all") failed (exit \(result.exitCode))"
+        }
         await refreshAlerts()
     }
 
@@ -575,6 +611,7 @@ final class AppState {
     /// Check GitHub for newer releases of BOTH the Mac app and the
     /// DefenseClaw runtime; re-checked every 6h by the pulse.
     func checkForUpdates(force: Bool = false) async {
+        guard !updateOperationInProgress else { return }
         guard force || Date().timeIntervalSince1970 - lastUpdateCheckTime > 6 * 3600 else { return }
         let now = Date().timeIntervalSince1970
         lastUpdateCheckTime = now
@@ -589,6 +626,7 @@ final class AppState {
     /// Check only this macOS app. Used by Settings when the user wants to keep
     /// the DefenseClaw runtime untouched.
     func checkForMacAppUpdate(force: Bool = false) async {
+        guard !updateOperationInProgress else { return }
         guard force || Date().timeIntervalSince1970 - lastMacAppUpdateCheckTime > 6 * 3600 else { return }
         lastMacAppUpdateCheckTime = Date().timeIntervalSince1970
 
@@ -598,6 +636,7 @@ final class AppState {
 
     /// Check only the underlying DefenseClaw runtime.
     func checkForRuntimeUpdate(force: Bool = false) async {
+        guard !updateOperationInProgress else { return }
         // Always refresh the local version. Only the network release lookup is
         // subject to the six-hour throttle.
         await refreshInstalledRuntimeVersion()
@@ -744,7 +783,7 @@ final class AppState {
 
     private func runRuntimeUpgradeIfAvailable(refreshAfterSuccess: Bool = true) async -> Bool {
         switch runtimeUpgradeState {
-        case .downloading, .installing:
+        case .checking, .downloading, .installing:
             return false
         default:
             break
@@ -756,7 +795,7 @@ final class AppState {
         runtimeUpgradeState = .installing
         runtimeUpgradeLogTail = ""
         let result = await cli.run(arguments: ["upgrade", "--yes"]) { line in
-            Task { @MainActor in
+            await MainActor.run {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty { self.runtimeUpgradeLogTail = trimmed }
             }
@@ -807,7 +846,7 @@ final class AppState {
         let connStates = health.connectors.map { $0.state.lowercased() }
         let up = connStates.filter { running.contains($0) }.count
         let roster = config.connectors
-        let disabledN = roster.filter { config.connectorDisabled.contains($0.lowercased()) }.count
+        let disabledN = roster.filter { connectorIsDisabled($0) }.count
         let rosterTotal = roster.count
         let enabledTotal = max(rosterTotal - disabledN, 0)
         let multiConnector = rosterTotal > 1
@@ -957,7 +996,12 @@ final class AppState {
         let target = ConfigStore.dataDirectory.appendingPathComponent("last-run.log")
         do {
             try (header + entry.output + "\n").write(to: target, atomically: true, encoding: .utf8)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+            do {
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+            } catch {
+                try? FileManager.default.removeItem(at: target)
+                throw error
+            }
             notify(title: "DefenseClaw", body: "Wrote last-run.log → \(target.path)", id: "export-\(Date().timeIntervalSince1970)")
         } catch {
             notify(title: "DefenseClaw", body: "Save failed: \(error.localizedDescription)", id: "export-\(Date().timeIntervalSince1970)")
@@ -1092,6 +1136,9 @@ final class AppState {
         }
         if !config.rosterError.isEmpty {
             notices.append(.init(level: .error, message: "Connector roster degraded: \(config.rosterError) - showing a reduced view; check your connector config"))
+        }
+        if !config.loadError.isEmpty {
+            notices.append(.init(level: .error, message: config.loadError))
         }
         let unmanaged = detectedUnconfiguredConnectors
         if !unmanaged.isEmpty {
@@ -1306,7 +1353,7 @@ final class AppState {
             }
             // connectorDisabled stores the raw roster key — match it
             // case-insensitively like every other name comparison here.
-            let disabled = config.connectorDisabled.contains { $0.lowercased() == lower }
+            let disabled = connectorIsDisabled(name)
             if var row = health.connectors.first(where: { $0.name.lowercased() == lower }) {
                 if disabled { row.state = "disabled" }
                 return row
@@ -1324,8 +1371,8 @@ final class AppState {
                 if blocks == 0 { blocks = stats?.blocks ?? 0 }
                 return ConnectorHealth(
                     name: name,
-                    mode: config.connectorModes[name]?.nonEmpty ?? config.guardrailMode ?? "observe",
-                    rulePack: config.connectorRulePacks[name]?.nonEmpty ?? "default",
+                    mode: connectorValue(config.connectorModes, for: name)?.nonEmpty ?? config.guardrailMode ?? "observe",
+                    rulePack: connectorValue(config.connectorRulePacks, for: name)?.nonEmpty ?? "default",
                     lastActivity: stats?.lastActivity,
                     calls: calls,
                     blocks: blocks,
@@ -1336,8 +1383,8 @@ final class AppState {
             }
             return ConnectorHealth(
                 name: name,
-                mode: config.connectorModes[name]?.nonEmpty ?? config.guardrailMode ?? "observe",
-                rulePack: config.connectorRulePacks[name]?.nonEmpty ?? "default",
+                mode: connectorValue(config.connectorModes, for: name)?.nonEmpty ?? config.guardrailMode ?? "observe",
+                rulePack: connectorValue(config.connectorRulePacks, for: name)?.nonEmpty ?? "default",
                 lastActivity: stats?.lastActivity,
                 calls: stats?.hookCalls ?? 0,
                 blocks: stats?.blocks ?? 0,
@@ -1405,13 +1452,13 @@ final class AppState {
     /// roster row, then the global posture rows tagged "(global)".
     private func connectorConfigurationRows(_ name: String) -> [ConfigurationRow] {
         let row = health.connectors.first { $0.name.lowercased() == name.lowercased() }
-        let mode = row?.mode.nonEmpty ?? config.connectorModes[name]?.nonEmpty ?? "?"
-        let rulePack = row?.rulePack.nonEmpty ?? config.connectorRulePacks[name]?.nonEmpty ?? "default"
+        let mode = row?.mode.nonEmpty ?? connectorValue(config.connectorModes, for: name)?.nonEmpty ?? "?"
+        let rulePack = row?.rulePack.nonEmpty ?? connectorValue(config.connectorRulePacks, for: name)?.nonEmpty ?? "default"
         let status = row?.state.nonEmpty ?? "unknown"
         let lastActivity = row?.lastActivity.map { DCDates.relative($0) } ?? "none"
         // Per-connector kill switch (guardrail.connectors.<name>.enabled:
         // false) outranks the global flag, exactly like connector_is_disabled.
-        let guardrail = (config.connectorDisabled.contains(name.lowercased()) || !config.guardrailEnabled)
+        let guardrail = (connectorIsDisabled(name) || !config.guardrailEnabled)
             ? "disabled" : "enabled"
         let redaction = config.redactionEnabled ? "ON (global redacted)" : "OFF (global RAW)"
         let approval = config.hiltEnabled ? "ON (global min \(config.hiltMinSeverity))" : "OFF (global)"
@@ -1519,8 +1566,8 @@ final class AppState {
     /// would fabricate "observe · default" where the TUI hides the row).
     var connectorPolicyLabel: String {
         guard !connectorFilter.isEmpty else { return "" }
-        let mode = config.connectorModes[connectorFilter]?.nonEmpty ?? ""
-        let pack = config.connectorRulePacks[connectorFilter]?.nonEmpty ?? ""
+        let mode = connectorValue(config.connectorModes, for: connectorFilter)?.nonEmpty ?? ""
+        let pack = connectorValue(config.connectorRulePacks, for: connectorFilter)?.nonEmpty ?? ""
         return [mode, pack].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
@@ -1627,6 +1674,14 @@ final class AppState {
         } catch {
             scannerFixError = "\(status.name): \(error.localizedDescription)"
         }
+    }
+
+    private func connectorValue(_ values: [String: String], for name: String) -> String? {
+        values.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
+    }
+
+    private func connectorIsDisabled(_ name: String) -> Bool {
+        config.connectorDisabled.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
     }
 
     private func notify(title: String, body: String, id: String) {

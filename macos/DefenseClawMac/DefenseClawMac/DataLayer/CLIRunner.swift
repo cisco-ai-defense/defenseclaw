@@ -131,10 +131,17 @@ actor CLIRunner {
     /// Runs `defenseclaw <args>`, streaming combined output lines to `onLine`.
     func run(
         arguments: [String],
+        environment: [String: String] = [:],
         runID: UUID? = nil,
-        onLine: (@Sendable (String) -> Void)? = nil
+        onLine: (@Sendable (String) async -> Void)? = nil
     ) async -> CLIResult {
-        await run(binary: "defenseclaw", arguments: arguments, runID: runID, onLine: onLine)
+        await run(
+            binary: "defenseclaw",
+            arguments: arguments,
+            environment: environment,
+            runID: runID,
+            onLine: onLine
+        )
     }
 
     /// Runs a DefenseClaw executable with optional stdin. `standardInput` is
@@ -144,8 +151,9 @@ actor CLIRunner {
         binary binaryName: String,
         arguments: [String],
         standardInput: String? = nil,
+        environment: [String: String] = [:],
         runID: UUID? = nil,
-        onLine: (@Sendable (String) -> Void)? = nil
+        onLine: (@Sendable (String) async -> Void)? = nil
     ) async -> CLIResult {
         guard let binary = locateBinary(named: binaryName) else {
             let setting = binaryName == "defenseclaw" ? " Set its path in Settings ▸ Connection." : ""
@@ -156,6 +164,9 @@ actor CLIRunner {
         proc.arguments = arguments
         var env = Self.subprocessEnvironment()
         env["NO_COLOR"] = "1"
+        for (key, value) in environment where !key.isEmpty {
+            env[key] = value
+        }
         proc.environment = env
 
         let pipe = Pipe()
@@ -180,7 +191,7 @@ actor CLIRunner {
         do {
             for try await line in pipe.fileHandleForReading.bytes.lines {
                 collected += line + "\n"
-                onLine?(line)
+                await onLine?(line)
             }
         } catch {
             collected += "\n[output stream error: \(error.localizedDescription)]\n"
@@ -209,12 +220,14 @@ actor CLIRunner {
         for line in result.output.split(separator: "\n").map(String.init) {
             let lower = line.lowercased()
             let outcome: DoctorCheck.Result
-            if lower.contains("pass") || lower.contains("✓") || lower.contains("ok") {
-                outcome = .pass
+            if lower.contains("fail") || lower.contains("✗") || lower.contains("error") {
+                outcome = .fail
             } else if lower.contains("warn") || lower.contains("⚠") {
                 outcome = .warn
-            } else if lower.contains("fail") || lower.contains("✗") || lower.contains("error") {
-                outcome = .fail
+            } else if lower.contains("pass") || lower.contains("✓")
+                        || lower.hasPrefix("ok ") || lower.hasSuffix(" ok")
+                        || lower.contains("[ok]") {
+                outcome = .pass
             } else {
                 continue
             }

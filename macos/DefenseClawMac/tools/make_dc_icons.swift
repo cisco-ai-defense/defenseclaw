@@ -23,7 +23,12 @@ import AppKit
 import CoreGraphics
 
 let outDir = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
-try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+do {
+    try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+} catch {
+    fputs("failed to create icon output directory \(outDir.path): \(error)\n", stderr)
+    exit(1)
+}
 
 // Map a unit-space (y-down) point into a CG rect (y-up).
 func P(_ x: CGFloat, _ y: CGFloat, _ r: CGRect) -> CGPoint {
@@ -57,9 +62,11 @@ func makeContext(_ size: Int) -> CGContext {
               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
 }
 
-func savePNG(_ ctx: CGContext, _ name: String) {
-    let rep = NSBitmapImageRep(cgImage: ctx.makeImage()!)
-    try! rep.representation(using: .png, properties: [:])!.write(to: outDir.appendingPathComponent(name))
+func savePNG(_ ctx: CGContext, _ name: String) throws {
+    guard let image = ctx.makeImage(),
+          let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+    else { throw CocoaError(.fileWriteUnknown) }
+    try data.write(to: outDir.appendingPathComponent(name), options: .atomic)
     print("wrote \(name)")
 }
 
@@ -137,8 +144,13 @@ func drawAppIcon(_ size: Int) -> CGContext {
     return ctx
 }
 
-for size in [16, 32, 64, 128, 256, 512, 1024] {
-    savePNG(drawAppIcon(size), "icon_\(size).png")
+do {
+    for size in [16, 32, 64, 128, 256, 512, 1024] {
+        try savePNG(drawAppIcon(size), "icon_\(size).png")
+    }
+} catch {
+    fputs("failed to write app icon: \(error)\n", stderr)
+    exit(1)
 }
 
 // MARK: - Menu bar templates (black + alpha; system handles light/dark)
@@ -194,9 +206,14 @@ func drawMenuIcon(_ variant: MenuVariant, _ size: Int) -> CGContext {
     return ctx
 }
 
-for variant: MenuVariant in [.outline, .fill, .half, .slash] {
-    savePNG(drawMenuIcon(variant, 18), "\(variant.rawValue)_18.png")
-    savePNG(drawMenuIcon(variant, 36), "\(variant.rawValue)_36.png")
+do {
+    for variant: MenuVariant in [.outline, .fill, .half, .slash] {
+        try savePNG(drawMenuIcon(variant, 18), "\(variant.rawValue)_18.png")
+        try savePNG(drawMenuIcon(variant, 36), "\(variant.rawValue)_36.png")
+    }
+} catch {
+    fputs("failed to write menu bar icon: \(error)\n", stderr)
+    exit(1)
 }
 
 print("done")

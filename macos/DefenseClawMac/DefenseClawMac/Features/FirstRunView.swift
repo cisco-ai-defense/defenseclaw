@@ -109,14 +109,25 @@ struct FirstRunView: View {
                         Label("Cancel", systemImage: "stop.fill")
                     }
                 } else if cliFound {
-                    Button {
-                        initialize()
-                    } label: {
-                        Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
+                    if detectedConnectors.isEmpty, !detectedProxyConnectors.isEmpty {
+                        Button {
+                            appState.selectedPanel = .setup
+                            dismiss()
+                        } label: {
+                            Label("Open Proxy Connector Setup", systemImage: "cable.connector")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                    } else {
+                        Button {
+                            initialize()
+                        } label: {
+                            Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(setupInvalid)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(setupInvalid)
                 }
             }
         }
@@ -174,12 +185,24 @@ struct FirstRunView: View {
                         }
                     }
                 } else {
-                    Picker("Fallback connector", selection: $connector) {
-                        ForEach(Self.connectors, id: \.self) { Text(friendlyConnectorName($0)).tag($0) }
+                    if detectedProxyConnectors.isEmpty {
+                        Picker("Fallback hook connector", selection: $connector) {
+                            ForEach(TUIWizards.hookConnectors, id: \.self) {
+                                Text(friendlyConnectorName($0)).tag($0)
+                            }
+                        }
+                        Text("No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LabeledContent("Detected proxy connectors") {
+                            Text(detectedProxyConnectors.map(friendlyConnectorName).joined(separator: ", "))
+                                .multilineTextAlignment(.trailing)
+                        }
+                        Text("Proxy connectors require their dedicated Setup flow. Continue with Open Proxy Connector Setup below.")
+                            .font(.caption)
+                            .foregroundStyle(Cisco.orange)
                     }
-                    Text("No installed hook connectors were returned by discovery. Setup will use this explicit fallback connector.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     if let connectorDiscoveryError {
                         Label(connectorDiscoveryError, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -374,7 +397,6 @@ struct FirstRunView: View {
             : []
         let detected = allDetected.filter { TUIWizards.hookConnectors.contains($0) }
         detectedProxyConnectors = allDetected.filter { TUIWizards.proxyConnectors.contains($0) }
-        if detected.isEmpty, let proxy = detectedProxyConnectors.first { connector = proxy }
         detectedConnectors = detected
         actionConnectors.formIntersection(Set(detected))
         if allDetected.isEmpty {

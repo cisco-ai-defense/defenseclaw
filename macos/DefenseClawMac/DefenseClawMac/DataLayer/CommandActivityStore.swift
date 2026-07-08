@@ -56,6 +56,8 @@ struct CommandActivityEntry: Identifiable, Sendable {
 @MainActor
 final class CommandActivityStore {
     private static let maximumOutputCharacters = 300_000
+    private static let maximumEntries = 500
+    private static let omittedPrefix = "[Earlier output omitted]\n"
 
     @ObservationIgnored private let runner: CLIRunner
     var entries: [CommandActivityEntry] = []
@@ -72,6 +74,7 @@ final class CommandActivityStore {
         binary: String = "defenseclaw",
         arguments: [String],
         standardInput: String? = nil,
+        environment: [String: String] = [:],
         category: String = "other",
         origin: String,
         successEffects: [String] = [],
@@ -81,7 +84,11 @@ final class CommandActivityStore {
             CommandActivityEntry(
                 id: id,
                 title: title,
-                command: Self.displayCommand(binary: binary, arguments: arguments),
+                command: Self.displayCommand(
+                    binary: binary,
+                    arguments: arguments,
+                    maskedEnvironmentKeys: environment.keys.sorted()
+                ),
                 category: category,
                 origin: origin,
                 startedAt: Date(),
@@ -93,14 +100,19 @@ final class CommandActivityStore {
             at: 0
         )
         selectedID = id
+        while entries.count > Self.maximumEntries,
+              let removable = entries.lastIndex(where: { $0.status != .running }) {
+            entries.remove(at: removable)
+        }
 
         let result = await runner.run(
             binary: binary,
             arguments: arguments,
             standardInput: standardInput,
+            environment: environment,
             runID: id
         ) { [weak self] line in
-            Task { @MainActor in self?.append(line: line, to: id) }
+            await self?.append(line: line, to: id)
         }
 
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return result }
@@ -132,12 +144,18 @@ final class CommandActivityStore {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[index].output += line + "\n"
         if entries[index].output.count > Self.maximumOutputCharacters {
-            entries[index].output = "[Earlier output omitted]\n" + entries[index].output.suffix(Self.maximumOutputCharacters)
+            let available = Self.maximumOutputCharacters - Self.omittedPrefix.count
+            entries[index].output = Self.omittedPrefix + entries[index].output.suffix(max(available, 0))
         }
     }
 
-    private static func displayCommand(binary: String, arguments: [String]) -> String {
-        ([binary] + arguments).map { value in
+    private static func displayCommand(
+        binary: String,
+        arguments: [String],
+        maskedEnvironmentKeys: [String] = []
+    ) -> String {
+        let environment = maskedEnvironmentKeys.map { "\($0)=••••••" }
+        return (environment + [binary] + arguments).map { value in
             value.contains(where: { $0.isWhitespace }) ? "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" : value
         }.joined(separator: " ")
     }

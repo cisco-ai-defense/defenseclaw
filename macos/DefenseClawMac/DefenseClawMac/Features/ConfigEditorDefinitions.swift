@@ -135,7 +135,8 @@ enum ConfigEditorCatalog {
     static let llmProviders = [
         "anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai",
         "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai",
-        "ollama", "vllm", "lm_studio",
+        "fireworks_ai", "perplexity", "huggingface", "replicate", "together_ai",
+        "cerebras", "ollama", "vllm", "lm_studio", "custom",
     ]
     static var llmOverrideProviders: [String] { [""] + llmProviders }
     static let connectors = [

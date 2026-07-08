@@ -18,6 +18,13 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+case "$MODE" in
+  run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify) ;;
+  *)
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    exit 2
+    ;;
+esac
 APP_NAME="DefenseClawMac"
 BUNDLE_ID="com.cisco.defenseclaw.macos"
 PROJECT="DefenseClawMac.xcodeproj"
@@ -66,9 +73,5 @@ case "$MODE" in
     open_app
     sleep 2
     pgrep -x "$APP_NAME" >/dev/null
-    ;;
-  *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
-    exit 2
     ;;
 esac

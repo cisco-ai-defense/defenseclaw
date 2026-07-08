@@ -20,6 +20,7 @@ import SwiftUI
 
 struct MainWindow: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.openWindow) private var openWindow
     @SceneStorage("main.selectedPanel") private var selectedPanelRaw = PanelID.overview.rawValue
 
     private let groups: [(String, [PanelID])] = [
@@ -91,7 +92,15 @@ struct MainWindow: View {
             }
         }
         .onAppear {
-            appState.selectedPanel = selectedPanel
+            // Deep links/menu actions may select a panel before SwiftUI
+            // restores SceneStorage. Preserve that explicit selection; only
+            // restore SceneStorage when AppState is still at its default.
+            if appState.selectedPanel != .overview || selectedPanelRaw == PanelID.overview.rawValue {
+                selectedPanelRaw = appState.selectedPanel.rawValue
+            } else {
+                appState.selectedPanel = selectedPanel
+            }
+            AppDelegate.recreateMainWindow = { openWindow(id: "main") }
         }
         .onChange(of: appState.selectedPanel) { _, panel in
             if panel != selectedPanel {
@@ -188,6 +197,7 @@ struct MainWindow: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Dismiss app update")
             }
         }
         .padding(10)
@@ -221,7 +231,7 @@ struct MainWindow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             switch appState.runtimeUpgradeState {
-            case .installing, .downloading:
+            case .checking, .installing, .downloading:
                 ProgressView().controlSize(.small).padding(.leading, 4)
             default:
                 Button("Upgrade Runtime") { appState.performRuntimeUpgrade() }
@@ -236,6 +246,7 @@ struct MainWindow: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Dismiss runtime update")
             }
         }
         .padding(10)
@@ -251,6 +262,8 @@ struct MainWindow: View {
 
     private var runtimeStatusText: String {
         switch appState.runtimeUpgradeState {
+        case .checking:
+            return "Checking for the latest DefenseClaw runtime…"
         case .installing, .downloading:
             return appState.runtimeUpgradeLogTail.isEmpty
                 ? "Running `defenseclaw upgrade` — gateway restarts when done…"

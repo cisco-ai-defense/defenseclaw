@@ -304,7 +304,7 @@ actor AuditStore {
         guard let since else {
             return (query("SELECT COUNT(*) AS n FROM scan_results").first?["n"] as? Int) ?? 0
         }
-        let iso = ISO8601DateFormatter().string(from: since)
+        let iso = DCDates.iso.string(from: since)
         return (query(
             "SELECT COUNT(*) AS n FROM scan_results WHERE datetime(timestamp) >= datetime(?)",
             binds: [iso]
@@ -425,9 +425,7 @@ actor AuditStore {
             """)
         return rows.compactMap { r in
             guard let name = r["target_name"] as? String else { return nil }
-            let json = (r["actions_json"] as? String ?? "").lowercased()
-            let state: ToolState = json.contains("block") ? .block
-                : json.contains("observe") ? .observe : .allow
+            let state = toolState(from: r["actions_json"] as? String)
             let reason = (r["reason"] as? String) ?? ""
             let updated = (r["updated_at"] as? String) ?? ""
             return ToolItem(
@@ -447,12 +445,24 @@ actor AuditStore {
         var out: [String: ToolState] = [:]
         for r in rows {
             guard let name = r["target_name"] as? String else { continue }
-            let json = (r["actions_json"] as? String ?? "").lowercased()
-            if json.contains("block") { out[name] = .block }
-            else if json.contains("observe") { out[name] = .observe }
-            else { out[name] = .allow }
+            out[name] = toolState(from: r["actions_json"] as? String)
         }
         return out
+    }
+
+    private func toolState(from actionsJSON: String?) -> ToolState {
+        guard let actionsJSON,
+              let data = actionsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return .allow }
+        let action = (object["install"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch action {
+        case "block", "deny": return .block
+        case "observe", "audit": return .observe
+        default: return .allow
+        }
     }
 
     func activityEvents(limit: Int) -> [ActivityMutation] {

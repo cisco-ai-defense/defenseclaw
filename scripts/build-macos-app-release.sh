@@ -92,6 +92,22 @@ mkdir -p "${WORK}" "${PLAIN_STAGE}" "${UNIFIED_STAGE}" "${OUT_DIR}"
 SIGNING_IDENTITY="-"
 VERIFICATION_STATUS="adhoc"
 
+APPLE_CREDENTIAL_VALUES=(
+    "${MACOS_DEVELOPER_ID_P12_BASE64:-}"
+    "${MACOS_DEVELOPER_ID_P12_PASSWORD:-}"
+    "${MACOS_NOTARY_KEY_BASE64:-}"
+    "${MACOS_NOTARY_KEY_ID:-}"
+    "${MACOS_NOTARY_ISSUER_ID:-}"
+)
+APPLE_CREDENTIAL_COUNT=0
+for value in "${APPLE_CREDENTIAL_VALUES[@]}"; do
+    [[ -z "${value}" ]] || APPLE_CREDENTIAL_COUNT=$((APPLE_CREDENTIAL_COUNT + 1))
+done
+if (( APPLE_CREDENTIAL_COUNT != 0 && APPLE_CREDENTIAL_COUNT != ${#APPLE_CREDENTIAL_VALUES[@]} )); then
+    echo "Apple signing/notarization credentials are partially configured; provide all required values or none" >&2
+    exit 1
+fi
+
 if [[ -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" ]]; then
     command -v openssl >/dev/null || { echo "required command not found: openssl" >&2; exit 1; }
     : "${MACOS_DEVELOPER_ID_P12_PASSWORD:?MACOS_DEVELOPER_ID_P12_PASSWORD is required}"
@@ -104,7 +120,8 @@ if [[ -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" ]]; then
     KEYCHAIN_PATH="${WORK}/release-signing.keychain-db"
     KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
     P12_PATH="${WORK}/developer-id.p12"
-    printf '%s' "${MACOS_DEVELOPER_ID_P12_BASE64}" | /usr/bin/base64 -D > "${P12_PATH}"
+    (umask 077; printf '%s' "${MACOS_DEVELOPER_ID_P12_BASE64}" | /usr/bin/base64 -D > "${P12_PATH}")
+    chmod 600 "${P12_PATH}"
     security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
     security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
     security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
@@ -204,7 +221,7 @@ if [[ "${SIGNING_IDENTITY}" != "-" && -n "${MACOS_NOTARY_KEY_BASE64:-}" ]]; then
     : "${MACOS_NOTARY_KEY_ID:?MACOS_NOTARY_KEY_ID is required}"
     : "${MACOS_NOTARY_ISSUER_ID:?MACOS_NOTARY_ISSUER_ID is required}"
     NOTARY_KEY_PATH="${WORK}/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
-    printf '%s' "${MACOS_NOTARY_KEY_BASE64}" | /usr/bin/base64 -D > "${NOTARY_KEY_PATH}"
+    (umask 077; printf '%s' "${MACOS_NOTARY_KEY_BASE64}" | /usr/bin/base64 -D > "${NOTARY_KEY_PATH}")
     chmod 600 "${NOTARY_KEY_PATH}"
     NOTARY_READY=1
 fi
@@ -278,10 +295,16 @@ else
     ZIP_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64-unverified.zip"
     DMG_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64-unverified.dmg"
 fi
+
+if [[ "${MACOS_REQUIRE_NOTARIZATION:-false}" == "true" && "${VERIFICATION_STATUS}" != "notarized" ]]; then
+    echo "MACOS_REQUIRE_NOTARIZATION=true but the app was not notarized" >&2
+    exit 1
+fi
 rm -f "${ZIP_ARTIFACT}" "${DMG_ARTIFACT}"
 ditto -c -k --keepParent "${PLAIN_APP}" "${ZIP_ARTIFACT}"
 cp "${TEMP_DMG}" "${DMG_ARTIFACT}"
 shasum -a 256 "${DMG_ARTIFACT}" "${ZIP_ARTIFACT}"
+"${ROOT}/scripts/verify-macos-app-release.sh" "${VERSION}" "${OUT_DIR}"
 echo "macOS app verification status: ${VERIFICATION_STATUS}"
 echo "unified DMG artifact: ${DMG_ARTIFACT}"
 echo "app-only update artifact: ${ZIP_ARTIFACT}"

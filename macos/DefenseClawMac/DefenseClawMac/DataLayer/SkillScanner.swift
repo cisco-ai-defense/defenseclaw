@@ -96,15 +96,14 @@ enum SkillScanner {
     /// SKILL.md/README.md, else first non-empty line; bounded to 2 KiB.
     static func readDescription(at path: String) -> String {
         for marker in ["SKILL.md", "README.md"] {
-            guard let handle = FileHandle(forReadingAtPath: path + "/" + marker),
-                  let data = try? handle.read(upToCount: 2048)
-            else { continue }
-            try? handle.close()
+            guard let handle = FileHandle(forReadingAtPath: path + "/" + marker) else { continue }
+            defer { try? handle.close() }
+            guard let data = try? handle.read(upToCount: 2048) else { continue }
             let text = String(decoding: data, as: UTF8.self)
             if let desc = frontmatterDescription(text), !desc.isEmpty {
                 return String(desc.prefix(200))
             }
-            for line in text.split(separator: "\n") {
+            for line in contentWithoutFrontmatter(text).split(separator: "\n") {
                 let stripped = line.trimmingCharacters(in: .whitespaces)
                     .drop { $0 == "#" }
                     .trimmingCharacters(in: .whitespaces)
@@ -126,6 +125,17 @@ enum SkillScanner {
             }
         }
         return nil
+    }
+
+    private static func contentWithoutFrontmatter(_ text: String) -> Substring {
+        guard text.hasPrefix("---"),
+              let end = text.range(
+                  of: "\n---",
+                  range: text.index(text.startIndex, offsetBy: 3)..<text.endIndex
+              )
+        else { return text[...] }
+        let bodyStart = text.index(end.upperBound, offsetBy: 0)
+        return text[bodyStart...]
     }
 }
 

@@ -361,8 +361,11 @@ enum CatalogActions {
         target: String,
         connector: String
     ) -> CatalogInvocation {
-        var args = [resource, verb ?? action.verb, target]
+        var args = [resource, verb ?? action.verb]
         appendConnector(connector, to: &args)
+        // Catalog names originate outside the app and may start with "-".
+        // End option parsing before the positional target.
+        args += ["--", target]
         return make(action, arguments: args, target: target)
     }
 

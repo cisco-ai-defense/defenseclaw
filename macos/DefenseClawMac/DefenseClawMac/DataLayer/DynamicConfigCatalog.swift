@@ -49,7 +49,7 @@ enum DynamicConfigCatalog {
             })
         out.append({"name": s.name, "summary": s.summary,
                     "help": getattr(s, "help", ""), "fields": fields})
-    print("DCCATALOG:" + json.dumps(out))
+    print(\(String(reflecting: sentinel)) + json.dumps(out))
     """
 
     static var runtimePython: String {
@@ -135,7 +135,12 @@ enum DynamicConfigCatalog {
             case .scalar(let scalar):
                 guard !path.isEmpty, !knownKeys.contains(path) else { return }
                 let lower = path.lowercased()
-                let secret = lower.contains("api_key") || lower.contains("token") || lower.contains("secret")
+                let secret = lower.contains("api_key")
+                    || lower.contains("private_key")
+                    || lower.contains("token")
+                    || lower.contains("secret")
+                    || lower.contains("password")
+                    || lower.contains("credential")
                 let kind: ConfigEditorField.Kind = secret
                     ? .password
                     : ["true", "false"].contains(scalar.lowercased()) ? .bool

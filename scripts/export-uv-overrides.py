@@ -19,14 +19,19 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
+
 import tomllib
 
 
 def main() -> int:
     source = Path(sys.argv[1] if len(sys.argv) > 1 else "pyproject.toml")
-    payload = tomllib.loads(source.read_text(encoding="utf-8"))
+    try:
+        payload = tomllib.loads(source.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        print(f"failed to read {source}: {exc}", file=sys.stderr)
+        return 1
     overrides = payload.get("tool", {}).get("uv", {}).get("override-dependencies", [])
     if not isinstance(overrides, list) or not overrides:
         print(f"no [tool.uv].override-dependencies in {source}", file=sys.stderr)

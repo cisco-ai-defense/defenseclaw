@@ -66,35 +66,110 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  macos-app:
-    name: Build unified macOS app
-    runs-on: macos-15
-    environment: release
+  # This job deliberately has no release environment and no signing/OIDC
+  # privileges. Both privileged jobs depend on it, so unreviewed commits are
+  # rejected before Apple credentials or publishing authority are available.
+  release-preflight:
+    name: Validate release provenance
+    runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.provenance.outputs.commit }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Resolve and validate app version
-        id: version
+      - name: Require latest stable macOS app source
         env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-macos-upstream.py
+
+      - name: Resolve and validate target tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION_INPUT: ${{ inputs.version }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            VERSION="$RELEASE_VERSION_INPUT"
+            TAG="$RELEASE_VERSION_INPUT"
+            if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error title=Invalid version input::version must be X.Y.Z with no v prefix (got: '$TAG')"
+              exit 1
+            fi
+            if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+              echo "::error title=Tag already exists::Tag '$TAG' already exists at $(git rev-parse "refs/tags/$TAG"). Pick a fresh version."
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "::error title=Tag already exists on remote::Tag '$TAG' already exists on origin. Pick a fresh version."
+              exit 1
+            fi
           else
-            VERSION="${GITHUB_REF#refs/tags/}"
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error title=Invalid pushed tag::pushed tag must be X.Y.Z (got: '$TAG')"
+              exit 1
+            fi
           fi
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error title=Invalid release version::version must be X.Y.Z (got: '$VERSION')"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error title=Release already exists::A release for '$TAG' already exists."
+            echo "::error::Do not manually create the GitHub release before this workflow runs."
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release commit is on main / release branch
+        id: provenance
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            COMMIT="$GITHUB_SHA"
+          else
+            COMMIT=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          fi
+          git fetch --no-tags origin main "+refs/heads/release/*:refs/remotes/origin/release/*" 2>/dev/null || true
+          if git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "OK: $COMMIT is reachable from origin/main"
+          else
+            authorized=""
+            for branch in $(git for-each-ref --format='%(refname)' refs/remotes/origin/release/); do
+              if git merge-base --is-ancestor "$COMMIT" "$branch"; then
+                authorized="$branch"
+                break
+              fi
+            done
+            if [ -z "$authorized" ]; then
+              echo "::error title=Provenance gate failed::Release commit $COMMIT is not reachable from origin/main or origin/release/*."
+              exit 1
+            fi
+            echo "OK: $COMMIT is reachable from $authorized"
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+  macos-app:
+    name: Build unified macOS app
+    needs: release-preflight
+    runs-on: macos-15
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      verification_status: ${{ steps.app.outputs.verification_status }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -112,7 +187,7 @@ jobs:
 
       - name: Stamp and build matching runtime inputs
         env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.release-preflight.outputs.tag }}
         run: |
           set -euo pipefail
           scripts/stamp-version.sh "$RELEASE_VERSION"
@@ -122,13 +197,14 @@ jobs:
       - name: Build, sign, and package app
         id: app
         env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.release-preflight.outputs.tag }}
           MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
           MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
           MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_REQUIRE_NOTARIZATION: ${{ vars.MACOS_REQUIRE_NOTARIZATION || 'false' }}
         run: scripts/build-macos-app-release.sh "$RELEASE_VERSION" dist
 
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -137,10 +213,11 @@ jobs:
           path: |
             dist/DefenseClawMac-*.dmg
             dist/DefenseClawMac-*.zip
+            dist/defenseclaw-*.whl
           if-no-files-found: error
 
   release:
-    needs: macos-app
+    needs: [release-preflight, macos-app]
     runs-on: ubuntu-latest
     # GitHub Environments protect the production secrets (cosign
     # OIDC trust, GH release token scope) used by this pipeline.
@@ -399,7 +476,46 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: macos-app-release
-          path: dist
+          path: macos-app-release
+
+      - name: Verify macOS payload matches published wheel
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          VERIFICATION_STATUS: ${{ needs.macos-app.outputs.verification_status }}
+        run: |
+          set -euo pipefail
+          case "$VERIFICATION_STATUS" in
+            notarized)
+              EXPECTED_DMG="macos-app-release/DefenseClawMac-${RELEASE_TAG}-macos-arm64.dmg"
+              EXPECTED_ZIP="macos-app-release/DefenseClawMac-${RELEASE_TAG}-macos-arm64.zip"
+              ;;
+            adhoc)
+              EXPECTED_DMG="macos-app-release/DefenseClawMac-${RELEASE_TAG}-macos-arm64-unverified.dmg"
+              EXPECTED_ZIP="macos-app-release/DefenseClawMac-${RELEASE_TAG}-macos-arm64-unverified.zip"
+              ;;
+            *)
+              echo "::error title=Unknown macOS verification status::verification_status=$VERIFICATION_STATUS"
+              exit 1
+              ;;
+          esac
+          test -f "$EXPECTED_DMG"
+          test -f "$EXPECTED_ZIP"
+          python3 - \
+            "dist/defenseclaw-${RELEASE_TAG}-py3-none-any.whl" \
+            "macos-app-release/defenseclaw-${RELEASE_TAG}-py3-none-any.whl" <<'PY'
+          import sys
+          import zipfile
+
+          def contents(path: str) -> dict[str, bytes]:
+              with zipfile.ZipFile(path) as wheel:
+                  return {name: wheel.read(name) for name in wheel.namelist() if not name.endswith("/")}
+
+          if contents(sys.argv[1]) != contents(sys.argv[2]):
+              raise SystemExit("macOS runtime wheel contents differ from the wheel being published")
+          PY
+          cp "$EXPECTED_DMG" dist/
+          cp "$EXPECTED_ZIP" dist/
+          echo "macOS verification status: $VERIFICATION_STATUS"
 
       - name: Finalize upgrade manifest and checksums
         run: |

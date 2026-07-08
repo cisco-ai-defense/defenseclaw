@@ -20,9 +20,8 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
-
+from pathlib import Path
 
 COPYRIGHT = "Copyright 2026 Cisco Systems, Inc. and its affiliates"
 SPDX = "SPDX-License-Identifier: Apache-2.0"
@@ -60,7 +59,7 @@ def xml_header() -> str:
 def header_for(path: Path) -> str | None:
     if path.suffix == ".swift" or path.suffix == ".xcconfig" or path.name == "project.pbxproj":
         return line_header("//")
-    if path.suffix in {".sh", ".py"} or path.name == ".gitignore":
+    if path.suffix in {".sh", ".py", ".toml"} or path.name == ".gitignore":
         return line_header("#")
     if path.suffix == ".md":
         return markdown_header()
@@ -121,7 +120,15 @@ def main() -> int:
             unsupported.append(relative)
             continue
 
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            if path.suffix in {".plist", ".entitlements"} and path.read_bytes().startswith(b"bplist"):
+                print(f"skipping binary property list (cannot embed a text header): {relative}")
+                continue
+            print(f"cannot decode text file as UTF-8: {relative}", file=sys.stderr)
+            unsupported.append(relative)
+            continue
         if has_header(text):
             continue
         if not args.fix:

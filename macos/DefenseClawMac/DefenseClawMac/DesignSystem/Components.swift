@@ -21,13 +21,28 @@ import SwiftUI
 
 struct SeverityBadge: View {
     let severity: Severity
+
+    private var foreground: Color {
+        switch severity {
+        case .critical: .white
+        case .high, .medium, .low: .black
+        case .info: .primary
+        }
+    }
+
+    private var background: Color {
+        severity == .info
+            ? Cisco.severityColor(severity).opacity(0.18)
+            : Cisco.severityColor(severity).opacity(0.88)
+    }
+
     var body: some View {
         Text(severity.rawValue)
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(Cisco.severityColor(severity).opacity(severity == .medium ? 0.85 : 0.18))
-            .foregroundStyle(severity == .medium ? Color.black : Cisco.severityColor(severity))
+            .background(background)
+            .foregroundStyle(foreground)
             .clipShape(Capsule())
     }
 }
@@ -255,13 +270,16 @@ struct DCEmptyState: View {
 
 struct ConfidenceGauge: View {
     let value: Double // 0...1
+
+    private var normalizedValue: Double { max(0, min(1, value)) }
+
     var body: some View {
         HStack(spacing: 6) {
-            ProgressView(value: max(0, min(1, value)))
+            ProgressView(value: normalizedValue)
                 .progressViewStyle(.linear)
-                .tint(value > 0.8 ? Cisco.green : value > 0.5 ? Cisco.orange : Cisco.red)
+                .tint(normalizedValue > 0.8 ? Cisco.green : normalizedValue > 0.5 ? Cisco.orange : Cisco.red)
                 .frame(width: 70)
-            Text("\(Int(value * 100))%")
+            Text("\(Int(normalizedValue * 100))%")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }

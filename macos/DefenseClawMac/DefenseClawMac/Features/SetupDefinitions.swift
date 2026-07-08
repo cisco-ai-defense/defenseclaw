@@ -542,6 +542,14 @@ enum TUIWizards {
         id: "splunk", title: "Splunk", icon: "waveform.path.ecg.rectangle",
         blurb: "Configure Splunk O11y, local logs, or Enterprise HEC pipelines.",
         baseArgs: ["setup", "splunk"], commandBuilder: splunkCommands,
+        secretEnvironment: { v in
+            var environment: [String: String] = [:]
+            let accessToken = value(v, "access-token")
+            let hecToken = value(v, "hec-token")
+            if !accessToken.isEmpty { environment["SPLUNK_ACCESS_TOKEN"] = accessToken }
+            if !hecToken.isEmpty { environment["DEFENSECLAW_SPLUNK_HEC_TOKEN"] = hecToken }
+            return environment
+        },
         validation: { v in
             if value(v, "mode", "splunk-o11y") == "local-docker", !yes(v, "accept-splunk-license") {
                 return "Local Docker mode requires accepting the Splunk license."
@@ -565,6 +573,10 @@ enum TUIWizards {
         id: "observability", title: "Observability", icon: "chart.xyaxis.line",
         blurb: "Add, list, enable, disable, or remove OTel and audit destinations.",
         baseArgs: ["setup", "observability"], commandBuilder: observabilityCommands,
+        secretEnvironment: { v in
+            let token = value(v, "token")
+            return token.isEmpty ? [:] : ["DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": token]
+        },
         validation: { v in
             let action = value(v, "action", "add")
             if ["enable", "disable", "remove"].contains(action), value(v, "name").isEmpty {
@@ -695,6 +707,10 @@ enum TUIWizards {
         id: "splunk-dashboards", title: "Splunk Dashboards", icon: "rectangle.3.group.bubble.left",
         blurb: "Apply or destroy the DefenseClaw Splunk O11y dashboards and detectors.",
         baseArgs: ["setup", "splunk", "dashboards"], commandBuilder: splunkDashboardCommands,
+        secretEnvironment: { v in
+            let token = value(v, "o11y-api-token")
+            return token.isEmpty ? [:] : ["SFX_AUTH_TOKEN": token]
+        },
         fields: [
             WizardField(key: "action", label: "Action", kind: .choice(options: ["apply", "destroy"]), defaultValue: "apply"),
             WizardField(key: "with-detectors", label: "Include detectors", kind: .bool, defaultValue: "no"),
@@ -990,9 +1006,7 @@ enum TUIWizards {
         let modeFlag = mode == "splunk-o11y" ? "--o11y" : mode == "local-docker" ? "--logs" : "--enterprise"
         var args = ["setup", "splunk", modeFlag, "--non-interactive"]
         append(v, "realm", flag: "--realm", to: &args)
-        appendSecure(v, "access-token", flag: "--access-token", mask: mask, to: &args)
         append(v, "hec-endpoint", flag: "--hec-endpoint", to: &args)
-        appendSecure(v, "hec-token", flag: "--hec-token", mask: mask, to: &args)
         flag(v, "accept-splunk-license", "--accept-splunk-license", to: &args)
         args.append(yes(v, "traces") ? "--traces" : "--no-traces")
         args.append(yes(v, "metrics") ? "--metrics" : "--no-metrics")
@@ -1009,7 +1023,6 @@ enum TUIWizards {
             append(v, "name", flag: "--name", to: &args)
             // The webhook preset reads --url, not --endpoint.
             append(v, "endpoint", flag: preset == "webhook" ? "--url" : "--endpoint", to: &args)
-            appendSecure(v, "token", flag: "--token", mask: mask, to: &args)
             append(v, "signals", flag: "--signals", to: &args)
         } else if ["enable", "disable", "remove"].contains(action) {
             let name = value(v, "name")
@@ -1112,7 +1125,6 @@ enum TUIWizards {
             flag(v, "enable-detectors", "--enable-detectors", to: &args)
         }
         append(v, "name-prefix", flag: "--name-prefix", to: &args)
-        appendSecure(v, "o11y-api-token", flag: "--o11y-api-token", mask: mask, to: &args)
         append(v, "api-url", flag: "--api-url", to: &args)
         return [args]
     }
@@ -1161,12 +1173,6 @@ enum TUIWizards {
                                to args: inout [String], unless skipped: String? = nil) {
         let item = value(values, key)
         if !item.isEmpty && item != skipped { args += [flag, item] }
-    }
-
-    private static func appendSecure(_ values: [String: String], _ key: String, flag: String,
-                                     mask: Bool, to args: inout [String]) {
-        let item = value(values, key)
-        if !item.isEmpty { args += [flag, mask ? "••••••" : item] }
     }
 
     private static func appendCSV(_ values: [String: String], _ key: String, flag: String, to args: inout [String]) {
