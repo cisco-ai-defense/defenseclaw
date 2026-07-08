@@ -760,6 +760,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
+	mux.HandleFunc("/routing/v1/chat/completions", a.handleRoutedChatCompletion)
 	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
@@ -3030,6 +3031,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/routing/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		route := r.Pattern
 		if route == "" {
 			// Sanitize so the OTLP path-token is never recorded as a
@@ -3182,6 +3187,10 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, ro
 func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/routing/") {
 			next.ServeHTTP(w, r)
 			return
 		}

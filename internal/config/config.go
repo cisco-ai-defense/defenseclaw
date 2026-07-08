@@ -231,6 +231,51 @@ type Config struct {
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
+	Routing               RoutingConfig               `mapstructure:"routing"          yaml:"routing,omitempty"`
+}
+
+// RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
+// Kept in config package to avoid circular imports; the gateway adapter
+// converts to routing.RoutingConfig at boot.
+type RoutingConfig struct {
+	Enabled   bool                    `mapstructure:"enabled"   yaml:"enabled"`
+	Models    []RoutingModelBackend   `mapstructure:"models"    yaml:"models,omitempty"`
+	Signals   RoutingSignalConfig     `mapstructure:"signals"   yaml:"signals,omitempty"`
+	Decisions []RoutingDecisionRule   `mapstructure:"decisions" yaml:"decisions,omitempty"`
+}
+
+type RoutingModelBackend struct {
+	Name         string   `mapstructure:"name"         yaml:"name"`
+	Provider     string   `mapstructure:"provider"     yaml:"provider"`
+	Model        string   `mapstructure:"model"        yaml:"model"`
+	BaseURL      string   `mapstructure:"base_url"     yaml:"base_url,omitempty"`
+	APIKeyEnv    string   `mapstructure:"api_key_env"  yaml:"api_key_env,omitempty"`
+	Weight       int      `mapstructure:"weight"       yaml:"weight,omitempty"`
+	Capabilities []string `mapstructure:"capabilities" yaml:"capabilities,omitempty"`
+}
+
+type RoutingSignalConfig struct {
+	Keywords []RoutingKeywordSignal `mapstructure:"keywords" yaml:"keywords,omitempty"`
+}
+
+type RoutingKeywordSignal struct {
+	Name     string   `mapstructure:"name"     yaml:"name"`
+	Keywords []string `mapstructure:"keywords" yaml:"keywords"`
+	Operator string   `mapstructure:"operator" yaml:"operator,omitempty"`
+}
+
+type RoutingDecisionRule struct {
+	Name       string             `mapstructure:"name"       yaml:"name"`
+	Priority   int                `mapstructure:"priority"   yaml:"priority"`
+	Conditions []RoutingCondition `mapstructure:"conditions" yaml:"conditions,omitempty"`
+	Operator   string             `mapstructure:"operator"   yaml:"operator,omitempty"`
+	ModelRefs  []string           `mapstructure:"model_refs" yaml:"model_refs"`
+	Algorithm  string             `mapstructure:"algorithm"  yaml:"algorithm,omitempty"`
+}
+
+type RoutingCondition struct {
+	Type string `mapstructure:"type" yaml:"type"`
+	Name string `mapstructure:"name" yaml:"name"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries

@@ -606,6 +606,14 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar]          The proxy binds 127.0.0.1 only. Set guardrail.host to \"127.0.0.1\" to avoid silent connection failures.\n")
 	}
 
+	// Initialize semantic model router from config.
+	if mr, mrErr := NewSemanticModelRouter(s.currentConfig().Routing); mrErr != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] semantic router init failed: %v (falling back to default provider)\n", mrErr)
+	} else if mr != nil {
+		RegisterModelRouter(mr)
+		fmt.Fprintf(os.Stderr, "[guardrail] semantic model router enabled\n")
+	}
+
 	// Initialize OPA engine before goroutines so both the watcher and the
 	// API reload handler share the same instance.
 	if s.currentConfig().PolicyDir != "" {
