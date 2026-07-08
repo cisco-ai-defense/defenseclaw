@@ -181,10 +181,20 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
         seen_kwargs.append(kwargs)
         return Process()
 
+    class NoopProcessTree:
+        @staticmethod
+        async def terminate(_grace: float, _force: float) -> None:
+            return None
+
+        @staticmethod
+        def close() -> None:
+            return None
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    process_tree_factory = lambda _pid: NoopProcessTree() if os.name == "nt" else None  # noqa: E731
     events = [
         event
-        async for event in CommandExecutor(use_pty=False, process_tree_factory=lambda _pid: None).run(
+        async for event in CommandExecutor(use_pty=False, process_tree_factory=process_tree_factory).run(
             "defenseclaw",
             ("doctor",),
         )
@@ -299,6 +309,40 @@ async def test_process_tree_setup_failure_stops_command_without_side_effect() ->
     assert events[1].text.startswith("Failed to secure process tree:")
     assert events[-1].exit_code == 1
     assert events[-1].cancelled is False
+    assert executor.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_windows_process_tree_none_stops_suspended_command(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Process:
+        pid = 1
+        stdin = None
+        stdout = None
+
+        @staticmethod
+        def kill() -> None:
+            calls.append("kill")
+
+        @staticmethod
+        async def wait() -> int:
+            calls.append("wait")
+            return 1
+
+    async def fake_exec(*_argv: str, **_kwargs: object) -> Process:
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("defenseclaw.tui.executor.os.name", "nt")
+    executor = CommandExecutor(use_pty=False, process_tree_factory=lambda _pid: None)
+
+    events = [event async for event in executor.run("defenseclaw", ("doctor",))]
+
+    assert calls == ["kill", "wait"]
+    assert [event.kind for event in events] == ["start", "output", "done"]
+    assert events[1].text == "Failed to secure process tree: Windows process tree setup returned no job object"
+    assert events[-1].exit_code == 1
     assert executor.is_running is False
 
 

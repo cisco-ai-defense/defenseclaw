@@ -43,7 +43,7 @@ def main() -> int:
     if not args.audit_db.is_file():
         raise ValueError(f"audit database is missing: {args.audit_db}")
 
-    connection = sqlite3.connect(f"file:{args.audit_db.as_posix()}?mode=ro", uri=True)
+    connection = sqlite3.connect(f"{args.audit_db.resolve().as_uri()}?mode=ro", uri=True)
     try:
         correlated = any(
             connection.execute(

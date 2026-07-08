@@ -222,22 +222,6 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     if not non_interactive:
         raw_inputs = _prompt_missing(preset, raw_inputs)
 
-    candidate_endpoint = str(raw_inputs.get("endpoint") or "")
-    candidate_host = str(raw_inputs.get("host") or "")
-    if (
-        not local_shell_stacks_supported()
-        and preset.id in {"splunk-hec", "splunk-enterprise"}
-        and is_local_shell_stack_destination(
-            kind="splunk_hec",
-            endpoint=candidate_endpoint or candidate_host,
-        )
-    ):
-        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
-
-    if not non_interactive:
-        if token_value is None:
-            token_value = _prompt_secret(preset, app.cfg.data_dir)
-
     inputs: dict[str, str] = {k: str(v) for k, v in raw_inputs.items() if v is not None}
 
     signal_tuple = None
@@ -252,6 +236,19 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
     connector_name = (connector or "").strip()
     try:
+        resolved_inputs = _resolve_inputs(preset, inputs)
+        candidate_endpoint = resolved_inputs.get("endpoint") or resolved_inputs.get("host", "")
+        if (
+            not local_shell_stacks_supported()
+            and preset.id in {"splunk-hec", "splunk-enterprise"}
+            and is_local_shell_stack_destination(
+                kind="splunk_hec",
+                endpoint=candidate_endpoint,
+            )
+        ):
+            raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+        if not non_interactive and token_value is None:
+            token_value = _prompt_secret(preset, app.cfg.data_dir)
         if connector_name:
             result = _apply_sink_to_connector(
                 preset,

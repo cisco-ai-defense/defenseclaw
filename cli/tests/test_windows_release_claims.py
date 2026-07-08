@@ -46,8 +46,7 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
 
 def test_release_packaging_keeps_non_windows_arm64_but_not_windows_arm64() -> None:
     release = (ROOT / ".goreleaser.yaml").read_text(encoding="utf-8")
-    assert "goos: windows\n        goarch: arm64" in release
-    assert release.count("- arm64") == 1
+    assert "ignore:\n      - goos: windows\n        goarch: arm64" in release
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
     assert '"codex",\n    "claudecode",\n    "none"' in installer

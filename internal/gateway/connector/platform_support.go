@@ -86,7 +86,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"hermes": {
 		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Hermes integration remains preview and has not completed native Windows x64 certification.",
+		Reason: "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
 	},
 	"openhands": {
 		Status: PlatformUnsupported,
@@ -136,6 +136,10 @@ func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 // goos. Preview connectors are deliberately available.
 func connectorSupportedOnOS(name, goos string) bool {
 	status := ConnectorSupportOnOS(name, goos).Status
+	return connectorStatusAvailable(status)
+}
+
+func connectorStatusAvailable(status PlatformSupportStatus) bool {
 	return status == PlatformSupported || status == PlatformPreview
 }
 
@@ -147,7 +151,7 @@ func ConnectorSupportOnHostOS(name string) PlatformSupport {
 // ConnectorSupportedOnHostOS reports availability on the current host OS.
 func ConnectorSupportedOnHostOS(name string) bool {
 	status := ConnectorSupportOnHostOS(name).Status
-	return status == PlatformSupported || status == PlatformPreview
+	return connectorStatusAvailable(status)
 }
 
 // CheckPlatformSupport returns the shared operator-facing preview warning or

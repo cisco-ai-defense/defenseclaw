@@ -194,7 +194,9 @@ func TestDispatcher_ConcurrentDuplicatesDeliverExactlyOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := rec.Drain(1, 250*time.Millisecond); len(got) != 1 {
+	// Wait for the full window so a duplicate that races through dedup is
+	// counted instead of arriving after the assertion has already returned.
+	if got := rec.Drain(2, 250*time.Millisecond); len(got) != 1 {
 		t.Fatalf("concurrent duplicate delivery count = %d, want 1: %#v", len(got), got)
 	}
 }

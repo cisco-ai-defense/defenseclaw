@@ -99,7 +99,7 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "hermes": ConnectorPlatformSupport(
         NOT_CERTIFIED,
-        "The DefenseClaw Hermes integration remains preview and has not completed native Windows x64 certification.",
+        "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
