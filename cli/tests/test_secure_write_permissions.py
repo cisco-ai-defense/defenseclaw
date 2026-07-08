@@ -31,7 +31,12 @@ from defenseclaw.commands import cmd_setup_observability as setup_writer
 from defenseclaw.observability import writer as observability_writer
 from defenseclaw.webhooks import writer as webhook_writer
 
-from tests.permissions import assert_owner_only_file, grant_everyone, set_known_windows_directory_acl
+from tests.permissions import (
+    assert_owner_only_directory,
+    assert_owner_only_file,
+    grant_everyone,
+    set_known_windows_directory_acl,
+)
 
 _ATOMIC_WRITERS = [
     (
@@ -336,6 +341,18 @@ def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
         assert result is True
     assert target.is_file()
     assert_owner_only_file(target)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory read/traverse ACLs")
+@pytest.mark.allow_subprocess
+def test_owner_only_directory_assertion_rejects_untrusted_read_access(tmp_path):
+    directory = tmp_path / "readable-directory"
+    directory.mkdir()
+    set_known_windows_directory_acl(directory)
+    grant_everyone(directory, "RX")
+
+    with pytest.raises(AssertionError, match="untrusted SID"):
+        assert_owner_only_directory(directory)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL preservation")

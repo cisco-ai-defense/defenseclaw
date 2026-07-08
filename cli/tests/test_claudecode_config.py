@@ -40,7 +40,6 @@ class _IsolatedHome:
 
     def __init__(self) -> None:
         self._tmp: tempfile.TemporaryDirectory | None = None
-        self._prev_home: str | None = None
         self.home: str = ""
 
     def __enter__(self) -> str:

@@ -24,7 +24,6 @@ func requireEnterpriseHookInstaller(t *testing.T) {
 }
 
 func TestInstallRejectsNativeWindowsBeforeSideEffects(t *testing.T) {
-	requireEnterpriseHookInstaller(t)
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows rejection contract")
 	}

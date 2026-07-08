@@ -655,6 +655,6 @@ func compareGolden(t *testing.T, name string, got []byte) {
 	wantText := strings.ReplaceAll(strings.TrimSpace(string(want)), "\r\n", "\n")
 	gotText := strings.ReplaceAll(strings.TrimSpace(string(got)), "\r\n", "\n")
 	if wantText != gotText {
-		t.Fatalf("golden mismatch %s\n--- want ---\n%s\n--- got ---\n%s\n", name, string(want), string(got))
+		t.Fatalf("golden mismatch %s\n--- want ---\n%s\n--- got ---\n%s\n", name, wantText, gotText)
 	}
 }
