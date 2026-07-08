@@ -5955,6 +5955,43 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	}
 }
 
+func TestManagedEnterpriseSharedHookIgnoresFailModeEnvOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{
+		DataDir:            dir,
+		APIAddr:            strings.TrimPrefix(srv.URL, "http://"),
+		HookFailMode:       "closed",
+		HookAPIToken:       "managed-scoped-fixture",
+		HookAPITokenScoped: true,
+		ManagedEnterprise:  true,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewZeptoClawConnector()); err != nil {
+		t.Fatalf("write managed shared hooks: %v", err)
+	}
+
+	cmd := exec.Command("bash", filepath.Join(hookDir, "inspect-request.sh"))
+	cmd.Stdin = strings.NewReader(`{"content":"hello"}`)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"DEFENSECLAW_FAIL_MODE=open",
+	}
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("managed shared hook error = %v, want fail-closed exit 2", err)
+	}
+}
+
 func TestCodexHookScript_FailClosed_DefaultWithoutResolvedObserveMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")

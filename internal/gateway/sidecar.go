@@ -2166,12 +2166,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookAPIToken:       setupTokens.hookToken,
 		HookAPITokenScoped: setupTokens.hookTokenScoped,
 		WorkspaceDir:       workspaceDir,
-		// HookFailMode is the operator-chosen response-layer fail mode
-		// for every generated hook (see GuardrailConfig.HookFailMode
-		// for the contract). Routed via EffectiveHookFailMode so the
-		// default "open" is applied uniformly when the field is unset
-		// — matches the user-friendly default in defaultsFor() and
-		// avoids a partial install accidentally going fail-closed.
+		// Resolve the response-layer fail mode for this connector, including
+		// manual and application-protection overrides plus observe/action
+		// compatibility semantics. The hook-writing boundary normalizes an
+		// unexpected empty value to the secure "closed" default.
 		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,

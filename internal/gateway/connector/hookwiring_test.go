@@ -37,9 +37,6 @@ func setHookBinaryOverride(t *testing.T, path string) {
 }
 
 func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows connector-aware hook sidecar")
-	}
 	dir := t.TempDir()
 	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
 		t.Fatal(err)
@@ -61,9 +58,6 @@ func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
 }
 
 func TestWindowsHookConfigSidecarMigratesLegacyScalar(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows legacy hook sidecar migration")
-	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, hookConfigSidecarName)
 	legacy := []byte("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\nDEFENSECLAW_FAIL_MODE=open\n")

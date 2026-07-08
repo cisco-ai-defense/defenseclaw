@@ -249,6 +249,7 @@ class Store:
             detect_types=sqlite3.PARSE_DECLTYPES,
             timeout=5.0,
         )
+        self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         # The grouped hook aggregate stays inside SQLite and returns only one
