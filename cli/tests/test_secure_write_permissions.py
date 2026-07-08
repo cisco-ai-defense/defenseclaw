@@ -348,6 +348,26 @@ def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_pat
     assert target.read_bytes() == b"rewritten"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="validates protected Windows DACL copying")
+@pytest.mark.allow_subprocess
+def test_copy_windows_dacl_protects_destination_from_parent_inheritance(tmp_path):
+    source = tmp_path / "source.json"
+    source.write_text("source", encoding="utf-8")
+    file_permissions._set_windows_owner_only_acl(os.fspath(source))
+
+    broad_dir = tmp_path / "broad-parent"
+    broad_dir.mkdir()
+    grant_everyone(broad_dir)
+    destination = broad_dir / "destination.json"
+    destination.write_text("destination", encoding="utf-8")
+    assert file_permissions._windows_dacl_is_protected(destination) is False
+
+    file_permissions.copy_windows_dacl(os.fspath(source), os.fspath(destination))
+
+    assert file_permissions._windows_dacl_is_protected(destination)
+    assert file_permissions._windows_acl_has_required_access(destination)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows junction refusal")
 @pytest.mark.allow_subprocess
 def test_private_atomic_write_refuses_windows_junction_escape(tmp_path):

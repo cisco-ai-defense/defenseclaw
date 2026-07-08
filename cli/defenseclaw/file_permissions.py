@@ -144,13 +144,26 @@ def copy_windows_dacl(source: str, destination: str) -> None:
     ]
     get_file_security.restype = wintypes.BOOL
 
-    set_file_security = advapi32.SetFileSecurityW
-    set_file_security.argtypes = [
-        wintypes.LPCWSTR,
+    get_descriptor_dacl = advapi32.GetSecurityDescriptorDacl
+    get_descriptor_dacl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    get_descriptor_dacl.restype = wintypes.BOOL
+
+    set_named_security_info = advapi32.SetNamedSecurityInfoW
+    set_named_security_info.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
         wintypes.DWORD,
         wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
     ]
-    set_file_security.restype = wintypes.BOOL
+    set_named_security_info.restype = wintypes.DWORD
 
     needed = wintypes.DWORD()
     ctypes.set_last_error(0)
@@ -174,12 +187,98 @@ def copy_windows_dacl(source: str, destination: str) -> None:
         ctypes.byref(needed),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
-    if not set_file_security(
-        destination,
-        dacl_security_information | protected_dacl_security_information,
+
+    dacl_present = wintypes.BOOL()
+    dacl = wintypes.LPVOID()
+    dacl_defaulted = wintypes.BOOL()
+    if not get_descriptor_dacl(
         descriptor,
+        ctypes.byref(dacl_present),
+        ctypes.byref(dacl),
+        ctypes.byref(dacl_defaulted),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
+    if not dacl_present.value or not dacl.value:
+        raise OSError(f"refusing to copy a missing or NULL Windows DACL: {source}")
+
+    result = set_named_security_info(
+        destination,
+        1,  # SE_FILE_OBJECT
+        dacl_security_information | protected_dacl_security_information,
+        None,
+        None,
+        dacl,
+        None,
+    )
+    if result:
+        raise OSError(result, ctypes.FormatError(result), destination)
+    if not _windows_dacl_is_protected(destination):
+        raise OSError(f"copied Windows DACL remains inheritable: {destination}")
+
+
+def _windows_dacl_is_protected(path: str | os.PathLike[str]) -> bool:
+    """Return whether *path* has the ``SE_DACL_PROTECTED`` control bit."""
+
+    if os.name != "nt":
+        raise OSError("Windows DACL inspection is only available on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    dacl_security_information = 0x00000004
+    error_insufficient_buffer = 122
+    se_dacl_protected = 0x1000
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    get_file_security = advapi32.GetFileSecurityW
+    get_file_security.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    get_file_security.restype = wintypes.BOOL
+    get_descriptor_control = advapi32.GetSecurityDescriptorControl
+    get_descriptor_control.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    get_descriptor_control.restype = wintypes.BOOL
+
+    needed = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    found = get_file_security(
+        os.fspath(path),
+        dacl_security_information,
+        None,
+        0,
+        ctypes.byref(needed),
+    )
+    error = ctypes.get_last_error()
+    if not found and error != error_insufficient_buffer:
+        raise ctypes.WinError(error)
+
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not get_file_security(
+        os.fspath(path),
+        dacl_security_information,
+        descriptor,
+        needed,
+        ctypes.byref(needed),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    if not get_descriptor_control(
+        descriptor,
+        ctypes.byref(control),
+        ctypes.byref(revision),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return bool(control.value & se_dacl_protected)
 
 
 def atomic_write_private(
