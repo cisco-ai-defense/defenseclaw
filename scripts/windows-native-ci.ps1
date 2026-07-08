@@ -140,6 +140,42 @@ function Assert-SafeStateRoot([string]$Path) {
     return Assert-NoReparseAncestors $full
 }
 
+function Protect-TestDirectory([string]$Path) {
+    $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.User) { throw 'current Windows identity has no user SID' }
+
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    foreach ($sid in @($identity.User, $system)) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+    [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
+}
+
+function Initialize-WindowsNativeTestEnvironment([string]$Root) {
+    $safeRoot = Assert-SafeStateRoot $Root
+    Protect-TestDirectory $safeRoot
+    $temp = Join-Path $safeRoot 'temp'
+    Protect-TestDirectory $temp
+    $env:TEMP = $temp
+    $env:TMP = $temp
+    return $safeRoot
+}
+
 function Limit-WindowsNativeText([AllowNull()][string]$Text, [int]$MaxBytes = 1048576) {
     $safe = Protect-WindowsNativeText $Text
     $bytes = [Text.Encoding]::UTF8.GetBytes($safe)
