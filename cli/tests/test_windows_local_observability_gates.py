@@ -310,6 +310,10 @@ def test_observability_json_status_labels_local_unsupported_and_remote_supported
             return_value=False,
         ),
         patch(
+            "defenseclaw.platform_support.local_shell_stacks_supported",
+            return_value=False,
+        ),
+        patch(
             "defenseclaw.commands.cmd_setup_observability.list_destinations",
             return_value=[local, remote],
         ),

@@ -21,6 +21,16 @@ from pathlib import Path
 
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")
 class WindowsManagedVenvResetTests(unittest.TestCase):
+    def test_windows_process_access_mask_constants_preserve_required_rights(self) -> None:
+        from defenseclaw.commands import cmd_uninstall
+
+        access_mask = (
+            cmd_uninstall._WIN_SYNCHRONIZE  # noqa: SLF001
+            | cmd_uninstall._WIN_PROCESS_QUERY_LIMITED_INFORMATION  # noqa: SLF001
+        )
+
+        self.assertEqual(access_mask, 0x00101000)
+
     def test_deferred_helper_accepts_utf8_shim_for_non_ascii_profile(self) -> None:
         from defenseclaw.commands import windows_uninstall_helper
 

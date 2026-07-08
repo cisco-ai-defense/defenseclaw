@@ -737,8 +737,7 @@ def _print_observability_status(cfg) -> None:
     from defenseclaw.observability import list_destinations
     from defenseclaw.observability.presets import PRESETS
     from defenseclaw.platform_support import (
-        is_local_shell_stack_destination,
-        local_shell_stacks_supported,
+        destination_platform_unsupported,
     )
 
     try:
@@ -754,14 +753,11 @@ def _print_observability_status(cfg) -> None:
 
     for d in destinations:
         label = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
-        local_unsupported = (
-            not local_shell_stacks_supported()
-            and is_local_shell_stack_destination(
-                name=d.name,
-                preset_id=d.preset_id,
-                kind=d.kind,
-                endpoint=d.endpoint,
-            )
+        local_unsupported = destination_platform_unsupported(
+            name=d.name,
+            preset_id=d.preset_id,
+            kind=d.kind,
+            endpoint=d.endpoint,
         )
         if local_unsupported:
             state = ux._style("unsupported on native Windows", fg="yellow")

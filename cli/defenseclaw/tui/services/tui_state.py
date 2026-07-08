@@ -308,7 +308,7 @@ class TUIStateStore:
             return None
 
     def _quarantine_corrupt(self, raw: str) -> None:
-        """Best-effort rename of a corrupt state file out of the way."""
+        """Write corrupt state to a private ``.bak``, then remove the original."""
 
         if self._path is None:
             return

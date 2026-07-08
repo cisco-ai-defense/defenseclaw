@@ -99,6 +99,7 @@ from defenseclaw.observability.writer import (
 )
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    destination_platform_unsupported,
     is_local_shell_stack_destination,
     local_shell_stacks_supported,
 )
@@ -1000,7 +1001,7 @@ def _gate_local_destination(destination: Destination) -> None:
 
 
 def _destination_platform_status(destination: Destination) -> str:
-    if not local_shell_stacks_supported() and is_local_shell_stack_destination(
+    if destination_platform_unsupported(
         name=destination.name,
         preset_id=destination.preset_id,
         kind=destination.kind,

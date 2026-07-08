@@ -44,6 +44,7 @@ from defenseclaw.platform_support import (
     connector_platform_support,
     connector_preview_on_os,
     connector_supported_on_os,
+    destination_platform_unsupported,
     host_os,
     is_proxy_connector,
     supported_connectors,
@@ -68,6 +69,25 @@ WINDOWS_NOT_CERTIFIED = {
 }
 WINDOWS_UNSUPPORTED = {"openhands", "omnigent", "openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
+
+
+def test_destination_platform_unsupported_centralizes_local_stack_gate() -> None:
+    local = {
+        "name": "local-observability",
+        "preset_id": "local-otlp",
+        "kind": "otlp",
+        "endpoint": "127.0.0.1:4317",
+    }
+    remote = {
+        "name": "remote-otlp",
+        "preset_id": "otlp",
+        "kind": "otlp",
+        "endpoint": "collector.example.test:4317",
+    }
+
+    assert destination_platform_unsupported(**local, os_name="windows") is True
+    assert destination_platform_unsupported(**local, os_name="linux") is False
+    assert destination_platform_unsupported(**remote, os_name="windows") is False
 
 
 def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:

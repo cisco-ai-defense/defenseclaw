@@ -64,9 +64,12 @@ def test_connector_matrix_preserves_macos_and_linux_support() -> None:
 
 def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     text = (ROOT / "scripts/live-connector-e2e/run-windows.ps1").read_text(encoding="utf-8").lower()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8").lower()
     assert "$agentargs =" in text
     assert "$eventrecord =" in text
     assert "[string]$eventname," in text
     assert "$args =" not in text
     assert "$event =" not in text
     assert "[string]$event," not in text
+    assert "$profiledir =" in workflow
+    assert "$profile =" not in workflow

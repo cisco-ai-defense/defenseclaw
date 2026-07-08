@@ -65,6 +65,8 @@ from defenseclaw import ux
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
 _RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
+_WIN_SYNCHRONIZE = 0x00100000
+_WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "openclaw": (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),),
     "codex": (
@@ -869,7 +871,11 @@ def _capture_managed_process(
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = (wintypes.HANDLE,)
     close_handle.restype = wintypes.BOOL
-    handle = open_process(0x00100000 | 0x1000, False, record.pid)
+    handle = open_process(
+        _WIN_SYNCHRONIZE | _WIN_PROCESS_QUERY_LIMITED_INFORMATION,
+        False,
+        record.pid,
+    )
     if not handle:
         if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: process exited.
             return None

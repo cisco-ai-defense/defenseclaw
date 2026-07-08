@@ -488,9 +488,9 @@ jobs:
       - name: Prepare disposable installer profile
         shell: pwsh
         run: |
-          $profile = Join-Path $env:RUNNER_TEMP "defenseclaw-installer-smoke"
-          New-Item -ItemType Directory -Force -Path $profile | Out-Null
-          "DC_SMOKE_PROFILE=$profile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $profileDir = Join-Path $env:RUNNER_TEMP "defenseclaw-installer-smoke"
+          New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+          "DC_SMOKE_PROFILE=$profileDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Run install.ps1 against local artifacts
         shell: pwsh

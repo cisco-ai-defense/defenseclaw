@@ -248,6 +248,24 @@ def is_local_shell_stack_destination(
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
 
 
+def destination_platform_unsupported(
+    *,
+    name: str = "",
+    preset_id: str = "",
+    kind: str = "",
+    endpoint: str = "",
+    os_name: str | None = None,
+) -> bool:
+    """Whether a destination belongs to a local stack unavailable here."""
+
+    return not local_shell_stacks_supported(os_name) and is_local_shell_stack_destination(
+        name=name,
+        preset_id=preset_id,
+        kind=kind,
+        endpoint=endpoint,
+    )
+
+
 def supported_connectors(
     names: Iterable[str], os_name: str | None = None
 ) -> list[str]:
