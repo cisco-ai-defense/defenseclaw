@@ -418,6 +418,29 @@ func TestDataDirAndLogFilePerms(t *testing.T) {
 	testenv.AssertPrivateFile(t, logPath)
 }
 
+func TestOpenLogFileForChildRejectsSymlink(t *testing.T) {
+	d := New(t.TempDir())
+	outside := filepath.Join(t.TempDir(), "outside.log")
+	if err := os.WriteFile(outside, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, d.logFile); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	f, err := d.openLogFileForChild()
+	if f != nil {
+		_ = f.Close()
+	}
+	if err == nil {
+		t.Fatal("openLogFileForChild accepted a symlink")
+	}
+	data, readErr := os.ReadFile(outside)
+	if readErr != nil || string(data) != "unchanged" {
+		t.Fatalf("outside log changed: data=%q err=%v", data, readErr)
+	}
+}
+
 func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 	dir := t.TempDir()
 	d := New(dir)

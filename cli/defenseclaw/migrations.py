@@ -746,14 +746,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if not os.path.isfile(cfg_path):
         return
 
-    try:
-        # newline="" preserves the file's existing line endings (CRLF on a
-        # Windows operator's config) so the surgical insert below does not
-        # silently normalize the whole file to LF.
-        with open(cfg_path, encoding="utf-8", newline="") as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
     block_match = _GUARDRAIL_HOOK_FAIL_MODE_RE.search(text)

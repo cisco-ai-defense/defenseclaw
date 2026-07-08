@@ -59,6 +59,7 @@ def protect_private_file(path: str | os.PathLike[str]) -> None:
 def open_regular_file_no_follow(path: str | os.PathLike[str]) -> int:
     """Open one regular file without following a swapped symlink/reparse point."""
     target = os.path.abspath(os.fspath(path))
+    _reject_reparse_chain(os.path.dirname(target) or os.curdir)
     expected = _reject_reparse_path(target, allow_missing=False)
     assert expected is not None
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)

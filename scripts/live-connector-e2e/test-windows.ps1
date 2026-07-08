@@ -34,11 +34,16 @@ try {
     Assert-True $security.AreAccessRulesProtected 'private fixture does not inherit the workspace ACL'
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $rules = $security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    $seenUser = $false
+    $seenSystem = $false
     foreach ($rule in $rules) {
-        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        Assert-True ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) "private fixture contains non-allow ACE for $($rule.IdentityReference)"
         $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier])
         Assert-True ($sid.Equals($identity.User) -or $sid.Equals($system)) "private fixture trusts unexpected principal $sid"
+        if ($sid.Equals($identity.User)) { $seenUser = $true }
+        if ($sid.Equals($system)) { $seenSystem = $true }
     }
+    Assert-True ($seenUser -and $seenSystem) 'private fixture must grant only the current user and SYSTEM'
 
     $pwsh = (Get-Process -Id $PID).Path
     $allow = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'allow') -TimeoutSeconds 5

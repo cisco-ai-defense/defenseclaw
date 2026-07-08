@@ -25,8 +25,8 @@ func buildScannerFixture(t *testing.T, stdout string, exitCode int) string {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	if err := exec.Command("go", "build", "-o", binary, source).Run(); err != nil {
-		t.Fatalf("build scanner fixture: %v", err)
+	if output, err := exec.Command("go", "build", "-o", binary, source).CombinedOutput(); err != nil {
+		t.Fatalf("build scanner fixture: %v\n%s", err, output)
 	}
 	return binary
 }
