@@ -6300,8 +6300,12 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
     app = DefenseClawTUI(overview_model=overview, audit_model=audit)
     manual_refresh = app._periodic_refresh
     # This test drives refreshes explicitly. Keep Textual's two-second mount
-    # timer from racing the body-update counter during a loaded full-suite run.
+    # timer and unrelated health/usage workers from racing the body-update
+    # counter during a loaded full-suite run.
     app._periodic_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_health_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_config_poll = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
