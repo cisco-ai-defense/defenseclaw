@@ -812,10 +812,11 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   # inherit the running uid/gid (root:defenseclaw) with mode 0644 — so
   # the daemon (running as defenseclaw) can READ but not WRITE the audit
   # DB when it comes back up. Result: every hook evaluation runs, but
-  # the audit row silently drops. Fix by re-chowning after every CLI
-  # invocation completes.
+  # the audit row silently drops. Guardian auth state is written by the
+  # same root-owned CLI invocation, so repair it before the service user
+  # resumes too.
   log "  re-chowning runtime files created by CLI migrations"
-  chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}"
+  chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${GUARDIAN_AUTH_DIR}"
 
   log "  resuming LaunchDaemon"
   launchctl bootstrap system "${PLIST_DST}"

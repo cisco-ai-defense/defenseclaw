@@ -162,6 +162,35 @@ ${hints}"
   fi
 }
 
+t_install_rechowns_guardian_auth_dir_after_cli() {
+  local bad
+  bad="$(/usr/bin/python3 - "${PKG_DIR}/install.sh" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+joined = re.sub(r"\\\n\s*", " ", src)
+bad = []
+lines = joined.splitlines()
+for i, line in enumerate(lines, start=1):
+    if 're-chowning runtime files created by CLI migrations' not in line:
+        continue
+    for j, candidate in enumerate(lines[i:], start=i + 1):
+        if 'chown -R "${SERVICE_UID}:${SERVICE_GID}"' in candidate:
+            if '"${RUNTIME_DIR}"' not in candidate or '"${GUARDIAN_AUTH_DIR}"' not in candidate:
+                bad.append((j, candidate.strip()[:200]))
+            break
+    else:
+        bad.append((i, "missing chown after post-CLI repair log"))
+for i, l in bad:
+    print(f"{i}: {l}")
+PY
+)"
+  if [[ -n "${bad}" ]]; then
+    _fail "post-CLI runtime ownership repair must include GUARDIAN_AUTH_DIR:
+${bad}"
+    return 1
+  fi
+}
+
 t_scrub_py_syntax() {
   local rc=0
   /usr/bin/python3 -c "import ast; ast.parse(open('${PKG_DIR}/lib/scrub_agent_configs.py').read())" 2>&1 || rc=$?
@@ -355,6 +384,8 @@ run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
 run_case "install.sh has ensure_service_user + calls it before launchd" t_install_has_service_user_helper
 run_case "install.sh passes DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR on every hooks-install call" \
   t_install_passes_guardian_auth_dir_to_cli
+run_case "install.sh re-chowns guardian auth state after hooks-install" \
+  t_install_rechowns_guardian_auth_dir_after_cli
 run_case "bundle layout: plist + binary resolve locally" t_bundle_layout_resolves_locally
 run_case "bundle without binary + no repo dies"          t_bundle_without_binary_and_no_repo_dies
 run_case "plist validator accepts bundle default owned by extracting user" \
