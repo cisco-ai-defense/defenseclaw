@@ -109,6 +109,14 @@ def test_load_buckets_reports_missing_required_rule_fields(tmp_path: Path) -> No
         bucket_import.load_buckets(rules_dir)
 
 
+def test_load_buckets_reports_missing_local_patterns_file(tmp_path: Path) -> None:
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+
+    with pytest.raises(ValueError, match="required local pattern file does not exist"):
+        bucket_import.load_buckets(rules_dir)
+
+
 def test_api_wraps_transport_errors() -> None:
     api = bucket_import.AgentControlAPI("https://agent-control.example.test", None, "X-API-Key")
 

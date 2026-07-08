@@ -90,6 +90,8 @@ def load_buckets(rules_dir: Path) -> list[Bucket]:
         buckets.append(Bucket(name=path.stem, rules=rules))
 
     local_path = rules_dir / "local-patterns.yaml"
+    if not local_path.is_file():
+        raise ValueError(f"required local pattern file does not exist: {local_path}")
     local = yaml.safe_load(local_path.read_text(encoding="utf-8"))
     if not isinstance(local, dict):
         raise ValueError(f"{local_path}: expected a YAML object")

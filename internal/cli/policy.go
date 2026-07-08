@@ -29,7 +29,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
@@ -53,10 +52,15 @@ func init() {
 	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackBaseDir, "base-dir", "", "Operator rule-pack directory to preserve beneath the overlay")
 	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackOverlayDir, "overlay-dir", "", "Managed rules-only overlay directory to validate")
 	// Native pre-publication validation must be side-effect free and usable
-	// before the gateway/audit database is running. They skip the root audit,
-	// sink, and telemetry bootstrap; resolveRegoDir performs only the lightweight
-	// config read when --rego-dir is omitted.
-	policyValidateCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
+	// before the gateway/audit database is running. An explicit --rego-dir is
+	// self-contained and skips root bootstrap; the normal no-flag command keeps
+	// the existing config-backed policy_dir resolution and full CLI lifecycle.
+	policyValidateCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if strings.TrimSpace(policyValidateRegoDir) != "" {
+			return nil
+		}
+		return rootCmd.PersistentPreRunE(cmd, args)
+	}
 	policyValidateRulePackCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
 
 	policyEvaluateFirewallCmd.Flags().String("destination", "", "Destination hostname or IP")
@@ -505,11 +509,6 @@ var policyDomainsCmd = &cobra.Command{
 // ---------------------------------------------------------------------------
 
 func resolveRegoDir() string {
-	if cfg == nil {
-		if loaded, err := config.Load(); err == nil {
-			cfg = loaded
-		}
-	}
 	if cfg != nil && cfg.PolicyDir != "" {
 		if info, err := os.Stat(cfg.PolicyDir); err == nil && info.IsDir() {
 			dataJSON := filepath.Join(cfg.PolicyDir, "data.json")
