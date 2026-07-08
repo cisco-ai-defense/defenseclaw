@@ -541,10 +541,10 @@ packaging-macos-bundle:
 	    "$(VERSION)" \
 	    "$(BUNDLE_LDFLAGS)"
 
-# Native SwiftUI companion-app checks and release packaging. The release
-# target embeds the matching arm64 gateway and Python wheel in the app bundle.
-# It is ad-hoc signed by default; scripts/build-macos-app-release.sh switches
-# to Developer ID signing/notarization when release credentials are present.
+# Native SwiftUI companion-app checks and release packaging. The release target
+# builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update
+# zip. Both are ad-hoc signed by default; scripts/build-macos-app-release.sh
+# switches to Developer ID signing/notarization when credentials are present.
 macos-app-license-check:
 	python3 scripts/macos_license_headers.py
 

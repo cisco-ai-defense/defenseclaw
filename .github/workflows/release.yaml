@@ -134,7 +134,9 @@ jobs:
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: macos-app-release
-          path: dist/DefenseClawMac-*.zip
+          path: |
+            dist/DefenseClawMac-*.dmg
+            dist/DefenseClawMac-*.zip
           if-no-files-found: error
 
   release:
@@ -389,10 +391,10 @@ jobs:
           make dist-cli
           make dist-plugin
 
-      # The macOS runner builds an app containing this exact release's arm64
-      # gateway and wheel. Download it before regenerating checksums so the
-      # zip is covered by the signed release manifest and published atomically
-      # with every other asset.
+      # The macOS runner builds a unified DMG containing this exact release's
+      # arm64 gateway and wheel, plus an app-only zip for self-updates. Download
+      # both before regenerating checksums so they are covered by the signed
+      # release manifest and published atomically with every other asset.
       - name: Download unified macOS app
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -430,6 +432,7 @@ jobs:
           shopt -s nullglob
           assets=(
             dist/*.tar.gz
+            dist/*.dmg
             dist/*.zip
             dist/*.sbom.json
             dist/checksums.txt

@@ -24,12 +24,12 @@ Native SwiftUI companion app for [Cisco DefenseClaw](https://github.com/cisco-ai
 
 ## Release package
 
-Every DefenseClaw release builds an Apple Silicon artifact named one of:
+Every DefenseClaw release builds two Apple Silicon artifacts:
 
-- `DefenseClawMac-<version>-macos-arm64-unverified.zip` when built with the default ad-hoc signature.
-- `DefenseClawMac-<version>-macos-arm64.zip` when Apple Developer ID signing and notarization credentials are configured.
+- `DefenseClawMac-<version>-macos-arm64[-unverified].dmg` — the recommended unified installer. Mount it, drag `DefenseClawMac.app` to `/Applications`, launch it, then select **Install DefenseClaw Runtime** on first run.
+- `DefenseClawMac-<version>-macos-arm64[-unverified].zip` — the smaller app-only artifact used by the in-app self-updater. It does not replace or reinstall the independently updating runtime.
 
-The zip contains `DefenseClawMac.app` and an embedded `Contents/Resources/RuntimePayload` with the matching release's:
+The app inside the DMG contains an embedded `Contents/Resources/RuntimePayload` with the matching release's:
 
 - `defenseclaw-gateway` macOS arm64 binary;
 - Python CLI wheel;
@@ -38,7 +38,7 @@ The zip contains `DefenseClawMac.app` and an embedded `Contents/Resources/Runtim
 
 On first run, the app installs that payload into the user's normal DefenseClaw locations. It can download Python dependencies from PyPI and install `uv` or Python if they are missing, so the installer is unified but not fully offline. Configuration, tokens, and the audit database are preserved during install or repair.
 
-The current release does not require Apple credentials. Ad-hoc artifacts are deliberately labeled `unverified`; macOS may require users to right-click the app and choose **Open**. The same release script automatically signs and notarizes when the documented GitHub environment secrets are added.
+The current release does not require Apple credentials. Both ad-hoc artifacts are deliberately labeled `unverified`; macOS may require users to right-click the app and choose **Open**. The same release script automatically signs and notarizes the app-only build, unified app, and DMG when the documented GitHub environment secrets are added.
 
 ### Enable Apple verification later
 
@@ -77,7 +77,7 @@ make dist-cli
 make macos-app-release
 ```
 
-The last target writes the zip to `dist/`. By default it is ad-hoc signed and carries the `-unverified` suffix.
+The last target writes the unified DMG and app-only update zip to `dist/`. By default both are ad-hoc signed and carry the `-unverified` suffix.
 
 ## Runtime connections
 

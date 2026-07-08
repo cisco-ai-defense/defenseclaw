@@ -37,7 +37,7 @@ images/
 .gitignore
 ```
 
-Do not import upstream Git metadata, `.codex`, standalone release scripts, a duplicate `LICENSE`, or design/planning documents that the monorepo supersedes.
+Do not import upstream Git metadata, `.codex`, personal signing identities, a duplicate `LICENSE`, or design/planning documents that the monorepo supersedes. Port relevant changes from the standalone DMG script into `scripts/build-macos-app-release.sh`; do not restore its hard-coded team, keychain profile, or download-from-an-already-published-release assumptions.
 
 ## 2. Preserve Cisco integration points
 
@@ -48,7 +48,7 @@ After syncing, review and restore these intentional differences:
 - App `MARKETING_VERSION` matches the repository `VERSION`.
 - `UpdateChecker` reads releases from `cisco-ai-defense/defenseclaw` and only selects `DefenseClawMac-*-macos-arm64*.zip` assets.
 - `RuntimeInstaller` continues to understand `Contents/Resources/RuntimePayload`.
-- Release packaging remains in `scripts/build-macos-app-release.sh` and `.github/workflows/release.yaml`.
+- Release packaging remains in `scripts/build-macos-app-release.sh` and `.github/workflows/release.yaml`, producing a runtime-bearing DMG and app-only self-update zip.
 
 Search for stale personal/repository settings:
 
@@ -81,12 +81,12 @@ make dist-cli
 make macos-app-release
 ```
 
-Confirm that the resulting zip contains `DefenseClawMac.app`, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Verify the artifact name ends in `-unverified.zip` unless Developer ID signing and notarization were deliberately configured.
+Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Applications` symlink, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Confirm the zip contains the app without `RuntimePayload`, preserving the independent runtime update track. Verify both artifact names contain `-unverified` unless Developer ID signing and notarization were deliberately configured.
 
 ## 5. Review before merging
 
 - Inspect the complete upstream diff, especially process execution, update URLs, token handling, filesystem writes, and embedded payload installation.
 - Confirm no credentials, signing certificates, developer-team IDs, generated build products, or local user paths were imported.
 - Confirm every GitHub Action is pinned to an immutable commit SHA.
-- Confirm the release job downloads the macOS artifact before regenerating `checksums.txt` and publishing the atomic GitHub release.
+- Confirm the release job downloads both the DMG and zip before regenerating `checksums.txt` and publishing the atomic GitHub release.
 - Record exact commands and observed results in the pull request test plan.

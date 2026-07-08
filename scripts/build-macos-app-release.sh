@@ -15,12 +15,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Build the arm64 macOS app with the matching DefenseClaw gateway and wheel
-# embedded in Contents/Resources/RuntimePayload. The default artifact is
-# ad-hoc signed and explicitly named "unverified". If release-environment
+# Build both macOS release artifacts: an app-only zip for self-updates and a
+# drag-to-Applications DMG whose app embeds the matching DefenseClaw gateway
+# and wheel in Contents/Resources/RuntimePayload. Artifacts are ad-hoc signed
+# and explicitly named "unverified" by default. If release-environment
 # Developer ID and notary credentials are supplied, this same script imports
-# them into a temporary keychain, signs, notarizes, staples, and emits the
-# verified artifact name.
+# them into a temporary keychain, signs, notarizes, staples, and emits verified
+# artifact names.
 
 set -euo pipefail
 
@@ -45,9 +46,12 @@ APP_ROOT="${ROOT}/macos/DefenseClawMac"
 PROJECT="${APP_ROOT}/DefenseClawMac.xcodeproj"
 WORK="${RUNNER_TEMP:-${ROOT}/build}/defenseclaw-macos-app-${VERSION}"
 DERIVED_DATA="${WORK}/DerivedData"
-STAGE="${WORK}/stage"
-APP="${STAGE}/DefenseClawMac.app"
+PLAIN_STAGE="${WORK}/app-only"
+PLAIN_APP="${PLAIN_STAGE}/DefenseClawMac.app"
+UNIFIED_STAGE="${WORK}/unified"
+APP="${UNIFIED_STAGE}/DefenseClawMac.app"
 PAYLOAD="${APP}/Contents/Resources/RuntimePayload"
+DMG_STAGE="${WORK}/dmg-stage"
 WHEEL="${ROOT}/dist/defenseclaw-${VERSION}-py3-none-any.whl"
 GATEWAY="${WORK}/defenseclaw-gateway"
 OVERRIDES="${WORK}/overrides.txt"
@@ -69,7 +73,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in xcodebuild xcrun codesign ditto file go python3 shasum; do
+for command in xcodebuild xcrun codesign ditto file go hdiutil python3 shasum spctl; do
     command -v "${command}" >/dev/null || {
         echo "required command not found: ${command}" >&2
         exit 1
@@ -83,7 +87,7 @@ done
 }
 
 rm -rf "${WORK}"
-mkdir -p "${WORK}" "${STAGE}" "${OUT_DIR}"
+mkdir -p "${WORK}" "${PLAIN_STAGE}" "${UNIFIED_STAGE}" "${OUT_DIR}"
 
 SIGNING_IDENTITY="-"
 VERIFICATION_STATUS="adhoc"
@@ -149,16 +153,24 @@ xcodebuild \
 
 BUILT_APP="${DERIVED_DATA}/Build/Products/Release/DefenseClawMac.app"
 [[ -d "${BUILT_APP}" ]] || { echo "app build not found: ${BUILT_APP}" >&2; exit 1; }
-ditto "${BUILT_APP}" "${APP}"
-mkdir -p "${PAYLOAD}"
-cp "${GATEWAY}" "${PAYLOAD}/defenseclaw-gateway"
-cp "${WHEEL}" "${PAYLOAD}/$(basename "${WHEEL}")"
-cp "${OVERRIDES}" "${PAYLOAD}/overrides.txt"
+ditto "${BUILT_APP}" "${PLAIN_APP}"
 
 sign_args=(--force --options runtime --sign "${SIGNING_IDENTITY}")
 if [[ "${SIGNING_IDENTITY}" != "-" ]]; then
     sign_args+=(--timestamp)
 fi
+codesign "${sign_args[@]}" "${PLAIN_APP}"
+codesign --verify --deep --strict --verbose=2 "${PLAIN_APP}"
+
+# The zip is intentionally app-only so in-app self-updates stay small and do
+# not replace or reinstall a separately updating DefenseClaw runtime. The DMG
+# below receives a copy with RuntimePayload injected.
+ditto "${PLAIN_APP}" "${APP}"
+mkdir -p "${PAYLOAD}"
+cp "${GATEWAY}" "${PAYLOAD}/defenseclaw-gateway"
+cp "${WHEEL}" "${PAYLOAD}/$(basename "${WHEEL}")"
+cp "${OVERRIDES}" "${PAYLOAD}/overrides.txt"
+
 codesign "${sign_args[@]}" "${PAYLOAD}/defenseclaw-gateway"
 
 GATEWAY_SHA="$(shasum -a 256 "${PAYLOAD}/defenseclaw-gateway" | awk '{print $1}')"
@@ -197,18 +209,17 @@ if [[ "${SIGNING_IDENTITY}" != "-" && -n "${MACOS_NOTARY_KEY_BASE64:-}" ]]; then
     NOTARY_READY=1
 fi
 
-TEMP_ZIP="${WORK}/DefenseClawMac-${VERSION}-notary.zip"
-ditto -c -k --keepParent "${APP}" "${TEMP_ZIP}"
-
-if [[ "${NOTARY_READY}" == "1" ]]; then
-    echo "Submitting app to Apple notary service"
-    NOTARY_JSON="${WORK}/notary-result.json"
-    xcrun notarytool submit "${TEMP_ZIP}" \
+notarize() {
+    local artifact="$1"
+    local label="$2"
+    local result="${WORK}/notary-${label}.json"
+    echo "Submitting ${label} to Apple notary service"
+    xcrun notarytool submit "${artifact}" \
         --key "${NOTARY_KEY_PATH}" \
         --key-id "${MACOS_NOTARY_KEY_ID}" \
         --issuer "${MACOS_NOTARY_ISSUER_ID}" \
-        --wait --output-format json > "${NOTARY_JSON}"
-    python3 - "${NOTARY_JSON}" <<'PY'
+        --wait --output-format json > "${result}"
+    python3 - "${result}" <<'PY'
 import json
 import sys
 
@@ -217,23 +228,67 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 if result.get("status") != "Accepted":
     raise SystemExit(f"notarization failed: {result}")
 PY
+}
+
+if [[ "${NOTARY_READY}" == "1" ]]; then
+    PLAIN_NOTARY_ZIP="${WORK}/DefenseClawMac-${VERSION}-app-only-notary.zip"
+    ditto -c -k --keepParent "${PLAIN_APP}" "${PLAIN_NOTARY_ZIP}"
+    notarize "${PLAIN_NOTARY_ZIP}" "app-only"
+    xcrun stapler staple "${PLAIN_APP}"
+    xcrun stapler validate "${PLAIN_APP}"
+
+    UNIFIED_NOTARY_ZIP="${WORK}/DefenseClawMac-${VERSION}-unified-notary.zip"
+    ditto -c -k --keepParent "${APP}" "${UNIFIED_NOTARY_ZIP}"
+    notarize "${UNIFIED_NOTARY_ZIP}" "unified-app"
     xcrun stapler staple "${APP}"
     xcrun stapler validate "${APP}"
+fi
+
+echo "Creating unified drag-to-Applications DMG"
+rm -rf "${DMG_STAGE}"
+mkdir -p "${DMG_STAGE}"
+ditto "${APP}" "${DMG_STAGE}/DefenseClawMac.app"
+ln -s /Applications "${DMG_STAGE}/Applications"
+TEMP_DMG="${WORK}/DefenseClawMac-${VERSION}-macos-arm64.dmg"
+hdiutil create \
+    -volname DefenseClawMac \
+    -srcfolder "${DMG_STAGE}" \
+    -ov -format UDZO \
+    "${TEMP_DMG}"
+
+dmg_sign_args=(--force --sign "${SIGNING_IDENTITY}")
+if [[ "${SIGNING_IDENTITY}" != "-" ]]; then
+    dmg_sign_args+=(--timestamp)
+fi
+codesign "${dmg_sign_args[@]}" "${TEMP_DMG}"
+codesign --verify --verbose=2 "${TEMP_DMG}"
+
+if [[ "${NOTARY_READY}" == "1" ]]; then
+    notarize "${TEMP_DMG}" "dmg"
+    xcrun stapler staple "${TEMP_DMG}"
+    xcrun stapler validate "${TEMP_DMG}"
+    spctl -a -t open --context context:primary-signature -vv "${TEMP_DMG}"
     VERIFICATION_STATUS="notarized"
 fi
 
 if [[ "${VERIFICATION_STATUS}" == "notarized" ]]; then
-    ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64.zip"
+    ZIP_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64.zip"
+    DMG_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64.dmg"
 else
-    ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64-unverified.zip"
+    ZIP_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64-unverified.zip"
+    DMG_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64-unverified.dmg"
 fi
-rm -f "${ARTIFACT}"
-ditto -c -k --keepParent "${APP}" "${ARTIFACT}"
-shasum -a 256 "${ARTIFACT}"
+rm -f "${ZIP_ARTIFACT}" "${DMG_ARTIFACT}"
+ditto -c -k --keepParent "${PLAIN_APP}" "${ZIP_ARTIFACT}"
+cp "${TEMP_DMG}" "${DMG_ARTIFACT}"
+shasum -a 256 "${DMG_ARTIFACT}" "${ZIP_ARTIFACT}"
 echo "macOS app verification status: ${VERIFICATION_STATUS}"
-echo "macOS app artifact: ${ARTIFACT}"
+echo "unified DMG artifact: ${DMG_ARTIFACT}"
+echo "app-only update artifact: ${ZIP_ARTIFACT}"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'artifact=%s\n' "${ARTIFACT}" >> "${GITHUB_OUTPUT}"
+    printf 'artifact=%s\n' "${DMG_ARTIFACT}" >> "${GITHUB_OUTPUT}"
+    printf 'dmg=%s\n' "${DMG_ARTIFACT}" >> "${GITHUB_OUTPUT}"
+    printf 'zip=%s\n' "${ZIP_ARTIFACT}" >> "${GITHUB_OUTPUT}"
     printf 'verification_status=%s\n' "${VERIFICATION_STATUS}" >> "${GITHUB_OUTPUT}"
 fi

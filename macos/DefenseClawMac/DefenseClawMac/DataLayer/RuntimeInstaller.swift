@@ -14,9 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Bundled-runtime installer. scripts/build_unified_dmg.sh embeds the
-// DefenseClaw release (Developer-ID re-signed gateway + wheel + manifest) in
-// Contents/Resources/RuntimePayload; this is the native port of
+// Bundled-runtime installer. scripts/build-macos-app-release.sh embeds the
+// DefenseClaw release (Developer-ID or ad-hoc signed gateway + wheel +
+// manifest) in Contents/Resources/RuntimePayload; this is the native port of
 // scripts/install.sh's darwin flow that lays it down — no remote script is
 // ever executed. Every mutating step runs through the shared activity store
 // so its exact argv, live output, and exit status appear in the Activity

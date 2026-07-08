@@ -24,8 +24,8 @@ The macOS app was imported from [`keitheobrien/defenseclaw_mac`](https://github.
 - Commit title: `Release DefenseClawMac 1.1.4`
 - Imported: 2026-07-08
 
-The import includes the Xcode project, Swift sources, tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, standalone release automation, duplicate license file, and superseded unified-installer plan.
+The import includes the Xcode project, Swift sources, tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, personal signing identities, duplicate license file, and standalone release wrapper. The upstream `scripts/build_unified_dmg.sh` behavior is adapted into the monorepo's `scripts/build-macos-app-release.sh` so the unified DMG is built from the same unpublished commit as the backend release rather than downloading an already-published runtime.
 
-Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, embedded backend payload, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
+Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, the runtime-bearing DMG plus app-only update zip, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
 
 Update this file whenever the imported app is refreshed. Follow [UPDATING.md](UPDATING.md); do not copy the standalone repository wholesale.
