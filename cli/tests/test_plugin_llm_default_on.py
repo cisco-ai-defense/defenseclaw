@@ -48,7 +48,8 @@ class PluginLLMDefaultOnTests(unittest.TestCase):
             captured["options"] = options
             return _StubResult()
 
-        with patch("defenseclaw.scanner.plugin.scan_plugin", fake_scan_plugin), \
+        with patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": ""}), \
+                patch("defenseclaw.scanner.plugin.scan_plugin", fake_scan_plugin), \
                 redirect_stderr(stderr):
             PluginScannerWrapper(llm=llm).scan("/tmp/x", use_llm=use_llm)
         captured["stderr"] = stderr.getvalue()

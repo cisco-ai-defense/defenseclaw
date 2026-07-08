@@ -18,11 +18,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import TextIO
 
 
 class UnsafePathError(OSError):
@@ -61,6 +64,56 @@ def set_file_mode(fd: int, path: str, mode: int) -> None:
         fchmod(fd, mode)
     else:
         os.chmod(path, mode)
+
+
+def atomic_write_text_secure(
+    path: str,
+    write: Callable[[TextIO], None],
+    *,
+    prefix: str,
+) -> None:
+    """Atomically replace a secret-bearing text file without widening access.
+
+    A new parent directory is owner-only on POSIX, while an existing directory
+    is never chmodded. The staging file is protected before ``write`` receives
+    its stream, and every failure path closes and removes the staging file.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+
+    target_mode = 0o600
+    if os.name != "nt":
+        try:
+            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            existing_mode = None
+        if existing_mode is not None and existing_mode != 0o600:
+            target_mode = existing_mode & 0o600
+            if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
+                target_mode = 0o640
+            elif target_mode == 0:
+                target_mode = 0o600
+
+    fd = -1
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
+        set_file_mode(fd, tmp, target_mode)
+        stream = os.fdopen(fd, "w")
+        fd = -1
+        with stream:
+            write(stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 def copy_windows_dacl(source: str, destination: str) -> None:

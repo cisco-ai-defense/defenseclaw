@@ -1536,6 +1536,45 @@
       "since": "0.7.0"
     },
     {
+      "name": "DEFENSECLAW_CLAWHUB_LAUNCHER",
+      "category": "hook_internal",
+      "purpose": "Absolute path to the trusted ClawHub .cmd or .bat launcher passed to the temporary Windows command adapter. Set only in the child process environment; inherited values are overwritten.",
+      "default": "unset (set by the ClawHub launcher adapter on Windows)",
+      "accepted_values": ["absolute path to a .cmd or .bat launcher"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:202", "description": "Windows ClawHub command adapter publishes the selected trusted launcher to its generated batch file"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLAWHUB_CWD",
+      "category": "hook_internal",
+      "purpose": "Working directory used by the temporary Windows ClawHub command adapter. Set only in the child process environment; inherited values are overwritten.",
+      "default": "unset (set by the ClawHub launcher adapter on Windows)",
+      "accepted_values": ["absolute directory path"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:203", "description": "Windows ClawHub command adapter publishes the selected launch directory to its generated batch file"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_MARKER",
+      "category": "test_fixture",
+      "purpose": "Test-only marker path used by the fake ClawHub launcher to record a single invocation.",
+      "default": "unset",
+      "accepted_values": ["absolute file path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_cmd_skill.py:858", "description": "Fake Windows ClawHub launcher appends an invocation marker during command-adapter tests"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",

@@ -442,15 +442,15 @@ def _save_ownership_backup(openclaw_home: str, data_dir: str) -> str:
     parents_without_ox = []
     parent = os.path.dirname(real_path)
     while parent:
+        next_parent = os.path.dirname(parent)
+        if next_parent == parent:
+            break
         try:
             pst = os.stat(parent)
             pmode = _stat.S_IMODE(pst.st_mode)
             if not (pmode & _stat.S_IXOTH):
                 parents_without_ox.append({"path": parent, "original_mode": oct(pmode)})
         except OSError:
-            break
-        next_parent = os.path.dirname(parent)
-        if next_parent == parent:
             break
         parent = next_parent
 
@@ -480,6 +480,9 @@ def _ensure_parent_traversal(target_path: str) -> None:
 
     parent = os.path.dirname(target_path)
     while parent:
+        next_parent = os.path.dirname(parent)
+        if next_parent == parent:
+            break
         try:
             st = os.stat(parent)
             mode = _stat.S_IMODE(st.st_mode)
@@ -493,9 +496,6 @@ def _ensure_parent_traversal(target_path: str) -> None:
                 if result.returncode == 0:
                     click.echo(f"  Traversal:     added o+x to {parent}")
         except OSError:
-            break
-        next_parent = os.path.dirname(parent)
-        if next_parent == parent:
             break
         parent = next_parent
 
