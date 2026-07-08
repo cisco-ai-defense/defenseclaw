@@ -1502,6 +1502,11 @@ async def test_catalog_control_action_uses_visible_table_cursor() -> None:
         await _wait_for_panel_render(app, "skills")
 
         table = app.query_one("#panel-table", DataTable)
+        await _wait_for_background(
+            lambda: not table.has_class("hidden")
+            and table.row_count == 2
+            and len(app._table_rows) == 2  # noqa: SLF001
+        )
         table.move_cursor(row=1, column=0, animate=False)
         await _wait_for_background(lambda: table.cursor_row == 1)
         skills.set_cursor(0)
@@ -2196,6 +2201,32 @@ async def test_health_poll_allows_scrolled_repaint_when_live_overview_changes(
     rows = {row.connector: row for row in app._overview_connector_rows()}
     assert rows["codex"].calls == 0
     assert rows["codex"].last_activity_at == now
+
+
+@pytest.mark.asyncio
+async def test_health_poll_refreshes_overview_disk_models(monkeypatch, tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    refreshed: list[str] = []
+
+    monkeypatch.setattr("defenseclaw.tui.app._fetch_gateway_health", lambda _cfg: None)
+    monkeypatch.setattr(app, "_propagate_connector", lambda _snapshot: None)
+    monkeypatch.setattr(app, "_mark_restart_if_gateway_restarted", lambda _snapshot: None)
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: None)
+    monkeypatch.setattr(app, "_refresh_alerts", lambda: refreshed.append("alerts"))
+    monkeypatch.setattr(app, "_load_doctor_cache", lambda: refreshed.append("doctor"))
+    monkeypatch.setattr(
+        app,
+        "_load_silent_bypass_count",
+        lambda: refreshed.append("silent-bypass"),
+    )
+    monkeypatch.setattr(app, "_render_overview_scope_indicator", lambda: None)
+    monkeypatch.setattr(app, "_schedule_overview_sampled_refresh", lambda **_kwargs: None)
+    app.active_panel = "overview"
+    app.help_open = False
+
+    await app._poll_health()
+
+    assert refreshed == ["alerts", "doctor", "silent-bypass"]
 
 
 def test_slow_refresh_scheduler_is_single_flight(tmp_path) -> None:

@@ -1197,6 +1197,78 @@ def _verify_sha256(
         raise SystemExit(1)
 
 
+def _stage_upgrade_binary(source: str, install_dir: str, label: str) -> str:
+    """Copy *source* to a same-filesystem staging path for atomic replace."""
+    fd, staged = tempfile.mkstemp(
+        prefix=f".{label}.", suffix=".tmp", dir=install_dir,
+    )
+    os.close(fd)
+    try:
+        shutil.copy2(source, staged)
+    except Exception:
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+        raise
+    return staged
+
+
+def _install_windows_gateway_pair(
+    gateway_source: str,
+    gateway_target: str,
+    hook_source: str,
+    hook_target: str,
+    install_dir: str,
+) -> None:
+    """Replace the Windows gateway and hook launcher as one recoverable pair."""
+    staged_gateway = _stage_upgrade_binary(
+        gateway_source, install_dir, "defenseclaw-gateway",
+    )
+    staged_hook = ""
+    previous_hook = ""
+    hook_existed = os.path.isfile(hook_target)
+    try:
+        staged_hook = _stage_upgrade_binary(
+            hook_source, install_dir, "defenseclaw-hook",
+        )
+        if hook_existed:
+            previous_hook = _stage_upgrade_binary(
+                hook_target, install_dir, "defenseclaw-hook-rollback",
+            )
+
+        # Replace the hook first because it is the file most likely to be held
+        # open by an agent process. The gateway stays untouched if this fails.
+        os.replace(staged_hook, hook_target)
+        staged_hook = ""
+        try:
+            os.replace(staged_gateway, gateway_target)
+            staged_gateway = ""
+        except OSError as install_error:
+            try:
+                if previous_hook:
+                    os.replace(previous_hook, hook_target)
+                    previous_hook = ""
+                else:
+                    try:
+                        os.remove(hook_target)
+                    except FileNotFoundError:
+                        pass
+            except OSError as rollback_error:
+                raise OSError(
+                    "gateway replacement failed and hook rollback also failed: "
+                    f"{rollback_error}",
+                ) from install_error
+            raise
+    finally:
+        for temporary in (staged_gateway, staged_hook, previous_hook):
+            if temporary:
+                try:
+                    os.remove(temporary)
+                except FileNotFoundError:
+                    pass
+
+
 def _install_gateway(
     binary_path: str,
     os_name: str,
@@ -1254,9 +1326,13 @@ def _install_gateway(
                     indent="  ",
                 )
 
-    shutil.copy2(binary_path, target)
-    if hook_source and hook_target:
-        shutil.copy2(hook_source, hook_target)
+    if os_name == "windows":
+        assert hook_source is not None and hook_target is not None
+        _install_windows_gateway_pair(
+            binary_path, target, hook_source, hook_target, install_dir,
+        )
+    else:
+        shutil.copy2(binary_path, target)
     # chmod's executable bits are meaningless on Windows (and os.chmod there only
     # toggles the read-only flag); the gateway was already stopped above, so the
     # copy can overwrite the prior .exe.
@@ -1390,6 +1466,38 @@ def _check_post_upgrade_drift(target_version: str) -> None:
     )
 
 
+def _run_managed_validation(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    failure_message: str,
+) -> None:
+    """Run one bounded post-install check and preserve failure diagnostics."""
+
+    try:
+        subprocess.run(
+            argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            env=env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        def output_text(value: str | bytes | None) -> str:
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return value or ""
+
+        output = "\n".join((output_text(exc.stdout), output_text(exc.stderr)))
+        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
+        suffix = f": {detail[:1000]}" if detail else ""
+        ux.err(f"{failure_message}{suffix}", indent="  ")
+        raise SystemExit(1) from exc
+
+
 def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
     """Install a pre-downloaded Python CLI wheel.
 
@@ -1435,45 +1543,16 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
         check=True,
         env=managed_env,
     )
-    try:
-        subprocess.run(
-            [uv, "--no-config", "pip", "check", "--python", venv_python],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            env=managed_env,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        output = ""
-        if isinstance(exc, subprocess.CalledProcessError):
-            output = "\n".join((exc.stdout or "", exc.stderr or ""))
-        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
-        suffix = f": {detail[:1000]}" if detail else ""
-        ux.err(f"Managed CLI dependency validation failed{suffix}", indent="  ")
-        raise SystemExit(1) from exc
-
-    try:
-        subprocess.run(
-            [venv_python, "-I", "-c", _TUI_SMOKE_CODE],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            env=managed_env,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        output = ""
-        if isinstance(exc, subprocess.CalledProcessError):
-            output = "\n".join((exc.stdout or "", exc.stderr or ""))
-        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
-        suffix = f": {detail[:1000]}" if detail else ""
-        ux.err(f"Managed TUI launch validation failed{suffix}", indent="  ")
-        raise SystemExit(1) from exc
+    _run_managed_validation(
+        [uv, "--no-config", "pip", "check", "--python", venv_python],
+        env=managed_env,
+        failure_message="Managed CLI dependency validation failed",
+    )
+    _run_managed_validation(
+        [venv_python, "-I", "-c", _TUI_SMOKE_CODE],
+        env=managed_env,
+        failure_message="Managed TUI launch validation failed",
+    )
 
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)
@@ -1521,6 +1600,12 @@ def _publish_windows_cli_launcher(cli_exe: str, install_dir: str) -> None:
 
         os.replace(temporary_shim, shim)
         temporary_shim = ""
+    except UnicodeEncodeError as exc:
+        ux.err(
+            f"Cannot publish Windows CLI launcher for non-ASCII path '{cli_exe}'",
+            indent="  ",
+        )
+        raise SystemExit(1) from exc
     finally:
         if fd >= 0:
             os.close(fd)

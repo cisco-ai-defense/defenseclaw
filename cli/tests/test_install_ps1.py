@@ -1652,6 +1652,12 @@ try {{
     assert "UNEXPECTED_SUCCESS=" not in failure.stdout
 
 
+def test_windows_installer_updates_process_path_before_quickstart() -> None:
+    main = INSTALL_PS1.read_text().split("function Main", 1)[1]
+
+    assert main.index("Add-ToPath") < main.index("Invoke-Quickstart")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")
 @pytest.mark.parametrize(
     ("native_exit", "expected"),

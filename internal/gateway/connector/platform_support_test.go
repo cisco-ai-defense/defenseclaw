@@ -173,7 +173,7 @@ func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
 	}
 }
 
-func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
+func TestRegistryWindowsFilterKeepsSupportedOnly(t *testing.T) {
 	reg := NewDefaultRegistry()
 	var got []string
 	for _, name := range reg.Names() {

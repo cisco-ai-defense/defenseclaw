@@ -368,7 +368,10 @@ def test_native_npx_cmd_acceptance_with_quoted_local_package(
 
 
 @pytest.mark.allow_subprocess
-@pytest.mark.skipif(not (HOST_UVX and HOST_LOCALAPPDATA), reason="native uvx.exe is unavailable")
+@pytest.mark.skipif(
+    not (HOST_UVX and HOST_UV and HOST_LOCALAPPDATA),
+    reason="native uvx.exe/uv.exe is unavailable",
+)
 def test_native_uvx_exe_acceptance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -334,6 +334,15 @@ def _refresh_and_maybe_restart_local_observability(
     if result.errors:
         for error in result.errors[:5]:
             click.echo(f"  error: bundle refresh: {error}", err=True)
+        if stopped:
+            click.echo(
+                f"  {ux.dim('→')} Restarting previously running observability "
+                "stack after refresh failure..."
+            )
+            _run_controller_check(
+                lambda: active.up(timeout=180, wait=False),
+                "Docker Compose restart after refresh failure",
+            )
         return result
     if result.refreshed:
         click.echo(

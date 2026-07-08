@@ -1844,19 +1844,19 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     try:
         active = cfg.active_connector()
         if active:
-            return str(active).strip().lower()
+            return normalize_connector(str(active))
     except Exception:
         pass
     gc = getattr(cfg, "guardrail", None)
     if gc is not None:
         connector = getattr(gc, "connector", "")
         if connector:
-            return str(connector).strip().lower()
+            return normalize_connector(str(connector))
     claw = getattr(cfg, "claw", None)
     if claw is not None:
         mode = getattr(claw, "mode", "")
         if mode:
-            return str(mode).strip().lower()
+            return normalize_connector(str(mode))
     return "openclaw"
 
 

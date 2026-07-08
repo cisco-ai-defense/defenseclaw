@@ -31,7 +31,7 @@ import json
 import os
 
 import pytest
-from defenseclaw import connector_paths
+from defenseclaw import connector_paths, file_permissions
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
     MCPWriteUnsupportedError,
@@ -439,6 +439,8 @@ class TestRoundTrip:
 
 class TestAtomicity:
     def test_set_recovers_from_corrupt_json(self, tmp_path, monkeypatch):
+        if os.name == "nt":
+            file_permissions._set_windows_owner_only_acl(os.fspath(tmp_path))
         path = tmp_path / ".mcp.json"
         path.write_text("{ this is not valid json")
 

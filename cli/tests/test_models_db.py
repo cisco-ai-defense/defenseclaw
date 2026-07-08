@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.logger import Logger
 from defenseclaw.models import Event, Finding, ScanResult, compare_severity
 
@@ -57,6 +58,16 @@ class ModelsDbTests(unittest.TestCase):
         self.assertGreater(compare_severity("CRITICAL", "HIGH"), 0)
         self.assertGreater(compare_severity("HIGH", "MEDIUM"), 0)
         self.assertLess(compare_severity("LOW", "HIGH"), 0)
+
+    def test_unknown_hook_action_is_clamped_to_allow(self):
+        self.assertEqual(connector_hook_decision("action=skip"), "allow")
+
+    def test_latest_scan_query_has_composite_lookup_index(self):
+        indexes = {
+            row[1]: row
+            for row in self.store.db.execute("PRAGMA index_list(scan_results)").fetchall()
+        }
+        self.assertIn("idx_scan_scanner_target_timestamp", indexes)
 
     def test_policy_engine_block_allow(self):
         pe = PolicyEngine(self.store)

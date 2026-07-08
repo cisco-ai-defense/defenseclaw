@@ -78,7 +78,7 @@ class _WindowsProcessTreeOwner:
 
         # The process was created suspended, so no compiler child can escape
         # before WindowsJob assigns the root and resumes the entire tree.
-        self._job = WindowsJob(pid)
+        self._job = WindowsJob(pid, allow_breakaway=False)
 
     def terminate(self, process: subprocess.Popen[bytes]) -> tuple[bytes | None, bytes | None]:
         self.close()  # KILL_ON_JOB_CLOSE terminates compiler/linker descendants.

@@ -223,12 +223,9 @@ def test_pinned_skill_scanner_api_and_local_scan(tmp_path: Path) -> None:
 
 def test_pinned_mcp_scanner_runs_offline_yara_scan(tmp_path: Path) -> None:
     assert importlib_metadata.version("cisco-ai-mcp-scanner") == MCP_SCANNER_VERSION
-    executable = shutil.which("mcp-scanner")
-    if executable is None:
-        script_name = "mcp-scanner.exe" if os.name == "nt" else "mcp-scanner"
-        managed_script = Path(sys.executable).with_name(script_name)
-        if managed_script.is_file():
-            executable = str(managed_script)
+    script_name = "mcp-scanner.exe" if os.name == "nt" else "mcp-scanner"
+    managed_script = Path(sys.executable).with_name(script_name)
+    executable = str(managed_script) if managed_script.is_file() else shutil.which("mcp-scanner")
     assert executable is not None
     fixture = tmp_path / "tools.json"
     fixture.write_text(

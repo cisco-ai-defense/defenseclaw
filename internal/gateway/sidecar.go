@@ -746,9 +746,6 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	if webhooks := s.webhooksSnapshot(); webhooks != nil {
 		webhooks.Close()
 	}
-	if aiDiscovery := s.swapAIDiscovery(nil); aiDiscovery != nil {
-		_ = aiDiscovery.Close()
-	}
 	// Drain the async judge-persistence queue BEFORE the audit DB
 	// handle is closed: any rows still buffered after a SIGTERM
 	// must land in SQLite or they are lost forever. Shutdown
@@ -1249,14 +1246,11 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if aiRestart {
-		previousAIDiscovery := s.swapAIDiscovery(nextAIDiscovery)
+		s.swapAIDiscovery(nextAIDiscovery)
 		if api := s.apiSnapshot(); api != nil {
 			api.SetAIDiscoveryService(nextAIDiscovery)
 		}
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
-		if previousAIDiscovery != nil {
-			_ = previousAIDiscovery.Close()
-		}
 	}
 
 	if watcherRestart {
@@ -3563,6 +3557,11 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	defer func() {
+		if err := aiDiscovery.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] close AI discovery store: %v\n", err)
+		}
+	}()
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
 		"mode":                      s.currentConfig().AIDiscovery.Mode,
 		"scan_interval_min":         s.currentConfig().AIDiscovery.ScanIntervalMin,
@@ -3602,6 +3601,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 				"result":          report.Summary.Result,
 			})
 		case <-ctx.Done():
+			<-errCh
 			s.health.SetAIDiscovery(StateStopped, "", nil)
 			return ctx.Err()
 		}

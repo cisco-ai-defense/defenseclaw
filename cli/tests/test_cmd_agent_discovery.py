@@ -112,6 +112,11 @@ class ResolveConnectorTests(unittest.TestCase):
         cfg.active_connector = lambda: "Codex"
         self.assertEqual(cmd_agent._resolve_connector_for_restart(cfg), "codex")
 
+    def test_active_connector_alias_is_canonicalized(self):
+        cfg = SimpleNamespace()
+        cfg.active_connector = lambda: "Claude-Code"
+        self.assertEqual(cmd_agent._resolve_connector_for_restart(cfg), "claudecode")
+
     def test_falls_back_to_guardrail_connector(self):
         cfg = SimpleNamespace(
             guardrail=SimpleNamespace(connector="claudecode"),

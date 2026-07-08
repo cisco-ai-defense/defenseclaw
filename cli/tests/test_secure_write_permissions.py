@@ -31,7 +31,12 @@ from defenseclaw.commands import cmd_setup_observability as setup_writer
 from defenseclaw.observability import writer as observability_writer
 from defenseclaw.webhooks import writer as webhook_writer
 
-from tests.permissions import assert_owner_only_file, grant_everyone, set_known_windows_directory_acl
+from tests.permissions import (
+    assert_owner_only_directory,
+    assert_owner_only_file,
+    grant_everyone,
+    set_known_windows_directory_acl,
+)
 
 _ATOMIC_WRITERS = [
     (
@@ -343,6 +348,18 @@ def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
     assert_owner_only_file(target)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory read/traverse ACLs")
+@pytest.mark.allow_subprocess
+def test_owner_only_directory_assertion_rejects_untrusted_read_access(tmp_path):
+    directory = tmp_path / "readable-directory"
+    directory.mkdir()
+    set_known_windows_directory_acl(directory)
+    grant_everyone(directory, "RX")
+
+    with pytest.raises(AssertionError, match="untrusted SID"):
+        assert_owner_only_directory(directory)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL preservation")
 @pytest.mark.allow_subprocess
 def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_path):
@@ -391,6 +408,64 @@ def test_copy_windows_dacl_protects_destination_from_parent_inheritance(tmp_path
 
     assert file_permissions._windows_dacl_is_protected(destination)
     assert file_permissions._windows_acl_has_required_access(destination)
+
+
+def test_windows_post_replace_verification_repairs_target(monkeypatch, tmp_path):
+    target = tmp_path / "repair.json"
+    target.write_bytes(b"sensitive")
+    problems = iter(["untrusted write grant", None])
+    repaired: list[str] = []
+
+    monkeypatch.setattr(file_permissions, "windows_acl_write_error", lambda _path: next(problems))
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
+    monkeypatch.setattr(file_permissions, "_set_windows_owner_only_acl", repaired.append)
+
+    file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
+
+    assert repaired == [os.fspath(target)]
+    assert target.read_bytes() == b"sensitive"
+
+
+def test_windows_post_replace_verification_removes_unrepairable_target(monkeypatch, tmp_path):
+    target = tmp_path / "unsafe.json"
+    target.write_bytes(b"sensitive")
+
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_write_error",
+        lambda _path: "untrusted read grant",
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "_set_windows_owner_only_acl",
+        lambda _path: (_ for _ in ()).throw(OSError("access denied")),
+    )
+
+    with pytest.raises(OSError, match="repair failed: access denied"):
+        file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
+
+    assert not target.exists()
+
+
+def test_windows_post_replace_inspection_error_removes_target(monkeypatch, tmp_path):
+    target = tmp_path / "unverifiable.json"
+    target.write_bytes(b"sensitive")
+
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_write_error",
+        lambda _path: (_ for _ in ()).throw(OSError("inspection denied")),
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "_set_windows_owner_only_acl",
+        lambda _path: (_ for _ in ()).throw(OSError("repair denied")),
+    )
+
+    with pytest.raises(OSError, match="ACL inspection failed: inspection denied"):
+        file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
+
+    assert not target.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows junction refusal")

@@ -184,7 +184,7 @@ class CommandRunner:
                 from defenseclaw.tui.windows_process import WindowsJob
 
                 try:
-                    windows_job = WindowsJob(process.pid)
+                    windows_job = WindowsJob(process.pid, allow_breakaway=False)
                 except OSError as exc:
                     process.kill()
                     process.wait(timeout=2)

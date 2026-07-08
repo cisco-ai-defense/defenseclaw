@@ -234,6 +234,34 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks(monkeypatch) -
     assert "token=secret" not in repr(rows)
 
 
+def test_enterprise_splunk_sink_is_not_gated_as_local(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.tui.services.overview_state.local_splunk_stack_supported",
+        lambda: False,
+    )
+    model = _model()
+    model.set_health(
+        HealthSnapshot(
+            sinks=SubsystemHealth(
+                state="running",
+                details={
+                    "sinks": [
+                        {
+                            "name": "enterprise-splunk",
+                            "preset_id": "splunk-enterprise",
+                            "kind": "splunk_hec",
+                            "enabled": True,
+                            "endpoint": "https://127.0.0.1:8088/services/collector/event",
+                        }
+                    ]
+                },
+            )
+        )
+    )
+
+    assert model.observability_destination_rows()[0].state == "enabled"
+
+
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
     # 8.13: in a multi-connector install the SERVICES "Agent" row collapses to
     # an "N connectors active" roll-up (per-connector detail lives in the

@@ -645,18 +645,20 @@ class TestMigrate040PermsTighten(unittest.TestCase):
         device_key = os.path.join(self.data_dir, "device.key")
         with open(device_key, "w") as f:
             f.write("secretkey")
-        os.chmod(device_key, 0o600)
+        if os.name == "nt":
+            with open(device_key, "r+") as f:
+                set_file_mode(f.fileno(), device_key, 0o600)
+        else:
+            os.chmod(device_key, 0o600)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
-        if os.name == "nt":
-            assert_owner_only_file(device_key)
-        else:
-            self.assertFalse(
-                any("device.key" in c for c in ctx.changes),
-                msg=ctx.changes,
-            )
+        assert_owner_only_file(device_key)
+        self.assertFalse(
+            any("device.key" in c for c in ctx.changes),
+            msg=ctx.changes,
+        )
 
     def test_tightens_managed_connector_backup_perms(self):
         managed = os.path.join(

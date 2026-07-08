@@ -146,7 +146,7 @@ sidecar.
 
 ```bash
 defenseclaw setup local-observability down     # stop containers, keep data
-defenseclaw setup local-observability reset    # stop + drop all volumes
+defenseclaw setup local-observability reset --yes  # stop + drop all volumes
 ```
 
 The standard lifecycle commands remain:

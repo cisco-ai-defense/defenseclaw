@@ -1157,6 +1157,23 @@ class SetupPanelModel:
         if rebuild is None:
             return
         overrides = _field_value_overrides(self.form_fields)
+        if self.active_wizard == SetupWizard.GUARDRAIL:
+            scope = wizard_field_value(self.form_fields, "Scope")
+            disable_label = next(
+                (field.label for field in self.form_fields if field.flag == "--disable"),
+                "",
+            )
+            scope_changed = (
+                scope == _GUARDRAIL_SCOPE_GLOBAL
+                and disable_label == "Disable Selected Connector"
+            ) or (
+                scope == _GUARDRAIL_SCOPE_CONNECTOR
+                and disable_label == "Disable Guardrail Globally"
+            )
+            if scope_changed:
+                # The connector and global toggles intentionally share the
+                # CLI flag, but their values must not cross a scope rebuild.
+                overrides.pop("--disable", None)
         if self.active_wizard in {SetupWizard.CONNECTOR_SETUP, SetupWizard.GUARDRAIL}:
             connector_field = next(
                 (field for field in self.form_fields if field.flag == "--connector" or field.label == "Connector"),

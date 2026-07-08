@@ -4045,7 +4045,7 @@ def setup_guardrail(
                 ctx = click.get_current_context()
                 ctx.invoke(
                     disable_cmd,
-                    restart=True,
+                    restart=restart,
                     yes=True,
                     connector_flag=None,
                 )
@@ -4053,7 +4053,7 @@ def setup_guardrail(
             else:
                 # Preserve the setup alias's historical idempotent teardown
                 # behavior when the persisted master switch is already off.
-                _disable_guardrail(app, gc, restart=True)
+                _disable_guardrail(app, gc, restart=restart)
         return
 
     aid = app.cfg.cisco_ai_defense
@@ -8213,20 +8213,25 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
         click.echo(f"  ✗ Failed to save config: {exc}")
         click.echo("    Guardrail may re-enable on next run")
 
-    # Restart the gateway so it runs conn.Teardown() — the sidecar checks
-    # guardrail.enabled on boot and calls Teardown instead of Setup when
-    # disabled. This restores agent configs (hooks, api_base, plugins,
-    # shims) to their pre-DefenseClaw state.
-    click.echo()
-    click.echo("  Restarting gateway to run connector teardown...")
-    _restart_services(
-        app.cfg.data_dir,
-        app.cfg.gateway.host,
-        app.cfg.gateway.port,
-        connector=connector_name,
-    )
-    click.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
-    click.echo()
+    if restart:
+        # Restart the gateway so it runs conn.Teardown() — the sidecar checks
+        # guardrail.enabled on boot and calls Teardown instead of Setup when
+        # disabled. This restores agent configs (hooks, api_base, plugins,
+        # shims) to their pre-DefenseClaw state.
+        click.echo()
+        click.echo("  Restarting gateway to run connector teardown...")
+        _restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=connector_name,
+        )
+        click.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
+        click.echo()
+    else:
+        click.echo()
+        click.echo("  --no-restart: connector teardown is deferred until the next gateway restart.")
+        click.echo()
 
     if app.logger:
         app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")

@@ -776,7 +776,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 		if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
 			hooksDir := filepath.Join(opts.DataDir, "hooks")
 			for eventType, val := range hooks {
-				remaining := removeOwnedHooks(val, hooksDir)
+				remaining := removeOwnedClaudeCodeHooks(val, hooksDir, backup.ManagedHookCommands)
 				if len(remaining) == 0 {
 					delete(hooks, eventType)
 				} else {

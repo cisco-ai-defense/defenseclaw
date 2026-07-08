@@ -74,3 +74,16 @@ def assert_owner_only_directory(path: str | os.PathLike[str]) -> None:
         return
 
     assert_owner_only_file(path)
+    from defenseclaw.file_permissions import _windows_acl_snapshot, _windows_current_user_sid
+
+    current_sid = _windows_current_user_sid()
+    trusted = {"S-1-3-4", "S-1-5-18", current_sid}
+    _owner_sid, _null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or permissions == 0:
+            continue
+        if sid in trusted:
+            continue
+        if sid == "S-1-3-0" and inheritance & 0x08:
+            continue
+        raise AssertionError(f"directory ACL grants access to untrusted SID {sid or '<unknown>'}")

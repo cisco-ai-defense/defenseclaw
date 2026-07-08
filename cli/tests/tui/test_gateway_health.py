@@ -262,6 +262,19 @@ def test_hook_only_footer_and_setup_readiness_are_online() -> None:
     assert gateway_check.status == "pass"
 
 
+def test_disabled_gateway_availability_is_terminal_readiness() -> None:
+    readiness = build_readiness_checks(
+        {},
+        None,
+        None,
+        (),
+        gateway_status=SimpleNamespace(state="disabled", last_error=""),
+    )
+
+    gateway_check = next(check for check in readiness if check.title == "Gateway / API Health")
+    assert gateway_check.status == "pass"
+
+
 def test_overview_metrics_do_not_label_health_errors_offline() -> None:
     overview = OverviewPanelModel(OverviewConfig(claw_mode="codex"))
     overview.set_health(

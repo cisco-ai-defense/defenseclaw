@@ -150,8 +150,8 @@ func main() {
   if len(os.Args) >= 3 && os.Args[1] == "plugin" && os.Args[2] == "list" { fmt.Println(os.Getenv("DEFENSECLAW_FAKE_CLAUDE_LIST")) }
 }
 `)
-	if err := exec.Command("go", "build", "-o", filepath.Join(binDir, name), source).Run(); err != nil {
-		t.Fatalf("build fake claude: %v", err)
+	if output, err := exec.Command("go", "build", "-o", filepath.Join(binDir, name), source).CombinedOutput(); err != nil {
+		t.Fatalf("build fake claude: %v\n%s", err, output)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

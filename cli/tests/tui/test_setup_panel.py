@@ -684,6 +684,19 @@ def test_guardrail_live_connector_change_rederives_connector_scoped_settings() -
     assert wizard_field_value(model.form_fields, "Approval Min Severity") == "LOW"
 
 
+def test_guardrail_scope_change_does_not_carry_disable_toggle() -> None:
+    model = SetupPanelModel(cfg=_codex_claude_guardrail_cfg())
+    model.open_wizard_form(SetupWizard.GUARDRAIL)
+
+    _replace_live_guardrail_field(model, "Disable Selected Connector", "yes")
+    _replace_live_guardrail_field(model, "Scope", "global-all-active")
+
+    assert wizard_field_value(model.form_fields, "Disable Guardrail Globally") == "no"
+    assert "--disable" not in build_wizard_args(
+        SetupWizard.GUARDRAIL, model.form_fields, model.config
+    )
+
+
 def test_guardrail_advanced_separates_connector_and_global_argv() -> None:
     cfg = _codex_claude_guardrail_cfg()
     connector_fields = guardrail_wizard_fields(cfg)

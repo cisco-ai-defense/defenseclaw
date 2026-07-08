@@ -162,8 +162,20 @@ func CreateExclusive(path string) (*os.File, error) {
 	if dir == "" {
 		dir = "."
 	}
+	if err := rejectReparseChain(dir); err != nil {
+		return nil, err
+	}
+	if err := rejectReparsePath(path); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("safefile: mkdir %s: %w", dir, err)
+	}
+	if err := rejectReparseChain(dir); err != nil {
+		return nil, err
+	}
+	if err := rejectReparsePath(path); err != nil {
+		return nil, err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {

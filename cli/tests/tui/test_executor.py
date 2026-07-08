@@ -33,6 +33,33 @@ from defenseclaw.tui.executor import (
 )
 
 
+@pytest.mark.asyncio
+async def test_windows_job_close_fallback_swallows_final_reap_timeout() -> None:
+    from defenseclaw.tui.windows_process import WindowsJob
+
+    waiter = asyncio.get_running_loop().create_future()
+
+    class Process:
+        kill_calls = 0
+
+        def wait(self):
+            return waiter
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+    process = Process()
+    job = WindowsJob.__new__(WindowsJob)
+    close_calls: list[bool] = []
+    job.close = lambda: close_calls.append(True)  # type: ignore[method-assign]
+
+    await job._close_and_wait(process, 0.001)  # type: ignore[arg-type]
+
+    assert close_calls == [True]
+    assert process.kill_calls == 1
+    waiter.cancel()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="stdlib PTYs are POSIX-only")
 @pytest.mark.asyncio
 async def test_executor_pty_forwards_interactive_stdin() -> None:
@@ -139,11 +166,13 @@ def test_managed_subprocess_is_suspended_only_on_windows() -> None:
 
 
 def test_windows_job_allows_only_explicit_managed_breakaway() -> None:
-    assert windows_process._TUI_JOB_LIMIT_FLAGS == (  # noqa: SLF001 - exact Win32 contract.
-        windows_process._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE  # noqa: SLF001
-        | windows_process._JOB_OBJECT_LIMIT_BREAKAWAY_OK  # noqa: SLF001
-    )
-    assert windows_process._TUI_JOB_LIMIT_FLAGS & 0x00001000 == 0  # noqa: SLF001 - no silent breakaway.
+    baseline = windows_process._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE  # noqa: SLF001
+    explicit = baseline | windows_process._JOB_OBJECT_LIMIT_BREAKAWAY_OK  # noqa: SLF001
+
+    assert windows_process._TUI_JOB_LIMIT_FLAGS == baseline  # noqa: SLF001
+    assert windows_process._job_limit_flags(allow_breakaway=False) == baseline  # noqa: SLF001
+    assert windows_process._job_limit_flags(allow_breakaway=True) == explicit  # noqa: SLF001
+    assert explicit & 0x00001000 == 0  # no silent breakaway.
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows console allocation behavior")

@@ -40,8 +40,8 @@ func buildGitListFixture(t *testing.T, output string, outputBytes int) string {
 	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := exec.Command("go", "build", "-o", filepath.Join(binDir, name), source).Run(); err != nil {
-		t.Fatalf("build git fixture: %v", err)
+	if output, err := exec.Command("go", "build", "-o", filepath.Join(binDir, name), source).CombinedOutput(); err != nil {
+		t.Fatalf("build git fixture: %v\n%s", err, output)
 	}
 	return binDir
 }

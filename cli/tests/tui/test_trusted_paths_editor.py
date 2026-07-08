@@ -19,8 +19,8 @@ from unittest.mock import patch
 
 import pytest
 from defenseclaw.inventory import agent_discovery as ad
-from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.screens import trusted_paths_editor as tpe
+from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.screens.trusted_paths_editor import (
     TrustedPathRow,
     TrustedPathsEditorScreen,
@@ -115,7 +115,6 @@ def test_rows_from_config_reflect_collect_view() -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEFENSECLAW_TRUSTED_BIN_PREFIXES", None)
             rows = trusted_paths_rows_from_config(SimpleNamespace(data_dir=tmp))
-    resolved = {r.resolved: r for r in rows}
     default_rows = [row for row in rows if row.source == "default"]
     assert default_rows
     assert all(not row.removable for row in default_rows)

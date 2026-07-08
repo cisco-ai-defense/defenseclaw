@@ -13,7 +13,7 @@ from ctypes import wintypes
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
-_TUI_JOB_LIMIT_FLAGS = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+_TUI_JOB_LIMIT_FLAGS = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _PROCESS_TERMINATE = 0x0001
@@ -72,10 +72,17 @@ class _JobObjectBasicAccountingInformation(ctypes.Structure):
     ]
 
 
+def _job_limit_flags(*, allow_breakaway: bool) -> int:
+    flags = _TUI_JOB_LIMIT_FLAGS
+    if allow_breakaway:
+        flags |= _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    return flags
+
+
 class WindowsJob:
     """Own one Windows subprocess tree until it has been fully reaped."""
 
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, *, allow_breakaway: bool = True) -> None:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -118,7 +125,9 @@ class WindowsJob:
             # DefenseClaw's managed gateway/watchdog launch sites request
             # CREATE_BREAKAWAY_FROM_JOB, allowing those PID-file-owned
             # daemons to survive after a successful TUI command exits.
-            limits.BasicLimitInformation.LimitFlags = _TUI_JOB_LIMIT_FLAGS
+            limits.BasicLimitInformation.LimitFlags = _job_limit_flags(
+                allow_breakaway=allow_breakaway
+            )
             if not kernel32.SetInformationJobObject(
                 self._job,
                 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -167,7 +176,7 @@ class WindowsJob:
         except TimeoutError:
             # Closing a kill-on-close job is the final bounded fallback.
             self.close()
-            await asyncio.wait_for(asyncio.shield(process.wait()), timeout=force)
+            await self._kill_and_wait(process, force)
             return
         try:
             empty = await self._wait_empty(force)
@@ -183,8 +192,20 @@ class WindowsJob:
         try:
             await asyncio.wait_for(asyncio.shield(process.wait()), timeout=timeout)
         except TimeoutError:
+            await self._kill_and_wait(process, timeout)
+
+    @staticmethod
+    async def _kill_and_wait(process: asyncio.subprocess.Process, timeout: float) -> None:
+        """Best-effort kill and bounded reap after the Job Object is closed."""
+
+        try:
             process.kill()
+        except ProcessLookupError:
+            return
+        try:
             await asyncio.wait_for(asyncio.shield(process.wait()), timeout=timeout)
+        except TimeoutError:
+            return
 
     async def _wait_empty(self, timeout: float) -> bool:
         deadline = asyncio.get_running_loop().time() + timeout

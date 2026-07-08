@@ -371,7 +371,7 @@ async def _create_contained_windows_process(
     from defenseclaw.tui.windows_process import WindowsJob
 
     try:
-        job = WindowsJob(process.pid)
+        job = WindowsJob(process.pid, allow_breakaway=False)
     except BaseException:
         process.kill()
         await process.wait()
@@ -1078,9 +1078,9 @@ class MCPScannerWrapper:
             selected.append(yara)
         model = litellm_model(self._llm)
         if model and llm_analyzer_ready(self._llm, model=model):
-            llm = analyzer_map.get("llm")
-            if llm is not None:
-                selected.append(llm)
+            llm_analyzer = analyzer_map.get("llm")
+            if llm_analyzer is not None:
+                selected.append(llm_analyzer)
         elif model:
             key_name = self._llm.api_key_env or "DEFENSECLAW_LLM_KEY"
             print(
