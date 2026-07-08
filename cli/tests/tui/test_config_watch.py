@@ -417,7 +417,6 @@ async def test_external_mode_refresh_preserves_filter_and_overview_scroll(
     monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
-    monkeypatch.setattr(app, "_schedule_config_poll", lambda: None)
 
     async with app.run_test(size=(110, 18)) as pilot:
         app._set_connector_filter("codex")  # noqa: SLF001
@@ -461,6 +460,7 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
     monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_schedule_config_poll", lambda: None)
 
     isolated_home = tmp_path / "user-home"
     isolated_home.mkdir()

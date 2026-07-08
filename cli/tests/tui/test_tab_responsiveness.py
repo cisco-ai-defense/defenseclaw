@@ -204,6 +204,7 @@ async def test_alerts_pending_generation_finishes_with_fresh_rows(
     monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
     monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_periodic_refresh", lambda: None)
     async with app.run_test(size=(140, 40)):
         app.action_switch_panel("alerts")
         await _wait_until(entered.is_set)
