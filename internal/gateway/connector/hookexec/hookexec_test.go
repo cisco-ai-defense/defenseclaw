@@ -679,9 +679,43 @@ func TestCodexNotifyGuardBranchesDoNotSendRequests(t *testing.T) {
 				t.Fatalf("exit code = %d, want 0", code)
 			}
 			if rt.requests != 0 {
-				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			t.Fatalf("gateway called %d times, want 0", rt.requests)
 			}
 		})
+	}
+}
+
+func TestCodexNotifyPrefersScopedTokenSidecar(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".token"),
+		[]byte("DEFENSECLAW_GATEWAY_TOKEN=\"generic-token\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".hook-codex.token"),
+		[]byte("scoped-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := ok(`{"status":"ok"}`)
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:    "127.0.0.1:8787",
+		Home:       home,
+		HookDir:    hookDir,
+		Token:      "environment-token",
+		HTTPClient: &http.Client{Transport: rt},
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want best-effort 0", code)
+	}
+	if rt.gotReq == nil {
+		t.Fatal("no request captured")
+	}
+	if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer scoped-token" {
+		t.Errorf("authorization = %q, want scoped token", got)
 	}
 }
 
