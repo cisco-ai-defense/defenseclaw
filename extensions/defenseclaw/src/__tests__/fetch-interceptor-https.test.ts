@@ -14,10 +14,13 @@
  * traffic actually reaches the guardrail proxy.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRequire } from "node:module";
 
-import { createFetchInterceptor } from "../fetch-interceptor.js";
+import {
+  createFetchInterceptor,
+  UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
+} from "../fetch-interceptor.js";
 
 // The interceptor mutates CJS `https.request` via createRequire; mirror that
 // here so our stubs swap the same exports object.
@@ -37,9 +40,13 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
   let originalHttpRequest: typeof http.request;
   let originalHttpsRequest: typeof https.request;
   let interceptor: ReturnType<typeof createFetchInterceptor>;
+  let originalUnguardedEnv: string | undefined;
 
   beforeEach(() => {
     captured.length = 0;
+    originalUnguardedEnv =
+      process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+    delete process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
     originalHttpRequest = http.request;
     originalHttpsRequest = https.request;
     // Swap http.request so the interceptor's proxied call lands in `captured`
@@ -65,6 +72,13 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
     interceptor.stop();
     http.request = originalHttpRequest;
     https.request = originalHttpsRequest;
+    if (originalUnguardedEnv === undefined) {
+      delete process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV];
+    } else {
+      process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] =
+        originalUnguardedEnv;
+    }
+    vi.restoreAllMocks();
   });
 
   it("redirects Bedrock requests passed as { host, path, port } to the proxy", () => {
@@ -149,6 +163,72 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
     const opts = captured[0].opts as { hostname?: string; port?: number };
     expect(opts.hostname).toBe("127.0.0.1");
     expect(opts.port).toBe(guardrailPort);
+  });
+
+  it("proxies ChatGPT Codex response requests by default", () => {
+    https.request(
+      {
+        host: "chatgpt.com",
+        method: "POST",
+        path: "/backend-api/codex/responses",
+        headers: { Authorization: "Bearer oauth-token" },
+      } as unknown as Parameters<typeof https.request>[0],
+      () => undefined,
+    );
+
+    expect(captured).toHaveLength(1);
+    const opts = captured[0].opts as {
+      hostname?: string;
+      host?: string;
+      port?: number;
+      protocol?: string;
+      path?: string;
+      headers?: Record<string, string>;
+    };
+    expect(opts.hostname).toBe("127.0.0.1");
+    expect(opts.host).not.toBe("chatgpt.com");
+    expect(opts.port).toBe(guardrailPort);
+    expect(opts.protocol).toBe("http:");
+    expect(opts.path).toBe("/backend-api/codex/responses");
+    expect(opts.headers?.["X-DC-Target-URL"]).toBe("https://chatgpt.com");
+  });
+
+  it("passes through ChatGPT Codex responses only with explicit unguarded opt-in", () => {
+    process.env[UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV] = "1";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let passthroughCalled = false;
+    const passthrough = ((..._args: unknown[]) => {
+      passthroughCalled = true;
+      return {
+        on: () => undefined,
+        end: () => undefined,
+        write: () => undefined,
+        destroy: () => undefined,
+      } as unknown as ReturnType<typeof https.request>;
+    }) as typeof https.request;
+
+    interceptor.stop();
+    https.request = passthrough;
+    interceptor = createFetchInterceptor(guardrailPort);
+    interceptor.start();
+
+    https.request(
+      {
+        host: "chatgpt.com",
+        method: "POST",
+        path: "/backend-api/codex/responses",
+        headers: { Authorization: "Bearer oauth-token" },
+      } as unknown as Parameters<typeof https.request>[0],
+      () => undefined,
+    );
+
+    expect(captured).toHaveLength(0);
+    expect(passthroughCalled).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV,
+      ),
+    );
   });
 
   it("stamps X-DefenseClaw-* correlation headers from getCorrelationHeaders", () => {
