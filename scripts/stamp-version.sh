@@ -29,13 +29,14 @@
 #   2. pyproject.toml                           (version = "X.Y.Z")
 #   3. cli/defenseclaw/__init__.py              (__version__ = "X.Y.Z")
 #   4. extensions/defenseclaw/package.json      ("version": "X.Y.Z")
+#   5. macos/DefenseClawMac Xcode project       (MARKETING_VERSION = X.Y.Z)
 #
 # Usage:
 #   scripts/stamp-version.sh 0.4.0
 #   make set-version VERSION=0.4.0
 #
 # Idempotent: re-running with the same version is a no-op. The script
-# fails loudly if any of the four files cannot be located or already
+# fails loudly if any of the five files cannot be located or already
 # contains a value that does not match the regex it expects, so a silent
 # drift never reaches a release artifact.
 
@@ -109,13 +110,25 @@ stamp_package_json() {
     sed_in_place -E "s/^(  \"version\":[[:space:]]*\")[0-9]+\.[0-9]+\.[0-9]+(\",?[[:space:]]*)\$/\1${VERSION}\2/" "${f}"
 }
 
+stamp_macos_project() {
+    local f="macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj"
+    [[ -f "${f}" ]] || { echo "error: ${f} not found" >&2; return 1; }
+    local count
+    count="$(grep -cE '^[[:space:]]*MARKETING_VERSION[[:space:]]*=[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+;[[:space:]]*$' "${f}")"
+    [[ "${count}" == "2" ]] \
+        || { echo "error: ${f} must contain exactly two MARKETING_VERSION = X.Y.Z lines (found ${count})" >&2; return 1; }
+    sed_in_place -E "s/^([[:space:]]*MARKETING_VERSION[[:space:]]*=[[:space:]]*)[0-9]+\.[0-9]+\.[0-9]+(;[[:space:]]*)\$/\1${VERSION}\2/" "${f}"
+}
+
 stamp_makefile
 stamp_pyproject
 stamp_init_py
 stamp_package_json
+stamp_macos_project
 
 echo "stamped version ${VERSION} into:"
 echo "  Makefile"
 echo "  pyproject.toml"
 echo "  cli/defenseclaw/__init__.py"
 echo "  extensions/defenseclaw/package.json"
+echo "  macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj"
