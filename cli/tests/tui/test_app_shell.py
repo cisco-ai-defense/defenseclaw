@@ -606,6 +606,28 @@ async def test_command_progress_strip_failure_and_rejection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_command_progress_strip_cancelled_keeps_warning_guidance() -> None:
+    """Cancellation keeps the dismiss guidance and warning presentation."""
+
+    from textual.widgets import Static
+
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app._strip_running("defenseclaw doctor")
+        app._strip_finished(exit_code=130, duration=0.5, cancelled=True)
+        await pilot.pause()
+
+        assert app._strip_state == "cancelled"
+        hint = app.query_one("#command-progress-hint", Static).render().plain
+        assert "press A for full output" in hint
+        assert "Dismiss" in hint
+        snippet = app.query_one("#command-progress-snippet", Static)
+        assert app_module.TOKENS.accent_amber in str(snippet.content)
+
+
+@pytest.mark.asyncio
 async def test_command_progress_strip_hidden_on_activity_panel() -> None:
     """Strip is redundant on Activity (live stream is right there) and hides."""
 

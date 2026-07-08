@@ -99,6 +99,7 @@ from defenseclaw.observability.writer import (
 )
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    destination_platform_unsupported,
     is_local_shell_stack_destination,
     local_shell_stacks_supported,
 )
@@ -222,22 +223,6 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     if not non_interactive:
         raw_inputs = _prompt_missing(preset, raw_inputs)
 
-    candidate_endpoint = str(raw_inputs.get("endpoint") or "")
-    candidate_host = str(raw_inputs.get("host") or "")
-    if (
-        not local_shell_stacks_supported()
-        and preset.id in {"splunk-hec", "splunk-enterprise"}
-        and is_local_shell_stack_destination(
-            kind="splunk_hec",
-            endpoint=candidate_endpoint or candidate_host,
-        )
-    ):
-        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
-
-    if not non_interactive:
-        if token_value is None:
-            token_value = _prompt_secret(preset, app.cfg.data_dir)
-
     inputs: dict[str, str] = {k: str(v) for k, v in raw_inputs.items() if v is not None}
 
     signal_tuple = None
@@ -252,6 +237,20 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
     connector_name = (connector or "").strip()
     try:
+        resolved_inputs = _resolve_inputs(preset, inputs)
+        candidate_endpoint = resolved_inputs.get("endpoint") or resolved_inputs.get("host", "")
+        if (
+            not local_shell_stacks_supported()
+            and preset.id in {"splunk-hec", "splunk-enterprise"}
+            and is_local_shell_stack_destination(
+                preset_id=preset.id,
+                kind="splunk_hec",
+                endpoint=candidate_endpoint,
+            )
+        ):
+            raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+        if not non_interactive and token_value is None:
+            token_value = _prompt_secret(preset, app.cfg.data_dir)
         if connector_name:
             result = _apply_sink_to_connector(
                 preset,
@@ -963,11 +962,11 @@ def _destination_signals(d: Destination) -> str:
 
 def _print_destination_header() -> None:
     click.echo(
-        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<8} "
+        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<11} "
         f"{'PROTOCOL':<10} {'SIGNALS':<22} {'PRESET':<18} ENDPOINT"
     )
     click.echo(
-        f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 8} "
+        f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 11} "
         f"{'-' * 10} {'-' * 22} {'-' * 18} {'-' * 36}"
     )
 
@@ -1003,7 +1002,7 @@ def _gate_local_destination(destination: Destination) -> None:
 
 
 def _destination_platform_status(destination: Destination) -> str:
-    if not local_shell_stacks_supported() and is_local_shell_stack_destination(
+    if destination_platform_unsupported(
         name=destination.name,
         preset_id=destination.preset_id,
         kind=destination.kind,

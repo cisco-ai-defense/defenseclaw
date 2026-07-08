@@ -99,7 +99,7 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "hermes": ConnectorPlatformSupport(
         NOT_CERTIFIED,
-        "The DefenseClaw Hermes integration remains preview and has not completed native Windows x64 certification.",
+        "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -244,8 +244,28 @@ def is_local_shell_stack_destination(
         return True
     if kind != "splunk_hec":
         return False
+    if preset_id == "splunk-enterprise":
+        return False
     parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def destination_platform_unsupported(
+    *,
+    name: str = "",
+    preset_id: str = "",
+    kind: str = "",
+    endpoint: str = "",
+    os_name: str | None = None,
+) -> bool:
+    """Whether a destination belongs to a local stack unavailable here."""
+
+    return not local_shell_stacks_supported(os_name) and is_local_shell_stack_destination(
+        name=name,
+        preset_id=preset_id,
+        kind=kind,
+        endpoint=endpoint,
+    )
 
 
 def supported_connectors(

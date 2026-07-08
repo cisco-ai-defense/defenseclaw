@@ -36,7 +36,7 @@ from tests.permissions import assert_owner_only_file, grant_everyone, set_known_
 _ATOMIC_WRITERS = [
     (
         "config",
-        config_module,
+        file_permissions,
         lambda path: config_module.write_config_yaml_secure(
             os.fspath(path),
             {"data_dir": os.fspath(path.parent)},
@@ -44,7 +44,7 @@ _ATOMIC_WRITERS = [
     ),
     (
         "webhooks",
-        webhook_writer,
+        file_permissions,
         lambda path: webhook_writer._write_yaml(
             os.fspath(path),
             {"webhooks": [{"name": "secure-write"}]},
@@ -277,6 +277,28 @@ def test_private_atomic_write_rejects_unsafe_unmanaged_parent(tmp_path):
     assert not target.exists()
 
 
+def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
+    monkeypatch,
+    tmp_path,
+):
+    calls: list[tuple[str, int, bool]] = []
+    real_makedirs = os.makedirs
+
+    def recording_makedirs(path, mode=0o777, exist_ok=False):
+        calls.append((os.fspath(path), mode, exist_ok))
+        return real_makedirs(path, mode=mode, exist_ok=exist_ok)
+
+    monkeypatch.setattr(file_permissions.os, "makedirs", recording_makedirs)
+    target = tmp_path / "private" / "config.yaml"
+
+    config_module.write_config_yaml_secure(
+        os.fspath(target),
+        {"data_dir": os.fspath(target.parent)},
+    )
+
+    assert calls == [(os.fspath(target.parent), 0o700, True)]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACLs")
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize(
@@ -341,6 +363,26 @@ def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_pat
     after = file_permissions._windows_acl_snapshot(os.fspath(target))
     assert after == before
     assert target.read_bytes() == b"rewritten"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates protected Windows DACL copying")
+@pytest.mark.allow_subprocess
+def test_copy_windows_dacl_protects_destination_from_parent_inheritance(tmp_path):
+    source = tmp_path / "source.json"
+    source.write_text("source", encoding="utf-8")
+    file_permissions._set_windows_owner_only_acl(os.fspath(source))
+
+    broad_dir = tmp_path / "broad-parent"
+    broad_dir.mkdir()
+    grant_everyone(broad_dir)
+    destination = broad_dir / "destination.json"
+    destination.write_text("destination", encoding="utf-8")
+    assert file_permissions._windows_dacl_is_protected(destination) is False
+
+    file_permissions.copy_windows_dacl(os.fspath(source), os.fspath(destination))
+
+    assert file_permissions._windows_dacl_is_protected(destination)
+    assert file_permissions._windows_acl_has_required_access(destination)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows junction refusal")

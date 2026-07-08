@@ -86,7 +86,6 @@ def test_local_observability_cli_gates_every_route_before_helpers_and_writes(
     [
         ("splunk", "--logs", "--non-interactive", "--accept-splunk-license"),
         ("splunk", "--s3-export", "--s3-bucket", "bucket", "--non-interactive", "--accept-splunk-license"),
-        ("splunk", "--show-credentials"),
         ("splunk", "--disable", "--logs"),
         (
             "splunk",
@@ -125,6 +124,21 @@ def test_local_splunk_cli_gates_before_remote_or_local_side_effects(
     env_file.assert_not_called()
     resolve.assert_not_called()
     run.assert_not_called()
+    assert _snapshot(data_dir) == before
+
+
+def test_splunk_show_credentials_remains_read_only_on_windows(tmp_path: Path) -> None:
+    from defenseclaw.commands.cmd_setup import setup
+
+    data_dir = tmp_path / "read only credentials"
+    app = _app(data_dir)
+    before = _snapshot(data_dir)
+    with patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=False):
+        result = CliRunner().invoke(setup, ["splunk", "--show-credentials"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert "Splunk credentials not found" in result.output
+    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON not in result.output
     assert _snapshot(data_dir) == before
 
 
@@ -296,6 +310,10 @@ def test_observability_json_status_labels_local_unsupported_and_remote_supported
             return_value=False,
         ),
         patch(
+            "defenseclaw.platform_support.local_shell_stacks_supported",
+            return_value=False,
+        ),
+        patch(
             "defenseclaw.commands.cmd_setup_observability.list_destinations",
             return_value=[local, remote],
         ),
@@ -341,6 +359,65 @@ def test_generic_observability_local_splunk_endpoint_gates_before_secret_or_writ
     secret_prompt.assert_not_called()
     apply.assert_not_called()
     assert _snapshot(data_dir) == before
+
+
+def test_generic_observability_resolves_local_splunk_defaults_before_gate(
+    tmp_path: Path,
+) -> None:
+    from defenseclaw.commands.cmd_setup_observability import observability
+
+    data_dir = tmp_path / "default local splunk preset"
+    app = _app(data_dir)
+    before = _snapshot(data_dir)
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            return_value=False,
+        ),
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply,
+    ):
+        result = CliRunner().invoke(
+            observability,
+            ["add", "splunk-hec", "--non-interactive"],
+            obj=app,
+        )
+
+    assert result.exit_code != 0
+    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
+    apply.assert_not_called()
+    assert _snapshot(data_dir) == before
+
+
+def test_splunk_enterprise_loopback_is_not_treated_as_bundled_local_stack(
+    tmp_path: Path,
+) -> None:
+    from defenseclaw.commands.cmd_setup_observability import observability
+    from defenseclaw.observability import list_destinations
+
+    data_dir = tmp_path / "loopback enterprise"
+    app = _app(data_dir)
+    with patch(
+        "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+        return_value=False,
+    ):
+        result = CliRunner().invoke(
+            observability,
+            [
+                "add",
+                "splunk-enterprise",
+                "--endpoint",
+                "http://localhost:8088/services/collector/event",
+                "--token",
+                "synthetic-token",
+                "--non-interactive",
+            ],
+            obj=app,
+        )
+
+    assert result.exit_code == 0, result.output
+    destinations = list_destinations(str(data_dir))
+    assert len(destinations) == 1
+    assert destinations[0].preset_id == "splunk-enterprise"
 
 
 def test_legacy_local_splunk_migration_is_gated_before_config_write(tmp_path: Path) -> None:
@@ -390,6 +467,8 @@ def test_tui_disables_local_actions_and_preserves_remote_options() -> None:
     info = next(item for item in model.wizard_infos() if item.wizard == SetupWizard.LOCAL_OBSERVABILITY)
     assert info.status == "unsupported"
     assert model.wizard_available(SetupWizard.LOCAL_OBSERVABILITY) is False
+    model.active_wizard = SetupWizard.LOCAL_OBSERVABILITY
+    assert model.active_wizard_info().status == "unsupported"
     assert model.open_goal_menu(SetupWizard.LOCAL_OBSERVABILITY) is False
     assert model.form_active is False
 

@@ -76,10 +76,11 @@ func windowsCommandFindings(text, toolName string) []RuleFinding {
 	for i := 0; i+1 < len(pipeline); i++ {
 		leftStatements := windowsStatements(pipeline[i], dialect)
 		rightStatements := windowsStatements(pipeline[i+1], dialect)
-		if len(leftStatements) != 1 || len(rightStatements) != 1 {
+		if len(leftStatements) == 0 || len(rightStatements) == 0 {
 			continue
 		}
-		left, right := windowsTokens(leftStatements[0], dialect), windowsTokens(rightStatements[0], dialect)
+		left := windowsTokens(leftStatements[len(leftStatements)-1], dialect)
+		right := windowsTokens(rightStatements[0], dialect)
 		if len(left) == 0 || len(right) == 0 {
 			continue
 		}
@@ -123,7 +124,7 @@ func windowsCommandText(text, toolName string) (string, windowsShellDialect, boo
 				for _, raw := range values {
 					value, ok := raw.(string)
 					if !ok {
-						return "", dialect, false
+						continue
 					}
 					argv = append(argv, quoteWindowsArg(value))
 				}

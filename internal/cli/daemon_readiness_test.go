@@ -160,7 +160,7 @@ func TestWaitForStartedDaemonStopsProcessOnFatalReadinessError(t *testing.T) {
 		t.Fatalf("waitForStartedDaemon() ready = %v, error = %v, want fatal bind error", ready, err)
 	}
 	if process.stopCalls != 1 {
-		t.Fatalf("Stop() calls = %d, want 1 for a fatal readiness error", process.stopCalls)
+		t.Fatalf("scoped stop calls = %d, want 1 for a fatal readiness error", process.stopCalls)
 	}
 	if process.stoppedPID != 42 {
 		t.Fatalf("StopStarted() PID = %d, want only launched PID 42", process.stoppedPID)

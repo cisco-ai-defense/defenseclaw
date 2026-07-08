@@ -1674,6 +1674,42 @@ class TestSaveOwnershipBackup(unittest.TestCase):
         expected = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
         self.assertEqual(backup_path, expected)
 
+    def test_backup_parent_walk_does_not_process_filesystem_root(self):
+        from defenseclaw.commands import cmd_init_sandbox
+
+        real_stat = os.stat
+        stat_paths = []
+
+        def recording_stat(path, *args, **kwargs):
+            stat_paths.append(os.path.normcase(os.path.realpath(path)))
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(cmd_init_sandbox.os, "stat", side_effect=recording_stat):
+            cmd_init_sandbox._save_ownership_backup(self.oc_home, self.data_dir)
+
+        filesystem_root = os.path.normcase(os.path.abspath(os.sep))
+        self.assertNotIn(filesystem_root, stat_paths)
+
+    @unittest.skipIf(os.name == "nt", "sandbox traversal permissions are POSIX-only")
+    def test_traversal_parent_walk_does_not_process_filesystem_root(self):
+        from defenseclaw.commands import cmd_init_sandbox
+
+        real_stat = os.stat
+        stat_paths = []
+
+        def recording_stat(path, *args, **kwargs):
+            stat_paths.append(os.path.normcase(os.path.realpath(path)))
+            return real_stat(path, *args, **kwargs)
+
+        with (
+            patch.object(cmd_init_sandbox.os, "stat", side_effect=recording_stat),
+            patch.object(cmd_init_sandbox.subprocess, "run", return_value=MagicMock(returncode=0)),
+        ):
+            cmd_init_sandbox._ensure_parent_traversal(os.path.join(self.oc_home, "target"))
+
+        filesystem_root = os.path.normcase(os.path.abspath(os.sep))
+        self.assertNotIn(filesystem_root, stat_paths)
+
 
 @unittest.skipIf(os.name == "nt", "OpenClaw sandbox ownership is POSIX-only")
 class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):

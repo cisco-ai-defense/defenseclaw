@@ -92,7 +92,7 @@ $ConnectorChoices = @(
     "claudecode",
     "none"
 )
-$HookConnectors = @()
+$HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 

@@ -212,6 +212,13 @@ func TestVerifyWatchdogProcess_LiveProcessAccepted(t *testing.T) {
 	}
 }
 
+func TestVerifyWatchdogProcess_UnverifiableStartIdentityRejected(t *testing.T) {
+	info := watchdogPIDInfo{PID: os.Getpid(), StartIdentity: "stale-process-identity"}
+	if verifyWatchdogProcess(info) {
+		t.Fatal("verifyWatchdogProcess accepted an unverifiable start identity")
+	}
+}
+
 func TestVerifyWatchdogProcess_DeadPIDRejected(t *testing.T) {
 	// PID 0 is never a valid process; the signal-0 path must reject.
 	if verifyWatchdogProcess(watchdogPIDInfo{PID: 0}) {

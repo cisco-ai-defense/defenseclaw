@@ -89,13 +89,13 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             return_value=True,
         )
         self._local_stack_support.start()
+        self.addCleanup(self._local_stack_support.stop)
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
 
     def tearDown(self) -> None:
         import shutil
 
-        self._local_stack_support.stop()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     @patch(
@@ -307,13 +307,13 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
             return_value=True,
         )
         self._local_stack_support.start()
+        self.addCleanup(self._local_stack_support.stop)
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
 
     def tearDown(self) -> None:
         import shutil
 
-        self._local_stack_support.stop()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     @patch(

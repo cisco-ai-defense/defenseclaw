@@ -425,6 +425,7 @@ def test_alerts_detail_pairs_copy_text_and_store_enrichment() -> None:
 
     copied = model.handle_key("y")
     assert copied.copy_text
+    assert copied.hint == "Copied alert detail."
     assert "Severity: HIGH" in copied.copy_text
     assert "Summary: api:443 strict gpt-4o" in copied.copy_text
     assert "Request ID: req-1" in copied.copy_text

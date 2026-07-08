@@ -52,6 +52,14 @@ try {
     $block = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'block') -TimeoutSeconds 5 -AllowedExitCodes @(2)
     Assert-True ($block.ExitCode -eq 2 -and $block.StdOut -match 'block') 'mock block decision'
 
+    $payloadPath = Join-Path $temp 'hook-payload.json'
+    $payload = '{"hook":"stdin-sentinel"}'
+    [IO.File]::WriteAllText($payloadPath, $payload)
+    $script:LogRoot = Join-Path $temp 'logs'
+    $script:CommandIndex = 0
+    $stdin = Invoke-Tool 'pwsh' @('-NoProfile', '-File', $mock, '-Action', 'stdin') @(0) -InputPath $payloadPath
+    Assert-True ($stdin.StdOut.Trim() -eq $payload) 'Invoke-Tool forwards the payload file to native stdin'
+
     [Environment]::SetEnvironmentVariable('DC_E2E_TEST_SECRET', ('unit-test-' + 'sensitive-value'))
     $secret = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'secret') -TimeoutSeconds 5
     Assert-True ($secret.StdOut -notmatch 'unit-test-sensitive-value' -and $secret.StdOut -match 'REDACTED') 'secret redaction'
@@ -68,6 +76,15 @@ try {
     $childPid = [int][IO.File]::ReadAllText($childPidPath)
     Assert-True ($null -eq (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'timeout killed the process tree'
 
+    $descendant = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Milliseconds 250
+        Stop-IsolatedProcessTree -Confirm:$false
+        Assert-True ($descendant.WaitForExit(5000)) 'isolated cleanup killed a descendant without StateRoot in its command line'
+    } finally {
+        Stop-Process -Id $descendant.Id -Force -ErrorAction SilentlyContinue
+    }
+
     $jsonl = Join-Path $temp 'gateway.jsonl'
     $database = Join-Path $temp 'audit.db'
     $requestId = [guid]::NewGuid().ToString()
@@ -76,6 +93,12 @@ try {
         @{ connector = 'codex'; request_id = $requestId; event_type = 'tool_invocation' }
     ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
     [IO.File]::WriteAllText($jsonl, ($fixtureEvents -join [Environment]::NewLine) + [Environment]::NewLine)
+    $heldWriter = [IO.File]::Open($jsonl, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+    try {
+        Assert-True (@(Get-EventLines $jsonl).Count -eq 2) 'gateway JSONL remains readable while the gateway writer is open'
+    } finally {
+        $heldWriter.Dispose()
+    }
     $pythonCode = 'import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute("create table audit_events(request_id text)");c.execute("insert into audit_events(request_id) values (?)",(sys.argv[2],));c.commit();c.close()'
     & python.exe -c $pythonCode $database $requestId
     if ($LASTEXITCODE -ne 0) { throw 'failed to create disposable audit fixture' }
@@ -97,6 +120,9 @@ try {
     Assert-True ([regex]::Matches($workflowText, 'failure\(\) \|\| cancelled\(\)').Count -ge 2) 'failure and cancellation diagnostics are uploaded'
     Assert-True ($workflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($harnessText -notmatch '(?i)\.sh\b|\bwsl\b|git bash|/bin/') 'native harness has no Unix harness dependency'
+    $checkoutCount = [regex]::Matches($workflowText, 'uses:\s*actions/checkout@').Count
+    $nonPersistentCheckoutCount = [regex]::Matches($workflowText, 'persist-credentials:\s*false').Count
+    Assert-True ($checkoutCount -eq $nonPersistentCheckoutCount) 'every checkout disables credential persistence'
     $unpinned = [regex]::Matches($workflowText, '(?m)^\s*-?\s*uses:\s*[^@\s]+@(?![0-9a-f]{40}\b)')
     $unpinnedText = @($unpinned | ForEach-Object { $_.Value }) -join ', '
     Assert-True ($unpinned.Count -eq 0) "external actions must be SHA-pinned: $unpinnedText"

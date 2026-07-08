@@ -37,6 +37,7 @@ import (
 
 const (
 	defaultStopTimeout           = 10 * time.Second
+	defaultPortReleaseTimeout    = 2 * time.Second
 	defaultStartReadinessTimeout = 10 * time.Second
 	defaultReadinessPollInterval = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout  = time.Second
@@ -112,7 +113,8 @@ func init() {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
-	cfg, cfgErr := loadDaemonConfig(cmd)
+	cfg, _ := loadDaemonConfig(cmd)
+	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
 	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
@@ -204,7 +206,8 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
-	cfg, cfgErr := loadDaemonConfig(cmd)
+	cfg, _ := loadDaemonConfig(cmd)
+	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
 	running, pid, err := inspectConfiguredListener(d, cfg, client)
@@ -222,7 +225,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
-	if err := requireConfiguredPortFree(cfg); err != nil {
+	if err := waitForConfiguredPortFree(cfg, defaultPortReleaseTimeout, defaultReadinessPollInterval); err != nil {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 
@@ -425,6 +428,26 @@ func requireConfiguredPortFree(cfg *config.Config) error {
 		return err
 	}
 	return fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
+}
+
+func waitForConfiguredPortFree(cfg *config.Config, timeout, pollInterval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := requireConfiguredPortFree(cfg)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		delay := pollInterval
+		if remaining := time.Until(deadline); delay <= 0 || delay > remaining {
+			delay = remaining
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
 }
 
 func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {

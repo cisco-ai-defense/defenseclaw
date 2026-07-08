@@ -215,8 +215,9 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
 
     def test_binary_only_removes_exact_targets_and_preserves_unrelated_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "bin"
-            root.mkdir()
+            profile = Path(tmp) / "kévin profile"
+            root = profile / "bin"
+            root.mkdir(parents=True)
             targets = tuple(
                 str(root / name)
                 for name in (
@@ -227,10 +228,10 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             )
             for target in targets:
                 Path(target).write_text("owned", encoding="utf-8")
-            managed_venv = Path(tmp) / ".defenseclaw" / ".venv"
+            managed_venv = profile / ".defenseclaw" / ".venv"
             Path(targets[0]).write_text(
                 f'@echo off\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\n',
-                encoding="ascii",
+                encoding="utf-8",
             )
             unrelated = root / "defenseclaw.exe"
             unrelated.write_text("foreign", encoding="utf-8")
