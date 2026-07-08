@@ -248,10 +248,10 @@ func TestBifrostE2E_TenantKeyUniqueness(t *testing.T) {
 	if !withTLS.config.NetworkConfig.InsecureSkipVerify {
 		t.Error("insecure_skip_verify did not propagate to NetworkConfig")
 	}
-	if withTLS.config.NetworkConfig.CACertPEM == "" {
+	if withTLS.config.NetworkConfig.CACertPEM == nil || withTLS.config.NetworkConfig.CACertPEM.GetValue() == "" {
 		t.Error("ca_cert_pem did not propagate to NetworkConfig")
 	}
-	if a1.config.NetworkConfig.InsecureSkipVerify || a1.config.NetworkConfig.CACertPEM != "" {
+	if a1.config.NetworkConfig.InsecureSkipVerify || a1.config.NetworkConfig.CACertPEM != nil {
 		t.Error("TLS overrides leaked back into the bare-tenant account")
 	}
 }

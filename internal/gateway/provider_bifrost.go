@@ -366,7 +366,7 @@ func newTenantAccount(
 		nc.InsecureSkipVerify = true
 	}
 	if tls.CACertPEM != "" {
-		nc.CACertPEM = tls.CACertPEM
+		nc.CACertPEM = &schemas.EnvVar{Val: tls.CACertPEM}
 	}
 	if len(extraHeaders) > 0 {
 		nc.ExtraHeaders = extraHeaders
@@ -396,7 +396,7 @@ func deploymentAliasesToBifrost(aliases map[string]string) schemas.KeyAliases {
 	}
 	out := make(schemas.KeyAliases, len(aliases))
 	for from, to := range aliases {
-		out[from] = to
+		out[from] = schemas.AliasConfig{ModelID: to}
 	}
 	return out
 }
@@ -405,15 +405,29 @@ func azureAliasesToBifrost(model string, azure *config.AzureKeyConfig) schemas.K
 	if azure == nil {
 		return nil
 	}
+	apiVersion := strings.TrimSpace(azure.APIVersion)
+	if apiVersion == "" {
+		return deploymentAliasesToBifrost(azure.DeploymentAliases)
+	}
+
+	version := apiVersion
+	withAPIVersion := func(modelID string) schemas.AliasConfig {
+		return schemas.AliasConfig{
+			ModelID: modelID,
+			AzureAliasCfg: &schemas.AzureAliasCfg{
+				APIVersion: &version,
+			},
+		}
+	}
 
 	aliases := make(schemas.KeyAliases, len(azure.DeploymentAliases)+1)
 	for from, to := range azure.DeploymentAliases {
-		aliases[from] = to
+		aliases[from] = withAPIVersion(to)
 	}
 
 	model = strings.TrimSpace(model)
 	if model != "" && !aliasMapContains(aliases, model) {
-		aliases[model] = model
+		aliases[model] = withAPIVersion(model)
 	}
 	if len(aliases) == 0 {
 		return nil

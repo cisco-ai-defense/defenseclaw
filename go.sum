@@ -187,8 +187,8 @@ github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
 github.com/ncruces/go-strftime v0.1.9 h1:bY0MQC28UADQmHmaF5dgpLmImcShSi2kHU9XLdhx/f4=
 github.com/ncruces/go-strftime v0.1.9/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
-github.com/nghodkicisco/bifrost-06162026/core v0.0.0-thought-sig-fix-2 h1:qi7nnC1x5TlBEB05C0v8mJegnrk65LNO66xrjNW3p+A=
-github.com/nghodkicisco/bifrost-06162026/core v0.0.0-thought-sig-fix-2/go.mod h1:BAKGmgCnMdhZZ92UG9oCRuFJxasTfAtMeeF1pHc5AMQ=
+github.com/nghodkicisco/bifrost-06162026/core v0.0.0-extra-content-delta-v1.5.21 h1:mFX1d/WocooUhQ927+IGOBNDlxQIkbXxRqIE0B1/6Ro=
+github.com/nghodkicisco/bifrost-06162026/core v0.0.0-extra-content-delta-v1.5.21/go.mod h1:J3pVZzL8jTRCeUcQh4iGmpoBmul9aICd0/YRLqvQSFs=
 github.com/open-policy-agent/opa v1.15.2 h1:dS9q+0Yvruq/VNvWJc5qCvCchn715OWc3HLHXn/UCCc=
 github.com/open-policy-agent/opa v1.15.2/go.mod h1:c6SN+7jSsUcKJLQc5P4yhwx8YYDRbjpAiGkBOTqxaa4=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
