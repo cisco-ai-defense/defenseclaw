@@ -22,6 +22,18 @@ struct InventoryOutputParseResult {
 }
 
 enum InventoryOutputParser {
+    /// First syntactically valid top-level JSON array in mixed CLI output.
+    /// Diagnostics may contain stray brackets before the real payload.
+    static func firstJSONArrayData(in output: String) -> Data? {
+        let bytes = Array(output.utf8)
+        for start in bytes.indices where bytes[start] == 0x5B {
+            guard let end = matchingJSONEnd(in: bytes, from: start) else { continue }
+            let data = Data(bytes[start...end])
+            if (try? JSONSerialization.jsonObject(with: data)) is [Any] { return data }
+        }
+        return nil
+    }
+
     /// DefenseClaw emits one object for a single connector and an array for
     /// multiple connectors. CLI diagnostics may surround that JSON because the
     /// app combines stdout and stderr for Activity output.

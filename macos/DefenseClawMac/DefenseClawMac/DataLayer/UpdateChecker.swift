@@ -279,7 +279,7 @@ actor UpdateChecker {
                     let data = await readTask.value
                     continuation.resume(returning: (
                         process.terminationStatus,
-                        String(decoding: data, as: UTF8.self)
+                        String(data: data, encoding: .utf8) ?? "[process output was not valid UTF-8]"
                     ))
                 }
             }

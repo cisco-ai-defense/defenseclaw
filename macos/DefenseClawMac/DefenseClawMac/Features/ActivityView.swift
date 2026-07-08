@@ -28,7 +28,6 @@ struct ActivityView: View {
     @State private var mutations: [ActivityMutation] = []
     @State private var search = ""
     @State private var selectedMutation: ActivityMutation?
-    @State private var mutationLoadTask: Task<Void, Never>?
     @State private var mutationLoadGeneration = 0
 
     private var commandEntries: [CommandActivityEntry] {
@@ -96,16 +95,17 @@ struct ActivityView: View {
                     }
                     .disabled(!appState.activity.entries.contains { $0.status != .running })
                 } else {
-                    Button(action: loadMutations) {
+                    Button { Task { await loadMutations() } } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
                 }
             }
         }
-        .task { loadMutations() }
-        .task(id: appState.health.fetchedAt) { loadMutations() }
-        .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in loadMutations() }
-        .onDisappear { mutationLoadTask?.cancel() }
+        .task { await loadMutations() }
+        .task(id: appState.health.fetchedAt) { await loadMutations() }
+        .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in
+            Task { await loadMutations() }
+        }
     }
 
     @ViewBuilder
@@ -268,23 +268,20 @@ struct ActivityView: View {
         .padding(12)
     }
 
-    private func loadMutations() {
-        mutationLoadTask?.cancel()
+    private func loadMutations() async {
         mutationLoadGeneration += 1
         let generation = mutationLoadGeneration
-        mutationLoadTask = Task {
-            let fromDB = await appState.audit.activityEvents(limit: 500)
-            guard !Task.isCancelled else { return }
-            let fromStream = await appState.stream.activity
-            var seen = Set<String>()
-            var merged: [ActivityMutation] = []
-            for mutation in (fromDB + fromStream).sorted(by: { $0.timestamp > $1.timestamp }) {
-                let key = "\(mutation.timestamp.timeIntervalSince1970)-\(mutation.action)-\(mutation.targetID)"
-                if seen.insert(key).inserted { merged.append(mutation) }
-            }
-            guard !Task.isCancelled, generation == mutationLoadGeneration else { return }
-            if merged.map(\.id) != mutations.map(\.id) { mutations = merged }
+        let fromDB = await appState.audit.activityEvents(limit: 500)
+        guard !Task.isCancelled else { return }
+        let fromStream = await appState.stream.activity
+        var seen = Set<String>()
+        var merged: [ActivityMutation] = []
+        for mutation in (fromDB + fromStream).sorted(by: { $0.timestamp > $1.timestamp }) {
+            let key = "\(mutation.timestamp.timeIntervalSince1970)-\(mutation.action)-\(mutation.targetID)"
+            if seen.insert(key).inserted { merged.append(mutation) }
         }
+        guard !Task.isCancelled, generation == mutationLoadGeneration else { return }
+        if merged.map(\.id) != mutations.map(\.id) { mutations = merged }
     }
 
     private func statusIcon(_ status: CommandActivityStatus) -> String {

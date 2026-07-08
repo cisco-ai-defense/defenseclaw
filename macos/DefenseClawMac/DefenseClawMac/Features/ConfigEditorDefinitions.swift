@@ -375,9 +375,10 @@ enum ConfigEditorCatalog {
             .init(label: "Judge Model", key: "guardrail.judge.model", hint: "Legacy judge model id."),
             .init(label: "Judge API Key Env", key: "guardrail.judge.api_key_env", hint: "Legacy judge API key env."),
             .init(label: "Judge API Base", key: "guardrail.judge.api_base", hint: "Legacy judge API base URL."),
-            .init(label: "Judge Timeout", key: "guardrail.judge.timeout", hint: "Seconds to wait for one judge call."),
+            .init(label: "Judge Timeout", key: "guardrail.judge.timeout", kind: .int,
+                  hint: "Seconds to wait for one judge call."),
             .init(label: "Adjudication Timeout", key: "guardrail.judge.adjudication_timeout",
-                  hint: "Total judge fallback budget."),
+                  kind: .int, hint: "Total judge fallback budget."),
             .init(label: "Fallbacks", key: "guardrail.judge.fallbacks", hint: "CSV of backup judge models."),
         ]
         guardrail += llmOverrideFields("Judge", "guardrail.judge.llm")

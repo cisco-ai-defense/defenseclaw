@@ -90,7 +90,10 @@ struct RuntimePayload: Sendable {
         guard wheelActual == wheelSHA256 else {
             return "Bundled wheel does not match its manifest checksum."
         }
-        if let overridesURL, let overridesSHA256 {
+        if let overridesURL {
+            guard let overridesSHA256 else {
+                return "Bundled dependency overrides are missing a manifest checksum."
+            }
             guard let actual = Self.sha256(of: overridesURL), actual == overridesSHA256 else {
                 return "Bundled dependency overrides do not match their manifest checksum."
             }

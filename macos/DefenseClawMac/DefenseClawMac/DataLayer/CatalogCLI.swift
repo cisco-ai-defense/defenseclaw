@@ -147,10 +147,10 @@ enum CatalogCLI {
     }
 
     private static func jsonData(from output: String) throws -> Data {
-        guard let start = output.firstIndex(of: "["), let end = output.lastIndex(of: "]"), start <= end else {
+        guard let data = InventoryOutputParser.firstJSONArrayData(in: output) else {
             throw CatalogCLIError.invalidJSON(String(output.prefix(240)))
         }
-        return Data(output[start...end].utf8)
+        return data
     }
 
     private static func scan(_ value: Any?) -> CatalogScanState? {
@@ -234,12 +234,7 @@ struct CatalogInvocation: Identifiable {
     var destructive: Bool
 
     var displayCommand: String {
-        (["defenseclaw"] + arguments).map(Self.quote).joined(separator: " ")
-    }
-
-    private static func quote(_ value: String) -> String {
-        guard value.contains(where: { $0.isWhitespace || "'\"\\".contains($0) }) else { return value }
-        return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+        (["defenseclaw"] + arguments).map(ShellQuoting.quote).joined(separator: " ")
     }
 }
 

@@ -19,6 +19,13 @@
 
 import Foundation
 
+enum ShellQuoting {
+    static func quote(_ value: String) -> String {
+        guard value.contains(where: { $0.isWhitespace || "'\"\\".contains($0) }) else { return value }
+        return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+}
+
 struct CommandDefinition: Identifiable, Hashable, Sendable {
     let title: String
     let binary: String
@@ -67,12 +74,7 @@ struct CommandDefinition: Identifiable, Hashable, Sendable {
     }
 
     func displayCommand(extraArguments: [String] = []) -> String {
-        ([binary] + arguments + extraArguments).map(Self.quote).joined(separator: " ")
-    }
-
-    private static func quote(_ value: String) -> String {
-        guard value.contains(where: { $0.isWhitespace || "'\"\\".contains($0) }) else { return value }
-        return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+        ([binary] + arguments + extraArguments).map(ShellQuoting.quote).joined(separator: " ")
     }
 }
 
