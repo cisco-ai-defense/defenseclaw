@@ -519,6 +519,10 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
             assert status_result.returncode == 0, status_output
             assert "action" in status_output.lower()
             for _ in range(20):
+                # Exercise the same poll operation used by the one-second TUI
+                # timer without coupling this cross-process acceptance to a
+                # loaded runner's timer-delivery latency.
+                await app._poll_config_once()  # noqa: SLF001
                 if app.overview_model.cfg and app.overview_model.cfg.guardrail_mode == "action":
                     break
                 await pilot.pause(0.25)
