@@ -13,23 +13,32 @@
     "validate-links": "tsx ./scripts/validate-links.ts",
     "validate-snippets": "tsx ./scripts/validate-shell-snippets.ts",
     "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",
+    "build:connector-icons": "tsx ./scripts/sync-connector-icons.ts",
     "build:policy-assets": "tsx ./scripts/build-policy-assets.ts",
     "test:policy-creator": "tsx --test ./scripts/test-policy-creator.ts",
-    "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts"
+    "test:feature-demos": "tsx --test ./scripts/test-feature-demos.ts",
+    "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
     "@open-policy-agent/opa-wasm": "^1.10.0",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "clsx": "^2.1.1",
     "flexsearch": "^0.8.212",
     "fumadocs-core": "^16.8.0",
     "fumadocs-mdx": "^15.0.0",
     "fumadocs-ui": "^16.8.0",
     "js-yaml": "^4.1.1",
+    "lucide-react": "^1.23.0",
+    "motion": "^12.42.2",
     "next": "^16.2.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "shiki": "^4.3.0",
+    "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
+    "@lobehub/icons-static-svg": "1.91.0",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/js-yaml": "^4.0.9",
     "@types/mdx": "^2.0.13",

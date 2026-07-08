@@ -33,21 +33,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
 
 ## Pick yours
 
-<Cards>
-  <Card title="OpenClaw" href="/docs/connectors/openclaw" description="Reference proxy connector with the bundled fetch interceptor and before_tool_call plugin." />
-  <Card title="ZeptoClaw" href="/docs/connectors/zeptoclaw" description="api_base redirect into the DefenseClaw proxy plus response-scan." />
-  <Card title="Claude Code" href="/docs/connectors/claudecode" description="Native hooks (PreToolUse, PostToolUse, UserPromptSubmit, Stop, PermissionRequest) + native OTel exporter." />
-  <Card title="Codex" href="/docs/connectors/codex" description="config.toml hooks + native OTel + notify bridge for agent-turn-complete events." />
-  <Card title="Cursor" href="/docs/connectors/cursor" description="hooks.json with native ask on beforeShellExecution and beforeMCPExecution." />
-  <Card title="Windsurf" href="/docs/connectors/windsurf" description="Cascade hooks across pre_user_prompt, pre_run_command, pre_mcp_tool_use." />
-  <Card title="Gemini CLI" href="/docs/connectors/geminicli" description="settings.json hooks + native OTLP exporter pointing at the gateway." />
-  <Card title="GitHub Copilot CLI" href="/docs/connectors/copilot" description="Global hooks under ~/.copilot/hooks with optional workspace overrides." />
-  <Card title="OpenHands" href="/docs/connectors/openhands" description="Global ~/.openhands/hooks.json command hooks across local OpenHands sessions." />
-  <Card title="Antigravity" href="/docs/connectors/antigravity" description="All five Antigravity 2.0 lifecycle hooks (PreInvocation/PreToolUse/PostToolUse/PostInvocation/Stop) in ~/.gemini/config/hooks.json, with native ask that overrides --dangerously-skip-permissions." />
-  <Card title="Hermes" href="/docs/connectors/hermes" description="config.yaml hooks for the Hermes agent runtime." />
-  <Card title="OpenCode" href="/docs/connectors/opencode" description="Auto-loaded JS bridge plugin with tool.execute.before blocking." />
-  <Card title="OmniGent" href="/docs/connectors/omnigent" description="Custom Python policy bridge with ALLOW/ASK/DENY enforcement and optional native OTLP." />
-</Cards>
+<ConnectorCatalog />
 
 ## Capability summary
 

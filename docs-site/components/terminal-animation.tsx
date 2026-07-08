@@ -262,7 +262,7 @@ export function TerminalAnimation({
           <div className="ml-auto flex items-center gap-2">
             <span
               aria-live="polite"
-              className="hidden font-mono text-[10px] uppercase tracking-wider text-zinc-500 sm:inline"
+              className="hidden font-mono text-[10px] uppercase tracking-wider text-zinc-400 sm:inline"
             >
               {paused ? 'paused' : done ? 'looping' : 'playing'}
             </span>
@@ -286,6 +286,8 @@ export function TerminalAnimation({
         </div>
         <pre
           ref={preRef}
+          tabIndex={0}
+          aria-label="Animated terminal output"
           style={{ maxHeight: height, minHeight: Math.min(220, height) }}
           className="m-0 overflow-x-auto overflow-y-auto p-5 font-mono text-[13px] leading-6 text-zinc-100"
         >
@@ -344,7 +346,7 @@ function Line({ line, shell }: { line: RenderedLine; shell: string }) {
     return <div className="text-amber-300">{line.text}</div>;
   }
   if (line.type === 'dim') {
-    return <div className="text-zinc-500">{line.text}</div>;
+    return <div className="text-zinc-400">{line.text}</div>;
   }
   if (line.type === 'spacer') {
     return <div>&nbsp;</div>;
