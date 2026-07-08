@@ -532,11 +532,11 @@ def _assert_safe_bundle_destination(root: Path, candidate: Path) -> None:
         ) from exc
 
     current = root_abs
-    if current.exists() and _is_reparse_or_symlink(current):
+    if _is_reparse_or_symlink(current):
         raise OSError(f"bundle root is a reparse/symlink: {current}")
     for part in relative.parts:
         current = current / part
-        if current.exists() and _is_reparse_or_symlink(current):
+        if _is_reparse_or_symlink(current):
             raise OSError(f"destination contains a reparse/symlink: {current}")
 
 
