@@ -960,11 +960,11 @@ def _destination_signals(d: Destination) -> str:
 
 def _print_destination_header() -> None:
     click.echo(
-        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<8} "
+        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<11} "
         f"{'PROTOCOL':<10} {'SIGNALS':<22} {'PRESET':<18} ENDPOINT"
     )
     click.echo(
-        f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 8} "
+        f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 11} "
         f"{'-' * 10} {'-' * 22} {'-' * 18} {'-' * 36}"
     )
 

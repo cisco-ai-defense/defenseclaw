@@ -35,6 +35,13 @@ const (
 
 var getExtendedTCPTable = windows.NewLazySystemDLL("iphlpapi.dll").NewProc("GetExtendedTcpTable")
 
+var callExtendedTCPTable = func(table unsafe.Pointer, size *uint32, family uint32) windows.Errno {
+	result, _, _ := getExtendedTCPTable.Call(
+		uintptr(table), uintptr(unsafe.Pointer(size)), 0, uintptr(family), tcpTableOwnerPIDListener, 0,
+	)
+	return windows.Errno(result)
+}
+
 type tcp4OwnerPIDRow struct {
 	State      uint32
 	LocalAddr  uint32
@@ -136,25 +143,31 @@ func collectTCP6Owners(port int, host string, owners map[int]struct{}) error {
 
 func walkExtendedTCPTable(family uint32, rowSize uintptr, visit func(unsafe.Pointer)) error {
 	var size uint32
-	result, _, _ := getExtendedTCPTable.Call(0, uintptr(unsafe.Pointer(&size)), 0, uintptr(family), tcpTableOwnerPIDListener, 0)
-	if windows.Errno(result) != errorInsufficientBuffer && result != 0 {
-		return listenerTableError(windows.Errno(result))
+	result := callExtendedTCPTable(nil, &size, family)
+	if result != errorInsufficientBuffer && result != 0 {
+		return listenerTableError(result)
 	}
-	if size == 0 {
+	for range 4 {
+		if size == 0 {
+			return nil
+		}
+		buffer := make([]byte, size)
+		result = callExtendedTCPTable(unsafe.Pointer(&buffer[0]), &size, family)
+		if result == errorInsufficientBuffer {
+			continue
+		}
+		if result != 0 {
+			return listenerTableError(result)
+		}
+		count := *(*uint32)(unsafe.Pointer(&buffer[0]))
+		offset := uintptr(unsafe.Sizeof(count))
+		for i := uint32(0); i < count; i++ {
+			row := unsafe.Pointer(uintptr(unsafe.Pointer(&buffer[0])) + offset + uintptr(i)*rowSize)
+			visit(row)
+		}
 		return nil
 	}
-	buffer := make([]byte, size)
-	result, _, _ = getExtendedTCPTable.Call(uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&size)), 0, uintptr(family), tcpTableOwnerPIDListener, 0)
-	if result != 0 {
-		return listenerTableError(windows.Errno(result))
-	}
-	count := *(*uint32)(unsafe.Pointer(&buffer[0]))
-	offset := uintptr(unsafe.Sizeof(count))
-	for i := uint32(0); i < count; i++ {
-		row := unsafe.Pointer(uintptr(unsafe.Pointer(&buffer[0])) + offset + uintptr(i)*rowSize)
-		visit(row)
-	}
-	return nil
+	return listenerTableError(errorInsufficientBuffer)
 }
 
 func listenerTableError(err windows.Errno) error {

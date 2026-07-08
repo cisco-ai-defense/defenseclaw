@@ -124,6 +124,12 @@ func gatewayClientHost(c *config.Config) string {
 	case "::":
 		return "::1"
 	default:
+		if ip := net.ParseIP(bind); ip != nil && ip.IsUnspecified() {
+			if ip.To4() != nil {
+				return "127.0.0.1"
+			}
+			return "::1"
+		}
 		return bind
 	}
 }

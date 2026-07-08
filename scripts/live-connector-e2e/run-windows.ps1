@@ -121,9 +121,9 @@ function Test-BlockVerdict([string]$Path, [int]$Since) {
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
-            $event = $line | ConvertFrom-Json
-            if ($event.event_type -eq 'verdict' -and $event.verdict.action -in @('block', 'deny')) { return $true }
-            if ($event.event_type -eq 'scan' -and $event.scan.verdict -in @('block', 'deny')) { return $true }
+            $eventRecord = $line | ConvertFrom-Json
+            if ($eventRecord.event_type -eq 'verdict' -and $eventRecord.verdict.action -in @('block', 'deny')) { return $true }
+            if ($eventRecord.event_type -eq 'scan' -and $eventRecord.scan.verdict -in @('block', 'deny')) { return $true }
         } catch { continue }
     }
     return $false
@@ -134,8 +134,8 @@ function Test-OtlpEvent([string]$Path, [string]$Name, [int]$Since) {
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
-            $event = $line | ConvertFrom-Json
-            if ($event.event_type -in @('tool_invocation', 'llm_prompt', 'llm_response') -and $line.ToLowerInvariant().Contains($Name.ToLowerInvariant())) { return $true }
+            $eventRecord = $line | ConvertFrom-Json
+            if ($eventRecord.event_type -in @('tool_invocation', 'llm_prompt', 'llm_response') -and $line.ToLowerInvariant().Contains($Name.ToLowerInvariant())) { return $true }
         } catch { continue }
     }
     return $false
@@ -215,12 +215,12 @@ function Install-Agent {
 }
 
 function Invoke-Agent([string]$Label, [string]$Prompt, [int[]]$AllowedExitCodes = @(0)) {
-    $args = if ($Connector -eq 'codex') {
+    $agentArgs = if ($Connector -eq 'codex') {
         @('exec', '--json', '--full-auto', '--model', ($env:CODEX_MODEL ?? 'gpt-5-mini'), $Prompt)
     } else {
         @('-p', $Prompt, '--output-format', 'json', '--model', ($env:CLAUDE_MODEL ?? 'claude-haiku-4-5'), '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash')
     }
-    return Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList $args -TimeoutSeconds $CommandTimeoutSeconds -AllowedExitCodes $AllowedExitCodes -LogPath (Join-Path $script:LogRoot "agent-$Label.log")
+    return Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList $agentArgs -TimeoutSeconds $CommandTimeoutSeconds -AllowedExitCodes $AllowedExitCodes -LogPath (Join-Path $script:LogRoot "agent-$Label.log")
 }
 
 function Assert-Evidence([int]$Since = 0) {

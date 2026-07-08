@@ -183,7 +183,7 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
 
     class NoopProcessTree:
         @staticmethod
-        async def terminate(_grace: float, _force: float) -> None:
+        async def cancel(_process, _grace: float, _force: float) -> None:
             return None
 
         @staticmethod

@@ -38,6 +38,7 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "Windows ARM64 requires separate certification" in text
     assert "Codex CLI | `codex` | certified" in text
     assert "Claude Code | `claudecode` | certified" in text
+    assert "Hermes remains preview" not in text
     assert "```bash" not in text and "```sh" not in text
     assert text.count("```powershell") >= 8
     for label in ("Sandbox", "enterprise hooks", "OpenHands", "OmniGent", "OpenClaw", "ZeptoClaw", "native desktop toasts"):
@@ -59,3 +60,11 @@ def test_connector_matrix_preserves_macos_and_linux_support() -> None:
     for connector in ("Codex", "Claude Code", "Cursor", "Windsurf", "Gemini CLI", "Copilot CLI", "Antigravity", "OpenCode", "Hermes", "OpenHands", "OmniGent", "OpenClaw", "ZeptoClaw"):
         row = next(line for line in text.splitlines() if line.startswith(f"| {connector} |"))
         assert "| supported | supported |" in row
+
+
+def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
+    text = (ROOT / "scripts/live-connector-e2e/run-windows.ps1").read_text(encoding="utf-8").lower()
+    assert "$agentargs =" in text
+    assert "$eventrecord =" in text
+    assert "$args =" not in text
+    assert "$event =" not in text

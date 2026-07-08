@@ -407,7 +407,7 @@ def _detect_platform() -> tuple[str, str]:
 
     if system == "windows" and arch in WINDOWS_NOT_CERTIFIED_ARCHITECTURES:
         ux.err(
-            "Windows ARM64 is not certified for this release; use certified Windows x64 (amd64).",
+            f"Windows {arch.upper()} is not certified for this release; use certified Windows x64 (amd64).",
             indent="  ",
         )
         raise SystemExit(1)
