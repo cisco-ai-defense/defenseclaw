@@ -550,11 +550,11 @@ func TestForSinkReason_TrustedAIDPrefix_RejectsBadShapes(t *testing.T) {
 	SetDisableAll(false)
 	t.Cleanup(func() { SetDisableAll(false) })
 	badShapes := []string{
-		"Cisco AI Defense: sk-ant-api03-secret-KEY_XYZ!!!",     // '!' rejected
-		"Cisco AI Defense: /etc/passwd content leaked",         // '/' rejected
-		"Cisco AI Defense: some=key value",                     // '=' rejected
-		"Cisco AI Defense:noSpace",                             // wrong shape (no ": ")
-		"NotCisco AI Defense: Prompt Injection",                // wrong prefix
+		"Cisco AI Defense: sk-ant-api03-secret-KEY_XYZ!!!", // '!' rejected
+		"Cisco AI Defense: /etc/passwd content leaked",     // '/' rejected
+		"Cisco AI Defense: some=key value",                 // '=' rejected
+		"Cisco AI Defense:noSpace",                         // wrong shape (no ": ")
+		"NotCisco AI Defense: Prompt Injection",            // wrong prefix
 	}
 	for _, in := range badShapes {
 		got := ForSinkReason(in)
