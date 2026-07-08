@@ -685,6 +685,34 @@ class TestClawHubWindowsLauncher(unittest.TestCase):
             ):
                 self.assertIsNone(_find_clawhub_staged_skill(stage, "benign-skill"))
 
+    def test_connector_copy_revalidates_tree_after_copy(self):
+        from defenseclaw.commands.cmd_skill import _copy_skill_tree_to_connector
+
+        with tempfile.TemporaryDirectory() as root:
+            source = os.path.join(root, "source")
+            install_root = os.path.join(root, "installed")
+            os.makedirs(source)
+            with open(os.path.join(source, "SKILL.md"), "w", encoding="utf-8") as handle:
+                handle.write("# benign\n")
+
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_skill._validate_staged_skill_tree",
+                    side_effect=[True, False],
+                ) as validate_tree,
+                self.assertRaises(SystemExit),
+            ):
+                _copy_skill_tree_to_connector(
+                    source,
+                    install_root,
+                    "benign-skill",
+                    force=False,
+                )
+
+            self.assertEqual(validate_tree.call_count, 2)
+            self.assertFalse(os.path.exists(os.path.join(install_root, "benign-skill")))
+            self.assertEqual(os.listdir(install_root), [])
+
     @unittest.skipUnless(os.name == "nt", "native Windows resolver/CLI test")
     def test_extensionless_only_wrapper_is_concise_cli_error(self):
         with tempfile.TemporaryDirectory() as bin_dir:
@@ -887,9 +915,6 @@ class TestSkillInstall(SkillCommandTestBase):
         self.assertTrue(os.path.isfile(os.path.join(destination, "SKILL.md")))
         with open(marker, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "1")
-
-    @unittest.skipUnless(os.name == "nt", "native Windows ClawHub acceptance test")
-
 
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")

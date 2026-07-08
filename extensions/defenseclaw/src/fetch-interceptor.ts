@@ -261,6 +261,46 @@ function extractHost(urlStr: string): string {
   }
 }
 
+export const UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV =
+  "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES";
+
+const CHATGPT_CODEX_RESPONSES_PATH = "/backend-api/codex/responses";
+
+function truthyEnv(name: string): boolean {
+  return (process.env[name] || "").trim().toLowerCase() === "1";
+}
+
+function isChatGPTCodexResponseBackendUrl(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    return (
+      parsed.hostname.toLowerCase() === "chatgpt.com" &&
+      (
+        parsed.pathname === CHATGPT_CODEX_RESPONSES_PATH ||
+        parsed.pathname.startsWith(`${CHATGPT_CODEX_RESPONSES_PATH}/`)
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The ChatGPT/Codex responses backend carries prompt/completion traffic, so it
+ * must stay on the guardrail path by default. Operators who explicitly prefer
+ * availability over inspection while OAuth-aware proxy support is missing can
+ * opt into an unguarded escape hatch with
+ * DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES=1.
+ */
+export function shouldPassthroughChatGPTCodexResponseBackendUrl(
+  urlStr: string,
+): boolean {
+  return (
+    isChatGPTCodexResponseBackendUrl(urlStr) &&
+    truthyEnv(UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV)
+  );
+}
+
 /**
  * Host-boundary domain match. A registered entry "api.openai.com"
  * matches the exact host "api.openai.com" and any subdomain
@@ -845,6 +885,7 @@ export function createFetchInterceptor(
   let originalHttpRequest: typeof http.request | null = null;
   let originalHttpGet: typeof http.get | null = null;
   let egressReporter: EgressReporter | null = null;
+  let chatgptCodexPassthroughWarned = false;
 
   // Extract { host, path } from a URL string without throwing. Missing
   // pieces are tolerated so the caller's downstream fetch is never
@@ -859,6 +900,27 @@ export function createFetchInterceptor(
     } catch {
       return { host: "", path: urlStr };
     }
+  }
+
+  function reportChatGPTCodexResponsePassthrough(urlStr: string): void {
+    if (!chatgptCodexPassthroughWarned) {
+      chatgptCodexPassthroughWarned = true;
+      console.warn(
+        `[defenseclaw] ${UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV}=1: ` +
+        `ChatGPT/Codex responses are being passed through unguarded: ${scrubUrlForLog(urlStr)}`,
+      );
+    }
+
+    const hp = extractHostPath(urlStr);
+    egressReporter?.report({
+      targetHost: hp.host,
+      targetPath: hp.path,
+      bodyShape: "none",
+      looksLikeLLM: true,
+      branch: "passthrough",
+      decision: "allow",
+      reason: "chatgpt-codex-oauth-passthrough",
+    });
   }
 
   function start(): void {
@@ -887,6 +949,11 @@ export function createFetchInterceptor(
       // Never self-loop: a request already aimed at the guardrail proxy
       // short-circuits before any shape inspection so we don't peek its body.
       if (isAlreadyProxied(urlStr, guardrailPort)) {
+        return originalFetch!(input, init);
+      }
+
+      if (shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+        reportChatGPTCodexResponsePassthrough(urlStr);
         return originalFetch!(input, init);
       }
 
@@ -1119,6 +1186,11 @@ export function createFetchInterceptor(
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+
+      if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+        reportChatGPTCodexResponsePassthrough(urlStr);
+        return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
 
       // Path-only shape detection for https.request — the body is
       // written via req.write after this call returns, so peeking is
@@ -1364,6 +1436,7 @@ export function createFetchInterceptor(
       egressReporter.stop();
       egressReporter = null;
     }
+    chatgptCodexPassthroughWarned = false;
     console.log("[defenseclaw] LLM fetch interceptor stopped");
   }
 
