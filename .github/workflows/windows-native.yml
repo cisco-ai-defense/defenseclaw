@@ -157,7 +157,16 @@ jobs:
           if (-not $shardFiles) {
             throw "Python test shard $($shardIndex + 1) selected no files"
           }
-          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + @('-q')
+          # These assertions exercise the POSIX-only OpenShell ownership path
+          # (pwd, root-owned mkdir/chown, and Linux sandbox users). Symlink
+          # capability alone is not enough to make that product path native to
+          # Windows, so keep the exact nodes in Linux CI and omit them here.
+          $windowsInapplicableTests = @(
+            '--deselect=cli/tests/test_cmd_setup_sandbox.py::TestTrustedPrivilegedCommands::test_existing_openclaw_integration_requires_pin',
+            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestSandboxInitIdempotentPin::test_f0162_refuses_swapped_symlink',
+            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestInitSandboxChownTOCTOU::test_f0421_rechecks_pinned_home_before_chown'
+          )
+          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
           Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}.log') | Out-Null
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}

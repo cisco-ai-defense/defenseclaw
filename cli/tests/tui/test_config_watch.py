@@ -502,7 +502,7 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
             )
             output = result.stdout + result.stderr
             assert "Config saved" in output
-            assert "claudecode mode=action" in output
+            assert "Claude Code action setup" in output
             assert result.returncode != 0
             assert "gateway restart/readiness failed" in output
             status_result = await asyncio.to_thread(

@@ -84,6 +84,16 @@ async def _wait_for_background(predicate, *, timeout: float = 8.0) -> None:
         await asyncio.sleep(0.01)
 
 
+async def _wait_for_panel_render(app: DefenseClawTUI, panel: str) -> None:
+    """Wait for queued, running, and coalesced work for one panel."""
+
+    await _wait_for_background(
+        lambda: panel not in app._panel_render_queued  # noqa: SLF001
+        and panel not in app._panel_render_running  # noqa: SLF001
+        and panel not in app._panel_render_pending,  # noqa: SLF001
+    )
+
+
 @pytest.mark.asyncio
 async def test_textual_shell_starts_on_overview() -> None:
     app = DefenseClawTUI()
@@ -920,7 +930,7 @@ async def test_activity_panel_uses_activity_model() -> None:
         app.activity_model.append_output("Checking gateway...")
         app.activity_model.finish_entry(0)
         await pilot.press("a")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "activity")
 
         assert app.active_panel == "activity"
         assert "Checking gateway..." in app.body_text
@@ -1202,7 +1212,7 @@ async def test_alerts_panel_renders_table_and_panel_local_keys_win() -> None:
 
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.press("2")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "alerts")
 
         table = app.query_one("#panel-table", DataTable)
         assert app.active_panel == "alerts"
@@ -1317,7 +1327,7 @@ async def test_alerts_table_row_click_updates_cursor() -> None:
 
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.press("2")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "alerts")
 
         clicked = await pilot.click("#panel-table", offset=(2, 2))
         await pilot.pause()
@@ -1354,7 +1364,7 @@ async def test_registries_panel_renders_table_and_local_tabs(tmp_path) -> None:
 
     async with app.run_test(size=(150, 40)) as pilot:
         app.action_switch_panel("registries")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "registries")
 
         table = app.query_one("#panel-table", DataTable)
         assert app.active_panel == "registries"
@@ -1423,7 +1433,7 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("3")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "skills")
 
         table = app.query_one("#panel-table", DataTable)
         assert app.active_panel == "skills"
@@ -1468,7 +1478,7 @@ async def test_catalog_control_action_uses_visible_table_cursor() -> None:
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("3")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "skills")
 
         table = app.query_one("#panel-table", DataTable)
         table.move_cursor(row=1, column=0, animate=False)
@@ -1591,7 +1601,7 @@ async def test_logs_and_audit_panels_render_worker_models() -> None:
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "logs")
         assert app.active_panel == "logs"
         assert "Gateway" in app.body_text
         assert app.query_one("#panel-table", DataTable).row_count == 1
@@ -1601,7 +1611,7 @@ async def test_logs_and_audit_panels_render_worker_models() -> None:
         assert app.query_one("#panel-table", DataTable).row_count == 2
 
         await pilot.press("9")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "audit")
         assert app.active_panel == "audit"
         assert app.query_one("#panel-table", DataTable).row_count == 1
         assert "events recorded" in app.body_text or "shown of 1 events" in app.body_text
@@ -1618,7 +1628,7 @@ async def test_logs_cursor_only_render_reuses_existing_table_rows() -> None:
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "logs")
         table = app.query_one("#panel-table", DataTable)
         row_objects = tuple(table.rows.values())
 
@@ -1644,7 +1654,7 @@ async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("8")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "logs")
         table = app.query_one("#panel-table", DataTable)
         previous_second_row = list(table.rows.values())[1]
         logs.set_cursor(50)
@@ -1746,7 +1756,7 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
 
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("8")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "logs")
         assert "line one" in str(app.query_one("#panel-table", DataTable).get_cell_at((0, 0)))
 
         (tmp_path / "gateway.log").write_text("line one\nline two\n", encoding="utf-8")
@@ -2269,7 +2279,7 @@ async def test_setup_panel_renders_wizards_and_form() -> None:
 
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("0")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "setup")
 
         table = app.query_one("#panel-table", DataTable)
         assert app.active_panel == "setup"
@@ -2416,7 +2426,7 @@ async def test_inventory_mouse_controls_switch_tabs_filters_and_scope() -> None:
 
     async with app.run_test(size=(190, 44)) as pilot:
         await pilot.press("6")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "inventory")
 
         await pilot.click("#inventory-tab-plugins")
         await pilot.pause()
@@ -2448,7 +2458,7 @@ async def test_logs_mouse_controls_and_structured_row_click_open_detail() -> Non
 
     async with app.run_test(size=(190, 44)) as pilot:
         await pilot.press("8")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "logs")
 
         await pilot.click("#logs-filter-3")
         await pilot.pause()
@@ -2486,6 +2496,7 @@ async def test_registries_mouse_tabs_and_sync_button_open_preview(tmp_path) -> N
 
     async with app.run_test(size=(190, 44)) as pilot:
         app.action_switch_panel("registries")
+        await _wait_for_panel_render(app, "registries")
         await pilot.pause()
 
         await pilot.click("#registries-tab-entries")
@@ -2515,7 +2526,7 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
 
     async with app.run_test(size=(190, 44)) as pilot:
         await pilot.press("0")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "setup")
 
         await pilot.click("#setup-mode-config")
         await pilot.pause()
@@ -2593,7 +2604,7 @@ async def test_activity_panel_exposes_clickable_action_bar() -> None:
 
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press("A")  # Activity panel.
-        await pilot.pause()
+        await _wait_for_panel_render(app, "activity")
         assert app.active_panel == "activity"
         for selector in (
             "#activity-cancel",
@@ -2800,7 +2811,7 @@ async def test_ai_discovery_panel_exposes_action_bar() -> None:
 
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press("V")  # AI Discovery panel key.
-        await pilot.pause()
+        await _wait_for_panel_render(app, "ai")
         assert app.active_panel == "ai"
         for selector in (
             "#ai-enable",
@@ -2830,7 +2841,7 @@ async def test_ai_discovery_bar_swaps_enable_for_disable_when_enabled() -> None:
 
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press("V")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "ai")
         assert app.query_one("#ai-enable", Button).has_class("hidden") is True
         assert app.query_one("#ai-disable", Button).has_class("hidden") is False
         assert app.query_one("#ai-scan", Button).has_class("hidden") is False

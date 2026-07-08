@@ -168,6 +168,14 @@ try {
     Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4\]' -and
         $nativeWorkflowText -match '\(\$index % 4\) -eq \$shardIndex') `
         'complete Python suite assigns every test file to one of four deterministic shards'
+    foreach ($node in @(
+        'test_existing_openclaw_integration_requires_pin',
+        'test_f0162_refuses_swapped_symlink',
+        'test_f0421_rechecks_pinned_home_before_chown'
+    )) {
+        Assert-True ($nativeWorkflowText -match "--deselect=.*$node") `
+            "native Windows suite excludes the POSIX-only sandbox assertion $node"
+    }
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and

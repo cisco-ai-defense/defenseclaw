@@ -41,7 +41,8 @@ async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 8.0) ->
 
 async def _wait_for_panel(app: DefenseClawTUI, panel: str) -> None:
     await _wait_until(
-        lambda: panel not in app._panel_render_running  # noqa: SLF001
+        lambda: panel not in app._panel_render_queued  # noqa: SLF001
+        and panel not in app._panel_render_running  # noqa: SLF001
         and panel not in app._panel_render_pending,  # noqa: SLF001
     )
 
