@@ -70,13 +70,13 @@ jobs:
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $go = (Get-Command go.exe -ErrorAction Stop).Source
-          # These assertions exercise POSIX mode bits/scripts that native
-          # Windows does not use. Equivalent reparse-point, private-DACL, and
-          # supported-connector coverage runs elsewhere in this same job.
+          # These tests contain POSIX mode-bit/script assertions that native
+          # Windows does not use. Equivalent token validation, reparse-point,
+          # private-DACL, and supported-connector coverage runs in this job.
           $windowsInapplicable = '^(' + (@(
             'TestAtomicWriteFile_PreservesSymlinkedDotfile',
             'TestOpenHandsHookScript_BlockExitsTwo',
-            'TestLoadOTLPPathToken_RejectsUnsafeFiles/wide_mode'
+            'TestLoadOTLPPathToken_RejectsUnsafeFiles'
           ) -join '|') + ')$'
           # Keep package execution serial on the four-core hosted runner so
           # bounded discovery tests are not starved by concurrent packages.

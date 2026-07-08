@@ -6298,6 +6298,10 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
     store = MutableHookStore()
     audit = AuditPanelModel(store)
     app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+    manual_refresh = app._periodic_refresh
+    # This test drives refreshes explicitly. Keep Textual's two-second mount
+    # timer from racing the body-update counter during a loaded full-suite run.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(120, 18)) as pilot:
         await pilot.pause()
@@ -6325,7 +6329,7 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         app._overview_last_scroll_activity_at = 0.0
 
         previous_generation = app._panel_render_generation  # noqa: SLF001
-        app._periodic_refresh()
+        manual_refresh()
         await _wait_for_background(
             lambda: app._overview_render_snapshot is not None  # noqa: SLF001
             and app._overview_render_snapshot.generation > previous_generation  # noqa: SLF001
@@ -6344,7 +6348,7 @@ async def test_overview_repaints_connector_rows_when_activity_changes_while_scro
         )
 
         previous_generation = app._panel_render_generation  # noqa: SLF001
-        app._periodic_refresh()
+        manual_refresh()
         await _wait_for_background(
             lambda: app._overview_render_snapshot is not None  # noqa: SLF001
             and app._overview_render_snapshot.generation > previous_generation  # noqa: SLF001

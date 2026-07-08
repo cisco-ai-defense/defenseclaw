@@ -118,15 +118,15 @@ class RegistryStructureTests(unittest.TestCase):
         expected_registry = {
             "DEFENSECLAW_CLAWHUB_CWD": {
                 "category": "hook_internal",
-                "default": "unset (set only for the child wrapper process)",
-                "accepted_values": ["absolute directory path", "unset"],
+                "default": "unset (set by the ClawHub launcher adapter on Windows)",
+                "accepted_values": ["absolute directory path"],
                 "security_impact": "none",
                 "surface_in_doctor": False,
             },
             "DEFENSECLAW_CLAWHUB_LAUNCHER": {
                 "category": "hook_internal",
-                "default": "unset (set only for the child wrapper process)",
-                "accepted_values": ["absolute executable path", "unset"],
+                "default": "unset (set by the ClawHub launcher adapter on Windows)",
+                "accepted_values": ["absolute path to a .cmd or .bat launcher"],
                 "security_impact": "none",
                 "surface_in_doctor": False,
             },
@@ -154,7 +154,7 @@ class RegistryStructureTests(unittest.TestCase):
             "DEFENSECLAW_TEST_MARKER": {
                 "category": "test_fixture",
                 "default": "unset",
-                "accepted_values": ["temporary marker file path", "unset"],
+                "accepted_values": ["absolute file path", "unset"],
                 "security_impact": "none",
                 "surface_in_doctor": False,
             },
@@ -181,13 +181,13 @@ class RegistryStructureTests(unittest.TestCase):
         expected_doc_cells = {
             "DEFENSECLAW_CLAWHUB_CWD": (
                 "—",
-                "`unset` (set only for the child wrapper process)",
-                "`absolute directory path`, `unset`",
+                "`unset` (set by the ClawHub launcher adapter on Windows)",
+                "`absolute directory path`",
             ),
             "DEFENSECLAW_CLAWHUB_LAUNCHER": (
                 "—",
-                "`unset` (set only for the child wrapper process)",
-                "`absolute executable path`, `unset`",
+                "`unset` (set by the ClawHub launcher adapter on Windows)",
+                "`absolute path to a .cmd or .bat launcher`",
             ),
             "DEFENSECLAW_OBSERVABILITY_BIN": (
                 "low",
@@ -207,7 +207,7 @@ class RegistryStructureTests(unittest.TestCase):
             "DEFENSECLAW_TEST_MARKER": (
                 "—",
                 "`unset`",
-                "`temporary marker file path`, `unset`",
+                "`absolute file path`, `unset`",
             ),
             "DEFENSECLAW_WINDOWS_PROCESS_HELPER": (
                 "—",
