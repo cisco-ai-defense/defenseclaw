@@ -73,6 +73,7 @@ from rich.text import Text
 from tests.permissions import assert_owner_only_file, set_known_windows_directory_acl
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
+from textual.pilot import Pilot
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
 
 
@@ -92,6 +93,25 @@ async def _wait_for_panel_render(app: DefenseClawTUI, panel: str) -> None:
         and panel not in app._panel_render_running  # noqa: SLF001
         and panel not in app._panel_render_pending,  # noqa: SLF001
     )
+
+
+async def _click_when_ready(
+    pilot: Pilot,
+    selector: str,
+    *,
+    offset: tuple[int, int] = (0, 0),
+    timeout: float = 8.0,
+) -> bool:
+    """Wait for layout hit-testing, then deliver one click to *selector*."""
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        await pilot.pause()
+        if await pilot.click(selector, offset=offset):
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out waiting for clickable {selector}")
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -1329,7 +1349,7 @@ async def test_alerts_table_row_click_updates_cursor() -> None:
         await pilot.press("2")
         await _wait_for_panel_render(app, "alerts")
 
-        clicked = await pilot.click("#panel-table", offset=(2, 2))
+        clicked = await _click_when_ready(pilot, "#panel-table", offset=(2, 2))
         await pilot.pause()
 
         assert clicked is True
@@ -1439,7 +1459,7 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
         assert app.active_panel == "skills"
         assert table.row_count == 2
 
-        await pilot.click("#panel-table", offset=(2, 2))
+        await _click_when_ready(pilot, "#panel-table", offset=(2, 2))
         await _wait_for_background(lambda: skills.cursor == 1)
         assert skills.cursor == 1
 
@@ -2286,7 +2306,7 @@ async def test_setup_panel_renders_wizards_and_form() -> None:
         assert "Setup Wizards" in app.body_text
         assert table.row_count == len(WIZARD_NAMES)
 
-        await pilot.click("#panel-table", offset=(2, 2))
+        await _click_when_ready(pilot, "#panel-table", offset=(2, 2))
         await _wait_for_background(lambda: int(setup.active_wizard) == 1)
         assert int(setup.active_wizard) == 1
 
@@ -2428,7 +2448,7 @@ async def test_inventory_mouse_controls_switch_tabs_filters_and_scope() -> None:
         await pilot.press("6")
         await _wait_for_panel_render(app, "inventory")
 
-        await pilot.click("#inventory-tab-plugins")
+        await _click_when_ready(pilot, "#inventory-tab-plugins")
         await _wait_for_background(
             lambda: inventory.active_sub == "plugins"
             and app.query_one("#panel-table", DataTable).row_count == 2
@@ -2436,7 +2456,7 @@ async def test_inventory_mouse_controls_switch_tabs_filters_and_scope() -> None:
         assert inventory.active_sub == "plugins"
         assert app.query_one("#panel-table", DataTable).row_count == 2
 
-        await pilot.click("#inventory-filter-disabled")
+        await _click_when_ready(pilot, "#inventory-filter-disabled")
         await _wait_for_background(
             lambda: inventory.filter == "disabled"
             and app.query_one("#panel-table", DataTable).row_count == 1
@@ -2444,7 +2464,7 @@ async def test_inventory_mouse_controls_switch_tabs_filters_and_scope() -> None:
         assert inventory.filter == "disabled"
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
-        await pilot.click("#inventory-scope-fast")
+        await _click_when_ready(pilot, "#inventory-scope-fast")
         await _wait_for_background(lambda: set(inventory.category_scope) == {"skills", "plugins", "mcp"})
         assert set(inventory.category_scope) == {"skills", "plugins", "mcp"}
 
@@ -2466,24 +2486,24 @@ async def test_logs_mouse_controls_and_structured_row_click_open_detail() -> Non
         await pilot.press("8")
         await _wait_for_panel_render(app, "logs")
 
-        await pilot.click("#logs-filter-3")
+        await _click_when_ready(pilot, "#logs-filter-3")
         await pilot.pause()
         assert logs.filter_mode == "errors"
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
-        await pilot.click("#logs-toggle-pause")
+        await _click_when_ready(pilot, "#logs-toggle-pause")
         await pilot.pause()
         assert logs.paused is True
 
-        await pilot.click("#logs-source-watchdog")
+        await _click_when_ready(pilot, "#logs-source-watchdog")
         await pilot.pause()
         assert logs.source == "watchdog"
 
-        await pilot.click("#logs-source-verdicts")
+        await _click_when_ready(pilot, "#logs-source-verdicts")
         await pilot.pause()
-        await pilot.click("#logs-filter-0")
+        await _click_when_ready(pilot, "#logs-filter-0")
         await pilot.pause()
-        await pilot.click("#panel-table", offset=(2, 1))
+        await _click_when_ready(pilot, "#panel-table", offset=(2, 1))
         await pilot.pause()
 
         screen = app.screen_stack[-1]
@@ -2534,7 +2554,7 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
         await pilot.press("0")
         await _wait_for_panel_render(app, "setup")
 
-        await pilot.click("#setup-mode-config")
+        await _click_when_ready(pilot, "#setup-mode-config")
         await _wait_for_background(lambda: setup.mode == "config")
         assert setup.mode == "config"
 
@@ -2542,7 +2562,7 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
             next(index for index, section in enumerate(setup.sections) if section.name == "Audit Sinks")
         )
         app._render_chrome()  # noqa: SLF001 - deterministic section switch.
-        await pilot.click("#setup-edit-list")
+        await _click_when_ready(pilot, "#setup-edit-list")
         await _wait_for_background(
             lambda: app.screen_stack[-1].__class__.__name__ == "SetupResourceEditorScreen"
         )
@@ -2568,7 +2588,7 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
         # the layout pass and ``pilot.click`` lands on the previous
         # frame, producing a no-op that flakes this assertion.
         await pilot.pause()
-        await pilot.click("#setup-save")
+        await _click_when_ready(pilot, "#setup-save")
         await _wait_for_background(lambda: app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen")
         assert app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen"
 

@@ -1522,6 +1522,9 @@ class DefenseClawTUI(App[None]):
         """Export the selected lightweight panel after applying queued chrome."""
 
         panel = self.active_panel
+        if title is None:
+            label = next((label for name, _key, label in PANELS if name == panel), panel.title())
+            title = f"DefenseClaw — {label}"
         generation = self._panel_render_queued.get(panel)
         if panel not in {
             "overview",
