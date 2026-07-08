@@ -166,8 +166,20 @@ jobs:
             '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestSandboxInitIdempotentPin::test_f0162_refuses_swapped_symlink',
             '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestInitSandboxChownTOCTOU::test_f0421_rechecks_pinned_home_before_chown'
           )
-          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
-          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}.log') | Out-Null
+          # Click's interactive guardrail tests have demonstrated a hosted-
+          # Windows cross-file hang after earlier shard files alter process
+          # state. Keep their complete coverage, but run the file in a fresh,
+          # bounded pytest process before the rest of its assigned shard.
+          $guardrailFiles = @($shardFiles | Where-Object {
+            [IO.Path]::GetFileName($_).Equals('test_guardrail.py', [StringComparison]::OrdinalIgnoreCase)
+          })
+          $remainingFiles = @($shardFiles | Where-Object { $_ -notin $guardrailFiles })
+          if ($guardrailFiles.Count) {
+            $guardrailArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $guardrailFiles + @('-q')
+            Invoke-WindowsNativeProcess $uv $guardrailArgs -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}-guardrail.log') | Out-Null
+          }
+          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $remainingFiles + $windowsInapplicableTests + @('-q')
+          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 3300 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}.log') | Out-Null
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
