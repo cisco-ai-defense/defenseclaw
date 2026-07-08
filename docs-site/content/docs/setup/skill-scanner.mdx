@@ -15,10 +15,11 @@ Agents are getting comfortable installing skills. A "skill" is a small bundle â€
 
 DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so every skill on disk gets a deterministic + LLM-assisted review before an agent is allowed to use it. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher quarantines new skills until the scan resolves.
 
-<Video
-  src="skill"
-  caption="Skill Scanner demo: defenseclaw skill scan flagging a malicious skill before the agent picks it up."
-/>
+<DefenseClawDemo scenario="skill-quarantine" variant="critical" />
+
+## What you just saw
+
+The watcher moved a new skill out of the agent-visible path **before** scanning it. Deterministic checks and optional LLM-assisted intent analysis produced a CRITICAL result, which `skill_actions` mapped to retained quarantine, disabled runtime, blocked installation, and an audit event.
 
 ## What it scans
 

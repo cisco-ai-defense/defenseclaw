@@ -48,6 +48,7 @@ OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        packaging-macos-test packaging-macos-bundle \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -542,6 +543,50 @@ cli-test-snap:
 
 gateway-test: sync-openclaw-extension
 	go test -race ./internal/gateway/ ./test/... -v
+
+# packaging-macos-test runs the pure-bash unit tests for the macOS installer
+# scripts under packaging/macos/. They don't touch /Library, sudo, or
+# launchctl and are safe to run on any macOS or Linux dev host.
+packaging-macos-test:
+	packaging/macos/tests/run_tests.sh
+
+# packaging-macos-bundle assembles a shippable folder + tarball containing
+# the prebuilt gateway binary alongside the install / uninstall scripts.
+# The bundle is fully self-contained — no repo tree required at install
+# time. Layout:
+#
+#   defenseclaw-macos-$(VERSION)-$(GOOS)-$(GOARCH)/
+#     defenseclaw-gateway              (binary)
+#     install.sh                       (calls the binary next to it)
+#     uninstall.sh
+#     com.defenseclaw.gateway.plist    (installed to /Library/LaunchDaemons)
+#     lib/installer_lib.sh
+#     lib/scrub_agent_configs.py
+#     README.md                        (short usage)
+#
+# Ships as dist/defenseclaw-macos-$(VERSION)-$(GOOS)-$(GOARCH).tar.gz.
+#
+# Overrides: GOOS/GOARCH cross-compile the gateway.
+BUNDLE_GOOS  ?= darwin
+# Universal (x86_64 + arm64 via lipo) is the default for macOS drops so the
+# packaging team ships one artifact for both Intel and Apple Silicon. Override
+# with BUNDLE_GOARCH=amd64 or =arm64 for a single-arch bundle.
+BUNDLE_GOARCH ?= universal
+BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
+BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
+# BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
+# argument (no shell re-parsing / eval).
+BUNDLE_LDFLAGS := -X main.version=$(VERSION)
+
+packaging-macos-bundle:
+	@scripts/build-macos-bundle.sh \
+	    "$(BUNDLE_GOOS)" \
+	    "$(BUNDLE_GOARCH)" \
+	    "$(BUNDLE_NAME)" \
+	    "$(BUNDLE_DIR)" \
+	    "$(DIST_DIR)" \
+	    "$(VERSION)" \
+	    "$(BUNDLE_LDFLAGS)"
 
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.

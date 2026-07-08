@@ -13,6 +13,12 @@ keywords:
 
 The DefenseClaw gateway is observable by design. Every decision — admission, guardrail verdict, judge call, scanner finding, HITL approval — is structured, correlated by `trace_id`/`span_id`, and emitted on three independent rails:
 
+<DefenseClawDemo scenario="observability-correlation" />
+
+## What you just saw
+
+The same synthetic Cursor enforcement decision used on the homepage kept its trace, span, session, connector, decision, rule, and severity dimensions across local evidence and configured export rails. The example does not imply delivery to an OTLP, Splunk, or webhook destination that an operator has not configured.
+
 <Flow
   direction="TB"
   caption="Three independent sinks fanned out below the gateway. Failure on one rail does not affect the others."

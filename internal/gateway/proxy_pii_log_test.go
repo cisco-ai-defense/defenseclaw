@@ -130,3 +130,55 @@ func TestLogVerdict_NoneSeverityEmitsNoReason(t *testing.T) {
 		t.Errorf("NONE branch leaked reason: %s", out)
 	}
 }
+
+func TestLogPreCall_OmitsMessageContentEvenWhenRevealEnabled(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+	const secretPrompt = "SENTINEL user prompt that must never reach gateway.log"
+	v := &ScanVerdict{Action: "allow", Severity: "NONE"}
+
+	out := captureStderr(t, func() {
+		(&GuardrailProxy{}).logPreCall("test-model", []ChatMessage{
+			{Role: "user", Content: secretPrompt},
+		}, v, 5*time.Millisecond)
+	})
+
+	if strings.Contains(out, secretPrompt) {
+		t.Fatalf("pre-call log leaked message content: %s", out)
+	}
+	if !strings.Contains(out, "user (54 chars; content omitted)") {
+		t.Fatalf("pre-call log dropped safe message metadata: %s", out)
+	}
+}
+
+func TestLogRequestBodyMetadata_OmitsBodyEvenWhenRevealEnabled(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+	body := []byte(`{"messages":[{"role":"user","content":"SENTINEL raw request prompt"}]}`)
+
+	out := captureStderr(t, func() {
+		logRequestBodyMetadata(body)
+	})
+
+	if strings.Contains(out, "SENTINEL raw request prompt") {
+		t.Fatalf("request log leaked body content: %s", out)
+	}
+	if !strings.Contains(out, "raw body: 70 bytes (content omitted)") {
+		t.Fatalf("request log dropped safe body metadata: %s", out)
+	}
+}
+
+func TestLogPostCall_OmitsResponseContentEvenWhenRevealEnabled(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+	const secretResponse = "SENTINEL assistant response that must never reach gateway.log"
+	v := &ScanVerdict{Action: "allow", Severity: "NONE"}
+
+	out := captureStderr(t, func() {
+		(&GuardrailProxy{}).logPostCall("test-model", secretResponse, v, 5*time.Millisecond, nil)
+	})
+
+	if strings.Contains(out, secretResponse) {
+		t.Fatalf("post-call log leaked response content: %s", out)
+	}
+	if !strings.Contains(out, "response (61 chars; content omitted)") {
+		t.Fatalf("post-call log dropped safe response metadata: %s", out)
+	}
+}

@@ -1,10 +1,9 @@
 import defaultMdxComponents from 'fumadocs-ui/mdx';
-import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 import { Step, Steps } from 'fumadocs-ui/components/steps';
 import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
-import { Callout } from 'fumadocs-ui/components/callout';
+import { Callout as FumadocsCallout } from 'fumadocs-ui/components/callout';
 import { File, Folder, Files } from 'fumadocs-ui/components/files';
-import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Card as FumadocsCard, Cards as FumadocsCards } from 'fumadocs-ui/components/card';
 import { Banner } from 'fumadocs-ui/components/banner';
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import type { MDXComponents } from 'mdx/types';
@@ -15,6 +14,37 @@ import PolicyCreator from '@/components/policy-creator';
 import { RecipeCatalog } from '@/components/policy-creator/recipe-catalog';
 import { Video } from '@/components/video';
 import { TerminalAnimation } from '@/components/terminal-animation';
+import { DefenseClawDemo } from '@/components/feature-demo';
+import { EditorialTab as Tab, EditorialTabs as Tabs } from '@/components/editorial-tabs';
+import { ResponsiveTable } from '@/components/responsive-table';
+import { ConnectorCatalog } from '@/components/connector-catalog';
+import { ConnectorLabel } from '@/components/connector-brand';
+import type { ComponentProps } from 'react';
+import { cn } from '@/lib/utils';
+
+function Callout(props: ComponentProps<typeof FumadocsCallout>) {
+  return <FumadocsCallout {...props} className={cn('editorial-callout', props.className)} />;
+}
+
+function Cards(props: ComponentProps<typeof FumadocsCards>) {
+  return <FumadocsCards {...props} className={cn('editorial-cards', props.className)} />;
+}
+
+function Card(props: ComponentProps<typeof FumadocsCard>) {
+  return <FumadocsCard {...props} className={cn('editorial-card', props.className)} />;
+}
+
+function MdxInput(props: ComponentProps<'input'>) {
+  if (props.type === 'checkbox') {
+    return (
+      <input
+        {...props}
+        aria-label={props['aria-label'] ?? (props.checked ? 'Completed checklist item' : 'Incomplete checklist item')}
+      />
+    );
+  }
+  return <input {...props} />;
+}
 
 // Single registry for the components that MDX pages can reference
 // without a per-file import. Keeping this list short and curated
@@ -23,6 +53,8 @@ import { TerminalAnimation } from '@/components/terminal-animation';
 // TypeTables, Flow/Sequence diagrams, the CapabilityMatrix).
 export const mdxComponents: MDXComponents = {
   ...defaultMdxComponents,
+  table: ResponsiveTable,
+  input: MdxInput,
   Tab,
   Tabs,
   Step,
@@ -49,4 +81,7 @@ export const mdxComponents: MDXComponents = {
   RecipeCatalog,
   Video,
   TerminalAnimation,
+  DefenseClawDemo,
+  ConnectorCatalog,
+  ConnectorLabel,
 };

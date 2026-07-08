@@ -637,6 +637,13 @@ only affects operator-facing stderr logs (for local incident triage); it
 has no effect on SQLite, webhooks, Splunk HEC, or OTLP logs — those
 always receive the scrubbed copy.
 
+The guardrail's pretty stderr stream never prints LLM request bodies,
+individual prompt/history/tool message bodies, or response bodies. It retains
+only operational metadata such as role, content length, model, timing, token
+usage, and verdict. Because the daemon persists stderr to `gateway.log` and
+deployments commonly forward that file, this omission also applies when
+`DEFENSECLAW_REVEAL_PII=1` or global redaction is disabled.
+
 > **Never set `DEFENSECLAW_REVEAL_PII=1` in production.** This flag is
 > intended for developer workstations and short-lived incident-triage
 > sessions only. When set, the gateway will print matched literals

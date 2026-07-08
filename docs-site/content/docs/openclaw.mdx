@@ -32,18 +32,18 @@ The DefenseClaw gateway client speaks the OpenClaw WebSocket handshake across th
 ## End-to-end flow
 
 <Sequence
-  caption="Three interception points let DefenseClaw inspect every interesting moment in OpenClaw's lifecycle and surface HITL approvals back through the chat origin."
+  caption="Three interception points let DefenseClaw inspect every interesting moment in OpenClaw's lifecycle and surface HITL approvals back through the chat origin. Plugin is the bundled DefenseClaw plugin; Gateway is defenseclaw-gateway; Operator is the DefenseClaw TUI."
   participants={[
     { id: 'u',  label: 'User',                kind: 'operator' },
     { id: 'oc', label: 'OpenClaw',            kind: 'agent' },
-    { id: 'p',  label: 'DefenseClaw plugin',  kind: 'connector' },
-    { id: 'g',  label: 'defenseclaw-gateway', kind: 'gateway' },
-    { id: 'op', label: 'Operator (chat)',     kind: 'operator' },
+    { id: 'p',  label: 'Plugin',   kind: 'connector' },
+    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
+    { id: 'op', label: 'Operator', kind: 'operator' },
   ]}
 >
   <Message from="u"  to="oc" label="prompt" />
   <Message from="oc" to="p"  label="fetch (LLM request)" />
-  <Message from="p"  to="g"  label="POST /v1/inspect (X-DefenseClaw-Correlation-Id)" />
+  <Message from="p"  to="g"  label="POST /v1/inspect + correlation ID" />
   <Message from="g"  to="p"  kind="return" label="allow / block / pause" />
   <Message from="p"  to="oc" label="publish approval prompt (when paused)" />
   <Message from="oc" to="op" label="approval request in chat" />
