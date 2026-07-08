@@ -22,7 +22,6 @@ const (
 	DeploymentModeEnv               = "DEFENSECLAW_DEPLOYMENT_MODE"
 	HookGuardianAuthorizationDirEnv = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
 	HookGuardianAuthorizationFile   = "protected_targets.json"
-	CMIDLibPathEnv                  = "DEFENSECLAW_CMID_LIB_PATH"
 )
 
 func IsManagedEnterprise(mode string) bool {

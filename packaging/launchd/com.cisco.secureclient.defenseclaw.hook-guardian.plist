@@ -3,28 +3,28 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.defenseclaw.hook-guardian</string>
+  <string>com.cisco.secureclient.defenseclaw.hook-guardian</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/DefenseClaw/bin/defenseclaw-gateway</string>
+    <string>/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway</string>
     <string>enterprise</string>
     <string>hooks</string>
     <string>reconcile</string>
     <string>--manifest</string>
-    <string>/Library/Application Support/DefenseClaw/hook-guardian/targets.yaml</string>
+    <string>/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Library/Application Support/DefenseClaw</string>
+  <string>/opt/cisco/secureclient/defenseclaw</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>DEFENSECLAW_HOME</key>
-    <string>/Library/Application Support/DefenseClaw</string>
+    <string>/opt/cisco/secureclient/defenseclaw</string>
     <key>DEFENSECLAW_CONFIG</key>
-    <string>/Library/Application Support/DefenseClaw/config.yaml</string>
+    <string>/opt/cisco/secureclient/defenseclaw/etc/config.yaml</string>
     <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
     <string>managed_enterprise</string>
     <key>DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR</key>
-    <string>/Library/Application Support/DefenseClaw/hook-guardian-state</string>
+    <string>/opt/cisco/secureclient/defenseclaw/hook-guardian-state</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -33,8 +33,8 @@
   <key>Umask</key>
   <integer>63</integer>
   <key>StandardOutPath</key>
-  <string>/Library/Logs/DefenseClaw/hook-guardian.log</string>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/hook-guardian.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Logs/DefenseClaw/hook-guardian.err.log</string>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/hook-guardian.err.log</string>
 </dict>
 </plist>

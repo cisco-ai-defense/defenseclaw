@@ -119,47 +119,52 @@ def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
 
 
 def test_launchd_gateway_plist_uses_managed_paths():
+    # DefenseClaw installs under /opt/cisco/secureclient/defenseclaw/.
+    # The plist name and every path inside it follows that layout, and
+    # the daemon runs as root (no UserName/GroupName keys — the managed
+    # cloud auth provider requires root for its credential store).
     root = Path(__file__).resolve().parents[2]
-    plist_path = root / "packaging" / "launchd" / "com.defenseclaw.gateway.plist"
+    plist_path = root / "packaging" / "launchd" / "com.cisco.secureclient.defenseclaw.plist"
 
     with plist_path.open("rb") as fh:
         payload = plistlib.load(fh)
 
-    assert payload["Label"] == "com.defenseclaw.gateway"
-    assert payload["ProgramArguments"] == ["/Library/DefenseClaw/bin/defenseclaw-gateway"]
-    assert payload["UserName"] == "defenseclaw"
-    assert payload["GroupName"] == "defenseclaw"
-    assert payload["WorkingDirectory"] == "/Library/Application Support/DefenseClaw"
-    assert payload["EnvironmentVariables"]["DEFENSECLAW_HOME"] == "/Library/Application Support/DefenseClaw"
+    assert payload["Label"] == "com.cisco.secureclient.defenseclaw"
+    assert payload["ProgramArguments"] == ["/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"]
+    assert "UserName" not in payload, "daemon runs as root; UserName must be absent"
+    assert "GroupName" not in payload, "daemon runs as root; GroupName must be absent"
+    assert payload["WorkingDirectory"] == "/opt/cisco/secureclient/defenseclaw"
+    assert payload["EnvironmentVariables"]["DEFENSECLAW_HOME"] == "/opt/cisco/secureclient/defenseclaw"
     assert (
-        payload["EnvironmentVariables"]["DEFENSECLAW_CONFIG"] == "/Library/Application Support/DefenseClaw/config.yaml"
+        payload["EnvironmentVariables"]["DEFENSECLAW_CONFIG"]
+        == "/opt/cisco/secureclient/defenseclaw/etc/config.yaml"
     )
     assert payload["EnvironmentVariables"]["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
     assert (
         payload["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
-        == "/Library/Application Support/DefenseClaw/hook-guardian-state"
+        == "/opt/cisco/secureclient/defenseclaw/hook-guardian-state"
     )
     assert payload["RunAtLoad"] is True
     assert payload["KeepAlive"] is True
     assert payload["Umask"] == 0o77
-    assert payload["StandardOutPath"] == "/Library/Logs/DefenseClaw/gateway.log"
-    assert payload["StandardErrorPath"] == "/Library/Logs/DefenseClaw/gateway.err.log"
+    assert payload["StandardOutPath"] == "/Library/Logs/Cisco/SecureClient/DefenseClaw/gateway.log"
+    assert payload["StandardErrorPath"] == "/Library/Logs/Cisco/SecureClient/DefenseClaw/gateway.err.log"
 
 
 def test_launchd_hook_guardian_is_separate_privileged_job():
     root = Path(__file__).resolve().parents[2]
-    plist_path = root / "packaging" / "launchd" / "com.defenseclaw.hook-guardian.plist"
+    plist_path = root / "packaging" / "launchd" / "com.cisco.secureclient.defenseclaw.hook-guardian.plist"
 
     with plist_path.open("rb") as fh:
         payload = plistlib.load(fh)
 
-    assert payload["Label"] == "com.defenseclaw.hook-guardian"
+    assert payload["Label"] == "com.cisco.secureclient.defenseclaw.hook-guardian"
     assert "UserName" not in payload
     assert payload["ProgramArguments"][1:4] == ["enterprise", "hooks", "reconcile"]
     assert payload["EnvironmentVariables"]["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
     assert (
         payload["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
-        == "/Library/Application Support/DefenseClaw/hook-guardian-state"
+        == "/opt/cisco/secureclient/defenseclaw/hook-guardian-state"
     )
     assert payload["StartInterval"] == 300
 

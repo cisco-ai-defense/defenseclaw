@@ -466,6 +466,33 @@ func (p *GuardrailProxy) SetConnectorSwitchState(reg *connector.Registry, opts c
 	p.setupOpts = opts
 }
 
+// SetManagedInspection swaps in a managed-mode AID inspector after
+// construction and toggles the managed verdict-merge dispatch on the
+// underlying GuardrailInspector. Called only by the sidecar boot path
+// when deployment_mode = managed_enterprise (see
+// Sidecar.runActiveGuardrail). Pass replacement == nil with
+// managed == true to explicitly disable remote inspection in managed
+// mode (fail-closed when the managed cloud auth provider is unavailable).
+//
+// The proxy stores its inspector under the ContentInspector interface,
+// so this method type-asserts down to *GuardrailInspector to reach the
+// concrete setters. A non-matching implementation (test double) is a
+// no-op — the managed toggle only matters for the real inspector wired
+// by NewGuardrailProxy.
+func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspector) {
+	if p == nil {
+		return
+	}
+	g, ok := p.inspector.(*GuardrailInspector)
+	if !ok {
+		return
+	}
+	if managed {
+		g.SetManagedMode(true)
+		g.SetCiscoInspector(replacement)
+	}
+}
+
 // ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
 // the live proxy without rereading any side files.
 func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {

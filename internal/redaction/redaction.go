@@ -402,6 +402,18 @@ func ForSinkReason(reason string) string {
 	if isAlreadyRedacted(reason) {
 		return reason
 	}
+	// Trusted whole-reason allow-list: the AID normalizer at
+	// internal/gateway/cisco_inspect.go emits ship-authored strings
+	// of the shape "Cisco AI Defense: <rule>[, <rule>...]" (comma-
+	// joined rule catalog names). Those clauses are NOT user content
+	// — they're DefenseClaw-authored labels — so we let the whole
+	// reason pass through unredacted rather than fragmenting on ", "
+	// (which drops the trusted-prefix context and redacts the
+	// individual rule names). See trustedReasonPassthrough for the
+	// narrow validation.
+	if r := trustedReasonPassthrough(reason); r != "" {
+		return r
+	}
 	out := strings.Builder{}
 	out.Grow(len(reason))
 	emit := func(t string) {
@@ -495,6 +507,47 @@ func isRedactedToken(tok string) bool {
 //  6. Fallback                       — whole-token redaction
 func redactReasonToken(t string) string {
 	return redactReasonTokenDepth(t, 0)
+}
+
+// trustedReasonPassthrough returns the input unchanged when it matches
+// one of the ship-authored trusted reason shapes. Returns "" when the
+// input doesn't match, deferring to the normal redaction rules.
+func trustedReasonPassthrough(t string) string {
+	const aidPrefix = "Cisco AI Defense"
+	if !strings.HasPrefix(t, aidPrefix) {
+		return ""
+	}
+	// Exact "Cisco AI Defense custom policy block" catch-all reason
+	// emitted when the cloud blocks without naming a specific rule.
+	if t == "Cisco AI Defense custom policy block" {
+		return t
+	}
+	// "Cisco AI Defense: <rule>[, <rule>...]" — rule names are
+	// hand-authored labels from the AID cloud catalog. Validate the
+	// suffix consists entirely of comma-separated tokens made of
+	// letters, digits, spaces, and a small punctuation set so we
+	// don't accidentally allow through a user-controlled string that
+	// happens to prepend "Cisco AI Defense: " (e.g. a prompt-injection
+	// attempt echoing the phrase).
+	suffix, ok := strings.CutPrefix(t, aidPrefix+": ")
+	if !ok {
+		return ""
+	}
+	if suffix == "" || len(suffix) > 256 {
+		return ""
+	}
+	for i := 0; i < len(suffix); i++ {
+		c := suffix[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == ' ' || c == '-' || c == '_' || c == ',' || c == '.' || c == '&':
+		default:
+			return ""
+		}
+	}
+	return t
 }
 
 // redactReasonTokenDepth is the depth-bounded worker for

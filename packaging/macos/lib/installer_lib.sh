@@ -246,25 +246,49 @@ prepare_userspace_for() {
 
 # ---- config rendering --------------------------------------------------
 
-# render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR CONN... -> stdout
-# Renders the full config.yaml. Pure stdout, no file writes.
-# Extra args after SUPPORT_DIR are the full connector list (primary + others).
+# aid_endpoint_for_env ENV -> stdout
+# Maps the installer's --env flag to the AI Defense cloud host that
+# defenseclaw's managed CMID inspection client will target. The daemon
+# appends the fixed /api/v1/inspect/defense_claw path itself; this
+# helper only supplies the host.
 #
-# SUPPORT_DIR holds config.yaml at its root (root-owned 0640) — the
-# managed_enterprise trust check walks every ancestor of config.yaml
-# and refuses group-writable or non-root ancestors. Runtime state
-# (audit DB, tokens, guardian state) lives in ${SUPPORT_DIR}/runtime,
-# which is chown'd to the service user. This split matches the docs
-# (docs-site/content/docs/setup/enterprise-deployment.mdx: "The managed
-# config must set data_dir: /Library/Application Support/DefenseClaw/runtime")
-# and preserves the CI plist test's WorkingDirectory/HOME assertions.
+# Kept as a pure-bash lookup so tests can exercise it without depending
+# on the AID cloud being reachable. Adding a new environment is a
+# one-line change here + a new case in the outer arg validator.
+aid_endpoint_for_env() {
+  local env="$1"
+  case "${env}" in
+    prod)    echo "https://us.api.inspect.aidefense.security.cisco.com";;
+    preview) echo "https://preview.api.inspect.aidefense.aiteam.cisco.com";;
+    *)       return 1;;
+  esac
+}
+
+# render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
+# Renders the full config.yaml. Pure stdout, no file writes.
+# Extra args after AID_ENDPOINT are the full connector list (primary + others).
+#
+# SUPPORT_DIR is the module root under the managed install tree
+# (/opt/cisco/secureclient/defenseclaw). config.yaml sits under
+# SUPPORT_DIR/etc/config.yaml (root:wheel 0640). The managed_enterprise
+# trust check walks every ancestor of config.yaml and refuses
+# group-writable or non-root ancestors — the shipped layout is
+# root:wheel 0755 all the way up, so it passes. Runtime state (audit
+# DB, tokens, guardian state) lives in ${SUPPORT_DIR}/runtime; on the
+# root-mode daemon everything under SUPPORT_DIR is root-owned.
+#
+# AID_ENDPOINT is the fully-qualified host (with scheme) that the
+# managed CiscoDefenseClawInspectClient will target — produced by
+# aid_endpoint_for_env. Empty is not accepted; if callers do not want
+# remote inspection they should not run in managed_enterprise mode.
 render_config() {
   local mode="$1"
   local primary="$2"
   local api_port="$3"
   local disable_redaction="$4"
   local support_dir="$5"
-  shift 5
+  local aid_endpoint="$6"
+  shift 6
   local -a connectors=("$@")
   local runtime_dir="${support_dir}/runtime"
 
@@ -287,6 +311,16 @@ gateway:
   # default would send the daemon's first-boot write to
   # \${SUPPORT_DIR}/device.key and crash it with "permission denied".
   device_key_file: "${runtime_dir}/device.key"
+  # The skill/plugin/MCP watcher periodically re-scans agent component
+  # directories and invokes the 'defenseclaw' python scanner binary.
+  # In this managed_enterprise rollout we rely on AID cloud + local
+  # regex as the only content classifiers (see mergeVerdict /
+  # demoteLocalBlockForManaged in internal/gateway/guardrail.go); the
+  # watcher would otherwise fail-close every plugin operation when the
+  # python scanner isn't installed, and none of its verdicts feed into
+  # the enforced action path we're building. Turn it off.
+  watcher:
+    enabled: false
 
 privacy:
   disable_redaction: ${disable_redaction}
@@ -295,6 +329,11 @@ guardrail:
   enabled: true
   mode: ${mode}
   scanner_mode: both
+  # regex_only skips the LLM-judge routing; adjudication burns cycles
+  # and we don't ship an LLM key on managed installs.
+  detection_strategy: regex_only
+  judge:
+    enabled: false
   connector: ${primary}
 EOF
 
@@ -312,16 +351,27 @@ EOF
 
   cat <<EOF
 
+# In managed_enterprise mode the gateway authenticates AI Defense
+# inspection with a bearer token sourced from the managed cloud auth
+# provider. The daemon calls
+# ${aid_endpoint}/api/v1/inspect/defense_claw with Authorization: Bearer
+# <token>. The endpoint is installer-set; --env selects which AID cloud
+# environment to target. See internal/gateway/cisco_inspect_defense_claw.go
+# and internal/managed/cloudreg for the client-side implementation.
+cisco_ai_defense:
+  endpoint: "${aid_endpoint}"
+
+# asset_policy is intentionally disabled in this managed_enterprise
+# rollout. The AID cloud is the single authoritative source of block
+# verdicts on this branch; asset_policy's mcp/skill/plugin allow-lists
+# and the component (plugin) scanner it feeds would compete with the
+# cloud's classification and (in the plugin case) fail-close every
+# request when the 'defenseclaw' python plugin-scanner isn't installed.
+# See internal/gateway/guardrail.go: mergeVerdict + demoteLocalBlockForManaged
+# for the analogous local-pattern demotion, and the installer PR notes
+# for the full "which sources enforce" decision matrix.
 asset_policy:
-  enabled: true
-  mode: ${mode}
-  mcp:
-    default: deny
-    registry_required: false
-  skill:
-    default: allow
-  plugin:
-    default: allow
+  enabled: false
 
 application_protection:
   enabled: false

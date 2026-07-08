@@ -3,12 +3,22 @@
 # DefenseClaw macOS installer (managed_enterprise + LaunchDaemon + per-user
 # hook wiring via the enterprise hook guardian).
 #
-# System layout (root-owned):
-#   /Library/DefenseClaw/bin/defenseclaw-gateway          (root:wheel 0755)
-#   /Library/LaunchDaemons/com.defenseclaw.gateway.plist  (root:wheel 0644)
-#   /Library/Application Support/DefenseClaw/             (root:wheel 0750)
-#     config.yaml                                         (root:wheel 0640)
-#   /Library/Logs/DefenseClaw/                            (root:wheel 0750)
+# Managed install layout, all root-owned:
+#   /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway
+#                                                             (root:wheel 0755)
+#   /Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
+#                                                             (root:wheel 0644)
+#   /opt/cisco/secureclient/defenseclaw/                      (root:wheel 0755)
+#     etc/config.yaml                                         (root:wheel 0640)
+#     runtime/                                                (root:wheel 0750)
+#     hook-guardian-state/                                    (root:wheel 0750)
+#   /Library/Logs/Cisco/SecureClient/DefenseClaw/             (root:wheel 0750)
+#
+# Older DefenseClaw installs used /Library/DefenseClaw/,
+# /Library/Application Support/DefenseClaw/, and /Library/Logs/DefenseClaw/
+# with the LaunchDaemon labelled 'com.defenseclaw.gateway'. uninstall.sh
+# sweeps both the legacy and current locations so 'sudo ./uninstall.sh --purge'
+# on a pre-managed-layout install cleanly cuts over when this installer runs.
 #
 # Per-user (target-user-owned, written by the guardian dropping euid/egid):
 #   ~/.<agent>/<hook-config-file>                          (target-user 0600)
@@ -27,6 +37,7 @@ DEFAULT_MODE="observe"
 DEFAULT_CONNECTOR="codex"
 DEFAULT_API_PORT="18970"
 DISABLE_REDACTION="false"
+DEFAULT_ENV="prod"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd 2>/dev/null || echo "${SCRIPT_DIR}")"
@@ -58,8 +69,8 @@ if [[ -n "${DEFENSECLAW_PLIST_SRC:-}" && ! -f "${DEFENSECLAW_PLIST_SRC}" ]]; the
 fi
 for _candidate_origin in \
   "override:${DEFENSECLAW_PLIST_SRC:-}" \
-  "bundle:${SCRIPT_DIR}/com.defenseclaw.gateway.plist" \
-  "repo:${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"; do
+  "bundle:${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" \
+  "repo:${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.plist"; do
   _candidate="${_candidate_origin#*:}"
   if [[ -n "${_candidate}" && -f "${_candidate}" ]]; then
     PLIST_SRC="${_candidate}"
@@ -72,18 +83,38 @@ SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
 
-INSTALL_PREFIX="/Library/DefenseClaw"
-SUPPORT_DIR="/Library/Application Support/DefenseClaw"
-LOGS_DIR="/Library/Logs/DefenseClaw"
-PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
-LAUNCHD_LABEL="com.defenseclaw.gateway"
+# Managed install prefix. Everything DefenseClaw owns lives under this
+# one tree. SUPPORT_DIR and INSTALL_PREFIX are the same directory in
+# this layout; the two variable names are kept so downstream code can
+# distinguish "binary tree root" (INSTALL_PREFIX) from "administrator-
+# owned state root" (SUPPORT_DIR) — a distinction that matters when
+# running the managed_enterprise trust check.
+INSTALL_PREFIX="/opt/cisco/secureclient/defenseclaw"
+SUPPORT_DIR="${INSTALL_PREFIX}"
+LOGS_DIR="/Library/Logs/Cisco/SecureClient/DefenseClaw"
+PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
+LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw"
 GATEWAY_BIN="${INSTALL_PREFIX}/bin/defenseclaw-gateway"
 
-# macOS convention is a hidden system user prefixed with an underscore.
-# We create this if it doesn't exist. Admins can override via
-# --service-user; the plist we ship gets rewritten to match.
-SERVICE_USER="defenseclaw"
-SERVICE_GROUP="defenseclaw"
+# Legacy paths + label from pre-Cisco-path DefenseClaw installs. These
+# are only referenced by uninstall.sh for its migration sweep; install.sh
+# never writes to them.
+LEGACY_INSTALL_PREFIX="/Library/DefenseClaw"
+LEGACY_SUPPORT_DIR="/Library/Application Support/DefenseClaw"
+LEGACY_LOGS_DIR="/Library/Logs/DefenseClaw"
+LEGACY_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
+LEGACY_LAUNCHD_LABEL="com.defenseclaw.gateway"
+
+# The daemon runs as root — the managed cloud auth provider requires
+# root to read its credential store. We therefore do NOT create a
+# dedicated service user or group. Every install-time chown of a
+# DefenseClaw-owned path uses root:wheel.
+#
+# Older DefenseClaw installs (pre-root switch) provisioned a hidden
+# system user via a battery of dscl / dseditgroup / sysadminctl
+# helpers. All of that machinery was removed alongside the plist
+# change; uninstall.sh --purge still knows how to sweep the legacy
+# account for upgrades from those installs.
 
 TARGET_USER=""
 AGENT_VERSION=""
@@ -93,327 +124,6 @@ AGENT_VERSION=""
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
-
-# find_free_system_uid — returns an unused UID in the System range so we
-# don't collide with an admin's existing service user. macOS reserves
-# < 500 for the OS; we scan 400..499 and pick the first free slot.
-#
-# Uses a single `dscl -list` to enumerate all in-use UIDs, which is much
-# faster than issuing 100 -search calls. On a laptop with a network
-# directory attached, the per-candidate probe form could take 30s+.
-find_free_system_uid() {
-  local in_use_uids in_use_gids in_use
-  # Query /Local/Default explicitly — using `.` (the meta-node) makes
-  # dscl walk every attached directory (AD/LDAP/OD), which can hang or
-  # return ENETUNREACH on a Mac bound to an unreachable domain. Service
-  # users only ever live in /Local/Default, so this is both faster and
-  # safer.
-  #
-  # Check BOTH /Users UIDs and /Groups GIDs — since our service user
-  # uses the same numeric ID for both, we can't pick a value that's
-  # taken by either. Missing this check produced a live install failure
-  # where UID 400 was free but GID 400 was taken by an unrelated group.
-  in_use_uids="$(dscl /Local/Default -list /Users  UniqueID       2>/dev/null | awk '{print $2}')"
-  in_use_gids="$(dscl /Local/Default -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}')"
-  in_use="$(printf '%s\n%s\n' "${in_use_uids}" "${in_use_gids}" | sort -u)"
-  local candidate
-  for candidate in $(seq 400 499); do
-    if ! printf '%s\n' "${in_use}" | grep -qxF "${candidate}"; then
-      printf '%s' "${candidate}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-# DS_NODE is the dscl node the service-user helpers target.
-#
-# We deliberately pin to /Local/Default instead of the meta-node `.` so
-# that a Mac bound to an unreachable network directory (AD / LDAP /
-# managed OD) doesn't hang or ENETUNREACH us during install. Service
-# users always live in the local node — network directory users would
-# never be candidates for the DefenseClaw daemon principal.
-DS_NODE="/Local/Default"
-
-# dscl_read_prop RECORD PROP — echoes the value of a single dscl property
-# or empty when the record/property doesn't exist. Handles the "AttrName:
-# value" one-liner shape dscl -read returns.
-#
-# NOTE: we swallow non-zero from `dscl -read` (record-not-found returns
-# rc=1) so this helper is safe to use inside command substitutions under
-# `set -o pipefail`. Callers check the returned value for emptiness.
-dscl_read_prop() {
-  local record="$1"
-  local prop="$2"
-  local raw
-  raw="$(dscl "${DS_NODE}" -read "${record}" "${prop}" 2>/dev/null || true)"
-  printf '%s\n' "${raw}" \
-    | awk -v p="${prop}:" 'index($0, p) == 1 { $1=""; sub(/^ /, ""); print; exit }'
-  return 0
-}
-
-# dscl_ensure_record RECORD — creates a dscl record idempotently.
-# `dscl -create` will return eDSRecordAlreadyExists when the record is
-# already there; that's exactly the state we want, so we treat it as
-# success. Any other error is fatal. macOS's OpenDirectory can also be
-# temporarily inconsistent (a -read says "not there" while a subsequent
-# -create says "already there") for a few seconds after a prior create,
-# so this helper is more reliable than gating on -read.
-dscl_ensure_record() {
-  local record="$1"
-  # Capture stderr AND status in a single assignment, matching the
-  # pattern used by dscl_ensure_prop below. Two things going on here:
-  #
-  # 1. `local err rc=0` on its own line means the `local` builtin has
-  #    already returned 0 by the time we look at $?. If we ran the
-  #    dscl command substitution on a `local err=...` line, `local`'s
-  #    exit status (always 0) would overwrite dscl's — that's the
-  #    exact footgun CodeRabbit flagged.
-  # 2. Under `set -e`, a failing command substitution on the RHS of a
-  #    plain assignment does NOT abort the script (set -e ignores the
-  #    subshell in that position). The `|| rc=$?` on the assignment
-  #    statement itself is what captures the failure status reliably.
-  local err rc=0
-  err="$(dscl "${DS_NODE}" -create "${record}" 2>&1)" || rc=$?
-  if (( rc == 0 )); then
-    return 0
-  fi
-  if [[ "${err}" == *eDSRecordAlreadyExists* ]]; then
-    return 0
-  fi
-  printf '%s\n' "${err}" >&2
-  return "${rc}"
-}
-
-# dscl_ensure_prop RECORD PROP VALUE — sets a property on a dscl record
-# to a specific value, treating "already has this exact value" as success.
-#
-# We try `-create` first with fallback to `-change`: on some macOS
-# versions `dscl -create record prop value` returns eDSRecordAlreadyExists
-# when the record itself already exists (even though the property might
-# be unset), so we can't rely on read-then-create-or-change. Instead:
-#
-#   1. If the current value already matches, no-op.
-#   2. Otherwise try `-create`. Success → done.
-#   3. If -create failed with eDSRecordAlreadyExists, use `-change`.
-#      -change tolerates a missing old value by passing empty.
-dscl_ensure_prop() {
-  local record="$1"
-  local prop="$2"
-  local value="$3"
-  local current
-  current="$(dscl_read_prop "${record}" "${prop}")"
-  if [[ "${current}" == "${value}" ]]; then
-    return 0
-  fi
-
-  local err rc=0
-  err="$(dscl "${DS_NODE}" -create "${record}" "${prop}" "${value}" 2>&1)" || rc=$?
-  if (( rc == 0 )); then
-    return 0
-  fi
-
-  if [[ "${err}" == *eDSRecordAlreadyExists* ]]; then
-    # Record already exists. The property may or may not be present.
-    # Try -change first (works when the attribute is already there); if
-    # dscl reports eDSAttributeNotFound, fall back to -append.
-    local err2 rc2=0
-    err2="$(dscl "${DS_NODE}" -change "${record}" "${prop}" "${current}" "${value}" 2>&1)" || rc2=$?
-    if (( rc2 == 0 )); then
-      return 0
-    fi
-    if [[ "${err2}" == *eDSAttributeNotFound* ]]; then
-      dscl "${DS_NODE}" -append "${record}" "${prop}" "${value}"
-      return $?
-    fi
-    printf '%s\n' "${err2}" >&2
-    return "${rc2}"
-  fi
-
-  printf '%s\n' "${err}" >&2
-  return "${rc}"
-}
-
-# ensure_service_user NAME — idempotently creates a hidden macOS system
-# user + group so the LaunchDaemon has a real principal to drop into.
-# Handles three states cleanly:
-#   1. Neither user nor group exist        → create both, sharing a fresh UID
-#   2. Group exists (orphan from a prior)  → adopt its existing GID for the user
-#   3. Both exist                          → no-op, just log
-#
-# Uses Apple's convention for hidden system users: '_' prefix, /var/empty
-# home, /usr/bin/false shell, IsHidden=1.
-# SERVICE_UID / SERVICE_GID are populated by ensure_service_user for
-# downstream chown calls. macOS's userdb cache can lag several seconds
-# behind OpenDirectory after a `dscl -create`, so using numeric IDs is
-# more reliable than relying on getpwnam/getgrnam right after creation.
-SERVICE_UID=""
-SERVICE_GID=""
-
-# wait_for_id_resolves NAME [max_seconds] — polls until getpwnam sees the
-# user in the running process's cache, up to max_seconds. Returns 0 on
-# resolution, non-zero on timeout.
-wait_for_id_resolves() {
-  local name="$1"
-  local max="${2:-5}"
-  local deadline=$(( $(date +%s) + max ))
-  while (( $(date +%s) < deadline )); do
-    if id -u "${name}" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
-ensure_service_user() {
-  local name="$1"
-
-  # Detect a corrupt half-state from a prior failed install: dscl says
-  # the record exists (-create → eDSRecordAlreadyExists) but its
-  # PrimaryGroupID/UniqueID is neither readable (-read empty) nor
-  # settable (-change → eDSAttributeNotFound, -append → also
-  # eDSRecordAlreadyExists). This can happen when opendirectoryd's
-  # in-memory state got out of sync with the on-disk /var/db/dslocal
-  # plist during a prior interrupted install.
-  #
-  # Recovery: use sysadminctl -deleteUser / dscl -delete to hard-reset
-  # BOTH records, then flush opendirectoryd's cache so subsequent
-  # dscl -create calls see a clean slate.
-  local existing_gid existing_uid
-  existing_gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
-  existing_uid="$(dscl_read_prop "/Users/${name}"  UniqueID)"
-
-  local user_shell_present group_shell_present
-  dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 && user_shell_present=yes  || user_shell_present=no
-  dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1 && group_shell_present=yes || group_shell_present=no
-
-  local needs_reset=no
-  if [[ "${user_shell_present}" == "yes" && -z "${existing_uid}" ]]; then
-    log "  user ${name} record present but UniqueID missing; hard-resetting"
-    needs_reset=yes
-  fi
-  if [[ "${group_shell_present}" == "yes" && -z "${existing_gid}" ]]; then
-    log "  group ${name} record present but PrimaryGroupID missing; hard-resetting"
-    needs_reset=yes
-  fi
-
-  if [[ "${needs_reset}" == "yes" ]]; then
-    # Recovering the corrupt "record exists but attribute is missing"
-    # state. dscl can't fix what dscl (or a killed install) created,
-    # and /var/db/dslocal/nodes/Default is SIP-protected on modern
-    # macOS so `rm` returns "Operation not permitted" even as root.
-    #
-    # The tools that CAN modify SIP-protected local directory records
-    # are the ones that route through opendirectoryd's authenticated
-    # API: dseditgroup for groups, sysadminctl for users. Both were
-    # verified in a live diagnostic:
-    #
-    #   sudo dseditgroup -o delete _defenseclaw  → exit 0, record gone
-    #   sudo sysadminctl -deleteUser _defenseclaw → deletes if present
-    if [[ "${group_shell_present}" == "yes" ]]; then
-      log "  resetting group ${name} via dseditgroup"
-      /usr/sbin/dseditgroup -o delete "${name}" >/dev/null 2>&1 || \
-        warn "  dseditgroup -o delete ${name} failed"
-    fi
-    if [[ "${user_shell_present}" == "yes" ]]; then
-      log "  resetting user ${name} via sysadminctl"
-      /usr/sbin/sysadminctl -deleteUser "${name}" >/dev/null 2>&1 || \
-        warn "  sysadminctl -deleteUser ${name} failed"
-    fi
-
-    # dseditgroup / sysadminctl already synchronize opendirectoryd, so
-    # no cache-flush dance needed. Just verify the reset actually took.
-    local settle=0
-    while (( settle < 5 )); do
-      if ! dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 && \
-         ! dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
-        break
-      fi
-      sleep 1
-      settle=$((settle + 1))
-    done
-
-    # Reset the state trackers so the fresh-provision path runs.
-    existing_gid=""
-    existing_uid=""
-
-    # If the record STILL exists after that, it's coming from a
-    # network directory / MDM push that we can't manage locally.
-    # Bail with an actionable error.
-    if dscl "${DS_NODE}" -read "/Users/${name}"  >/dev/null 2>&1 || \
-       dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
-      die "cannot reset ${name} — record survives dseditgroup/sysadminctl and is likely coming from a directory service (AD/LDAP/MDM). Pass --service-user with a different name (e.g. --service-user _defenseclaw2)"
-    fi
-  fi
-
-  # Decide the id to use:
-  #   - reuse an existing UID/GID whenever we have one (avoids fighting
-  #     OD if either record is present)
-  #   - otherwise, allocate a free UID and use it for both
-  local uid=""
-  if [[ -n "${existing_gid}" ]]; then
-    uid="${existing_gid}"
-    log "  reusing existing gid=${uid}"
-  elif [[ -n "${existing_uid}" ]]; then
-    uid="${existing_uid}"
-    log "  reusing existing uid=${uid}"
-  else
-    log "  scanning UIDs 400..499 for a free slot"
-    uid="$(find_free_system_uid)" \
-      || die "no free UID in 400..499 for service user ${name}"
-    log "  picked free uid=${uid}"
-  fi
-
-  log "  ensuring group ${name} (gid=${uid})"
-  # Use dseditgroup rather than dscl for group creation. On modern
-  # macOS (SIP enabled) dscl -create /Local/Default -create /Groups/X
-  # writes a plist under /var/db/dslocal — which is SIP-protected.
-  # dscl "succeeds" but the write can be partially dropped, leaving
-  # a phantom record with RecordName but no PrimaryGroupID. That's
-  # exactly the corruption pattern the reset block above cleans up.
-  #
-  # dseditgroup routes through opendirectoryd's authenticated API,
-  # which has entitlements to write SIP-protected records atomically
-  # and correctly.
-  if ! dscl "${DS_NODE}" -read "/Groups/${name}" >/dev/null 2>&1; then
-    /usr/sbin/dseditgroup -o create -i "${uid}" -r "DefenseClaw Service Group" "${name}" \
-      || die "dseditgroup -o create ${name} failed"
-  fi
-  # Verify the group ended up with the right GID (dseditgroup ignores
-  # -i if a group with the same name already exists in another node).
-  local actual_gid
-  actual_gid="$(dscl_read_prop "/Groups/${name}" PrimaryGroupID)"
-  if [[ "${actual_gid}" != "${uid}" ]]; then
-    die "group ${name} exists but PrimaryGroupID=${actual_gid:-<unset>} does not match target ${uid}"
-  fi
-
-  log "  ensuring user ${name} (uid=${uid})"
-  # For users, sysadminctl is the SIP-safe primitive, but it requires
-  # a password argument and creates a full account. dscl still works
-  # for creating a hidden system user because Users/ plists in
-  # /var/db/dslocal are less restrictive than Groups/. We validate
-  # the write after each dscl call.
-  dscl_ensure_record "/Users/${name}" \
-    || die "create user ${name} failed"
-  dscl_ensure_prop   "/Users/${name}" UserShell        /usr/bin/false
-  dscl_ensure_prop   "/Users/${name}" RealName         "DefenseClaw Service"
-  dscl_ensure_prop   "/Users/${name}" UniqueID         "${uid}"
-  dscl_ensure_prop   "/Users/${name}" PrimaryGroupID   "${uid}"
-  dscl_ensure_prop   "/Users/${name}" NFSHomeDirectory /var/empty
-  dscl_ensure_prop   "/Users/${name}" IsHidden         1
-
-  SERVICE_UID="${uid}"
-  SERVICE_GID="${uid}"
-
-  # Wait for the OpenDirectory cache to see the new user. Downstream
-  # chown/find commands go through getpwnam and can otherwise fail with
-  # "illegal user name" for a few seconds after creation. Non-fatal —
-  # the chown site uses numeric IDs so it works regardless.
-  if ! wait_for_id_resolves "${name}" 5; then
-    warn "  ${name} still not resolvable via id(1) after 5s — using numeric UID for chown"
-  fi
-}
 
 # shellcheck source=lib/installer_lib.sh
 . "${SCRIPT_DIR}/lib/installer_lib.sh"
@@ -429,11 +139,14 @@ Gateway options:
                             Examples: --connector cursor
                                       --connector cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
+  --env {prod|preview}      AI Defense cloud environment (default: ${DEFAULT_ENV}).
+                            Selects the cisco_ai_defense.endpoint that the
+                            managed daemon uses to inspect content.
+                            Use 'preview' only for internal validation against
+                            the aiteam preview deployment.
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
-  --service-user NAME       macOS service user for the daemon (default: defenseclaw).
-                            Created via dscl if missing. Also used as the group.
   --skip-build              Reuse an existing gateway binary (no rebuild)
   --skip-launchd            Install files but don't bootstrap/enable launchd
 
@@ -452,16 +165,17 @@ EOF
 MODE="${DEFAULT_MODE}"
 CONNECTOR="${DEFAULT_CONNECTOR}"
 API_PORT="${DEFAULT_API_PORT}"
+AID_ENV="${DEFAULT_ENV}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)             MODE="${2:?}"; shift 2;;
     --connector)        CONNECTOR="${2:?}"; shift 2;;
     --port)             API_PORT="${2:?}"; shift 2;;
+    --env)              AID_ENV="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
     --plist)            PLIST_SRC="${2:?}"; PLIST_SRC_ORIGIN="override"; shift 2;;
-    --service-user)     SERVICE_USER="${2:?}"; SERVICE_GROUP="${2:?}"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
     --skip-launchd)     SKIP_LAUNCHD="true"; shift;;
     --user)             TARGET_USER="${2:?}"; shift 2;;
@@ -476,6 +190,9 @@ case "${MODE}" in
   observe|action) ;;
   *) die "--mode must be 'observe' or 'action' (got: ${MODE})";;
 esac
+
+AID_ENDPOINT="$(aid_endpoint_for_env "${AID_ENV}")" || \
+  die "--env must be 'prod' or 'preview' (got: ${AID_ENV})"
 
 if [[ ! "${API_PORT}" =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
   die "--port must be an integer between 1 and 65535 (got: ${API_PORT})"
@@ -589,88 +306,100 @@ if [[ "${SKIP_BUILD}" != "true" && ! -x "${BINARY_SRC}" ]]; then
 fi
 [[ -x "${BINARY_SRC}" ]] || die "binary not found or not executable: ${BINARY_SRC}"
 
-# Refuse to clobber a running install silently
-if launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
-  warn "${LAUNCHD_LABEL} is currently loaded — bootouting before reinstall"
-  launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
-  launchctl bootout system "${PLIST_DST}" 2>/dev/null || true
-fi
+# Refuse to clobber a running install silently. Sweep BOTH the current
+# Cisco-path label and the legacy pre-Cisco-path label so an upgrade
+# from an older install doesn't leave the legacy daemon loaded (which
+# would fight the new one for port 18970 and cause AUTH_INVALID_TOKEN
+# on every hook — the two daemons issue distinct gateway tokens and
+# whichever binds the port first drops the hook script's request).
+for _lbl_plist in \
+  "${LAUNCHD_LABEL}:${PLIST_DST}" \
+  "${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}"; do
+  _lbl="${_lbl_plist%%:*}"
+  _plist="${_lbl_plist#*:}"
+  if launchctl print "system/${_lbl}" >/dev/null 2>&1; then
+    warn "${_lbl} is currently loaded — bootouting before reinstall"
+    launchctl bootout "system/${_lbl}" 2>/dev/null || true
+    launchctl bootout system "${_plist}" 2>/dev/null || true
+  fi
+  # Even if the daemon is not loaded, a stale plist under
+  # /Library/LaunchDaemons/ will be re-loaded on next boot. Remove it
+  # so `launchctl bootstrap` on the new plist has the field to itself.
+  if [[ "${_lbl}" == "${LEGACY_LAUNCHD_LABEL}" && -f "${_plist}" ]]; then
+    log "removing legacy plist so launchd cannot re-load it: ${_plist}"
+    rm -f "${_plist}"
+  fi
+done
+unset _lbl_plist _lbl _plist
 
 # ---- gateway file install ----------------------------------------------
 
 log "installing binary -> ${GATEWAY_BIN}"
+# Ensure every ancestor of INSTALL_PREFIX exists. `install -d` is
+# idempotent so the pre-existing tree on a managed host is a no-op;
+# on a DefenseClaw-only test host with no ancestors yet, it creates
+# them.
+install -d -o root -g wheel -m 0755 /opt/cisco
+install -d -o root -g wheel -m 0755 /opt/cisco/secureclient
+install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}"
 install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}/bin"
 install    -o root -g wheel -m 0755 "${BINARY_SRC}" "${GATEWAY_BIN}"
 
-log "creating support dirs"
-# SUPPORT_DIR is root-owned 0750 — the config file at its root has to
-# be trust-checked, and the check walks every ancestor requiring
-# root ownership and no group/other write bits.
-install -d -o root -g wheel -m 0750 "${SUPPORT_DIR}"
-# RUNTIME_DIR lives INSIDE SUPPORT_DIR (matches render_config's data_dir).
-# Chown'd to the service user after we ensure the user exists.
+log "creating support dirs under ${SUPPORT_DIR}"
+# SUPPORT_DIR (= INSTALL_PREFIX) is root:wheel 0755. The
+# managed_enterprise trust check walks every ancestor of config.yaml
+# requiring root ownership and no group/other write bits — 0755 (owner
+# rwx, group rx, world rx) passes.
+CONFIG_DIR="${SUPPORT_DIR}/etc"
 RUNTIME_DIR="${SUPPORT_DIR}/runtime"
 # GUARDIAN_AUTH_DIR must match the shipped plist's
 # DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR env var (see
-# packaging/launchd/com.defenseclaw.gateway.plist and the
+# packaging/launchd/com.cisco.secureclient.defenseclaw.plist and the
 # test_launchd_gateway_plist_uses_managed_paths CI assertion).
 # Root-owned per docs — "root-owned authorization-record directory".
 GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
+install -d -o root -g wheel -m 0755 "${CONFIG_DIR}"
 install -d -o root -g wheel -m 0750 "${RUNTIME_DIR}"
 install -d -o root -g wheel -m 0750 "${GUARDIAN_AUTH_DIR}"
+# LOGS_DIR — create the /Library/Logs/Cisco/ and SecureClient/
+# ancestors idempotently.
+install -d -o root -g wheel -m 0755 /Library/Logs/Cisco
+install -d -o root -g wheel -m 0755 /Library/Logs/Cisco/SecureClient
 install -d -o root -g wheel -m 0750 "${LOGS_DIR}"
 
-CONFIG_PATH="${SUPPORT_DIR}/config.yaml"
+CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 if [[ -f "${CONFIG_PATH}" ]]; then
   BACKUP="${CONFIG_PATH}.$(date +%Y%m%d-%H%M%S).bak"
   cp -p "${CONFIG_PATH}" "${BACKUP}"
   log "backed up existing config to ${BACKUP}"
 fi
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} redaction_off=${DISABLE_REDACTION})"
-render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTION}" "${SUPPORT_DIR}" "${CONNECTORS[@]}" > "${CONFIG_PATH}"
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_off=${DISABLE_REDACTION})"
+render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTION}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_PATH}"
 chown root:wheel "${CONFIG_PATH}"
 chmod 0640 "${CONFIG_PATH}"
 
-log "ensuring service user ${SERVICE_USER}"
-ensure_service_user "${SERVICE_USER}"
+log "chowning runtime dirs to root:wheel (daemon runs as root)"
+# Every DefenseClaw-owned directory is root:wheel. The daemon runs as
+# root (see plist), so no service-user provisioning is needed. Runtime
+# dirs stay owner-only writable (0750) to keep the surface tight for
+# anything a future audit tool inspects.
+chown -R root:wheel "${RUNTIME_DIR}" "${LOGS_DIR}"
 
-log "chowning runtime dirs to ${SERVICE_USER}:${SERVICE_GROUP} (uid=${SERVICE_UID} gid=${SERVICE_GID})"
-# Only RUNTIME_DIR + LOGS_DIR get service-user ownership. SUPPORT_DIR
-# itself and CONFIG_PATH stay root-owned so the managed_enterprise
-# config trust check (which walks every ancestor of config.yaml)
-# accepts them.
-[[ -n "${SERVICE_UID}" && -n "${SERVICE_GID}" ]] \
-  || die "service uid/gid unset after ensure_service_user (internal bug)"
-chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}" "${LOGS_DIR}"
-
-# SUPPORT_DIR stays owned by root, but the service user needs group
-# traverse (x) access so launchd can chdir into
-# ${SUPPORT_DIR}/runtime as its WorkingDirectory. Without this the
-# daemon exits with EX_CONFIG before opening stdout/stderr — we can't
-# even see a log line explaining what happened.
-#
-# The trust check refuses (mode & 0o022) — group-WRITE or other-WRITE
-# bits — but group-execute (0o010) is fine. chgrp to the service group
-# and keep mode 0750: root has full access, service group has rx only,
-# world has nothing.
-chgrp "${SERVICE_GID}" "${SUPPORT_DIR}"
-chmod 0750 "${SUPPORT_DIR}"
-# Also make config.yaml readable by the service group (daemon needs
-# to read it). Owner stays root, mode 0640 (owner rw, group r, other 0).
-chgrp "${SERVICE_GID}" "${CONFIG_PATH}"
-chmod 0640 "${CONFIG_PATH}"
+# SUPPORT_DIR + CONFIG_PATH are already root:wheel from the install(1)
+# calls above; managed_enterprise trust check accepts them unchanged.
 
 log "installing LaunchDaemon plist -> ${PLIST_DST}"
 install -o root -g wheel -m 0644 "${PLIST_SRC}" "${PLIST_DST}"
 
-# Rewrite the plist's UserName / GroupName to match the actual service
-# user we ensured above. plutil is on every macOS install.
-log "wiring plist to service user ${SERVICE_USER}"
-/usr/bin/plutil -replace UserName  -string "${SERVICE_USER}"  "${PLIST_DST}" \
-  || die "failed to set UserName in ${PLIST_DST}"
-/usr/bin/plutil -replace GroupName -string "${SERVICE_GROUP}" "${PLIST_DST}" \
-  || die "failed to set GroupName in ${PLIST_DST}"
+# The shipped plist deliberately omits UserName/GroupName so the daemon
+# runs as root (uid 0). If a stale plist from a pre-root DefenseClaw
+# install left those keys behind on this host, strip them now so the
+# daemon doesn't get pinned to a legacy service user that no longer
+# exists (or would fail on managed cloud auth, which needs root).
+log "stripping any legacy UserName/GroupName from installed plist"
+/usr/bin/plutil -remove UserName  "${PLIST_DST}" >/dev/null 2>&1 || true
+/usr/bin/plutil -remove GroupName "${PLIST_DST}" >/dev/null 2>&1 || true
 
 if [[ "${SKIP_LAUNCHD}" == "true" ]]; then
   log "skipping launchctl bootstrap (--skip-launchd)"
@@ -785,7 +514,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     log "  [${c}] detected agent_version: ${AGENT_VER}"
     log "  [${c}] running: enterprise hooks install --connector ${c} --user ${TARGET_USER}"
     # DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR MUST match what the plist sets
-    # for the running daemon (see packaging/launchd/com.defenseclaw.gateway.plist).
+    # for the running daemon (see packaging/launchd/com.cisco.secureclient.defenseclaw.plist).
     # The CLI's default is `${data_dir}-hook-guardian` which resolves to
     # ${SUPPORT_DIR}/runtime-hook-guardian and doesn't exist in our
     # layout — the installer creates ${SUPPORT_DIR}/hook-guardian-state
@@ -806,16 +535,12 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     fi
   done
 
-  # The CLI subcommands ran as root and created audit.db / judge_bodies.db
-  # + their -wal/-shm sidecars in RUNTIME_DIR. Even though RUNTIME_DIR's
-  # ownership is defenseclaw:defenseclaw, the newly-written files
-  # inherit the running uid/gid (root:defenseclaw) with mode 0644 — so
-  # the daemon (running as defenseclaw) can READ but not WRITE the audit
-  # DB when it comes back up. Result: every hook evaluation runs, but
-  # the audit row silently drops. Fix by re-chowning after every CLI
-  # invocation completes.
-  log "  re-chowning runtime files created by CLI migrations"
-  chown -R "${SERVICE_UID}:${SERVICE_GID}" "${RUNTIME_DIR}"
+  # The CLI subcommands ran as root and wrote audit.db / judge_bodies.db
+  # + their -wal/-shm sidecars into RUNTIME_DIR. The daemon also runs as
+  # root, so ownership already matches — no chown pass is needed. This
+  # step used to fix a defenseclaw-uid inheritance issue that vanishes
+  # when everything is root.
+  log "  runtime files created by CLI are already root-owned (daemon runs as root)"
 
   log "  resuming LaunchDaemon"
   launchctl bootstrap system "${PLIST_DST}"

@@ -1974,10 +1974,8 @@ const (
 
 // CloudAuthConfig selects how defenseclaw authenticates to the defenseclaw
 // cloud. The empty Mode disables cloud auth; today the only supported value
-// is "cmid", which sources credentials from the Cisco Secure Client Cloud
-// Management module via internal/managed/cloud. The consuming cloud client
-// is added in a follow-up branch — this struct exists so managed-mode
-// installers can begin rendering the block into config.yaml.
+// is "cmid", which sources credentials from the managed cloud auth provider
+// registered via internal/managed/cloudreg.
 type CloudAuthConfig struct {
 	Mode    string `mapstructure:"mode"     yaml:"mode,omitempty"`
 	LibPath string `mapstructure:"lib_path" yaml:"lib_path,omitempty"`
