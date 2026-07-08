@@ -458,6 +458,10 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
     environment = os.environ.copy()
     environment.update(
         {
+            # Connector compatibility is covered separately. This acceptance
+            # targets the open TUI's response to an external config writer and
+            # must not fall back to observe when the CI host lacks Claude Code.
+            "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1",
             "DEFENSECLAW_CONFIG": str(path),
             "DEFENSECLAW_HOME": str(tmp_path),
             "HOME": str(isolated_home),

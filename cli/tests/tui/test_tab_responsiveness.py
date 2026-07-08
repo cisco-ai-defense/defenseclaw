@@ -84,6 +84,13 @@ async def test_tab_acknowledges_before_blocked_overview_and_discards_stale_gener
     entered = threading.Event()
     release = threading.Event()
     calls = 0
+    # This regression targets switch-generated renders only. Mounted network
+    # and periodic pollers can legitimately enqueue an additional Overview
+    # generation, obscuring whether the stale switch result was discarded.
+    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_periodic_refresh", lambda: None)
 
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("2")
