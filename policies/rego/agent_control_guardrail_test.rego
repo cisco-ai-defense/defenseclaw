@@ -147,3 +147,25 @@ test_agent_control_cannot_disable_live_hilt if {
 
 	result.action == "confirm"
 }
+
+test_unknown_precedence_falls_back_to_local_baseline if {
+	result := guardrail with input as _high_local_input
+		with data.guardrail as _local
+		with data.agent_control as {
+			"enabled": true,
+			"precedence": "unexpected",
+			"guardrail": {"block_threshold": 1, "alert_threshold": 1, "cisco_trust_level": "full"},
+		}
+	result.action == "alert"
+}
+
+test_incomplete_remote_guardrail_falls_back_to_local_baseline if {
+	result := guardrail with input as _high_local_input
+		with data.guardrail as _local
+		with data.agent_control as {
+			"enabled": true,
+			"precedence": "remote",
+			"guardrail": {"alert_threshold": 1, "cisco_trust_level": "full"},
+		}
+	result.action == "alert"
+}

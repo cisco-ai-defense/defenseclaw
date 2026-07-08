@@ -29,6 +29,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
@@ -52,9 +53,9 @@ func init() {
 	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackBaseDir, "base-dir", "", "Operator rule-pack directory to preserve beneath the overlay")
 	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackOverlayDir, "overlay-dir", "", "Managed rules-only overlay directory to validate")
 	// Native pre-publication validation must be side-effect free and usable
-	// before the gateway/audit database is running. These two commands resolve
-	// every required path from flags and therefore skip the root config, audit,
-	// sink, and telemetry bootstrap.
+	// before the gateway/audit database is running. They skip the root audit,
+	// sink, and telemetry bootstrap; resolveRegoDir performs only the lightweight
+	// config read when --rego-dir is omitted.
 	policyValidateCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
 	policyValidateRulePackCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
 
@@ -92,6 +93,7 @@ var policyValidateCmd = &cobra.Command{
 		if regoDir == "" {
 			return fmt.Errorf("policy: cannot resolve rego directory — set policy_dir in config")
 		}
+		regoDir = normalizePolicyRegoDir(regoDir)
 
 		candidate := policyValidateAgentControlCandidate
 		if strings.TrimSpace(candidate) != "" {
@@ -176,7 +178,6 @@ func validateAgentControlGuardrailSmoke(engine *policy.Engine) error {
 }
 
 func stageAgentControlCandidate(regoDir, candidate string) (string, func(), error) {
-	regoDir = normalizePolicyRegoDir(regoDir)
 	info, err := os.Stat(regoDir)
 	if err != nil || !info.IsDir() {
 		return "", func() {}, fmt.Errorf("policy: invalid rego directory %s", regoDir)
@@ -504,6 +505,11 @@ var policyDomainsCmd = &cobra.Command{
 // ---------------------------------------------------------------------------
 
 func resolveRegoDir() string {
+	if cfg == nil {
+		if loaded, err := config.Load(); err == nil {
+			cfg = loaded
+		}
+	}
 	if cfg != nil && cfg.PolicyDir != "" {
 		if info, err := os.Stat(cfg.PolicyDir); err == nil && info.IsDir() {
 			dataJSON := filepath.Join(cfg.PolicyDir, "data.json")

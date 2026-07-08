@@ -1,0 +1,57 @@
+#!/bin/sh
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+set -eu
+
+ENV_FILE="/Library/Application Support/DefenseClaw/agent-control.env"
+ENV_DIR=${ENV_FILE%/*}
+DEFENSECLAW_BIN="/Library/DefenseClaw/bin/defenseclaw"
+
+fail() {
+  printf 'defenseclaw agent-control launcher: %s\n' "$*" >&2
+  exit 1
+}
+
+[ -d "$ENV_DIR" ] || fail "missing credential environment directory: $ENV_DIR"
+[ ! -L "$ENV_DIR" ] || fail "credential environment directory must not be a symlink"
+dir_meta=$(/usr/bin/stat -f '%Su:%Sg:%Lp' "$ENV_DIR") || \
+  fail "cannot inspect credential environment directory"
+[ "$dir_meta" = root:defenseclaw:750 ] || \
+  fail "credential environment directory must be root:defenseclaw mode 0750"
+
+[ -f "$ENV_FILE" ] || fail "missing credential environment file: $ENV_FILE"
+[ ! -L "$ENV_FILE" ] || fail "credential environment file must not be a symlink"
+
+path_meta=$(/usr/bin/stat -f '%i:%l:%Su:%Sg:%Lp' "$ENV_FILE") || \
+  fail "cannot inspect credential environment file"
+exec 3< "$ENV_FILE" || fail "cannot open credential environment file"
+fd_identity=$(/usr/bin/stat -f '%i:%l:%Su:%Sg' /dev/fd/3) || \
+  fail "cannot inspect opened credential environment file"
+path_meta_after=$(/usr/bin/stat -f '%i:%l:%Su:%Sg:%Lp' "$ENV_FILE") || \
+  fail "cannot re-inspect credential environment file"
+[ "$path_meta" = "$path_meta_after" ] || fail "credential environment file changed while opening"
+path_identity=${path_meta%:*}
+[ "$path_identity" = "$fd_identity" ] || fail "credential environment file changed while opening"
+
+old_ifs=$IFS
+IFS=:
+set -- $path_meta
+IFS=$old_ifs
+[ "$2" = 1 ] || fail "credential environment file must not be hard-linked"
+[ "$3" = root ] || fail "credential environment file must be owned by root"
+[ "$4" = defenseclaw ] || fail "credential environment file group must be defenseclaw"
+[ "$5" = 640 ] || fail "credential environment file mode must be 0640"
+
+# The file is administrator-owned and mode-checked above. It may contain only
+# environment assignments required by the Agent Control SDK and local gateway.
+set -a
+# shellcheck disable=SC1090
+. /dev/fd/3
+set +a
+exec 3<&-
+
+[ -n "${AGENT_CONTROL_URL:-}" ] || fail "AGENT_CONTROL_URL is required"
+[ -n "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] || fail "DEFENSECLAW_GATEWAY_TOKEN is required"
+
+exec "$DEFENSECLAW_BIN" agent-control sync --watch

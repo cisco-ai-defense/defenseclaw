@@ -67,6 +67,9 @@ func AgentControlRulePackStatus(overlayDirs []string) (ManagedRulePackStatus, er
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return ManagedRulePackStatus{}, fmt.Errorf("guardrail: managed Agent Control rule artifact must be a regular file: %s", candidate)
 		}
+		if activePath != "" {
+			return ManagedRulePackStatus{}, fmt.Errorf("guardrail: reserved category agent-control may appear only once across managed overlays")
+		}
 		activePath = candidate
 	}
 	if activePath == "" {
@@ -96,6 +99,16 @@ func LoadRulePackWithOverlays(baseDir string, overlayDirs []string) (*RulePack, 
 	result := *base
 	result.RuleFiles = append([]*RulesFileYAML(nil), base.RuleFiles...)
 	seenRuleIDs := make(map[string]struct{})
+	for _, file := range base.RuleFiles {
+		if file == nil {
+			continue
+		}
+		for _, rule := range file.Rules {
+			if id := strings.TrimSpace(rule.ID); id != "" {
+				seenRuleIDs[id] = struct{}{}
+			}
+		}
+	}
 	agentControlCategorySeen := false
 	totalBytes := int64(0)
 	totalRules := 0

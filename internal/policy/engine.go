@@ -462,6 +462,9 @@ func loadStoreWithStatus(regoDir string) (storage.Store, AgentControlPolicyStatu
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, AgentControlPolicyStatus{}, fmt.Errorf("policy: parse data.json: %w", err)
 	}
+	if data == nil {
+		return nil, AgentControlPolicyStatus{}, fmt.Errorf("policy: parse data.json: top-level value must be an object")
+	}
 
 	mergeSupplementalData(regoDir, data, "data-sandbox.json")
 	agentControlStatus, err := loadAgentControlData(regoDir, data)

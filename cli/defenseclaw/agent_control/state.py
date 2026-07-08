@@ -6,7 +6,7 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ class SyncState:
     target_type: str = "defenseclaw.installation"
     target_id_hash: str = ""
     snapshot_state: str = "none"
-    snapshot_freshness: str = "unknown"
+    snapshot_freshness: str = "not_exposed_by_sdk"
     opa_source_digest: str | None = None
     opa_published_digest: str | None = None
     opa_active_digest: str | None = None
@@ -42,7 +42,7 @@ class SyncState:
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def load_state(path: Path) -> SyncState:
@@ -64,7 +64,8 @@ def save_state(path: Path, state: SyncState) -> None:
     if existing is not None:
         if path.is_symlink() or not path.is_file() or existing.st_nlink != 1:
             raise OSError(f"refusing unsafe Agent Control state file: {path}")
-        if existing.st_uid != os.geteuid():
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None and existing.st_uid != geteuid():
             raise OSError(f"Agent Control state file has unexpected owner: {path}")
     payload = (json.dumps(asdict(state), ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
     tmp = path.parent / f".{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
@@ -76,11 +77,16 @@ def save_state(path: Path, state: SyncState) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
-        dir_fd = os.open(path.parent, os.O_RDONLY)
         try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            # Opening directories for fsync is unsupported on Windows.
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     finally:
         try:
             tmp.unlink()

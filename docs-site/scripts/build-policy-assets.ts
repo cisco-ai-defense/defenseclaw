@@ -64,17 +64,17 @@ type PresetName = (typeof PRESETS)[number];
 // from the browser — anything not listed here would return undefined.
 const REGO_DOMAINS: Array<{
   name: string;
-  source: string;
+  sources: string[];
   entrypoints: string[];
 }> = [
   {
     name: 'admission',
-    source: 'admission.rego',
+    sources: ['admission.rego'],
     entrypoints: ['defenseclaw/admission/verdict', 'defenseclaw/admission/reason'],
   },
   {
     name: 'guardrail',
-    source: 'guardrail.rego',
+    sources: ['guardrail.rego', 'agent_control_guardrail.rego'],
     entrypoints: [
       'defenseclaw/guardrail/severity',
       'defenseclaw/guardrail/reason',
@@ -83,17 +83,17 @@ const REGO_DOMAINS: Array<{
   },
   {
     name: 'firewall',
-    source: 'firewall.rego',
+    sources: ['firewall.rego'],
     entrypoints: ['defenseclaw/firewall/action', 'defenseclaw/firewall/rule_name'],
   },
   {
     name: 'audit',
-    source: 'audit.rego',
+    sources: ['audit.rego'],
     entrypoints: ['defenseclaw/audit/retain', 'defenseclaw/audit/retain_reason'],
   },
   {
     name: 'skill_actions',
-    source: 'skill_actions.rego',
+    sources: ['skill_actions.rego'],
     entrypoints: [
       'defenseclaw/skill_actions/runtime_action',
       'defenseclaw/skill_actions/file_action',
@@ -747,9 +747,10 @@ function compileWasm(opts: { skipMissingOpa: boolean }): { compiled: string[]; s
   ensureDir(tmpRoot);
 
   for (const domain of REGO_DOMAINS) {
-    const sourcePath = join(POLICIES, 'rego', domain.source);
-    if (!existsSync(sourcePath)) {
-      console.warn(`[policy-assets] missing ${sourcePath} — skipping ${domain.name}`);
+    const sourcePaths = domain.sources.map((source) => join(POLICIES, 'rego', source));
+    const missingSource = sourcePaths.find((sourcePath) => !existsSync(sourcePath));
+    if (missingSource) {
+      console.warn(`[policy-assets] missing ${missingSource} — skipping ${domain.name}`);
       skipped.push(domain.name);
       continue;
     }
@@ -759,7 +760,7 @@ function compileWasm(opts: { skipMissingOpa: boolean }): { compiled: string[]; s
     for (const e of domain.entrypoints) {
       args.push('-e', e);
     }
-    args.push('-o', bundlePath, sourcePath);
+    args.push('-o', bundlePath, ...sourcePaths);
 
     try {
       execFileSync(opaPath, args, { stdio: 'pipe' });

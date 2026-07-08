@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import signal
 import tempfile
 import uuid
@@ -93,9 +94,7 @@ def setup_agent_control(
         if sdk.get_server_controls() is None:
             raise RuntimeError("Agent Control did not return a successful initial snapshot")
     except Exception as exc:
-        raise click.ClickException(
-            f"Agent Control connectivity validation failed ({type(exc).__name__})"
-        ) from exc
+        raise click.ClickException(f"Agent Control connectivity validation failed ({type(exc).__name__})") from exc
     finally:
         try:
             sdk.shutdown()
@@ -106,18 +105,22 @@ def setup_agent_control(
         data_dir=app.cfg.data_dir,
         policy_dir=app.cfg.policy_dir,
         managed_dir=settings.managed_dir,
+        opa_enabled=settings.opa.enabled,
     )
     publisher.prepare()
-    disabled = extract_candidates([]).opa_artifact(settings.opa.precedence)
-    if publisher.active_digest(publisher.opa_active_path) is None:
-        publisher.publish_opa(disabled)
+    if settings.opa.enabled:
+        disabled = extract_candidates([]).opa_artifact(settings.opa.precedence)
+        if publisher.active_digest(publisher.opa_active_path) is None:
+            publisher.publish_opa(disabled)
     overlay_path = str(publisher.rule_pack_root)
-    overlays = list(app.cfg.guardrail.rule_pack_overlay_dirs)
-    if settings.rule_pack.enabled and overlay_path not in overlays:
+    overlay_norm = os.path.normpath(overlay_path.strip())
+    overlays = [
+        value for value in app.cfg.guardrail.rule_pack_overlay_dirs if os.path.normpath(value.strip()) != overlay_norm
+    ]
+    if settings.rule_pack.enabled:
         overlays.append(overlay_path)
-    if not settings.rule_pack.enabled:
-        overlays = [value for value in overlays if value != overlay_path]
     app.cfg.guardrail.rule_pack_overlay_dirs = overlays
+    app.cfg.guardrail.validate()
     app.cfg.save()
 
     click.echo("Agent Control synchronization configured.")
@@ -166,10 +169,12 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
     value = asdict(state)
     value["enabled"] = app.cfg.agent_control.enabled
     value["managed_dir"] = str(publisher.managed_dir)
+    value.setdefault("opa_active_digest", None)
+    value.setdefault("rule_pack_active_digest", None)
     if app.cfg.agent_control.target_id:
-        value["target_id_hash"] = "sha256:" + hashlib.sha256(
-            app.cfg.agent_control.target_id.encode("utf-8")
-        ).hexdigest()
+        value["target_id_hash"] = (
+            "sha256:" + hashlib.sha256(app.cfg.agent_control.target_id.encode("utf-8")).hexdigest()
+        )
     try:
         sdk = load_agent_control_sdk()
         value["sdk_version"] = str(getattr(sdk, "__version__", "unknown"))
@@ -186,9 +191,7 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
             ).status()
             opa_status = runtime.get("agent_control") or {}
             rule_status = runtime.get("rule_pack") or {}
-            value["opa_active_digest"] = (
-                opa_status.get("artifact_digest") if opa_status.get("present") else None
-            )
+            value["opa_active_digest"] = opa_status.get("artifact_digest") if opa_status.get("present") else None
             value["rule_pack_active_digest"] = (
                 rule_status.get("artifact_digest") if rule_status.get("present") else None
             )
@@ -207,8 +210,7 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
     click.echo(f"Snapshot:            {state.snapshot_state} (freshness: {state.snapshot_freshness})")
     click.echo(f"OPA published/active: {state.opa_published_digest or '-'} / {value['opa_active_digest'] or '-'}")
     click.echo(
-        f"Rules published/active: {state.rule_pack_published_digest or '-'} / "
-        f"{value['rule_pack_active_digest'] or '-'}"
+        f"Rules published/active: {state.rule_pack_published_digest or '-'} / {value['rule_pack_active_digest'] or '-'}"
     )
     if state.rule_pack_pending_restart:
         click.echo("Rule activation:      pending gateway restart")

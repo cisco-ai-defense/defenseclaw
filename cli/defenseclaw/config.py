@@ -4104,6 +4104,11 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
 def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConfig:
     if not raw:
         return GuardrailConfig()
+    raw_overlay_dirs = raw.get("rule_pack_overlay_dirs", [])
+    if raw_overlay_dirs is None:
+        raw_overlay_dirs = []
+    if not isinstance(raw_overlay_dirs, list):
+        raise ValueError("guardrail.rule_pack_overlay_dirs must be a list")
     hilt_raw = raw.get("hilt")
     if hilt_raw is None:
         hilt_raw = raw.get("hitl")
@@ -4127,7 +4132,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
-        rule_pack_overlay_dirs=[str(value) for value in raw.get("rule_pack_overlay_dirs", []) or []],
+        rule_pack_overlay_dirs=[str(value) for value in raw_overlay_dirs],
         connector=raw.get("connector", ""),
         hilt=_merge_hilt(hilt_raw),
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
@@ -4137,8 +4142,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
 
 
 def _merge_agent_control(raw: Any) -> AgentControlConfig:
-    if not isinstance(raw, dict):
+    if raw is None:
         return AgentControlConfig()
+    if not isinstance(raw, dict):
+        raise ValueError("agent_control must be a mapping")
     allowed = {
         "enabled",
         "agent_name",
@@ -4154,8 +4161,14 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError(f"agent_control contains unsupported keys: {unknown}")
-    opa_raw = raw.get("opa") if isinstance(raw.get("opa"), dict) else {}
-    rule_raw = raw.get("rule_pack") if isinstance(raw.get("rule_pack"), dict) else {}
+    opa_value = raw.get("opa")
+    if opa_value is not None and not isinstance(opa_value, dict):
+        raise ValueError("agent_control.opa must be a mapping")
+    opa_raw = opa_value or {}
+    rule_value = raw.get("rule_pack")
+    if rule_value is not None and not isinstance(rule_value, dict):
+        raise ValueError("agent_control.rule_pack must be a mapping")
+    rule_raw = rule_value or {}
     unknown_opa = sorted(set(opa_raw) - {"enabled", "precedence", "activation"})
     if unknown_opa:
         raise ValueError(f"agent_control.opa contains unsupported keys: {unknown_opa}")

@@ -279,6 +279,10 @@ Extraction rules are exact:
 - Ignore unrelated evaluator names.
 - Validate every control using an exact DefenseClaw evaluator name.
 - Reject composite condition trees for v1.
+- Treat the SDK's canonical nullable defaults as the compact envelope: known
+  empty scope fields may be `null`/`[]`, `and`/`or`/`not` may be `null`, and
+  `steering_context` may be `null`. Any non-empty value or unknown field still
+  fails closed.
 - Reject a matching control with the wrong execution, selector, scope, action,
   envelope, or config shape.
 - Reject the complete candidate for the affected lane when any matching
@@ -651,8 +655,10 @@ Because `RulePackCache` is process-lifetime and category state is installed at
 startup, phase 2 activation requires a gateway restart. Automatic activation
 uses authenticated `POST /policy/restart`: daemon mode arranges the normal
 restart helper, while managed mode exits with an intentional restart result so
-systemd or launchd relaunches the gateway. Manual/user-mode publication reports
-`pending_restart` and provides the exact operator command.
+systemd or launchd relaunches the gateway. Before publication, the synchronizer
+requires `/policy/status` to prove that the gateway advertises supervisor-backed
+restart support. Manual/user-mode publication reports `pending_restart` and
+provides the exact operator command.
 
 After restart, a health/status surface must report the active rule artifact
 digest. A failed restart or digest mismatch restores the prior overlay and
@@ -683,6 +689,11 @@ with capped exponential backoff and jitter.
 After first success, the SDK owns network refresh and fail-stale cache
 behavior. The synchronizer polls `get_server_controls()` locally and avoids a
 second network loop.
+
+An unchanged snapshot that fails validation, publication, or activation is
+retried with capped exponential backoff and jitter. A newly changed snapshot
+is attempted immediately. This prevents a poison rule snapshot from driving a
+gateway restart loop at the cache polling interval.
 
 ### 10.2 Snapshot semantics
 
@@ -806,7 +817,8 @@ defenseclaw agent-control validate <path>
 - shuts down the SDK cleanly on termination.
 
 `status` reports configuration, SDK compatibility, redacted connection
-identity, hashed target identity, snapshot freshness, lane states, digests,
+identity, hashed target identity, snapshot freshness (`not_exposed_by_sdk`
+until the SDK supplies a timestamp), lane states, digests,
 last activation, pending restart, and the last safe error. It never prints
 raw policy by default.
 
@@ -824,6 +836,8 @@ or activation.
 - On Python 3.10 and 3.11, Agent Control commands return a clear unsupported
   version message; all other DefenseClaw commands remain available.
 - Add a systemd service and a launchd plist for persistent synchronization.
+  systemd requires a protected environment file; launchd uses a root-owned,
+  mode-checking launcher to source the equivalent protected file.
 - Run the synchronizer as the DefenseClaw service account with access only to
   its managed directory, the one supplemental policy file, state/lock files,
   and loopback activation.
@@ -836,8 +850,8 @@ or activation.
 
 - Permit one synchronizer writer per installation using an advisory lock with
   process identity and stale-lock recovery.
-- Managed directories use `0700`; files use `0600` unless the existing
-  service ownership model requires a stricter group-readable mode.
+- Synchronizer-managed directories use `0700` and files use `0600`. Shared
+  operator-provisioned directories retain their existing ownership and mode.
 - Never accept an output path, filename, service name, or command from a
   control payload.
 - Use fixed filenames and open temporary files with `O_EXCL` and no-follow

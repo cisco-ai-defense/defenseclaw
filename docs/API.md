@@ -686,6 +686,7 @@ authentication as `/policy/reload`.
 {
   "status": "ready",
   "generation": 4,
+  "restart_supported": true,
   "agent_control": {
     "present": true,
     "enabled": true,
@@ -719,6 +720,11 @@ user-daemon helper or a managed-supervisor restart, then the process exits.
 The returned digest is the pre-restart active value. Callers must wait for the
 gateway to return and verify the new exact digest through `/policy/status`;
 acceptance of the restart request is not activation proof.
+
+**Errors:** `503` when the gateway does not advertise an explicit process
+supervisor. This prevents a foreground gateway from exiting with no process
+available to bring it back. `500` indicates the configured supervisor helper
+could not arrange the restart.
 
 ---
 

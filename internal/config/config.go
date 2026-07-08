@@ -272,8 +272,11 @@ func (c *AgentControlConfig) Validate() error {
 	if c.TargetType != "defenseclaw.installation" {
 		return fmt.Errorf("target_type must be defenseclaw.installation")
 	}
-	if len(c.TargetID) > 255 || c.Enabled && strings.TrimSpace(c.TargetID) == "" {
-		return fmt.Errorf("target_id is required when enabled and cannot exceed 255 characters")
+	if c.Enabled && strings.TrimSpace(c.TargetID) == "" {
+		return fmt.Errorf("target_id is required when enabled")
+	}
+	if len(c.TargetID) > 255 {
+		return fmt.Errorf("target_id cannot exceed 255 characters")
 	}
 	if c.RefreshSeconds <= 0 || c.CachePollSeconds <= 0 || c.InitRetryMaxSeconds <= 0 {
 		return fmt.Errorf("refresh_seconds, cache_poll_seconds, and init_retry_max_seconds must be positive")

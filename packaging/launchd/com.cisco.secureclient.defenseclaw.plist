@@ -30,6 +30,8 @@
     <string>/opt/cisco/secureclient/defenseclaw/etc/config.yaml</string>
     <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
     <string>managed_enterprise</string>
+    <key>DEFENSECLAW_PROCESS_SUPERVISED</key>
+    <string>1</string>
     <key>DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR</key>
     <string>/opt/cisco/secureclient/defenseclaw/hook-guardian-state</string>
   </dict>

@@ -18,6 +18,7 @@ package guardrail
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -42,14 +43,16 @@ import (
 // instance. The multi-connector boot loop creates one and reuses it across
 // the connectors it spins up.
 //
-// Concurrency: Load is safe for concurrent use. It uses an RWMutex with
-// double-checked locking — the common "already cached" path takes only a
-// read lock, while a miss takes the write lock, re-checks, and loads under
-// the lock so two goroutines racing on the same directory load it once.
+// Concurrency: Load is safe for concurrent use. Base and overlay combinations
+// use separate RWMutexes, so strict overlay I/O cannot block an unrelated base
+// load. Each lane uses double-checked locking to load a given key only once.
 type RulePackCache struct {
-	mu     sync.RWMutex
-	packs  map[string]*RulePack
-	loader func(string) *RulePack
+	mu            sync.RWMutex
+	overlayMu     sync.RWMutex
+	packs         map[string]*RulePack
+	overlayPacks  map[string]*RulePack
+	loader        func(string) *RulePack
+	overlayLoader func(string, []string) (*RulePack, error)
 }
 
 // NewRulePackCache returns an empty cache backed by the real LoadRulePack
@@ -63,12 +66,24 @@ func NewRulePackCache() *RulePackCache {
 // tests can count loads, simulate slow loads, or avoid touching disk without
 // changing the de-dup / concurrency behavior under test.
 func newRulePackCacheWithLoader(loader func(string) *RulePack) *RulePackCache {
+	return newRulePackCacheWithLoaders(loader, LoadRulePackWithOverlays)
+}
+
+func newRulePackCacheWithLoaders(
+	loader func(string) *RulePack,
+	overlayLoader func(string, []string) (*RulePack, error),
+) *RulePackCache {
 	if loader == nil {
 		loader = LoadRulePack
 	}
+	if overlayLoader == nil {
+		overlayLoader = LoadRulePackWithOverlays
+	}
 	return &RulePackCache{
-		packs:  make(map[string]*RulePack),
-		loader: loader,
+		packs:         make(map[string]*RulePack),
+		overlayPacks:  make(map[string]*RulePack),
+		loader:        loader,
+		overlayLoader: overlayLoader,
 	}
 }
 
@@ -99,6 +114,34 @@ func (c *RulePackCache) Load(dir string) *RulePack {
 	return rp
 }
 
+// LoadWithOverlays caches the effective base+overlay combination for the
+// process lifetime. Failed strict loads are never cached, so a corrected
+// configuration can be retried by the caller before boot completes.
+func (c *RulePackCache) LoadWithOverlays(baseDir string, overlayDirs []string) (*RulePack, error) {
+	if len(overlayDirs) == 0 {
+		return c.Load(baseDir), nil
+	}
+	key := overlayCacheKey(baseDir, overlayDirs)
+	c.overlayMu.RLock()
+	rp, ok := c.overlayPacks[key]
+	c.overlayMu.RUnlock()
+	if ok {
+		return rp, nil
+	}
+
+	c.overlayMu.Lock()
+	defer c.overlayMu.Unlock()
+	if rp, ok := c.overlayPacks[key]; ok {
+		return rp, nil
+	}
+	rp, err := c.overlayLoader(baseDir, overlayDirs)
+	if err != nil {
+		return nil, err
+	}
+	c.overlayPacks[key] = rp
+	return rp, nil
+}
+
 // normalizeRulePackDir canonicalizes a rule-pack directory into a stable
 // cache key. The empty string (embedded defaults) is preserved exactly to
 // match LoadRulePack's special-casing; any non-empty path is cleaned so that
@@ -108,4 +151,13 @@ func normalizeRulePackDir(dir string) string {
 		return ""
 	}
 	return filepath.Clean(dir)
+}
+
+func overlayCacheKey(baseDir string, overlayDirs []string) string {
+	parts := make([]string, 0, len(overlayDirs)+1)
+	parts = append(parts, normalizeRulePackDir(baseDir))
+	for _, dir := range overlayDirs {
+		parts = append(parts, normalizeRulePackDir(dir))
+	}
+	return strings.Join(parts, "\x00")
 }

@@ -34,6 +34,7 @@ from .publisher import (
     ManagedPublisher,
     NativeValidator,
     PublicationError,
+    PublishedArtifact,
     RollbackDivergenceError,
     SingleWriterLock,
 )
@@ -90,12 +91,11 @@ class AgentControlSynchronizer:
             data_dir=cfg.data_dir,
             policy_dir=cfg.policy_dir,
             managed_dir=self.settings.managed_dir,
+            opa_enabled=self.settings.opa.enabled,
         )
         if gateway is None:
             token = cfg.gateway.resolved_token()
-            requires_activation = (
-                self.settings.opa.enabled and self.settings.opa.activation == "reload"
-            ) or (
+            requires_activation = (self.settings.opa.enabled and self.settings.opa.activation == "reload") or (
                 self.settings.rule_pack.enabled and self.settings.rule_pack.activation == "restart"
             )
             if requires_activation and not token:
@@ -114,6 +114,10 @@ class AgentControlSynchronizer:
         self.state.target_type = self.settings.target_type
         self.state.target_id_hash = "sha256:" + hashlib.sha256(self.settings.target_id.encode("utf-8")).hexdigest()
         self.state.sdk_version = str(getattr(self.sdk, "__version__", "unknown"))
+        if self.settings.opa.enabled and self.settings.opa.precedence == "remote":
+            logger.warning(
+                "Agent Control OPA precedence is remote; central policy may weaken local thresholds or trust"
+            )
 
     def run_once(self) -> SyncState:
         self.publisher.prepare()
@@ -134,32 +138,51 @@ class AgentControlSynchronizer:
             try:
                 controls = self._initialize_until_snapshot(deadline=None)
                 self._reconcile_state()
-                self.process_snapshot(controls)
-                last_projection = self._projection_identity(controls)
-                while not self.stop_event.wait(self.settings.cache_poll_seconds):
+                last_projection: tuple[str, str, str] | None = None
+                failed_projection: tuple[str, str, str] | None = None
+                failure_attempts = 0
+                retry_not_before = 0.0
+                while True:
+                    try:
+                        projection = self._projection_identity(controls)
+                        if projection != last_projection:
+                            now = time.monotonic()
+                            if projection != failed_projection:
+                                failed_projection = projection
+                                failure_attempts = 0
+                                retry_not_before = 0.0
+                            if now >= retry_not_before:
+                                self.process_snapshot(controls)
+                                last_projection = projection
+                                failed_projection = None
+                                failure_attempts = 0
+                                retry_not_before = 0.0
+                    except (ControlValidationError, PublicationError, ActivationError, SynchronizationError) as exc:
+                        failure_attempts += 1
+                        delay = _watch_retry_delay(
+                            failure_attempts,
+                            poll_seconds=self.settings.cache_poll_seconds,
+                            cap_seconds=self.settings.init_retry_max_seconds,
+                        )
+                        retry_not_before = time.monotonic() + delay
+                        self._record_error(exc)
+                        logger.error(
+                            "Agent Control policy synchronization failed; unchanged snapshot retry in %.1fs: %s",
+                            delay,
+                            self.state.last_error,
+                        )
+
+                    if self.stop_event.wait(self.settings.cache_poll_seconds):
+                        break
                     try:
                         cached = self.sdk.get_server_controls()
                     except Exception as exc:
-                        error = SynchronizationError(
-                            f"Agent Control SDK cache read failed ({type(exc).__name__})"
-                        )
+                        error = SynchronizationError(f"Agent Control SDK cache read failed ({type(exc).__name__})")
                         self._record_error(error)
                         logger.error("Agent Control policy synchronization failed: %s", self.state.last_error)
                         continue
-                    if cached is None:
-                        continue
-                    try:
-                        projection = self._projection_identity(cached)
-                        if projection == last_projection:
-                            continue
-                        self.process_snapshot(cached)
-                        last_projection = projection
-                    except (ControlValidationError, PublicationError, ActivationError, SynchronizationError) as exc:
-                        self._record_error(exc)
-                        logger.error(
-                            "Agent Control policy synchronization failed: %s",
-                            self.state.last_error,
-                        )
+                    if cached is not None:
+                        controls = cached
                 return self.state
             finally:
                 self._shutdown_sdk()
@@ -174,7 +197,7 @@ class AgentControlSynchronizer:
             raise
 
         self.state.snapshot_state = "nonempty" if matching_controls else "empty"
-        self.state.snapshot_freshness = "unknown"
+        self.state.snapshot_freshness = "not_exposed_by_sdk"
         self.state.matching_controls = matching_controls
         self.state.ignored_controls = ignored_controls
         self.state.last_observed_at = utc_now()
@@ -208,15 +231,27 @@ class AgentControlSynchronizer:
             self._audit(ACTION_AGENT_CONTROL_SYNC, "snapshot", None)
 
         self.state.status = "active"
-        if self.settings.opa.activation == "manual" or (
-            self.settings.rule_pack.enabled and self.settings.rule_pack.activation == "manual"
-        ):
+        opa_pending = (
+            self.settings.opa.enabled
+            and self.settings.opa.activation == "manual"
+            and self.state.opa_published_digest != self.state.opa_active_digest
+        )
+        rule_pending = (
+            self.settings.rule_pack.enabled
+            and self.settings.rule_pack.activation == "manual"
+            and self.state.rule_pack_published_digest != self.state.rule_pack_active_digest
+        )
+        self.state.rule_pack_pending_restart = rule_pending
+        if opa_pending or rule_pending:
             self.state.status = "published_pending_activation"
         self.state.last_error = None
         save_state(self.publisher.state_path, self.state)
         return self.state
 
     def _apply_opa(self, candidates: CandidateSet) -> None:
+        previous_source_digest = self.state.opa_source_digest
+        previous_published_digest = self.state.opa_published_digest
+        previous_last_published_at = self.state.last_published_at
         content = candidates.opa_artifact(self.settings.opa.precedence)
         artifact_digest = digest_bytes(content)
         self.state.opa_source_digest = candidates.opa_source_digest
@@ -233,8 +268,14 @@ class AgentControlSynchronizer:
         publication = self.publisher.publish_opa(content)
         self.state.opa_published_digest = artifact_digest
         self.state.last_published_at = utc_now()
+        self._persist_publication(
+            publication,
+            lane="opa",
+            previous_source_digest=previous_source_digest,
+            previous_published_digest=previous_published_digest,
+            previous_last_published_at=previous_last_published_at,
+        )
         self._audit(ACTION_AGENT_CONTROL_PUBLISH, "opa", artifact_digest)
-        save_state(self.publisher.state_path, self.state)
         if self.settings.opa.activation == "manual":
             return
 
@@ -265,6 +306,9 @@ class AgentControlSynchronizer:
         self._audit(ACTION_AGENT_CONTROL_ACTIVATE, "opa", artifact_digest)
 
     def _apply_rule_pack(self, candidates: CandidateSet) -> None:
+        previous_source_digest = self.state.rule_pack_source_digest
+        previous_published_digest = self.state.rule_pack_published_digest
+        previous_last_published_at = self.state.last_published_at
         if len(candidates.rules) > self.settings.rule_pack.max_rules:
             raise PublicationError(
                 f"rule-pack candidate exceeds configured max_rules={self.settings.rule_pack.max_rules}"
@@ -280,17 +324,26 @@ class AgentControlSynchronizer:
         if current_digest == artifact_digest:
             return
 
+        if self.settings.rule_pack.activation == "restart":
+            self.gateway.ensure_restart_supported()
+
         if content is not None:
             overlay_dir = self.publisher.stage_rule_pack(content)
             self.validator.validate_rule_pack(base_dirs=self._rule_pack_base_dirs(), overlay_dir=overlay_dir)
         publication = self.publisher.publish_rule_pack(content)
         self.state.rule_pack_published_digest = artifact_digest
         self.state.last_published_at = utc_now()
-        self._audit(ACTION_AGENT_CONTROL_PUBLISH, "rule_pack", artifact_digest)
-        save_state(self.publisher.state_path, self.state)
         if self.settings.rule_pack.activation == "manual":
             self.state.rule_pack_pending_restart = True
-            save_state(self.publisher.state_path, self.state)
+        self._persist_publication(
+            publication,
+            lane="rule_pack",
+            previous_source_digest=previous_source_digest,
+            previous_published_digest=previous_published_digest,
+            previous_last_published_at=previous_last_published_at,
+        )
+        self._audit(ACTION_AGENT_CONTROL_PUBLISH, "rule_pack", artifact_digest)
+        if self.settings.rule_pack.activation == "manual":
             return
 
         try:
@@ -320,6 +373,31 @@ class AgentControlSynchronizer:
         self.state.rule_pack_pending_restart = False
         self.state.last_activated_at = utc_now()
         self._audit(ACTION_AGENT_CONTROL_ACTIVATE, "rule_pack", artifact_digest)
+
+    def _persist_publication(
+        self,
+        publication: PublishedArtifact,
+        *,
+        lane: str,
+        previous_source_digest: str | None,
+        previous_published_digest: str | None,
+        previous_last_published_at: str | None,
+    ) -> None:
+        try:
+            save_state(self.publisher.state_path, self.state)
+        except OSError as exc:
+            try:
+                self.publisher.rollback(publication)
+            except (PublicationError, RollbackDivergenceError) as rollback_error:
+                raise RollbackDivergenceError(
+                    f"{lane} state persistence failed ({exc}); publication rollback failed ({rollback_error})"
+                ) from rollback_error
+            setattr(self.state, f"{lane}_source_digest", previous_source_digest)
+            setattr(self.state, f"{lane}_published_digest", previous_published_digest)
+            self.state.last_published_at = previous_last_published_at
+            if lane == "rule_pack":
+                self.state.rule_pack_pending_restart = False
+            raise PublicationError(f"{lane} state persistence failed; publication was rolled back") from exc
 
     def _initialize_until_snapshot(self, *, deadline: float | None) -> list[dict[str, Any]]:
         delay = 1.0
@@ -362,10 +440,12 @@ class AgentControlSynchronizer:
 
     def _reconcile_state(self) -> None:
         """Rebuild diagnostic state from disk and authoritative runtime readback."""
-        for path, attribute in (
-            (self.publisher.opa_active_path, "opa_published_digest"),
-            (self.publisher.rule_pack_active_path, "rule_pack_published_digest"),
-        ):
+        paths: list[tuple[Path, str]] = []
+        if self.settings.opa.enabled:
+            paths.append((self.publisher.opa_active_path, "opa_published_digest"))
+        if self.settings.rule_pack.enabled:
+            paths.append((self.publisher.rule_pack_active_path, "rule_pack_published_digest"))
+        for path, attribute in paths:
             setattr(self.state, attribute, self.publisher.active_digest(path))
         try:
             status = self.gateway.status()
@@ -378,9 +458,7 @@ class AgentControlSynchronizer:
 
     def _record_error(self, error: Exception) -> None:
         self.state.status = (
-            "critical_disk_runtime_divergence"
-            if isinstance(error, RollbackDivergenceError)
-            else "error_lkg_preserved"
+            "critical_disk_runtime_divergence" if isinstance(error, RollbackDivergenceError) else "error_lkg_preserved"
         )
         safe = _safe_error(error)
         if self.settings.target_id:
@@ -419,6 +497,14 @@ def _safe_error(error: Exception) -> str:
         if secret:
             message = message.replace(secret, "<redacted>")
     return message[:1000]
+
+
+def _watch_retry_delay(attempt: int, *, poll_seconds: int, cap_seconds: int) -> float:
+    """Return capped exponential retry delay with bounded jitter."""
+    base = max(1.0, float(poll_seconds))
+    cap = max(base, float(cap_seconds))
+    delay = min(cap, base * (2 ** min(max(0, attempt - 1), 16)))
+    return min(cap, delay + random.uniform(0, min(1.0, delay * 0.1)))
 
 
 def configured_rule_pack_base_dirs(cfg: Any) -> list[Path]:

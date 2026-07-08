@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
 import urllib.error
@@ -37,7 +38,14 @@ class PublishedArtifact:
 
 
 class ManagedPublisher:
-    def __init__(self, *, data_dir: str, policy_dir: str, managed_dir: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        data_dir: str,
+        policy_dir: str,
+        managed_dir: str = "",
+        opa_enabled: bool = True,
+    ) -> None:
         raw_data_dir = _absolute_path(data_dir)
         raw_policy_dir = _absolute_path(policy_dir)
         self.data_dir = raw_data_dir.resolve()
@@ -52,6 +60,7 @@ class ManagedPublisher:
             raise PublicationError("managed_dir must be inside data_dir")
         self.state_path = self.managed_dir / "state.json"
         self.lock_path = self.managed_dir / "lock"
+        self.opa_enabled = opa_enabled
         self.opa_active_path = self.policy_dir / "rego" / "data-agent-control.json"
         self.rule_pack_root = self.managed_dir / "rule-pack" / "current"
         self.rule_pack_active_path = self.rule_pack_root / "rules" / "agent-control.yaml"
@@ -62,11 +71,17 @@ class ManagedPublisher:
             self.managed_dir / "opa" / "versions",
             self.managed_dir / "rule-pack" / "versions",
             self.rule_pack_active_path.parent,
-            self.opa_active_path.parent,
         ):
             _ensure_real_directory(directory)
+        # policy_dir/rego is shared with the gateway's local Rego modules.
+        # Require it to be writable and symlink-free, but do not take
+        # ownership of it or silently tighten an administrator-selected mode.
+        if self.opa_enabled:
+            _ensure_publish_directory(self.opa_active_path.parent)
 
     def publish_opa(self, content: bytes) -> PublishedArtifact:
+        if not self.opa_enabled:
+            raise PublicationError("OPA publication is disabled for this synchronizer")
         self.prepare()
         digest = digest_bytes(content)
         self._store_version("opa", digest, "data-agent-control.json", content)
@@ -74,6 +89,8 @@ class ManagedPublisher:
 
     def stage_opa(self, content: bytes) -> Path:
         """Persist an immutable candidate without changing the active file."""
+        if not self.opa_enabled:
+            raise PublicationError("OPA publication is disabled for this synchronizer")
         self.prepare()
         digest = digest_bytes(content)
         self._store_version("opa", digest, "data-agent-control.json", content)
@@ -96,14 +113,23 @@ class ManagedPublisher:
     @staticmethod
     def active_digest(path: Path) -> str | None:
         try:
-            _validate_existing_file(path)
-            return digest_bytes(path.read_bytes())
+            return digest_bytes(_read_regular(path))
         except FileNotFoundError:
             return None
 
     def rollback(self, publication: PublishedArtifact) -> None:
+        current_digest = self.active_digest(publication.path)
+        if current_digest != publication.digest:
+            raise RollbackDivergenceError(
+                f"refusing rollback for {publication.path}: "
+                f"expected active digest {publication.digest}, got {current_digest}"
+            )
         if publication.previous_existed and publication.previous is not None:
-            _atomic_write(publication.path, publication.previous)
+            _atomic_write(
+                publication.path,
+                publication.previous,
+                shared_parent=publication.path == self.opa_active_path,
+            )
         else:
             try:
                 _validate_existing_file(publication.path)
@@ -114,8 +140,7 @@ class ManagedPublisher:
 
     def _replace_active(self, path: Path, content: bytes | None, digest: str | None) -> PublishedArtifact:
         try:
-            _validate_existing_file(path)
-            previous = path.read_bytes()
+            previous = _read_regular(path)
             previous_existed = True
         except FileNotFoundError:
             previous = None
@@ -128,7 +153,7 @@ class ManagedPublisher:
             except FileNotFoundError:
                 pass
         else:
-            _atomic_write(path, content)
+            _atomic_write(path, content, shared_parent=path == self.opa_active_path)
         return PublishedArtifact(path=path, digest=digest, previous=previous, previous_existed=previous_existed)
 
     def _store_version(self, lane: str, digest: str, relative: str, content: bytes) -> None:
@@ -145,7 +170,7 @@ class ManagedPublisher:
         if active_digest:
             protected.add(active_digest.removeprefix("sha256:"))
         if destination_exists:
-            if destination.read_bytes() != content:
+            if _read_regular(destination) != content:
                 raise PublicationError(f"immutable version collision at {destination}")
             self._prune_versions(version_dir.parent, keep=8, protected=protected)
             return
@@ -181,7 +206,8 @@ class SingleWriterLock:
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(self.path, flags, 0o600)
         info = os.fstat(fd)
-        if info.st_nlink != 1 or info.st_uid != os.geteuid():
+        geteuid = getattr(os, "geteuid", None)
+        if info.st_nlink != 1 or (geteuid is not None and info.st_uid != geteuid()):
             os.close(fd)
             raise PublicationError("writer lock has unexpected owner or link count")
         self._file = os.fdopen(fd, "r+")
@@ -267,9 +293,7 @@ class NativeValidator:
                     timeout=30,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
-                raise PublicationError(
-                    f"native rule-pack validation could not run ({type(exc).__name__})"
-                ) from exc
+                raise PublicationError(f"native rule-pack validation could not run ({type(exc).__name__})") from exc
             if result.returncode != 0:
                 raise PublicationError("native rule-pack validation failed; candidate was not published")
 
@@ -287,8 +311,7 @@ class GatewayClient:
 
     def reload_opa(self, expected_digest: str | None) -> dict[str, Any]:
         response = self._request("POST", "/policy/reload")
-        status = response.get("agent_control") or {}
-        actual = status.get("artifact_digest") if status.get("present") else None
+        actual = _status_artifact_digest(response, "agent_control")
         if actual != expected_digest:
             raise ActivationError(f"OPA active digest mismatch: expected {expected_digest}, got {actual}")
         return response
@@ -298,11 +321,18 @@ class GatewayClient:
 
     def verify_rule_pack(self, expected_digest: str | None) -> dict[str, Any]:
         response = self.status()
-        rule_status = response.get("rule_pack") or {}
-        actual = rule_status.get("artifact_digest") if rule_status.get("present") else None
+        actual = _status_artifact_digest(response, "rule_pack")
         if actual != expected_digest:
             raise ActivationError(f"rule-pack active digest mismatch: expected {expected_digest}, got {actual}")
         return response
+
+    def ensure_restart_supported(self) -> None:
+        response = self.status()
+        if response.get("restart_supported") is not True:
+            raise ActivationError(
+                "automatic rule-pack activation requires a supervised gateway; "
+                "use manual activation or run the gateway under a packaged supervisor"
+            )
 
     def restart_and_verify_rule_pack(self, expected_digest: str | None, timeout: float = 60.0) -> dict[str, Any]:
         self._request("POST", "/policy/restart")
@@ -351,16 +381,35 @@ def _ensure_real_directory(path: Path) -> None:
     info = path.lstat()
     if path.is_symlink() or not path.is_dir():
         raise PublicationError(f"managed path must be a real directory: {path}")
-    if info.st_uid != os.geteuid():
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and info.st_uid != geteuid():
         raise PublicationError(f"managed directory has unexpected owner: {path}")
     try:
         path.chmod(0o700)
-    except OSError:
-        pass
+    except OSError as exc:
+        raise PublicationError(f"cannot restrict managed directory permissions: {path}") from exc
+    if path.lstat().st_mode & 0o777 != 0o700:
+        raise PublicationError(f"managed directory permissions are not 0700: {path}")
 
 
-def _atomic_write(path: Path, content: bytes) -> None:
-    _ensure_real_directory(path.parent)
+def _ensure_publish_directory(path: Path) -> None:
+    """Prepare a shared policy directory without changing its ownership/mode."""
+    _reject_symlink_components(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise PublicationError(f"policy publication directory must already exist: {path}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise PublicationError(f"policy publication path must be a real directory: {path}")
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise PublicationError(f"policy publication directory is not writable: {path}")
+
+
+def _atomic_write(path: Path, content: bytes, *, shared_parent: bool = False) -> None:
+    if shared_parent:
+        _ensure_publish_directory(path.parent)
+    else:
+        _ensure_real_directory(path.parent)
     try:
         _validate_existing_file(path)
     except FileNotFoundError:
@@ -383,7 +432,11 @@ def _atomic_write(path: Path, content: bytes) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        # Windows does not allow opening a directory with os.open().
+        return
     try:
         os.fsync(fd)
     finally:
@@ -418,10 +471,55 @@ def _reject_descendant_symlinks(path: Path, root: Path) -> None:
 
 def _validate_existing_file(path: Path) -> os.stat_result:
     info = path.lstat()
-    if path.is_symlink() or not path.is_file():
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise PublicationError(f"managed file must be regular: {path}")
     if info.st_nlink != 1:
         raise PublicationError(f"managed file must not be hard-linked: {path}")
-    if info.st_uid != os.geteuid():
-        raise PublicationError(f"managed file has unexpected owner: {path}")
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and info.st_uid not in {0, geteuid()}:
+        raise PublicationError(f"managed file owner is neither root nor the current user: {path}")
     return info
+
+
+def _read_regular(path: Path) -> bytes:
+    """Read one managed file through an identity-checked descriptor."""
+    before = _validate_existing_file(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise PublicationError(f"managed file changed while opening: {path}")
+        if opened.st_nlink != 1:
+            raise PublicationError(f"managed file must not be hard-linked: {path}")
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None and opened.st_uid not in {0, geteuid()}:
+            raise PublicationError(f"managed file owner is neither root nor the current user: {path}")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            content = handle.read()
+        after = path.lstat()
+        if stat.S_ISLNK(after.st_mode) or (after.st_dev, after.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
+        ):
+            raise PublicationError(f"managed file changed while reading: {path}")
+        return content
+    finally:
+        os.close(fd)
+
+
+def _status_artifact_digest(response: dict[str, Any], field: str) -> str | None:
+    status = response.get(field)
+    if not isinstance(status, dict) or not isinstance(status.get("present"), bool):
+        raise ActivationError(f"gateway status has malformed {field} metadata")
+    digest = status.get("artifact_digest")
+    if status["present"]:
+        if not isinstance(digest, str) or not digest.startswith("sha256:"):
+            raise ActivationError(f"gateway status has malformed {field} artifact digest")
+        return digest
+    if digest not in (None, ""):
+        raise ActivationError(f"gateway status reports a digest for absent {field} policy")
+    return None

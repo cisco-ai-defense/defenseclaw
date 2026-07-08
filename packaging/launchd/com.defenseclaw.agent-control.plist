@@ -6,10 +6,7 @@
   <string>com.defenseclaw.agent-control</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/DefenseClaw/bin/defenseclaw</string>
-    <string>agent-control</string>
-    <string>sync</string>
-    <string>--watch</string>
+    <string>/Library/DefenseClaw/bin/defenseclaw-agent-control-launcher</string>
   </array>
   <key>UserName</key>
   <string>defenseclaw</string>

@@ -542,8 +542,12 @@ or managed overlay path manually.
 
 Persistent service templates are provided at
 `packaging/systemd/defenseclaw-agent-control.service` and
-`packaging/launchd/com.defenseclaw.agent-control.plist`. The systemd unit may
-read `/etc/defenseclaw/agent-control.env`; both platforms also use the normal
-DefenseClaw data-directory `.env` loading. Keep Agent Control and gateway
-credentials in those protected environment files, never in `config.yaml` or
-the service definition.
+`packaging/launchd/com.defenseclaw.agent-control.plist`. The systemd unit
+requires `/etc/defenseclaw/agent-control.env`. On macOS, the LaunchDaemon uses
+the owner/mode-checking `defenseclaw-agent-control-launcher` and reads
+`/Library/Application Support/DefenseClaw/agent-control.env`. Both platforms
+require the credential file to be a regular, single-link `root:defenseclaw`
+file with mode `0640`; the service refuses to start if validation fails. Both
+platforms also use the normal DefenseClaw data-directory `.env` loading. Keep Agent
+Control and gateway credentials in those protected environment files, never
+in `config.yaml` or the service definition.

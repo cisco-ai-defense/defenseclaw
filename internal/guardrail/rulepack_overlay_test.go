@@ -152,6 +152,15 @@ func TestLoadRulePackWithOverlaysRejectsDuplicateRuleIDs(t *testing.T) {
 	}
 }
 
+func TestLoadRulePackWithOverlaysRejectsRuleIDFromBase(t *testing.T) {
+	base := writeOverlay(t, "base.yaml", strings.Replace(validManagedRuleFile, "category: agent-control", "category: base", 1))
+	overlay := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)
+	if _, err := LoadRulePackWithOverlays(base, []string{overlay}); err == nil ||
+		!strings.Contains(err.Error(), "duplicate rule id") {
+		t.Fatalf("expected base/overlay duplicate rule id error, got %v", err)
+	}
+}
+
 func TestLoadRulePackWithOverlaysRejectsUnexpectedRootEntry(t *testing.T) {
 	overlay := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)
 	if err := os.WriteFile(filepath.Join(overlay, "suppressions.yaml"), []byte("version: 1\n"), 0o600); err != nil {
@@ -220,5 +229,14 @@ func TestAgentControlRulePackStatusUsesExactBytes(t *testing.T) {
 	want := "sha256:" + hex.EncodeToString(sum[:])
 	if status.ArtifactDigest != want {
 		t.Fatalf("digest = %q, want %q", status.ArtifactDigest, want)
+	}
+}
+
+func TestAgentControlRulePackStatusRejectsMultipleArtifacts(t *testing.T) {
+	first := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)
+	second := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)
+	if _, err := AgentControlRulePackStatus([]string{first, second}); err == nil ||
+		!strings.Contains(err.Error(), "only once") {
+		t.Fatalf("expected duplicate Agent Control artifact error, got %v", err)
 	}
 }

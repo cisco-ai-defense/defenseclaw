@@ -16,7 +16,10 @@
 
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func validAgentControlConfig() AgentControlConfig {
 	return AgentControlConfig{
@@ -52,6 +55,10 @@ func TestAgentControlConfigValidate(t *testing.T) {
 		"bad OPA activation":  func(c *AgentControlConfig) { c.OPA.Activation = "restart" },
 		"bad rule activation": func(c *AgentControlConfig) { c.RulePack.Activation = "reload" },
 		"bad max rules":       func(c *AgentControlConfig) { c.RulePack.MaxRules = 1001 },
+		"bad refresh":         func(c *AgentControlConfig) { c.RefreshSeconds = 0 },
+		"bad cache poll":      func(c *AgentControlConfig) { c.CachePollSeconds = 0 },
+		"bad init retry":      func(c *AgentControlConfig) { c.InitRetryMaxSeconds = 0 },
+		"overlong target":     func(c *AgentControlConfig) { c.TargetID = strings.Repeat("x", 256) },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

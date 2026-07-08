@@ -106,6 +106,9 @@ func TestAgentControlDataRejectsInvalidDocuments(t *testing.T) {
 		"bad source digest":         strings.Replace(validAgentControlDocument, strings.Repeat("a", 64), "abc", 1),
 		"alert exceeds block":       strings.Replace(validAgentControlDocument, `"alert_threshold": 2`, `"alert_threshold": 4`, 1),
 		"unsupported trust":         strings.Replace(validAgentControlDocument, `"full"`, `"trusted"`, 1),
+		"unknown guardrail field":   strings.Replace(validAgentControlDocument, `"cisco_trust_level": "full"`, `"cisco_trust_level": "full", "extra": true`, 1),
+		"block threshold zero":      strings.Replace(validAgentControlDocument, `"block_threshold": 3`, `"block_threshold": 0`, 1),
+		"block threshold too high":  strings.Replace(validAgentControlDocument, `"block_threshold": 3`, `"block_threshold": 5`, 1),
 		"multiple JSON values":      validAgentControlDocument + `{}`,
 		"missing agent_control key": `{}`,
 	}
@@ -119,6 +122,27 @@ func TestAgentControlDataRejectsInvalidDocuments(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestPolicyDataMustBeJSONObject(t *testing.T) {
+	dir := writePolicyFixture(t, `null`)
+	if _, err := New(dir); err == nil || !strings.Contains(err.Error(), "top-level value must be an object") {
+		t.Fatalf("expected object validation error, got %v", err)
+	}
+}
+
+func TestAgentControlDataRejectsOversizedArtifact(t *testing.T) {
+	dir := writePolicyFixture(t, `{}`)
+	raw := make([]byte, maxAgentControlDataBytes+1)
+	for i := range raw {
+		raw[i] = 'x'
+	}
+	if err := os.WriteFile(filepath.Join(dir, agentControlDataFilename), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected oversized artifact error, got %v", err)
 	}
 }
 

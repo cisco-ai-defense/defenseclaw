@@ -982,6 +982,9 @@ func (s *Sidecar) requestProcessRestart() {
 }
 
 func (s *Sidecar) schedulePolicyProcessRestart() error {
+	if !s.policyProcessRestartSupported() {
+		return fmt.Errorf("gateway process restart requires a configured supervisor")
+	}
 	if launchConfigRestartHelper != nil {
 		if err := launchConfigRestartHelper(); err != nil {
 			return err
@@ -992,6 +995,14 @@ func (s *Sidecar) schedulePolicyProcessRestart() error {
 	// non-zero process result; user-mode daemon children use the helper above.
 	time.AfterFunc(250*time.Millisecond, s.requestProcessRestart)
 	return nil
+}
+
+func (s *Sidecar) policyProcessRestartSupported() bool {
+	if daemon.IsDaemonChild() {
+		return true
+	}
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("DEFENSECLAW_PROCESS_SUPERVISED")))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func configReloadMode(cfg *config.Config) string {
@@ -1063,10 +1074,7 @@ func loadSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error) {
 }
 
 func loadCachedRulePackWithOverlays(cache *guardrail.RulePackCache, baseDir string, overlayDirs []string) (*guardrail.RulePack, error) {
-	if len(overlayDirs) == 0 {
-		return cache.Load(baseDir), nil
-	}
-	return guardrail.LoadRulePackWithOverlays(baseDir, overlayDirs)
+	return cache.LoadWithOverlays(baseDir, overlayDirs)
 }
 
 func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
@@ -2213,7 +2221,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	// Reuse the rule pack already loaded by NewSidecar and stored on the
 	// router, avoiding a redundant disk/embed read and potential drift.
-	rp := s.router.rp
+	rp := s.router.RulePackSnapshot()
 	if rp == nil {
 		var err error
 		rp, err = guardrail.LoadRulePackWithOverlays(
@@ -2712,7 +2720,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Reuse the primary rule pack already loaded by NewSidecar (it drives
 	// the process-global scanner overrides). The per-connector packs below
 	// are loaded separately via the cache.
-	primaryRP := s.router.rp
+	primaryRP := s.router.RulePackSnapshot()
 	if primaryRP == nil {
 		var err error
 		primaryRP, err = guardrail.LoadRulePackWithOverlays(
@@ -3830,7 +3838,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.SetPolicyReloader(s.opa.Reload)
 		api.SetPolicyStatusProvider(s.opa.Status)
 	}
-	api.SetPolicyRestartRequester(s.schedulePolicyProcessRestart)
+	if len(s.currentConfig().Guardrail.RulePackOverlayDirs) > 0 {
+		api.SetPolicyRestartRequester(s.schedulePolicyProcessRestart)
+		api.SetPolicyRestartSupportedProvider(s.policyProcessRestartSupported)
+	}
 	api.SetRulePackStatusProvider(s.rulePackStatusSnapshot)
 	reg := connector.NewDefaultRegistry()
 	if s.currentConfig().PluginDir != "" {

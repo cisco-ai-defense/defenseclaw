@@ -127,6 +127,7 @@ type APIServer struct {
 	policyReloader         func() error
 	policyStatusProvider   func() policy.EngineStatus
 	policyRestartRequester func() error
+	policyRestartSupported func() bool
 	rulePackStatusProvider func() guardrail.ManagedRulePackStatus
 
 	claudeCodeMu                      sync.Mutex
@@ -607,6 +608,12 @@ func (a *APIServer) SetPolicyStatusProvider(fn func() policy.EngineStatus) {
 // the restart only after the handler has had time to flush its response.
 func (a *APIServer) SetPolicyRestartRequester(fn func() error) {
 	a.policyRestartRequester = fn
+}
+
+// SetPolicyRestartSupportedProvider reports whether a real process supervisor
+// will bring the gateway back after a rule-pack activation exit.
+func (a *APIServer) SetPolicyRestartSupportedProvider(fn func() bool) {
+	a.policyRestartSupported = fn
 }
 
 // SetRulePackStatusProvider registers the process-start/config-activation
@@ -3741,6 +3748,12 @@ func (a *APIServer) handlePolicyRestart(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
+	if a.policyRestartSupported == nil || !a.policyRestartSupported() {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "policy restart requires a supervised gateway",
+		})
+		return
+	}
 	if err := a.policyRestartRequester(); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "policy restart request failed: " + err.Error(),
@@ -3782,19 +3795,25 @@ func (a *APIServer) handlePolicyStatus(w http.ResponseWriter, r *http.Request) {
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy status failed: " + err.Error()})
 			return
 		}
-		if err := engine.Compile(); err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy status failed: " + err.Error()})
-			return
+		// The shared engine is live enforcement state; status must never
+		// recompile or mutate it. Only compile the compatibility engine that
+		// loadPolicyEngine constructs for an isolated API server.
+		if a.policyEngine == nil {
+			if err := engine.Compile(); err != nil {
+				a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy status failed: " + err.Error()})
+				return
+			}
 		}
 		status = engine.Status()
 	}
 
 	rulePackStatus := a.currentRulePackStatus()
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "ready",
-		"generation":    status.Generation,
-		"agent_control": status.AgentControl,
-		"rule_pack":     rulePackStatus,
+		"status":            "ready",
+		"generation":        status.Generation,
+		"agent_control":     status.AgentControl,
+		"rule_pack":         rulePackStatus,
+		"restart_supported": a.policyRestartSupported != nil && a.policyRestartSupported(),
 	})
 }
 

@@ -36,26 +36,39 @@ _agent_control_guardrail := data.agent_control.guardrail if {
 	data.agent_control.guardrail
 } else := {}
 
-_effective_block_threshold := data.guardrail.block_threshold if {
-	not _agent_control_enabled
-} else := min({data.guardrail.block_threshold, _agent_control_guardrail.block_threshold}) if {
-	_agent_control_precedence == "stricter"
-} else := _agent_control_guardrail.block_threshold
-
-_effective_alert_threshold := data.guardrail.alert_threshold if {
-	not _agent_control_enabled
-} else := min({data.guardrail.alert_threshold, _agent_control_guardrail.alert_threshold}) if {
-	_agent_control_precedence == "stricter"
-} else := _agent_control_guardrail.alert_threshold
-
 _trust_rank := {"none": 0, "advisory": 1, "full": 2}
 
+# The Go loader guarantees this shape. Keeping the Rego boundary defensive as
+# well makes direct OPA evaluation fall back to the local baseline instead of
+# becoming undefined if a test or future embedding bypasses that loader.
+_agent_control_active if {
+	_agent_control_enabled
+	_agent_control_precedence in {"stricter", "remote"}
+	is_number(_agent_control_guardrail.block_threshold)
+	is_number(_agent_control_guardrail.alert_threshold)
+	_trust_rank[_agent_control_guardrail.cisco_trust_level]
+}
+
+_effective_threshold(field) := data.guardrail[field] if {
+	not _agent_control_active
+} else := min({data.guardrail[field], _agent_control_guardrail[field]}) if {
+	_agent_control_precedence == "stricter"
+} else := _agent_control_guardrail[field] if {
+	_agent_control_precedence == "remote"
+}
+
+_effective_block_threshold := _effective_threshold("block_threshold")
+
+_effective_alert_threshold := _effective_threshold("alert_threshold")
+
 _effective_cisco_trust_level := data.guardrail.cisco_trust_level if {
-	not _agent_control_enabled
+	not _agent_control_active
 } else := data.guardrail.cisco_trust_level if {
 	_agent_control_precedence == "stricter"
 	_trust_rank[data.guardrail.cisco_trust_level] >= _trust_rank[_agent_control_guardrail.cisco_trust_level]
 } else := _agent_control_guardrail.cisco_trust_level if {
 	_agent_control_precedence == "stricter"
 	_trust_rank[data.guardrail.cisco_trust_level] < _trust_rank[_agent_control_guardrail.cisco_trust_level]
-} else := _agent_control_guardrail.cisco_trust_level
+} else := _agent_control_guardrail.cisco_trust_level if {
+	_agent_control_precedence == "remote"
+}

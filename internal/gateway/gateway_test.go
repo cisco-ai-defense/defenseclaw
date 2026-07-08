@@ -3793,6 +3793,7 @@ func TestAPIPolicyRestartRequestsSupervisorTransaction(t *testing.T) {
 		requested = true
 		return nil
 	})
+	api.SetPolicyRestartSupportedProvider(func() bool { return true })
 	api.SetRulePackStatusProvider(func() guardrail.ManagedRulePackStatus {
 		return guardrail.ManagedRulePackStatus{Present: true, ArtifactDigest: "sha256:active-rules"}
 	})
@@ -3805,6 +3806,47 @@ func TestAPIPolicyRestartRequestsSupervisorTransaction(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "restart_requested") ||
 		!strings.Contains(w.Body.String(), "sha256:active-rules") {
 		t.Fatalf("unexpected restart response: %s", w.Body.String())
+	}
+}
+
+func TestAPIPolicyRestartRejectsUnsupervisedGateway(t *testing.T) {
+	api := &APIServer{}
+	requested := false
+	api.SetPolicyRestartRequester(func() error {
+		requested = true
+		return nil
+	})
+	api.SetPolicyRestartSupportedProvider(func() bool { return false })
+	req := httptest.NewRequest(http.MethodPost, "/policy/restart", nil)
+	w := httptest.NewRecorder()
+	api.handlePolicyRestart(w, req)
+	if requested || w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("requested=%v status=%d body=%s", requested, w.Code, w.Body.String())
+	}
+}
+
+func TestAPIPolicyRestartRequesterError(t *testing.T) {
+	api := &APIServer{}
+	api.SetPolicyRestartSupportedProvider(func() bool { return true })
+	api.SetPolicyRestartRequester(func() error { return fmt.Errorf("restart unavailable") })
+	req := httptest.NewRequest(http.MethodPost, "/policy/restart", nil)
+	w := httptest.NewRecorder()
+	api.handlePolicyRestart(w, req)
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "restart unavailable") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPolicyProcessRestartSupportedRequiresExplicitSupervisor(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DAEMON", "")
+	t.Setenv("DEFENSECLAW_PROCESS_SUPERVISED", "")
+	s := &Sidecar{}
+	if s.policyProcessRestartSupported() {
+		t.Fatal("unsupervised foreground gateway reported restart support")
+	}
+	t.Setenv("DEFENSECLAW_PROCESS_SUPERVISED", "true")
+	if !s.policyProcessRestartSupported() {
+		t.Fatal("explicitly supervised gateway did not report restart support")
 	}
 }
 

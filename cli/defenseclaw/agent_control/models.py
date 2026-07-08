@@ -24,6 +24,10 @@ MAX_TAGS = 32
 MAX_TAG_CHARS = 128
 MAX_RULE_ID_CHARS = 128
 MAX_RULE_TITLE_CHARS = 256
+MAX_TRAVERSAL_DEPTH = 64
+MAX_TRAVERSAL_NODES = 10_000
+SDK_SCOPE_FIELDS = {"step_types", "step_names", "step_name_regex", "stages"}
+SDK_CONDITION_FIELDS = {"selector", "evaluator", "and", "or", "not"}
 
 
 class ControlValidationError(ValueError):
@@ -192,13 +196,37 @@ def _evaluator_name(control: Any) -> str:
 
 
 def _contains_evaluator(value: Any, evaluator_names: set[str]) -> bool:
-    if isinstance(value, dict):
-        evaluator = value.get("evaluator")
-        if isinstance(evaluator, dict) and evaluator.get("name") in evaluator_names:
-            return True
-        return any(_contains_evaluator(child, evaluator_names) for child in value.values())
-    if isinstance(value, list):
-        return any(_contains_evaluator(child, evaluator_names) for child in value)
+    """Find a matching evaluator without allowing hostile recursive shapes.
+
+    SDK snapshots are JSON-compatible, but callers can still hand this layer
+    arbitrary Python objects. An explicit stack avoids ``RecursionError`` and
+    the depth/node bounds keep a malformed control from monopolizing the
+    synchronizer before the closed envelope validator can reject it.
+    """
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    visited: set[int] = set()
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if depth > MAX_TRAVERSAL_DEPTH or nodes > MAX_TRAVERSAL_NODES:
+            raise ControlValidationError("control evaluator discovery exceeds traversal limits")
+        if isinstance(current, dict):
+            identity = id(current)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            evaluator = current.get("evaluator")
+            evaluator_name = evaluator.get("name") if isinstance(evaluator, dict) else None
+            if isinstance(evaluator_name, str) and evaluator_name in evaluator_names:
+                return True
+            stack.extend((child, depth + 1) for child in current.values())
+        elif isinstance(current, list):
+            identity = id(current)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            stack.extend((child, depth + 1) for child in current)
     return False
 
 
@@ -210,12 +238,27 @@ def _validate_envelope(item: dict[str, Any], index: int, evaluator_name: str) ->
         raise ControlValidationError(f"control[{index}] must be enabled")
     if control.get("execution") != "sdk":
         raise ControlValidationError(f"control[{index}].execution must be 'sdk'")
-    if control.get("scope") != {}:
-        raise ControlValidationError(f"control[{index}].scope must be an empty object")
-    if control.get("action") != {"decision": "observe"}:
+    scope = control.get("scope")
+    if (
+        not isinstance(scope, dict)
+        or not set(scope).issubset(SDK_SCOPE_FIELDS)
+        or any(value not in (None, []) for value in scope.values())
+    ):
+        raise ControlValidationError(f"control[{index}].scope must be globally empty")
+    action = control.get("action")
+    if (
+        not isinstance(action, dict)
+        or action.get("decision") != "observe"
+        or any(key != "decision" and (key != "steering_context" or value is not None) for key, value in action.items())
+    ):
         raise ControlValidationError(f"control[{index}].action must be observe")
     condition = control.get("condition")
-    if not isinstance(condition, dict) or set(condition) != {"selector", "evaluator"}:
+    if (
+        not isinstance(condition, dict)
+        or not {"selector", "evaluator"}.issubset(condition)
+        or not set(condition).issubset(SDK_CONDITION_FIELDS)
+        or any(condition.get(key) is not None for key in ("and", "or", "not"))
+    ):
         raise ControlValidationError(f"control[{index}].condition must be one selector/evaluator leaf")
     if condition.get("selector") != {"path": "*"}:
         raise ControlValidationError(f"control[{index}].selector path must be '*'")
@@ -237,11 +280,11 @@ def _validate_opa_config(config: Any, index: int) -> dict[str, Any]:
     if policy["domain"] != "guardrail":
         raise ControlValidationError(f"{path}.policy.domain must be 'guardrail'")
     for field in ("block_at", "alert_at"):
-        if policy[field] not in SEVERITY_RANK:
+        if not isinstance(policy[field], str) or policy[field] not in SEVERITY_RANK:
             raise ControlValidationError(f"{path}.policy.{field} has unsupported severity")
     if SEVERITY_RANK[policy["alert_at"]] > SEVERITY_RANK[policy["block_at"]]:
         raise ControlValidationError(f"{path}.policy.alert_at cannot exceed block_at")
-    if policy["cisco_trust_level"] not in TRUST_LEVELS:
+    if not isinstance(policy["cisco_trust_level"], str) or policy["cisco_trust_level"] not in TRUST_LEVELS:
         raise ControlValidationError(f"{path}.policy.cisco_trust_level is unsupported")
     normalized = {"schema_version": 1, "policy": dict(policy)}
     if len(canonical_json(normalized)) > MAX_OPA_CONFIG_BYTES:
@@ -279,7 +322,7 @@ def _validate_rule(rule: Any, path: str) -> dict[str, Any]:
     if not title.strip():
         raise ControlValidationError(f"{path}.title cannot be whitespace")
     severity = rule["severity"]
-    if severity not in SEVERITY_RANK:
+    if not isinstance(severity, str) or severity not in SEVERITY_RANK:
         raise ControlValidationError(f"{path}.severity is unsupported")
     confidence = rule["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
