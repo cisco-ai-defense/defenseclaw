@@ -630,6 +630,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
 	}
 
+	// Initialize semantic model router from config.
+	if mr, mrErr := NewSemanticModelRouter(s.currentConfig().Routing); mrErr != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] semantic router init failed: %v (falling back to default provider)\n", mrErr)
+	} else if mr != nil {
+		RegisterModelRouter(mr)
+		fmt.Fprintf(os.Stderr, "[guardrail] semantic model router enabled\n")
+	}
+
 	// Initialize OPA engine before goroutines so both the watcher and the
 	// API reload handler share the same instance.
 	if s.currentConfig().PolicyDir != "" {

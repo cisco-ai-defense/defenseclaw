@@ -232,6 +232,79 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
+	Routing               RoutingConfig               `mapstructure:"routing"          yaml:"routing,omitempty"`
+}
+
+// RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
+// Kept in config package to avoid circular imports; the gateway adapter
+// converts to routing.RoutingConfig at boot.
+type RoutingConfig struct {
+	Enabled   bool                    `mapstructure:"enabled"   yaml:"enabled"`
+	Models    []RoutingModelBackend   `mapstructure:"models"    yaml:"models,omitempty"`
+	Signals   RoutingSignalConfig     `mapstructure:"signals"   yaml:"signals,omitempty"`
+	Decisions []RoutingDecisionRule   `mapstructure:"decisions" yaml:"decisions,omitempty"`
+}
+
+type RoutingModelBackend struct {
+	Name         string   `mapstructure:"name"         yaml:"name"`
+	Provider     string   `mapstructure:"provider"     yaml:"provider"`
+	Model        string   `mapstructure:"model"        yaml:"model"`
+	BaseURL      string   `mapstructure:"base_url"     yaml:"base_url,omitempty"`
+	APIKeyEnv    string   `mapstructure:"api_key_env"  yaml:"api_key_env,omitempty"`
+	Weight       int      `mapstructure:"weight"       yaml:"weight,omitempty"`
+	Capabilities []string `mapstructure:"capabilities" yaml:"capabilities,omitempty"`
+}
+
+type RoutingSignalConfig struct {
+	Keywords []RoutingKeywordSignal `mapstructure:"keywords" yaml:"keywords,omitempty"`
+}
+
+type RoutingKeywordSignal struct {
+	Name     string   `mapstructure:"name"     yaml:"name"`
+	Keywords []string `mapstructure:"keywords" yaml:"keywords"`
+	Operator string   `mapstructure:"operator" yaml:"operator,omitempty"`
+}
+
+type RoutingDecisionRule struct {
+	Name       string             `mapstructure:"name"       yaml:"name"`
+	Priority   int                `mapstructure:"priority"   yaml:"priority"`
+	Conditions []RoutingCondition `mapstructure:"conditions" yaml:"conditions,omitempty"`
+	Operator   string             `mapstructure:"operator"   yaml:"operator,omitempty"`
+	ModelRefs  []string           `mapstructure:"model_refs" yaml:"model_refs"`
+	Algorithm  string             `mapstructure:"algorithm"  yaml:"algorithm,omitempty"`
+}
+
+type RoutingCondition struct {
+	Type string `mapstructure:"type" yaml:"type"`
+	Name string `mapstructure:"name" yaml:"name"`
+}
+
+// PrivacyConfig groups privacy/redaction toggles. Today it carries
+// only the redaction kill-switch; future fields (per-sink redaction
+// scope, custom redactor profiles) land here so operators have a
+// single section to audit.
+//
+// Scope: this is a deliberate, persistent operator decision.
+// Defaults match the existing redacting-by-default behavior so a
+// fresh install or a config without a `privacy:` block keeps the
+// historical contract documented in OBSERVABILITY.md.
+type PrivacyConfig struct {
+	// DisableRedaction, when true, instructs the sidecar to bypass
+	// every ForSink* redaction helper at startup — including
+	// persistent sinks (SQLite audit, OTel log exporters, Splunk
+	// HEC, webhooks). Equivalent to setting
+	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
+	// the choice survives restarts and TUI invocations without
+	// per-shell env-var ceremony.
+	//
+	// WARNING: this violates the unconditional-redaction contract
+	// documented in OBSERVABILITY.md. Only enable on single-tenant
+	// installs where every downstream sink already lives inside
+	// the same trust boundary (e.g. lab / prompt-engineering use).
+	// The CLI emits a loud warning on flip-on, and config loaders emit
+	// a once-per-process warning when they observe the setting so the
+	// runtime state stays auditable without spamming reload loops.
+	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
 }
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
