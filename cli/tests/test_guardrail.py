@@ -1744,11 +1744,16 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         gc.connectors = {}
         gc.connector = ""
 
-        # All-defaults walk-through: picker default (openclaw) -> enable ->
-        # observe -> fail-mode -> scanner local -> role -> no judge ->
-        # no advanced. Padding with blank lines is harmless (every prompt
-        # has a default), too FEW would EOF/abort.
+        # Select the first platform-supported connector, then accept defaults:
+        # enable -> observe -> fail-mode -> scanner local -> role -> no judge ->
+        # no advanced. OpenClaw is not a native-Windows picker option, so the
+        # historical OpenClaw default cannot be accepted with a blank line.
+        # Connector discovery probes real host binaries. Keep this picker unit
+        # test deterministic and leave discovery coverage to its dedicated tests.
         with patch(
+            "defenseclaw.commands.cmd_setup._detect_connector",
+            return_value=None,
+        ) as detect_connector, patch(
             "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
             return_value=(True, []),
         ), patch(
@@ -1759,13 +1764,14 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 setup,
                 ["guardrail", "--no-restart"],
                 obj=self.app,
-                input="\n" * 15,
+                input="1\n" + "\n" * 31,
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Which agent framework are you using?", result.output)
         # Bootstrap is NOT a global-fleet edit.
         self.assertNotIn("Editing global guardrail policy", result.output)
+        detect_connector.assert_called_once_with(self.app.cfg.data_dir)
 
     def test_interactive_single_connector_skips_picker_keeps_mode(self):
         """One configured connector: the picker is skipped (re-asking would
