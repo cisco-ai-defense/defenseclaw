@@ -1141,6 +1141,10 @@ class _PluginInstallTransaction:
                     raise PluginIdentityError(f"staging path already exists: {stage}")
                 shutil.copytree(source_path, stage, symlinks=True)
                 plan["stage"] = stage
+                # Preserve links during the untrusted copy so they are never
+                # dereferenced, then reject any link introduced after the
+                # source preflight before the staged tree can be committed.
+                _reject_linked_tree(stage)
         except Exception:
             tx.rollback()
             raise
@@ -1150,6 +1154,9 @@ class _PluginInstallTransaction:
         installed: dict[str, str] = {}
         try:
             for plan in self.plans:
+                # Revalidate at the mutation boundary in case the staged tree
+                # changed after prepare() returned.
+                _reject_linked_tree(plan["stage"])
                 for index, existing in enumerate(plan["aliases"]):
                     backup = os.path.join(
                         plan["root"],
@@ -1162,6 +1169,7 @@ class _PluginInstallTransaction:
                 os.replace(plan["stage"], plan["destination"])
                 plan["stage"] = ""
                 plan["installed"] = True
+                _reject_linked_tree(plan["destination"])
                 installed[plan["connector"]] = plan["destination"]
             self.committed = True
             return installed

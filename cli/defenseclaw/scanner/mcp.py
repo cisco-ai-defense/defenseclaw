@@ -1078,9 +1078,9 @@ class MCPScannerWrapper:
             selected.append(yara)
         model = litellm_model(self._llm)
         if model and llm_analyzer_ready(self._llm, model=model):
-            llm = analyzer_map.get("llm")
-            if llm is not None:
-                selected.append(llm)
+            llm_analyzer = analyzer_map.get("llm")
+            if llm_analyzer is not None:
+                selected.append(llm_analyzer)
         elif model:
             key_name = self._llm.api_key_env or "DEFENSECLAW_LLM_KEY"
             print(

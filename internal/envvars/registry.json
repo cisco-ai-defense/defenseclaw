@@ -228,6 +228,23 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
+      "category": "security_opt_out",
+      "purpose": "Allow ChatGPT Codex response-backend requests to bypass the guardrail proxy. Intended only as an explicit availability fallback when the Codex backend cannot operate through the proxy.",
+      "default": "unset (guardrail proxy enforced)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:258", "description": "Env-var name exported for the OpenClaw interceptor and tests"},
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:293", "description": "isCodexResponsesPassthroughEnabled gates the explicit unguarded passthrough path"},
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:902", "description": "Interceptor warning names the active unguarded bypass"}
+      ],
+      "since": "0.5.0",
+      "security_note": "Codex response guardrail enforcement — prevents model prompt/response traffic from silently bypassing observe/action policies unless the operator explicitly opts into an unguarded fallback.",
+      "replacement_hint": "Leave unset for normal guarded operation; use only while diagnosing proxy incompatibility."
+    },
+    {
       "name": "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
       "category": "security_opt_out",
       "purpose": "Force the AWS HTTP/1 shim to install even on non-Bedrock setups. Counterpart to DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM; only one should be set at a time.",

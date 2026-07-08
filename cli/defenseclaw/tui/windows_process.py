@@ -176,7 +176,7 @@ class WindowsJob:
         except TimeoutError:
             # Closing a kill-on-close job is the final bounded fallback.
             self.close()
-            await asyncio.wait_for(asyncio.shield(process.wait()), timeout=force)
+            await self._kill_and_wait(process, force)
             return
         try:
             empty = await self._wait_empty(force)
@@ -192,8 +192,20 @@ class WindowsJob:
         try:
             await asyncio.wait_for(asyncio.shield(process.wait()), timeout=timeout)
         except TimeoutError:
+            await self._kill_and_wait(process, timeout)
+
+    @staticmethod
+    async def _kill_and_wait(process: asyncio.subprocess.Process, timeout: float) -> None:
+        """Best-effort kill and bounded reap after the Job Object is closed."""
+
+        try:
             process.kill()
+        except ProcessLookupError:
+            return
+        try:
             await asyncio.wait_for(asyncio.shield(process.wait()), timeout=timeout)
+        except TimeoutError:
+            return
 
     async def _wait_empty(self, timeout: float) -> bool:
         deadline = asyncio.get_running_loop().time() + timeout

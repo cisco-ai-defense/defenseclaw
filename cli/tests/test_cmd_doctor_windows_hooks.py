@@ -187,6 +187,22 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertIn("Windows-native PowerShell", check.detail)
 
+    def test_powershell_registration_rejects_unsafe_launcher_switches(self) -> None:
+        runtime = self._runtime(
+            "defenseclaw-hook.ps1",
+            b"# defenseclaw-managed-hook v6\n# passive wrapper fixture\n",
+        )
+        for switch, value in (("-Command", "ignored"), ("-EncodedCommand", "Zg==")):
+            with self.subTest(switch=switch):
+                command = (
+                    f'powershell.exe -NoProfile -NonInteractive {switch} {value} '
+                    f'-File "{runtime}" hook --connector claudecode'
+                )
+                config = self._config("claudecode", command)
+                check = self._validate("claudecode", config)
+                self.assertEqual(check.state, "malformed")
+                self.assertIn("unsupported launcher arguments", check.detail)
+
     def test_stale_wrapper_version_is_rejected(self) -> None:
         runtime = self._runtime("defenseclaw-hook.cmd", b"rem defenseclaw-managed-hook v5\r\n")
         config = self._config("codex", f'"{runtime}" hook --connector codex')

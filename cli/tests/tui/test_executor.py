@@ -33,6 +33,33 @@ from defenseclaw.tui.executor import (
 )
 
 
+@pytest.mark.asyncio
+async def test_windows_job_close_fallback_swallows_final_reap_timeout() -> None:
+    from defenseclaw.tui.windows_process import WindowsJob
+
+    waiter = asyncio.get_running_loop().create_future()
+
+    class Process:
+        kill_calls = 0
+
+        def wait(self):
+            return waiter
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+    process = Process()
+    job = WindowsJob.__new__(WindowsJob)
+    close_calls: list[bool] = []
+    job.close = lambda: close_calls.append(True)  # type: ignore[method-assign]
+
+    await job._close_and_wait(process, 0.001)  # type: ignore[arg-type]
+
+    assert close_calls == [True]
+    assert process.kill_calls == 1
+    waiter.cancel()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="stdlib PTYs are POSIX-only")
 @pytest.mark.asyncio
 async def test_executor_pty_forwards_interactive_stdin() -> None:

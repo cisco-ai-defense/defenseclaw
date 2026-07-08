@@ -2271,7 +2271,7 @@ def _capture_managed_mcp_backup(path: str) -> None:
     # refuses to follow it or a replacement file.
     fd = open_regular_file_no_follow(path)
     with os.fdopen(fd, "rb") as source:
-        atomic_write_private_bytes(backup, source.read())
+        atomic_write_private_bytes(backup, source.read(), protect_parent=False)
     _registry_register(os.path.abspath(path), backup)
 
 

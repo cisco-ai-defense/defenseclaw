@@ -322,6 +322,53 @@ def _windows_dacl_is_protected(path: str | os.PathLike[str]) -> bool:
     return bool(control.value & se_dacl_protected)
 
 
+def _windows_private_target_problem(path: str) -> str | None:
+    try:
+        problem = windows_acl_write_error(path)
+    except OSError as exc:
+        return f"ACL inspection failed: {exc}"
+    if problem is not None:
+        return problem
+    try:
+        required_access = _windows_acl_has_required_access(path)
+    except OSError as exc:
+        return f"ACL access verification failed: {exc}"
+    if not required_access:
+        return "owner/SYSTEM access missing"
+    return None
+
+
+def _verify_or_repair_windows_private_target(path: str) -> None:
+    """Repair or remove a replaced private file whose DACL cannot be verified."""
+
+    problem = _windows_private_target_problem(path)
+    if problem is None:
+        return
+
+    repair_error: OSError | None = None
+    try:
+        _set_windows_owner_only_acl(path)
+    except OSError as exc:
+        repair_error = exc
+    else:
+        problem = _windows_private_target_problem(path)
+        if problem is None:
+            return
+
+    cleanup_error: OSError | None = None
+    try:
+        os.unlink(path)
+    except OSError as exc:
+        cleanup_error = exc
+
+    detail = problem
+    if repair_error is not None:
+        detail += f"; repair failed: {repair_error}"
+    if cleanup_error is not None:
+        detail += f"; cleanup failed: {cleanup_error}"
+    raise OSError(f"private Windows DACL verification failed: {detail}")
+
+
 def atomic_write_private(
     path: str | os.PathLike[str],
     write: Callable[[int], None],
@@ -372,11 +419,7 @@ def atomic_write_private(
             os.replace(tmp, target)
             tmp = ""
             if os.name == "nt":
-                problem = windows_acl_write_error(target)
-                if problem is not None:
-                    raise OSError(f"private Windows DACL verification failed: {problem}")
-                if not _windows_acl_has_required_access(target):
-                    raise OSError("private Windows DACL verification failed: owner/SYSTEM access missing")
+                _verify_or_repair_windows_private_target(target)
         finally:
             if fd != -1:
                 with suppress(OSError):

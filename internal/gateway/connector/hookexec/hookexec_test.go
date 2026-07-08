@@ -634,13 +634,14 @@ func TestCodexNotifyRequestWiring(t *testing.T) {
 	}
 	rt := ok(`{"status":"ok"}`)
 	payload := []byte(`{"type":"agent-turn-complete","last-assistant-message":"done"}`)
+	traceParent := "00-0af7651916cd43dd8448eb211c80319c-" +
+		"b7ad6b7169203331-01"
 	code := RunCodexNotify(context.Background(), Options{
-		APIAddr:    "127.0.0.1:8787",
-		Home:       home,
-		HookDir:    hookDir,
-		HTTPClient: &http.Client{Transport: rt},
-		TraceParent: "00-0af7651916cd43dd8448eb211c80319c-" +
-			"b7ad6b7169203331-01",
+		APIAddr:     "127.0.0.1:8787",
+		Home:        home,
+		HookDir:     hookDir,
+		HTTPClient:  &http.Client{Transport: rt},
+		TraceParent: traceParent,
 	}, payload)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want best-effort 0", code)
@@ -659,6 +660,9 @@ func TestCodexNotifyRequestWiring(t *testing.T) {
 	}
 	if got := rt.gotReq.Header.Get("x-defenseclaw-source"); got != "codex-notify" {
 		t.Errorf("source header = %q", got)
+	}
+	if got := rt.gotReq.Header.Get("traceparent"); got != traceParent {
+		t.Errorf("traceparent = %q, want %q", got, traceParent)
 	}
 	if !bytes.Equal(rt.gotBody, payload) {
 		t.Errorf("body = %q, want %q", rt.gotBody, payload)
