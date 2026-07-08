@@ -1619,6 +1619,7 @@ function Main {
         New-Item -ItemType Directory -Force -Path $DefenseClawHome | Out-Null
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
         Set-ManagedPathProtection -Path $DefenseClawHome
+        Set-ManagedPathProtection -Path (Split-Path -Parent $InstallDir)
         Set-ManagedPathProtection -Path $InstallDir
         Invoke-PairedInstallTransaction -Artifacts $artifacts
     } finally {

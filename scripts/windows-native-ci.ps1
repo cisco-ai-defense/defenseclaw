@@ -140,6 +140,88 @@ function Assert-SafeStateRoot([string]$Path) {
     return Assert-NoReparseAncestors $full
 }
 
+function Set-CurrentUserAsDefaultOwner {
+    # GitHub's elevated Windows runner token can use BUILTIN\Administrators as
+    # its default owner even though processes run as the runner user. That
+    # makes ordinary child-created test paths look foreign to the production
+    # ownership checks. Normalize only this disposable CI process token; child
+    # processes inherit it and create objects owned by the actual runner user.
+    if ($null -eq ('DefenseClaw.WindowsNative.TokenOwner' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+namespace DefenseClaw.WindowsNative {
+    public static class TokenOwner {
+        private const uint TokenQuery = 0x0008;
+        private const uint TokenAdjustDefault = 0x0080;
+        private const int TokenOwnerClass = 4;
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(
+            IntPtr process,
+            uint desiredAccess,
+            out IntPtr token
+        );
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool SetTokenInformation(
+            IntPtr token,
+            int informationClass,
+            IntPtr information,
+            int informationLength
+        );
+
+        public static void SetCurrentUser() {
+            SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
+            if (user == null) {
+                throw new InvalidOperationException("Current Windows identity has no user SID");
+            }
+            byte[] sid = new byte[user.BinaryLength];
+            user.GetBinaryForm(sid, 0);
+            GCHandle pinnedSid = GCHandle.Alloc(sid, GCHandleType.Pinned);
+            IntPtr owner = Marshal.AllocHGlobal(IntPtr.Size);
+            IntPtr token = IntPtr.Zero;
+            try {
+                Marshal.WriteIntPtr(owner, pinnedSid.AddrOfPinnedObject());
+                if (!OpenProcessToken(
+                    GetCurrentProcess(),
+                    TokenQuery | TokenAdjustDefault,
+                    out token
+                )) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                if (!SetTokenInformation(
+                    token,
+                    TokenOwnerClass,
+                    owner,
+                    IntPtr.Size
+                )) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+            } finally {
+                if (token != IntPtr.Zero) {
+                    CloseHandle(token);
+                }
+                Marshal.FreeHGlobal(owner);
+                pinnedSid.Free();
+            }
+        }
+    }
+}
+'@
+    }
+    [DefenseClaw.WindowsNative.TokenOwner]::SetCurrentUser()
+}
+
 function Protect-TestDirectory([string]$Path) {
     $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -167,6 +249,7 @@ function Protect-TestDirectory([string]$Path) {
 }
 
 function Initialize-WindowsNativeTestEnvironment([string]$Root) {
+    Set-CurrentUserAsDefaultOwner
     $safeRoot = Assert-SafeStateRoot $Root
     Protect-TestDirectory $safeRoot
     $temp = Join-Path $safeRoot 'temp'
@@ -360,6 +443,7 @@ function Invoke-BuildArtifacts {
 }
 
 function Initialize-IsolatedProfile([string]$Root) {
+    Set-CurrentUserAsDefaultOwner
     $safeRoot = Assert-SafeStateRoot $Root
     [IO.Directory]::CreateDirectory($safeRoot) | Out-Null
     $originalProfile = $env:USERPROFILE
@@ -368,6 +452,7 @@ function Initialize-IsolatedProfile([string]$Root) {
     $tools = Join-Path $safeRoot 'tools'
     foreach ($path in @($profile, $temp, $tools, (Join-Path $profile 'AppData\Roaming'), (Join-Path $profile 'AppData\Local'))) {
         [IO.Directory]::CreateDirectory($path) | Out-Null
+        Protect-TestDirectory $path
     }
     $uvSource = Get-RequiredCommand 'uv.exe'
     $uvIsolated = Join-Path $tools 'uv.exe'

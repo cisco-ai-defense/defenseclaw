@@ -169,6 +169,9 @@ def test_installer_protects_managed_windows_paths_and_replacements() -> None:
     assert main.index("Set-ManagedPathProtection -Path $DefenseClawHome") < main.index(
         "Invoke-PairedInstallTransaction"
     )
+    assert main.index(
+        "Set-ManagedPathProtection -Path (Split-Path -Parent $InstallDir)"
+    ) < main.index("Invoke-PairedInstallTransaction")
     assert main.index("Set-ManagedPathProtection -Path $InstallDir") < main.index(
         "Invoke-PairedInstallTransaction"
     )
