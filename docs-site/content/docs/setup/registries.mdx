@@ -17,6 +17,12 @@ A **registry source** is a fetchable manifest of skills and/or MCP servers that 
 Without a registry, every new skill / MCP that lands on disk is admission-evaluated against ad-hoc operator-authored rules. With one or more registries, the catalog drives admission: clean entries get auto-promoted, suspicious ones are quarantined for review, and toggling `registry_required` flips the asset class to deny-by-default for anything the catalog hasn't blessed.
 </Callout>
 
+<DefenseClawDemo scenario="registry-promote-require" variant="clean" />
+
+## What you just saw
+
+An **on-demand** registry sync verified source integrity, routed an entry through its existing scanner, and selected a deterministic outcome: promote a clean entry, hold a warning for review, or deny an unknown asset when `registry_required=true`. Stored sync settings do not create a runtime poller.
+
 ## The seven registry kinds
 
 <TypeTable

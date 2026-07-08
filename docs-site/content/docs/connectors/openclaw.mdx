@@ -150,12 +150,12 @@ A hash-checked backup of `openclaw.json` is stored before edits; teardown restor
 ## What the plugin does
 
 <Sequence
-  caption="Three interception points let DefenseClaw inspect every interesting moment in OpenClaw's lifecycle."
+  caption="Three interception points let DefenseClaw inspect every interesting moment in OpenClaw's lifecycle. Plugin is the bundled DefenseClaw plugin; Gateway is defenseclaw-gateway."
   participants={[
     { id: 'u',  label: 'User',                kind: 'operator' },
-    { id: 'oc', label: 'OpenClaw agent',      kind: 'agent' },
-    { id: 'p',  label: 'DefenseClaw plugin',  kind: 'connector' },
-    { id: 'g',  label: 'defenseclaw-gateway', kind: 'gateway' },
+    { id: 'oc', label: 'OpenClaw', kind: 'agent' },
+    { id: 'p',  label: 'Plugin',   kind: 'connector' },
+    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
   ]}
 >
   <Message from="u"  to="oc" label="prompt" />

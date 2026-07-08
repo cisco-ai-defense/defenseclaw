@@ -17,6 +17,12 @@ That tool list is also a perfect place to hide a "shadow capability" — a tool 
 
 DefenseClaw integrates Cisco's open-source [`cisco-ai-mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner) for exactly that. Verdicts feed the `mcp_actions` admission policy by severity bucket — same shape as `skill_actions`.
 
+<DefenseClawDemo scenario="mcp-shadow-capability" />
+
+## What you just saw
+
+A locally configured stdio server advertised a read-only-looking tool whose description and schema implied filesystem and outbound-network side effects. DefenseClaw held admission, inspected the server in the scanner sandbox, resolved `mcp_actions.high`, disabled the runtime, and blocked installation. Remote URL scans use a different path and do not add the server to a connector.
+
 ## What it scans
 
 The wrapper at [`cli/defenseclaw/scanner/mcp.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/mcp.py) accepts two target shapes — both as a positional `TARGET` argument (there is no `--server` or `--remote` flag — the scanner figures out which from the target's shape):
