@@ -1498,10 +1498,12 @@ async def test_catalog_control_action_uses_visible_table_cursor() -> None:
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("3")
+        await _wait_for_background(lambda: app.active_panel == "skills")
         await _wait_for_panel_render(app, "skills")
 
         table = app.query_one("#panel-table", DataTable)
         table.move_cursor(row=1, column=0, animate=False)
+        await _wait_for_background(lambda: table.cursor_row == 1)
         skills.set_cursor(0)
 
         app._handle_catalog_control("skills", "skills-block")  # noqa: SLF001
