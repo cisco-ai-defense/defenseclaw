@@ -3429,6 +3429,90 @@ def _verify_sha256(
         raise SystemExit(1)
 
 
+def _stage_upgrade_binary(source: str, install_dir: str, label: str) -> str:
+    """Copy *source* to a same-filesystem staging path for atomic replace."""
+    fd, staged = tempfile.mkstemp(
+        prefix=f".{label}.", suffix=".tmp", dir=install_dir,
+    )
+    os.close(fd)
+    try:
+        shutil.copy2(source, staged)
+        descriptor = os.open(staged, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+        raise
+    return staged
+
+
+def _install_windows_gateway_pair(
+    gateway_source: str,
+    gateway_target: str,
+    hook_source: str,
+    hook_target: str,
+    install_dir: str,
+) -> None:
+    """Replace the Windows gateway and hook launcher as one recoverable pair."""
+    staged_gateway = _stage_upgrade_binary(
+        gateway_source, install_dir, "defenseclaw-gateway",
+    )
+    staged_hook = ""
+    previous_hook = ""
+    hook_existed = os.path.isfile(hook_target)
+    try:
+        staged_hook = _stage_upgrade_binary(
+            hook_source, install_dir, "defenseclaw-hook",
+        )
+        if hook_existed:
+            previous_hook = _stage_upgrade_binary(
+                hook_target, install_dir, "defenseclaw-hook-rollback",
+            )
+
+        # Replace the hook first because it is the file most likely to be held
+        # open by an agent process. The gateway stays untouched if this fails.
+        os.replace(staged_hook, hook_target)
+        staged_hook = ""
+        try:
+            os.replace(staged_gateway, gateway_target)
+            staged_gateway = ""
+        except OSError as install_error:
+            try:
+                if previous_hook:
+                    os.replace(previous_hook, hook_target)
+                    previous_hook = ""
+                else:
+                    try:
+                        os.remove(hook_target)
+                    except FileNotFoundError:
+                        pass
+            except OSError as rollback_error:
+                preserved_hook = previous_hook
+                previous_hook = ""
+                recovery_note = (
+                    f"; previous hook preserved at {preserved_hook}"
+                    if preserved_hook
+                    else ""
+                )
+                raise OSError(
+                    "gateway replacement failed and hook rollback also failed: "
+                    f"{rollback_error}{recovery_note}",
+                ) from install_error
+            raise
+    finally:
+        for temporary in (staged_gateway, staged_hook, previous_hook):
+            if temporary:
+                try:
+                    os.remove(temporary)
+                except FileNotFoundError:
+                    pass
+
+
 def _install_gateway(
     binary_path: str,
     os_name: str,
@@ -3484,15 +3568,22 @@ def _install_gateway(
                     indent="  ",
                 )
 
-    # Publish from a fully copied, flushed same-directory file. A power loss or
-    # SIGKILL before os.replace leaves the old gateway intact; after os.replace
-    # the target names complete candidate bytes, never a truncated in-place
-    # copy. On macOS, ad-hoc signing is also completed before publication.
-    descriptor, temporary = tempfile.mkstemp(prefix=".defenseclaw-gateway-", dir=install_dir)
-    os.close(descriptor)
-    try:
-        shutil.copy2(binary_path, temporary)
-        if os_name != "windows":
+    if os_name == "windows":
+        assert hook_source is not None and hook_target is not None
+        _install_windows_gateway_pair(
+            binary_path, target, hook_source, hook_target, install_dir,
+        )
+    else:
+        # Publish from a fully copied, flushed same-directory file. A power
+        # loss or SIGKILL before os.replace leaves the old gateway intact; on
+        # macOS signing also completes before the candidate is published.
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".defenseclaw-gateway-",
+            dir=install_dir,
+        )
+        os.close(descriptor)
+        try:
+            shutil.copy2(binary_path, temporary)
             os.chmod(temporary, 0o755)
             if os_name == "darwin":
                 _run_phase_two_mutator(
@@ -3500,25 +3591,29 @@ def _install_gateway(
                     capture_output=True,
                     check=True,
                 )
-        descriptor = os.open(temporary, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, target)
-        if os.name == "posix":
-            directory_fd = os.open(install_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            descriptor = os.open(
+                temporary,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
             try:
-                os.fsync(directory_fd)
+                os.fsync(descriptor)
             finally:
-                os.close(directory_fd)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-    if hook_source and hook_target:
-        shutil.copy2(hook_source, hook_target)
+                os.close(descriptor)
+            os.replace(temporary, target)
+            if os.name == "posix":
+                directory_fd = os.open(
+                    install_dir,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     ux.ok("Gateway binary installed")
     if hook_target:
         ux.ok("No-console hook launcher installed")
