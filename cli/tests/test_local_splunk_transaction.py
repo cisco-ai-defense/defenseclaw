@@ -24,6 +24,8 @@ from defenseclaw.observability.local_splunk import (
 )
 from defenseclaw.observability.local_stack import LocalStackError
 
+from tests.permissions import set_known_windows_directory_acl
+
 
 @pytest.fixture(autouse=True)
 def _restore_local_token_environment():
@@ -68,6 +70,8 @@ class FakeTransaction:
 
 def _app(tmp_path: Path) -> AppContext:
     tmp_path.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
     (tmp_path / "config.yaml").write_bytes(b"config_version: 4\ncustom:\n  preserve: true\n")
     (tmp_path / ".env").write_bytes(b"KEEP_ME=unchanged\n")
     app = AppContext()

@@ -254,9 +254,7 @@ def test_private_atomic_write_can_preserve_operator_selected_parent(tmp_path):
     file_permissions.atomic_write_private_bytes(target, b"synthetic fixture", protect_parent=False)
 
     after = (
-        file_permissions._windows_acl_snapshot(os.fspath(parent))
-        if os.name == "nt"
-        else parent.stat().st_mode & 0o777
+        file_permissions._windows_acl_snapshot(os.fspath(parent)) if os.name == "nt" else parent.stat().st_mode & 0o777
     )
     assert after == before
     assert_owner_only_file(target)
@@ -450,6 +448,17 @@ def test_private_directory_refuses_foreign_owner_without_acl_rewrite(monkeypatch
 
     with pytest.raises(OSError, match="foreign-owned"):
         file_permissions._protect_private_directory("synthetic")
+
+
+def test_private_directory_creation_descriptor_names_current_owner(monkeypatch):
+    owner = "S-1-5-21-1000-1001-1002-1003"
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: owner)
+
+    descriptor = file_permissions._windows_private_directory_sddl()
+
+    assert descriptor.startswith(f"O:{owner}D:P")
+    assert "(A;OICI;FA;;;OW)" in descriptor
+    assert "(A;OICI;FA;;;SY)" in descriptor
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory inheritance")

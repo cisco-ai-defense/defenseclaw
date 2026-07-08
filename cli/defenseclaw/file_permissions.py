@@ -503,7 +503,7 @@ def _make_private_directories(path: str) -> None:
     local_free.restype = wintypes.HLOCAL
 
     descriptor = wintypes.LPVOID()
-    sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
+    sddl = _windows_private_directory_sddl()
     if not convert(sddl, 1, ctypes.byref(descriptor), None):
         raise ctypes.WinError(ctypes.get_last_error())
     attributes = _SecurityAttributes(ctypes.sizeof(_SecurityAttributes), descriptor, False)
@@ -517,6 +517,12 @@ def _make_private_directories(path: str) -> None:
             _protect_private_directory(directory)
     finally:
         local_free(descriptor)
+
+
+def _windows_private_directory_sddl() -> str:
+    """Build the creation descriptor for a current-user-owned directory."""
+    owner_sid = _windows_current_user_sid()
+    return f"O:{owner_sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
 
 
 @contextmanager
@@ -568,11 +574,7 @@ def _windows_acl_has_required_access(path: str | os.PathLike[str]) -> bool:
     allowed = {
         sid for permissions, access_mode, _inheritance, sid in entries if access_mode in (1, 2) and permissions != 0
     }
-    denied = {
-        sid
-        for permissions, access_mode, _inheritance, sid in entries
-        if access_mode == 3 and permissions != 0
-    }
+    denied = {sid for permissions, access_mode, _inheritance, sid in entries if access_mode == 3 and permissions != 0}
     required_owner_sids = {current_sid, "S-1-3-4"}
     return (
         "S-1-5-18" in allowed
