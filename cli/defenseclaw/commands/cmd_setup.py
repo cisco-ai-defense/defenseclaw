@@ -1747,7 +1747,7 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     fd = -1
     try:
         fd = os.open(path, flags, 0o600)
-        set_file_mode(fd, path, 0o600)
+        set_file_mode(fd, path, 0o600, set_owner=True)
         stream = os.fdopen(fd, "w")
         fd = -1  # ownership transferred; stream closes on every with-path
         with stream as f:

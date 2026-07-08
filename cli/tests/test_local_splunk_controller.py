@@ -514,8 +514,7 @@ def test_failed_upgrade_stop_restores_prior_running_stack_before_returning(
 ) -> None:
     data_dir = tmp_path / "Stop Failure Ω"
     stable = data_dir / "splunk-bridge"
-    data_dir.mkdir()
-    shutil.copytree(bundled_splunk_bridge_dir(), stable)
+    local_splunk._copy_bundle(bundled_splunk_bridge_dir(), stable)
     previous_values = _credential_values(
         {"SPLUNK_IMAGE": "example.invalid/splunk:previous"},
         {},
@@ -558,8 +557,7 @@ def test_upgrade_rollback_restores_prior_assets_running_stack_and_volumes(
 ) -> None:
     data_dir = tmp_path / "Upgrade Profile Ω"
     stable = data_dir / "splunk-bridge"
-    data_dir.mkdir()
-    shutil.copytree(bundled_splunk_bridge_dir(), stable)
+    local_splunk._copy_bundle(bundled_splunk_bridge_dir(), stable)
     previous_values = _credential_values(
         {"SPLUNK_IMAGE": "example.invalid/splunk:previous"},
         {},

@@ -451,7 +451,10 @@ def _copy_bundle(source: Path, destination: Path) -> None:
         rel = current_path.relative_to(source)
         target_dir = destination / rel
         reject_reparse_path(target_dir)
-        target_dir.mkdir(exist_ok=True)
+        if os.name == "nt":
+            make_private_directory(target_dir)
+        else:
+            target_dir.mkdir(exist_ok=True)
         dirs[:] = [name for name in dirs if name != "__pycache__"]
         for name in dirs:
             candidate = current_path / name

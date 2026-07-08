@@ -61,6 +61,12 @@ _ATOMIC_WRITERS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _private_windows_tmp_path(tmp_path):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+
+
 def _assert_staging_cleanup(record: dict[str, object]) -> None:
     fd = record["fd"]
     path = record["path"]
@@ -156,7 +162,7 @@ def test_migration_writer_closes_and_removes_staging_file_when_permissions_fail(
     monkeypatch.setattr(
         migrations,
         "set_file_mode",
-        lambda *_args: (_ for _ in ()).throw(OSError("injected permission failure")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected permission failure")),
     )
 
     target = tmp_path / "migration-secret.yaml"
@@ -177,7 +183,7 @@ def test_dotenv_writer_closes_descriptor_when_permissions_fail(monkeypatch, tmp_
     monkeypatch.setattr(
         observability_writer,
         "set_file_mode",
-        lambda *_args: (_ for _ in ()).throw(OSError("injected permission failure")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected permission failure")),
     )
 
     with pytest.raises(OSError, match="injected permission failure"):
@@ -325,6 +331,7 @@ def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
 def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
     broad_dir = tmp_path / name
     broad_dir.mkdir()
+    set_known_windows_directory_acl(broad_dir)
     grant_everyone(broad_dir, "(RX)")
     target = broad_dir / "secret.yaml"
 
@@ -341,6 +348,7 @@ def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
 def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_path):
     target = tmp_path / "stricter ACL 雪.json"
     target.write_text("old", encoding="utf-8")
+    file_permissions._set_windows_current_user_owner(os.fspath(target))
     subprocess.run(
         [
             "icacls",
@@ -368,13 +376,15 @@ def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_pat
 def test_copy_windows_dacl_protects_destination_from_parent_inheritance(tmp_path):
     source = tmp_path / "source.json"
     source.write_text("source", encoding="utf-8")
-    file_permissions._set_windows_owner_only_acl(os.fspath(source))
+    file_permissions._set_windows_owner_only_acl(os.fspath(source), set_owner=True)
 
     broad_dir = tmp_path / "broad-parent"
     broad_dir.mkdir()
+    set_known_windows_directory_acl(broad_dir)
     grant_everyone(broad_dir)
     destination = broad_dir / "destination.json"
     destination.write_text("destination", encoding="utf-8")
+    file_permissions._set_windows_current_user_owner(os.fspath(destination))
     assert file_permissions._windows_dacl_is_protected(destination) is False
 
     file_permissions.copy_windows_dacl(os.fspath(source), os.fspath(destination))
@@ -468,6 +478,7 @@ def test_private_directory_keeps_existing_managed_venv_accessible(tmp_path):
     managed_venv.mkdir(parents=True)
     existing = managed_venv / "existing.txt"
     existing.write_text("before", encoding="utf-8")
+    set_known_windows_directory_acl(private_home)
 
     file_permissions.make_private_directory(private_home)
 
@@ -482,6 +493,8 @@ def test_private_directory_keeps_existing_managed_venv_accessible(tmp_path):
 def test_private_atomic_write_holds_parent_against_directory_swap(tmp_path):
     parent = tmp_path / "managed"
     parent.mkdir()
+    if os.name == "nt":
+        set_known_windows_directory_acl(parent)
     moved = tmp_path / "moved"
     swap_refused = False
 

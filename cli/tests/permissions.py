@@ -23,46 +23,6 @@ import stat
 import subprocess
 
 
-def set_current_user_owner(path: str | os.PathLike[str]) -> None:
-    """Assign a disposable Windows fixture to the process token user."""
-    if os.name != "nt":
-        return
-
-    import ctypes
-    from ctypes import wintypes
-
-    from defenseclaw.file_permissions import _windows_current_user_sid
-
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    convert = advapi32.ConvertStringSidToSidW
-    convert.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.LPVOID)]
-    convert.restype = wintypes.BOOL
-    set_security = advapi32.SetNamedSecurityInfoW
-    set_security.argtypes = [
-        wintypes.LPWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.LPVOID,
-        wintypes.LPVOID,
-        wintypes.LPVOID,
-    ]
-    set_security.restype = wintypes.DWORD
-    local_free = ctypes.WinDLL("kernel32", use_last_error=True).LocalFree
-    local_free.argtypes = [wintypes.HLOCAL]
-    local_free.restype = wintypes.HLOCAL
-
-    owner = wintypes.LPVOID()
-    if not convert(_windows_current_user_sid(), ctypes.byref(owner)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        result = set_security(os.fspath(path), 1, 1, owner, None, None, None)
-        if result:
-            raise ctypes.WinError(result)
-    finally:
-        local_free(owner)
-
-
 def grant_everyone(path: str | os.PathLike[str], perm: str = "F") -> None:
     """Grant the well-known Everyone SID broad access for negative-path tests."""
     ace = f"*S-1-1-0:{perm}" if os.path.isfile(path) else f"*S-1-1-0:(OI)(CI){perm}"
@@ -78,8 +38,7 @@ def set_known_windows_directory_acl(path: str | os.PathLike[str], *, everyone_wr
     """Replace inheritance with a deterministic disposable-directory DACL."""
     from defenseclaw.file_permissions import _set_windows_owner_only_acl
 
-    set_current_user_owner(path)
-    _set_windows_owner_only_acl(os.fspath(path))
+    _set_windows_owner_only_acl(os.fspath(path), set_owner=True)
     if everyone_write:
         grant_everyone(path)
 

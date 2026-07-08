@@ -1354,7 +1354,7 @@ def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
     tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
-        set_file_mode(fd, tmp, target_mode)
+        set_file_mode(fd, tmp, target_mode, set_owner=True)
         stream = os.fdopen(fd, "w")
         fd = -1
         with stream as f:
