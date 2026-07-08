@@ -195,7 +195,7 @@ function Invoke-WindowsNativeProcess {
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$ArgumentList = @(),
         [int[]]$AllowedExitCodes = @(0),
-        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 600,
+        [ValidateRange(1, 4200)][int]$TimeoutSeconds = 600,
         [string]$LogPath = '',
         [string]$WorkingDirectory = ''
     )
