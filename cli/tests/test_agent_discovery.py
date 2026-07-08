@@ -399,6 +399,7 @@ def test_codex_desktop_runtime_is_a_narrow_trusted_prefix(monkeypatch, tmp_path)
     runtime_root = local_app_data / "OpenAI" / "Codex" / "runtimes"
 
     assert ad._path_key(str(runtime_root)) in prefixes
+    assert ad._path_key(str(runtime_root.parent)) not in prefixes
     assert ad._path_key(str(local_app_data / "OpenAI")) not in prefixes
     assert ad._path_key(str(local_app_data)) not in prefixes
 
@@ -411,6 +412,8 @@ def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     hermes_scripts = local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts"
 
     assert ad._path_key(str(hermes_scripts)) in prefixes
+    assert ad._path_key(str(hermes_scripts.parent)) not in prefixes
+    assert ad._path_key(str(hermes_scripts.parent.parent)) not in prefixes
     assert ad._path_key(str(local_app_data / "hermes")) not in prefixes
     assert ad._path_key(str(local_app_data)) not in prefixes
 
