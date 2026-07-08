@@ -103,14 +103,18 @@ jobs:
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
   windows-python:
-    name: Windows complete Python suite (includes TUI)
+    name: Windows complete Python suite (includes TUI) / shard ${{ matrix.shard }}
     runs-on: windows-latest
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Initialize isolated paths
         run: |
-          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-python')" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-python')" >> $env:GITHUB_ENV
+          "DC_STATE_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-python-${{ matrix.shard }}')" >> $env:GITHUB_ENV
+          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-python-${{ matrix.shard }}')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -123,23 +127,38 @@ jobs:
       - name: Stage packaged runtime data with PowerShell
         run: ./scripts/windows-native-ci.ps1 -Operation stage-package-data
       - name: Validate registered Windows Codex and Claude hook commands
+        if: ${{ matrix.shard == 1 }}
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_cmd_doctor_windows_hooks.py', '-q') -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-doctor-windows-hooks.log') | Out-Null
       - name: Run native Windows Local Splunk certification regressions
+        if: ${{ matrix.shard == 1 }}
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
-      - name: Run every Python test, including headless TUI tests
+      - name: Run Python test shard ${{ matrix.shard }} of 4, including headless TUI tests
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
-          Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests', '-q') -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest.log') | Out-Null
+          $testFiles = @(Get-ChildItem cli/tests -Recurse -File -Filter 'test_*.py' | Sort-Object FullName)
+          $shardIndex = [int]'${{ matrix.shard }}' - 1
+          $shardFiles = @(
+            for ($index = 0; $index -lt $testFiles.Count; $index++) {
+              if (($index % 4) -eq $shardIndex) {
+                $testFiles[$index].FullName
+              }
+            }
+          )
+          if (-not $shardFiles) {
+            throw "Python test shard $($shardIndex + 1) selected no files"
+          }
+          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + @('-q')
+          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}.log') | Out-Null
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -147,7 +166,7 @@ jobs:
         if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-native-python-diagnostics
+          name: windows-native-python-diagnostics-${{ matrix.shard }}
           path: ${{ env.DC_DIAGNOSTICS }}\**
           if-no-files-found: ignore
           retention-days: 5

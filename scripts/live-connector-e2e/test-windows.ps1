@@ -164,7 +164,10 @@ try {
     Assert-True ($nativeWorkflowText -match '''-p=1''.*''-skip''.*\$windowsInapplicable') 'full Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
-    Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests', '-q'") 'complete Python suite is required'
+    Assert-True ($nativeWorkflowText -match "Get-ChildItem cli/tests -Recurse -File -Filter 'test_\*\.py'") 'complete Python suite discovers every test file'
+    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4\]' -and
+        $nativeWorkflowText -match '\(\$index % 4\) -eq \$shardIndex') `
+        'complete Python suite assigns every test file to one of four deterministic shards'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
