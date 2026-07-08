@@ -360,10 +360,12 @@ def test_native_npx_cmd_acceptance_with_quoted_local_package(
 def test_native_uvx_exe_acceptance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The suite redirects Windows identity roots. Restore only the host's
-    # product-specific uv install root so the real executable can pass the
-    # same canonical-prefix and DACL checks used in production.
+    # The suite redirects Windows identity roots, while setup-uv may install
+    # the real executable in a hosted toolcache instead of LOCALAPPDATA.
+    # Opt that exact parent into the production trust gate; owner/DACL checks
+    # still apply to the executable and its chain through this narrow prefix.
     monkeypatch.setenv("LOCALAPPDATA", HOST_LOCALAPPDATA)
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", os.fspath(Path(HOST_UVX).parent))
     entry = MCPServerEntry(
         name="native-uvx",
         command="uvx",
@@ -568,6 +570,7 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
             "USERPROFILE": os.fspath(profile),
             "APPDATA": os.fspath(profile / "AppData" / "Roaming"),
             "LOCALAPPDATA": HOST_LOCALAPPDATA,
+            "DEFENSECLAW_TRUSTED_BIN_PREFIXES": os.fspath(Path(HOST_UVX).parent),
             "DEFENSECLAW_HOME": os.fspath(dc_home),
             "DEFENSECLAW_CONFIG": os.fspath(config),
             "PYTHONPATH": os.fspath(tmp_path / "hostile-python-path"),

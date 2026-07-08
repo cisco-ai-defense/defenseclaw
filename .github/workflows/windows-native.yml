@@ -164,7 +164,11 @@ jobs:
           $windowsInapplicableTests = @(
             '--deselect=cli/tests/test_cmd_setup_sandbox.py::TestTrustedPrivilegedCommands::test_existing_openclaw_integration_requires_pin',
             '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestSandboxInitIdempotentPin::test_f0162_refuses_swapped_symlink',
-            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestInitSandboxChownTOCTOU::test_f0421_rechecks_pinned_home_before_chown'
+            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestInitSandboxChownTOCTOU::test_f0421_rechecks_pinned_home_before_chown',
+            # Windows os.readlink returns the preserved absolute target with
+            # an equivalent \\?\ prefix, so this raw POSIX string assertion
+            # remains covered by the Linux suite.
+            '--deselect=cli/tests/test_migrations.py::TestMigrate050PurgeLegacyFlatPolicyBundle::test_symlinked_flat_data_json_is_left_alone'
           )
           $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
           Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-shard-${{ matrix.shard }}.log') | Out-Null
