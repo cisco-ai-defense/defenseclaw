@@ -5,6 +5,7 @@ import {
   KIND_TO_STYLE,
   CHAR_WIDTH,
   DiagramDefs,
+  DiagramKindIcon,
   ForeignDiv,
   nextDiagramId,
 } from './shared';
@@ -63,26 +64,31 @@ interface ResolvedMessage extends MessageProps {
   toIdx: number;
 }
 
-const PILL_PAD_X = 18;
-const PILL_HEIGHT = 44;
-const COL_MIN_GAP = 160;
+const PILL_PAD_X = 20;
+const PILL_HEIGHT = 58;
+const PILL_MAX_WIDTH = 146;
+const COL_MIN_GAP = 150;
 // Cap how wide any single column gap can grow. Without this, one
 // 60-char message label can push every other column outward and
 // blow the whole diagram past the article column. When a label
 // exceeds this, the chip ellipses inside its foreignObject — the
 // authoring guide tells writers to alias overlong labels into the
 // surrounding prose anyway.
-const COL_MAX_GAP = 360;
-const TOP_MARGIN = 20;
-const PILL_MARGIN_BOTTOM = 18;
-const MESSAGE_GAP = 56;
-const BOTTOM_MARGIN = 28;
+const COL_MAX_GAP = 164;
+const TOP_MARGIN = 24;
+const PILL_MARGIN_BOTTOM = 24;
+const MESSAGE_GAP = 54;
+const BOTTOM_MARGIN = 30;
 const SIDE_MARGIN = 24;
+const CHIP_MIN_WIDTH = 40;
+const CHIP_MAX_WIDTH = 300;
+const CHIP_CHAR_WIDTH = 6.5;
+const CHIP_PAD_X = 20;
 // Same chip-width estimator used inside the renderer (see
 // SequenceLabelChip below). Hoisted so the layout stage can reserve
 // the right amount of space per column without rendering yet.
 function estimateChipWidth(label: string): number {
-  return Math.min(280, Math.max(40, label.length * 6.6 + 20));
+  return Math.min(CHIP_MAX_WIDTH, Math.max(CHIP_MIN_WIDTH, label.length * CHIP_CHAR_WIDTH + CHIP_PAD_X));
 }
 
 // Filter Message children out of the JSX tree, ignoring whitespace
@@ -125,7 +131,7 @@ export function Sequence({
 
   // Resolve pill widths from the label characters.
   const pillWidths = participants.map((p) =>
-    Math.max(96, p.label.length * CHAR_WIDTH + PILL_PAD_X * 2),
+    Math.min(PILL_MAX_WIDTH, Math.max(128, p.label.length * CHAR_WIDTH + PILL_PAD_X * 2 + 22)),
   );
 
   const idIndex = new Map(participants.map((p, i) => [p.id, i]));
@@ -141,7 +147,7 @@ export function Sequence({
   for (let i = 0; i < participants.length - 1; i++) {
     // Each column needs room for both pills' overhang past their
     // lifelines and any message label whose chip spans this gap.
-    const pillContribution = (pillWidths[i] + pillWidths[i + 1]) / 2 + 24;
+    const pillContribution = (pillWidths[i] + pillWidths[i + 1]) / 2 + 14;
     let widestSpanningLabel = 0;
     for (const m of messages) {
       const a = Math.min(m.fromIdx, m.toIdx);
@@ -160,7 +166,7 @@ export function Sequence({
     }
     const desired = Math.max(
       COL_MIN_GAP,
-      Math.max(pillContribution, widestSpanningLabel + 24),
+      Math.max(pillContribution, widestSpanningLabel + 12),
     );
     colGaps.push(Math.min(COL_MAX_GAP, desired));
   }
@@ -191,8 +197,16 @@ export function Sequence({
   // width gate, the data-* attrs, and downstream max-width: ${w}px
   // CSS all read better as integers.
   const lastIdx = participants.length - 1;
+  const selfMessageRight = messages.reduce((right, message) => {
+    if (message.fromIdx !== message.toIdx || !message.label) return right;
+    const labelRight = lifelineXs[message.fromIdx] + 34 + estimateChipWidth(message.label) + SIDE_MARGIN;
+    return Math.max(right, labelRight);
+  }, 0);
   const totalWidth = Math.ceil(
-    lifelineXs[lastIdx] + pillWidths[lastIdx] / 2 + SIDE_MARGIN,
+    Math.max(
+      lifelineXs[lastIdx] + pillWidths[lastIdx] / 2 + SIDE_MARGIN,
+      selfMessageRight,
+    ),
   );
   const lifelineTop = TOP_MARGIN + PILL_HEIGHT + PILL_MARGIN_BOTTOM;
   const totalHeight =
@@ -209,14 +223,12 @@ export function Sequence({
   const sizeStyle: React.CSSProperties =
     fit === 'native'
       ? {
-          display: 'block',
           margin: '0 auto',
           maxWidth: 'none',
           width: totalWidth,
           height: totalHeight,
         }
       : {
-          display: 'block',
           margin: '0 auto',
           width: '100%',
           height: 'auto',
@@ -238,9 +250,37 @@ export function Sequence({
       // Hidden on phones — the timeline list below renders the same
       // information stacked vertically. Both renders ship in the
       // same SSR HTML; no JS for the swap.
-      className="hidden sm:block"
+      className="fd-seq-svg hidden sm:block"
     >
       <DiagramDefs id={id} />
+
+      {/* Alternating swimlane bands make participant ownership readable at
+          a glance without the graph-paper texture used by the old system. */}
+      {resolved.map((participant, index) => {
+        const previousX = resolved[index - 1]?.x;
+        const nextX = resolved[index + 1]?.x;
+        const left = index === 0
+          ? 8
+          : (previousX! + participant.x) / 2;
+        const right = index === resolved.length - 1
+          ? totalWidth - 8
+          : (participant.x + nextX!) / 2;
+        return (
+          <rect
+            key={`lane-${participant.id}`}
+            className="fd-seq-lane"
+            x={left}
+            y={lifelineTop - 8}
+            width={right - left}
+            height={totalHeight - lifelineTop - BOTTOM_MARGIN + 16}
+            style={{
+              fill: index % 2 === 0
+                ? 'var(--diagram-lane-bg)'
+                : 'transparent',
+            }}
+          />
+        );
+      })}
 
       {/*
         Animation cadence (gated on the parent figure's
@@ -264,11 +304,11 @@ export function Sequence({
           y2={totalHeight - BOTTOM_MARGIN + 8}
           style={{
             stroke: p.emphasis
-              ? 'var(--brand-cisco)'
-              : 'var(--color-fd-border)',
+              ? 'var(--diagram-accent-blue)'
+              : 'var(--diagram-border-strong)',
             strokeWidth: p.emphasis ? 1.5 : 1,
-            strokeDasharray: p.emphasis ? undefined : '4 5',
-            opacity: p.emphasis ? 0.7 : 0.9,
+            strokeDasharray: p.emphasis ? undefined : '3 5',
+            opacity: p.emphasis ? 0.72 : 1,
             animationDelay: `${participants.length * 50 + 80}ms`,
           }}
         />
@@ -279,11 +319,38 @@ export function Sequence({
         <ParticipantPill
           key={`pill-${p.id}`}
           p={p}
-          gradientId={id}
-          filterId={id}
           animationDelay={`${i * 50}ms`}
         />
       ))}
+
+      {/* Numbered message rows create an audit-trace reading rhythm. */}
+      {messages.map((_, index) => {
+        const y = lifelineTop + 28 + index * MESSAGE_GAP;
+        return (
+          <g key={`row-${index}`} className="fd-seq-row-guide">
+            <line
+              x1={12}
+              x2={totalWidth - 12}
+              y1={y + 23}
+              y2={y + 23}
+              style={{ stroke: 'var(--diagram-row-rule)', strokeWidth: 1 }}
+            />
+            <text
+              x={14}
+              y={y + 4}
+              style={{
+                fill: 'var(--diagram-row-number)',
+                fontFamily: 'var(--font-mono), ui-monospace, monospace',
+                fontSize: '9px',
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+              }}
+            >
+              {String(index + 1).padStart(2, '0')}
+            </text>
+          </g>
+        );
+      })}
 
       {/* Messages */}
       {messages.map((m, i) => {
@@ -363,7 +430,7 @@ function SequenceTimelineList({
     <ol
       role="list"
       aria-label={`${ariaLabel} (timeline view)`}
-      className="not-prose flex flex-col gap-3 sm:hidden"
+      className="diagram-timeline not-prose sm:hidden"
     >
       {messages.map((m, i) => {
         const from = participants[m.fromIdx];
@@ -375,13 +442,9 @@ function SequenceTimelineList({
         return (
           <li
             key={`tl-${i}`}
-            className={
-              isNote
-                ? 'rounded-lg border border-(--brand-warn)/50 bg-(--brand-warn)/10 px-3 py-2.5 text-sm'
-                : 'rounded-lg border border-fd-border bg-fd-card px-3 py-2.5 text-sm'
-            }
+            className={`diagram-timeline-row${isNote ? ' is-note' : ''}`}
           >
-            <div className="flex items-baseline gap-2 text-xs text-fd-muted-foreground">
+            <div className="diagram-timeline-meta">
               <span className="font-mono tabular-nums">
                 {String(i + 1).padStart(2, '0')}
               </span>
@@ -401,7 +464,7 @@ function SequenceTimelineList({
               )}
             </div>
             {m.label && (
-              <p className="mt-1 text-fd-foreground">{m.label}</p>
+              <p className="diagram-timeline-copy">{m.label}</p>
             )}
           </li>
         );
@@ -418,12 +481,12 @@ function SequenceContainer({
   children: React.ReactNode;
 }) {
   return (
-    <figure className="my-6 not-prose">
-      <div className="overflow-x-auto rounded-xl border border-fd-border bg-fd-card/60 p-5">
+    <figure className="diagram-figure my-8 not-prose">
+      <div className="diagram-canvas overflow-x-auto">
         {children}
       </div>
       {caption && (
-        <figcaption className="mt-2 text-center text-sm text-fd-muted-foreground">
+        <figcaption className="diagram-caption">
           {caption}
         </figcaption>
       )}
@@ -433,13 +496,9 @@ function SequenceContainer({
 
 function ParticipantPill({
   p,
-  gradientId,
-  filterId,
   animationDelay,
 }: {
   p: ResolvedParticipant;
-  gradientId: string;
-  filterId: string;
   // Per-participant entrance delay; gated on the parent figure's
   // `data-animate="entered"`, so SSR paints the pill in its final
   // state until JS hydrates and the diagram scrolls into view.
@@ -447,11 +506,12 @@ function ParticipantPill({
 }) {
   const kind: DiagramKind = p.kind ?? 'generic';
   const style = KIND_TO_STYLE[kind];
+  const accent = style.accent ?? 'var(--diagram-accent-slate)';
   const x = p.x - p.pillW / 2;
   const y = TOP_MARGIN;
   const stroke = p.emphasis
-    ? `url(#${gradientId}-emphasis)`
-    : 'var(--color-fd-border)';
+    ? 'var(--diagram-accent-blue)'
+    : 'var(--diagram-node-border)';
   return (
     <g
       className="fd-seq-pill"
@@ -462,27 +522,25 @@ function ParticipantPill({
         y={y}
         width={p.pillW}
         height={p.pillH}
-        rx={p.pillH / 2}
-        ry={p.pillH / 2}
+        rx={6}
+        ry={6}
         style={{
-          fill: 'var(--color-fd-card)',
+          fill: p.emphasis
+            ? 'var(--diagram-node-emphasis-bg)'
+            : 'var(--diagram-node-bg)',
           stroke,
-          strokeWidth: p.emphasis ? 1.75 : 1,
+          strokeWidth: p.emphasis ? 1.6 : 1,
         }}
-        filter={`url(#${filterId}-shadow)`}
       />
-      {/* Top accent stripe — communicates the kind without overwhelming
-          the pill silhouette. We place it inside the rounded ends with
-          a small inset so the radius stays clean. */}
-      {style.accent && !p.emphasis && (
+      {accent && (
         <rect
-          x={x + 12}
-          y={y + 4}
-          width={p.pillW - 24}
-          height={2}
-          rx={1}
-          ry={1}
-          style={{ fill: style.accent, opacity: 0.85 }}
+          x={x}
+          y={y}
+          width={4}
+          height={p.pillH}
+          rx={3}
+          ry={3}
+          style={{ fill: p.emphasis ? 'var(--diagram-accent-blue)' : accent }}
         />
       )}
       <foreignObject x={x} y={y} width={p.pillW} height={p.pillH}>
@@ -491,22 +549,61 @@ function ParticipantPill({
             width: '100%',
             height: '100%',
             display: 'flex',
+            flexDirection: 'row',
             alignItems: 'center',
             justifyContent: 'center',
-            padding: '0 16px',
+            gap: '10px',
+            padding: '8px 12px 8px 14px',
             boxSizing: 'border-box',
             fontFamily: 'var(--font-sans), system-ui, sans-serif',
-            fontSize: '13px',
-            fontWeight: p.emphasis ? 600 : 500,
-            color: 'var(--color-fd-foreground)',
-            letterSpacing: '-0.005em',
-            textAlign: 'center',
+            fontSize: '12.5px',
+            fontWeight: p.emphasis ? 680 : 620,
+            color: 'var(--diagram-text)',
+            letterSpacing: '-0.01em',
+            textAlign: 'left',
             whiteSpace: 'nowrap',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
           }}
         >
-          {p.label}
+          <span
+            style={{
+              display: 'inline-flex',
+              flex: '0 0 auto',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '28px',
+              height: '28px',
+              border: `1px solid color-mix(in oklab, ${accent} 28%, var(--diagram-border))`,
+              borderRadius: '5px',
+              background: `color-mix(in oklab, ${accent} 8%, var(--diagram-node-bg))`,
+              color: accent,
+            }}
+            aria-hidden
+          >
+            <DiagramKindIcon kind={kind} />
+          </span>
+          <span
+            style={{
+              display: 'flex',
+              minWidth: 0,
+              flex: '1 1 auto',
+              flexDirection: 'column',
+            }}
+          >
+            <span style={{
+              color: accent,
+              fontFamily: 'var(--font-mono), ui-monospace, monospace',
+              fontSize: '8px',
+              fontWeight: 750,
+              letterSpacing: '0.09em',
+              lineHeight: 1,
+              textTransform: 'uppercase',
+            }}>{style.label}</span>
+            <span style={{ marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', width: '100%' }}>
+              {p.label}
+            </span>
+          </span>
         </ForeignDiv>
       </foreignObject>
     </g>
@@ -539,8 +636,8 @@ function SequenceArrow({
   const isReturn = kind === 'return';
   const isAsync = kind === 'async';
   const stroke = from.emphasis || to.emphasis
-    ? 'var(--brand-cisco)'
-    : 'var(--color-fd-foreground)';
+    ? 'var(--diagram-accent-blue)'
+    : 'var(--diagram-edge-strong)';
   const arrow =
     from.emphasis || to.emphasis
       ? `${markerId}-arrow-emphasis`
@@ -555,16 +652,18 @@ function SequenceArrow({
     return (
       <g
         className="fd-seq-message"
-        style={{ opacity, ...(animationDelay && { animationDelay }) }}
+        style={animationDelay ? { animationDelay } : undefined}
       >
         <path
           d={`M ${cx} ${y} h ${r} a ${r} ${r} 0 0 1 0 ${r * 2} h -${r}`}
           style={{
             fill: 'none',
             stroke,
-            strokeWidth: 1.25,
+            strokeWidth: 1.4,
+            strokeOpacity: opacity,
             strokeDasharray: dasharray,
             strokeLinecap: 'round',
+            strokeLinejoin: 'round',
           }}
           markerEnd={`url(#${arrow})`}
         />
@@ -589,7 +688,7 @@ function SequenceArrow({
   return (
     <g
       className="fd-seq-message"
-      style={{ opacity, ...(animationDelay && { animationDelay }) }}
+      style={animationDelay ? { animationDelay } : undefined}
     >
       <line
         x1={x1}
@@ -598,7 +697,8 @@ function SequenceArrow({
         y2={y}
         style={{
           stroke,
-          strokeWidth: 1.25,
+          strokeWidth: 1.4,
+          strokeOpacity: opacity,
           strokeDasharray: dasharray,
           strokeLinecap: 'round',
         }}
@@ -630,7 +730,7 @@ function SequenceLabelChip({
   anchor: 'start' | 'middle' | 'end';
   animationDelay?: string;
 }) {
-  const w = Math.min(280, Math.max(40, label.length * 6.6 + 20));
+  const w = estimateChipWidth(label);
   const h = 22;
   const offsetX = anchor === 'middle' ? -w / 2 : anchor === 'end' ? -w : 0;
   return (
@@ -649,14 +749,14 @@ function SequenceLabelChip({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          padding: '0 9px',
+          padding: '0 6px',
           boxSizing: 'border-box',
           fontFamily: 'var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace',
-          fontSize: '11.5px',
-          color: 'var(--color-fd-muted-foreground)',
-          background: 'var(--color-fd-card)',
-          border: '1px solid var(--color-fd-border)',
-          borderRadius: '6px',
+          fontSize: '11px',
+          fontWeight: 620,
+          lineHeight: 1.15,
+          color: 'var(--diagram-edge-label)',
+          background: 'var(--diagram-canvas)',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
@@ -692,7 +792,7 @@ function SequenceNote({
   const naturalWidth = x2 - x1 + padding * 2;
   const width = Math.max(naturalWidth, minWidth);
   const left = (x1 + x2) / 2 - width / 2;
-  const height = 30;
+  const height = 32;
   return (
     <g
       className="fd-seq-message"
@@ -703,13 +803,12 @@ function SequenceNote({
         y={y - height / 2}
         width={width}
         height={height}
-        rx={6}
-        ry={6}
+        rx={4}
+        ry={4}
         style={{
-          fill: 'color-mix(in oklab, var(--brand-warn) 12%, var(--color-fd-card))',
-          stroke: 'var(--brand-warn)',
-          strokeWidth: 1,
-          opacity: 0.95,
+          fill: 'var(--diagram-note-bg)',
+          stroke: 'var(--diagram-accent-amber)',
+          strokeWidth: 1.2,
         }}
       />
       <foreignObject
@@ -732,7 +831,7 @@ function SequenceNote({
             fontFamily: 'var(--font-sans), system-ui, sans-serif',
             fontSize: '12px',
             fontWeight: 500,
-            color: 'var(--color-fd-foreground)',
+            color: 'var(--diagram-text)',
             textAlign: 'center',
           }}
         >

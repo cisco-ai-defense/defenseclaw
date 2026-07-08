@@ -1,346 +1,225 @@
 import Link from 'next/link';
+import {
+  ArrowRight,
+  Check,
+  CircleDot,
+  Eye,
+  FileSearch,
+  Fingerprint,
+  Network,
+  PauseCircle,
+  Radar,
+  ScanSearch,
+  ShieldCheck,
+} from 'lucide-react';
 import { SoftwareApplicationSchema } from '@/components/structured-data';
-import { HeroLockup } from '@/components/hero-lockup';
-import { RotatingConnectorWord } from '@/components/rotating-connector-word';
-import { TerminalDemo } from '@/components/terminal-demo';
 import { CtaGlowButton } from '@/components/cta-glow-button';
+import { DefenseClawDemo } from '@/components/feature-demo';
+import { EditorialMotionGrid } from '@/components/editorial-motion-grid';
+import { ConnectorBrand } from '@/components/connector-brand';
+import { CapabilityMatrixWrapper } from '@/components/capability-matrix-wrapper';
 import matrix from '@/data/capability-matrix.json';
 
 const connectors = matrix.connectors;
 
+const LIFECYCLE = [
+  {
+    number: '01',
+    title: 'Before execution',
+    body: 'Discover, register, scan, and quarantine capabilities before an agent can load them.',
+    items: ['AI discovery', 'Skill + MCP scanning', 'Registry admission'],
+  },
+  {
+    number: '02',
+    title: 'During execution',
+    body: 'Inspect prompts and tool calls at the connector’s strongest available interception point.',
+    items: ['Runtime rules', 'Policy enforcement', 'Human approval'],
+  },
+  {
+    number: '03',
+    title: 'After execution',
+    body: 'Correlate each decision with durable evidence and export it to the security stack you already use.',
+    items: ['Audit history', 'Observability', 'OTLP + Splunk + webhooks'],
+  },
+];
+
+const CAPABILITIES = [
+  { icon: Radar, title: 'Discover AI running on a host', href: '/docs/ai-discovery' },
+  { icon: FileSearch, title: 'Vet a skill before an agent loads it', href: '/docs/setup/skill-scanner' },
+  { icon: ScanSearch, title: 'Inspect an MCP server’s advertised capabilities', href: '/docs/setup/mcp-scanner' },
+  { icon: ShieldCheck, title: 'Block or audit risky tool calls', href: '/docs/setup/guardrail' },
+  { icon: PauseCircle, title: 'Pause HIGH-risk actions for human approval', href: '/docs/hitl' },
+  { icon: Network, title: 'Send correlated evidence to Grafana, Splunk, OTLP, or webhooks', href: '/docs/observability' },
+];
+
 const STORIES = [
-  {
-    href: '/docs/stories/observe-claude-code',
-    title: 'Stop Claude Code from running rm -rf',
-    body: 'Switch action mode on, prove a destructive shell command never reaches the disk.',
-  },
-  {
-    href: '/docs/stories/prompt-injection-codex',
-    title: 'Catch a prompt injection on Codex',
-    body: 'Regex packs flag the obvious; the LLM judge catches the clever ones.',
-  },
-  {
-    href: '/docs/stories/cursor-secret-exfil',
-    title: 'Block secret exfiltration from Cursor',
-    body: 'Cursor’s beforeShellExecution hook is the stop point. We scan, then ask before it runs.',
-  },
-  {
-    href: '/docs/stories/hitl-approvals',
-    title: 'Approve risky tool calls before they fire',
-    body: 'HITL sits between observe and enforcement. Pause, review, then continue.',
-  },
-  {
-    href: '/docs/stories/local-observability',
-    title: 'Pin local observability in under 60 seconds',
-    body: 'One command brings up Prometheus, Loki, Tempo, and Grafana — pre-wired to the gateway.',
-  },
-  {
-    href: '/docs/stories/switch-connectors',
-    title: 'Switch from OpenClaw to Codex without losing audit history',
-    body: 'The audit DB is connector-agnostic. Setup rewires the data path; nothing else moves.',
-  },
+  { href: '/docs/stories/observe-claude-code', title: 'Stop Claude Code from running a destructive command', body: 'Prove the action never reaches the disk.' },
+  { href: '/docs/stories/prompt-injection-codex', title: 'Catch a prompt injection on Codex', body: 'Combine deterministic rules with an optional judge.' },
+  { href: '/docs/stories/cursor-secret-exfil', title: 'Block secret exfiltration from Cursor', body: 'Use the strongest pre-execution hook the connector exposes.' },
+  { href: '/docs/stories/hitl-approvals', title: 'Approve risky tool calls before they fire', body: 'Pause HIGH findings and return the operator’s decision.' },
+  { href: '/docs/stories/local-observability', title: 'Pin local observability in under 60 seconds', body: 'Follow one event through metrics, logs, traces, and audit.' },
+  { href: '/docs/stories/switch-connectors', title: 'Switch connectors without losing audit history', body: 'Keep the evidence contract stable while the agent changes.' },
 ];
 
-const MODES = [
-  {
-    name: 'Observe',
-    tagline: 'See what your agent does. Block nothing.',
-    body: 'Findings stream to the audit DB and your sinks. Run it for a week before enforcement.',
-  },
-  {
-    name: 'Action',
-    tagline: 'Block on HIGH and CRITICAL.',
-    body: 'CRITICAL findings always block. HIGH findings block unless approval mode pauses them for review.',
-  },
-  {
-    name: 'Ask approval',
-    tagline: 'Pause, review, then continue.',
-    body: 'Reaches the operator via the connector’s native ask, or downgrades to a TUI prompt.',
-  },
-];
-
-// Compact landing-page summary of the audit fan-out — same names that
-// appear in the connector docs, kept as a chip strip so it scans in
-// under a second instead of forcing the visitor through a sentence.
 const AUDIT_SINKS = ['SQLite', 'JSONL', 'OTLP', 'Splunk', 'Webhooks'];
-
-const WORKFLOW = ['Observe', 'Action', 'Ask approval'];
-
-// First sentence of c.notes is enough on the landing page; the full
-// sentence runs onto a second line and dilutes the card's job (point
-// at the dedicated connector page). Defensive split — falls back to
-// the full string if the data ever lacks a period.
-function firstSentence(text: string): string {
-  const idx = text.indexOf('. ');
-  return idx === -1 ? text : `${text.slice(0, idx)}.`;
-}
 
 export default function HomePage() {
   return (
-    <main className="flex flex-1 flex-col">
+    <div className="editorial-home flex flex-1 flex-col">
       <SoftwareApplicationSchema />
 
-      {/* Hero */}
-      <section className="relative isolate overflow-hidden border-b border-fd-border">
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--brand-cisco)/0.12,_transparent_55%),radial-gradient(ellipse_at_bottom_left,_var(--brand-warn)/0.07,_transparent_60%)]"
-        />
-        <div aria-hidden className="hero-grain pointer-events-none absolute inset-0" />
-
-        {/* HeroLockup owns the rotation index and the cadence between
-            the rotating word in the headline and the typewriter in
-            the terminal. Both consumers (<RotatingConnectorWord> and
-            <TerminalDemo>) read the index from context, so the
-            headline and the `defenseclaw setup …` line stay in
-            lockstep regardless of how long any one block takes to
-            type. The page-level layout (grid, eyebrow, h1, lede,
-            CTAs, chip strips, terminal column) lives here as
-            children. */}
-        <HeroLockup>
-          {/* Grid tracks tilt slightly toward the terminal column on lg+
-              (≈45/55) so the install curl URL wraps onto fewer lines
-              without crowding the headline / chip strips on the left. */}
-          <div className="container relative mx-auto grid min-w-0 max-w-7xl gap-10 px-4 py-16 lg:grid-cols-[9fr_11fr] lg:gap-16 lg:py-24">
-            <div className="flex w-full min-w-0 flex-col justify-center gap-6">
-              <span className="inline-flex w-fit items-center gap-2 rounded-full border border-[var(--brand-cisco)]/30 bg-[var(--brand-cisco)]/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
-                <span aria-hidden className="size-1.5 rounded-full bg-[var(--brand-cisco)]" />
-                Official Cisco project · Apache-2.0
-              </span>
-              <h1 className="text-balance wrap-break-word text-4xl font-bold tracking-tight md:text-5xl lg:text-6xl">
-                Security governance for <RotatingConnectorWord />.
-              </h1>
-              <p className="max-w-xl text-pretty text-lg text-fd-muted-foreground">
-                DefenseClaw inspects every prompt, completion, and tool call your AI coding agent
-                makes — block, approve, or audit, per connector.
-              </p>
-              <div className="flex flex-wrap items-center gap-3">
-                <Link
-                  href="/docs/get-started/quickstart"
-                  className="inline-flex items-center gap-2 rounded-md bg-[var(--brand-cisco)] px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-[var(--brand-cisco-strong)]"
-                >
-                  Quickstart
-                  <span aria-hidden>→</span>
-                </Link>
-                <Link
-                  href="/docs/setup/guardrail"
-                  className="inline-flex items-center gap-2 rounded-md border border-fd-border bg-fd-card px-4 py-2 text-sm font-medium transition hover:bg-fd-muted"
-                >
-                  Setup Guardrail
-                </Link>
-                <Link
-                  href="/docs/capability-matrix"
-                  className="inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-fd-muted-foreground transition hover:text-fd-foreground"
-                >
-                  Capability Matrix
-                </Link>
-              </div>
-
-              {/* Three rows compress the same content as before (connectors,
-                  workflow, audit fan-out) with a tight visual rhythm: each
-                  row has a fixed-width label rail with a thin horizontal
-                  divider between rows. The Workflow row's `→` arrows
-                  carry the left-to-right enforcement progression on
-                  their own — an earlier moving-dot underline froze
-                  under prefers-reduced-motion and read as a stray blue
-                  pixel, so the dot was retired. */}
-              <div className="mt-2 rounded-xl border border-fd-border bg-fd-card/40">
-                <HeroChipRow label="Connectors">
-                  {connectors.map((c) => (
-                    <HeroChip key={c.id}>{c.label}</HeroChip>
-                  ))}
-                </HeroChipRow>
-                <HeroChipRow label="Workflow">
-                  <span className="inline-flex flex-wrap items-center gap-1.5">
-                    {WORKFLOW.map((w, i) => (
-                      <span key={w} className="inline-flex items-center gap-1.5">
-                        <HeroChip>{w}</HeroChip>
-                        {i < WORKFLOW.length - 1 && (
-                          <span
-                            aria-hidden
-                            className="text-[var(--brand-cisco-strong)]/70"
-                          >
-                            →
-                          </span>
-                        )}
-                      </span>
-                    ))}
-                  </span>
-                </HeroChipRow>
-                <HeroChipRow label="Audit">
-                  {AUDIT_SINKS.map((s) => (
-                    <HeroChip key={s}>{s}</HeroChip>
-                  ))}
-                </HeroChipRow>
-              </div>
+      <section className="editorial-hero">
+        <EditorialMotionGrid />
+        <div className="editorial-shell editorial-hero-grid">
+          <div className="editorial-hero-copy">
+            <p className="editorial-kicker"><span>DefenseClaw</span> Cisco AI security</p>
+            <h1>Security governance for the entire AI agent lifecycle.</h1>
+            <p className="editorial-lede">
+              Scan skills and MCP servers before admission, inspect prompts and tool calls at runtime, pause risky actions for human approval, and export the evidence to your existing security stack.
+            </p>
+            <div className="editorial-actions">
+              <Link className="editorial-button editorial-button-primary" href="/docs/get-started/quickstart">
+                Quickstart <ArrowRight aria-hidden />
+              </Link>
+              <Link className="editorial-button" href="/docs">
+                Explore how it works
+              </Link>
+              <Link className="editorial-text-link" href="/docs/capability-matrix">
+                Capability Matrix <ArrowRight aria-hidden />
+              </Link>
             </div>
-
-            {/* The terminal pre uses overflow-x-auto, but it can only
-                scroll inside its own box if the grid cell honors
-                min-width:0. Without `min-w-0` the long install curl
-                line pushes the grid track wider than the viewport on
-                phones. */}
-            <div className="flex w-full min-w-0 items-center">
-              <TerminalDemo />
-            </div>
+            <dl className="editorial-proof-strip">
+              <div><dt>Connectors</dt><dd>{connectors.length}</dd></div>
+              <div><dt>Decision modes</dt><dd>Observe · Action · HITL</dd></div>
+              <div><dt>Evidence rails</dt><dd>{AUDIT_SINKS.length}</dd></div>
+            </dl>
           </div>
-        </HeroLockup>
+          <div className="editorial-hero-demo">
+            <DefenseClawDemo scenario="runtime-secret-exfiltration" />
+          </div>
+        </div>
       </section>
 
-      {/* Stories — moved above Three modes so visitors land on
-          concrete "things you can do today" before the conceptual
-          enforcement-tier explainer. */}
-      <section className="border-t border-fd-border bg-fd-card/30 py-16">
-        <div className="container mx-auto max-w-7xl px-4">
-          <div className="mb-8 flex flex-col gap-2">
-            <p className="text-sm font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
-              Stories
-            </p>
-            <h2 className="text-3xl font-semibold tracking-tight">
-              Six things you can do today.
-            </h2>
-          </div>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {STORIES.map((s) => (
-              <Link
-                key={s.href}
-                href={s.href}
-                className="group rounded-xl border border-fd-border bg-fd-card p-5 transition duration-200 hover:-translate-y-0.5 hover:border-[var(--brand-cisco)]/50 hover:shadow-md"
-              >
-                <h3 className="text-base font-semibold">{s.title}</h3>
-                <p className="mt-2 text-sm text-fd-muted-foreground">{s.body}</p>
-                {/* "Read →" is muted at rest so the card body reads as
-                    the primary content; on hover it brightens and
-                    underlines as the click affordance. */}
-                <p className="mt-3 text-sm font-medium text-[var(--brand-cisco-strong)] opacity-70 transition group-hover:opacity-100 group-hover:underline">
-                  Read →
-                </p>
-              </Link>
+      <section className="editorial-section" aria-labelledby="lifecycle-heading">
+        <div className="editorial-shell">
+          <SectionIntro eyebrow="A continuous control plane" title="One control plane for the agent lifecycle" id="lifecycle-heading">
+            Admission, runtime, and evidence operate as one sequence instead of three disconnected security products.
+          </SectionIntro>
+          <div className="lifecycle-rail">
+            {LIFECYCLE.map((phase) => (
+              <article key={phase.number}>
+                <span>{phase.number}</span>
+                <h3>{phase.title}</h3>
+                <p>{phase.body}</p>
+                <ul>{phase.items.map((item) => <li key={item}><CircleDot aria-hidden />{item}</li>)}</ul>
+              </article>
             ))}
           </div>
         </div>
       </section>
 
-      {/* Three modes */}
-      <section className="container mx-auto max-w-7xl px-4 py-16">
-        <div className="mb-8 flex flex-col gap-2">
-          <p className="text-sm font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
-            Three modes, one command
-          </p>
-          <h2 className="text-3xl font-semibold tracking-tight">
-            Start in observe. Earn enforcement.
-          </h2>
-          <p className="max-w-2xl text-fd-muted-foreground">
-            Start in observe. Promote to action when the policy is tuned. Layer approval prompts
-            on top for CRITICAL findings.
-          </p>
-        </div>
-        <div className="grid gap-4 md:grid-cols-3">
-          {MODES.map((m) => (
-            <article
-              key={m.name}
-              className="rounded-xl border border-fd-border bg-fd-card/40 p-6 transition hover:border-[var(--brand-cisco)]/50"
-            >
-              <h3 className="text-xl font-semibold">{m.name}</h3>
-              <p className="mt-3 text-sm font-medium text-[var(--brand-cisco-strong)]">{m.tagline}</p>
-              <p className="mt-2 text-sm text-fd-muted-foreground">{m.body}</p>
-            </article>
-          ))}
+      <section className="editorial-section editorial-section-tinted" aria-labelledby="capabilities-heading">
+        <div className="editorial-shell">
+          <SectionIntro eyebrow="Available now" title="Six things you can do today" id="capabilities-heading">
+            Start with one concrete control, then extend the same policy and evidence contract across the lifecycle.
+          </SectionIntro>
+          <ol className="capability-list">
+            {CAPABILITIES.map((item, index) => {
+              const Icon = item.icon;
+              return (
+                <li key={item.title}>
+                  <Link href={item.href}>
+                    <span className="capability-number">{String(index + 1).padStart(2, '0')}</span>
+                    <Icon aria-hidden />
+                    <strong>{item.title}</strong>
+                    <ArrowRight aria-hidden />
+                  </Link>
+                </li>
+              );
+            })}
+          </ol>
         </div>
       </section>
 
-      {/* Connector grid */}
-      <section className="border-t border-fd-border bg-fd-card/30 py-16">
-        <div className="container mx-auto max-w-7xl px-4">
-          <div className="mb-8 flex flex-col gap-2">
-            <p className="text-sm font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
-              Connectors
-            </p>
-            <h2 className="text-3xl font-semibold tracking-tight">
-              One adapter per agent. Same enforcement contract.
-            </h2>
-            <p className="max-w-2xl text-fd-muted-foreground">
-              Every connector lands in the same gateway with the same block / approve / observe
-              verbs — pick the agent you ship with, the contract is identical.
-            </p>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {connectors.map((c) => (
-              <Link
-                key={c.id}
-                href={`/docs/connectors/${c.id}`}
-                className="group rounded-xl border border-fd-border bg-fd-card p-5 transition duration-200 hover:-translate-y-0.5 hover:border-[var(--brand-cisco)]/50 hover:shadow-md"
-              >
-                <span className="text-base font-semibold">{c.label}</span>
-                <p className="mt-3 text-sm text-fd-muted-foreground">{firstSentence(c.notes)}</p>
-                <p className="mt-3 text-sm font-medium text-[var(--brand-cisco-strong)] opacity-70 transition group-hover:opacity-100 group-hover:underline">
-                  Open page →
-                </p>
-              </Link>
+      <section className="editorial-section" aria-labelledby="coverage-heading">
+        <div className="editorial-shell">
+          <SectionIntro eyebrow="Connector-aware enforcement" title="Use the strongest control each agent exposes" id="coverage-heading">
+            DefenseClaw normalizes the decision contract while preserving the difference between native ask, downgraded confirm, and pre-execution blocking.
+          </SectionIntro>
+          <CapabilityMatrixWrapper className="connector-preview" ariaLabel="Connector capability preview">
+            <table>
+              <thead><tr><th scope="col">Connector</th><th scope="col">Pre-execution block</th><th scope="col">Native ask</th><th scope="col">Fail closed</th></tr></thead>
+              <tbody>
+                {connectors.slice(0, 7).map((connector) => (
+                  <tr key={connector.id}>
+                    <th scope="row">
+                      <Link href={`/docs/connectors/${connector.id}`} className="connector-preview-name">
+                        <ConnectorBrand id={connector.id} size="sm" />
+                        {connector.label}
+                      </Link>
+                    </th>
+                    <td><CapabilityValue value={connector.hooks.canBlock} /></td>
+                    <td><CapabilityValue value={connector.hooks.canAskNative} /></td>
+                    <td><CapabilityValue value={connector.hooks.supportsFailClosed} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CapabilityMatrixWrapper>
+          <Link className="editorial-inline-link" href="/docs/capability-matrix">Compare all {connectors.length} connectors <ArrowRight aria-hidden /></Link>
+        </div>
+      </section>
+
+      <section className="editorial-section editorial-section-tinted" aria-labelledby="stories-heading">
+        <div className="editorial-shell editorial-stories-grid">
+          <SectionIntro eyebrow="Operator stories" title="See the decision in context" id="stories-heading">
+            Concrete walkthroughs connect configuration to the exact interception point, outcome, and audit evidence.
+          </SectionIntro>
+          <ol className="story-list">
+            {STORIES.map((story, index) => (
+              <li key={story.href}>
+                <Link href={story.href}>
+                  <span>{String(index + 1).padStart(2, '0')}</span>
+                  <div><strong>{story.title}</strong><p>{story.body}</p></div>
+                  <ArrowRight aria-hidden />
+                </Link>
+              </li>
             ))}
+          </ol>
+        </div>
+      </section>
+
+      <section className="editorial-install">
+        <div className="editorial-shell editorial-install-grid">
+          <div>
+            <p className="editorial-kicker"><Fingerprint aria-hidden /> Start with evidence</p>
+            <h2>Put a guardrail around your first agent in five minutes.</h2>
+            <p>No LLM key is required for deterministic runtime rules or static scanner checks.</p>
+          </div>
+          <div className="editorial-actions">
+            <CtaGlowButton href="/docs/get-started/install" className="editorial-button editorial-button-primary">
+              Install DefenseClaw <ArrowRight aria-hidden />
+            </CtaGlowButton>
+            <Link className="editorial-button" href="/docs/setup/guardrail">Configure guardrail</Link>
           </div>
         </div>
       </section>
-
-      {/* CTA */}
-      <section className="container mx-auto max-w-3xl px-4 py-20 text-center">
-        <h2 className="text-balance text-3xl font-semibold tracking-tight md:text-4xl">
-          Ready to put a guardrail around your agent?
-        </h2>
-        <p className="mt-4 text-fd-muted-foreground">
-          Five minutes. No LLM key required.
-        </p>
-        <div className="mt-6 flex flex-wrap justify-center gap-3">
-          <CtaGlowButton
-            href="/docs/get-started/install"
-            className="inline-flex items-center gap-2 rounded-md bg-[var(--brand-cisco)] px-5 py-2.5 text-sm font-medium text-white shadow-md transition hover:bg-[var(--brand-cisco-strong)]"
-          >
-            Install DefenseClaw
-          </CtaGlowButton>
-          <Link
-            href="/docs/setup/guardrail"
-            className="inline-flex items-center gap-2 rounded-md border border-fd-border bg-fd-card px-5 py-2.5 text-sm font-medium transition hover:bg-fd-muted"
-          >
-            Setup Guardrail
-          </Link>
-        </div>
-      </section>
-    </main>
-  );
-}
-
-// Hero chip primitives — kept co-located because they exist solely to
-// give the hero left column three scannable rows. The container is a
-// soft card; each row sits inside that card with a fixed-width label
-// rail on the left and the chip cluster on the right, with a thin
-// horizontal divider between rows. Sharing one `HeroChip` ensures
-// connectors, workflow pills, and audit sinks all read with identical
-// weight, and the styling tokens (rounded-full, bg-fd-secondary/50,
-// border-fd-border, text-xs) match the navbar repo-stats pills so the
-// lockup reads as one design system.
-function HeroChipRow({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-2 border-b border-fd-border/60 px-4 py-3 last:border-b-0 sm:flex-row sm:items-baseline sm:gap-4">
-      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-fd-muted-foreground sm:w-24 sm:shrink-0">
-        {label}
-      </span>
-      <div className="flex flex-1 flex-wrap items-center gap-1.5">
-        {children}
-      </div>
     </div>
   );
 }
 
-function HeroChip({ children }: { children: React.ReactNode }) {
+function SectionIntro({ eyebrow, title, id, children }: { eyebrow: string; title: string; id: string; children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-fd-border bg-fd-secondary/60 px-2.5 py-0.5 text-xs text-fd-foreground/85">
-      {children}
-    </span>
+    <div className="editorial-section-intro">
+      <p className="editorial-kicker">{eyebrow}</p>
+      <h2 id={id}>{title}</h2>
+      <p>{children}</p>
+    </div>
   );
+}
+
+function CapabilityValue({ value }: { value: boolean }) {
+  return value
+    ? <span className="capability-yes"><Check aria-hidden />Yes</span>
+    : <span className="capability-no"><Eye aria-hidden />No</span>;
 }

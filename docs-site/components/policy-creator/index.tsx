@@ -262,7 +262,7 @@ export default function PolicyCreator() {
   }
 
   return (
-    <div className="my-6 rounded-2xl border border-fd-border bg-fd-card/30 p-3">
+    <div className="policy-creator my-6 border border-fd-border bg-fd-card/30 p-3">
       <Tabs active={tab} onSwitch={setTab} />
       {shareError && (
         <ShareErrorBanner reason={shareError} onDismiss={() => setShareError(null)} />
@@ -517,7 +517,7 @@ function Tabs({
             ].join(' ')}
           >
             <div className="text-sm font-semibold">{t.label}</div>
-            <div className="text-[11px] opacity-80">{t.hint}</div>
+            <div className="text-[11px] text-fd-muted-foreground">{t.hint}</div>
           </button>
         );
       })}

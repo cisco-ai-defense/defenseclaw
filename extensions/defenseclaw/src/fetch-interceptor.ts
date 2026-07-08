@@ -424,6 +424,8 @@ export const KNOWN_SAFE_DOMAINS: ReadonlyArray<string> = [
   "datadoghq.com",
   "segment.io",
   "segment.com",
+  "graph.microsoft.com",
+  "login.microsoftonline.com",
 ];
 
 export type LLMBodyShape = "messages" | "prompt" | "input" | "contents" | "none";
