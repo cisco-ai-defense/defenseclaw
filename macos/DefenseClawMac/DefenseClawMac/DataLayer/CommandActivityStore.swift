@@ -155,9 +155,7 @@ final class CommandActivityStore {
         maskedEnvironmentKeys: [String] = []
     ) -> String {
         let environment = maskedEnvironmentKeys.map { "\($0)=••••••" }
-        return (environment + [binary] + arguments).map { value in
-            value.contains(where: { $0.isWhitespace }) ? "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" : value
-        }.joined(separator: " ")
+        return (environment + [binary] + arguments).map(ShellQuoting.quote).joined(separator: " ")
     }
 
     private static func inferredEffects(binary: String, arguments: [String], category: String) -> [String] {

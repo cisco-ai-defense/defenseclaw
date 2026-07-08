@@ -20,8 +20,12 @@
 import Foundation
 
 enum ShellQuoting {
+    private static let safeCharacters = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-"
+    )
+
     static func quote(_ value: String) -> String {
-        guard value.contains(where: { $0.isWhitespace || "'\"\\".contains($0) }) else { return value }
+        guard value.isEmpty || !value.unicodeScalars.allSatisfy(safeCharacters.contains) else { return value }
         return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 }

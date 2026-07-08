@@ -25,7 +25,8 @@ struct ConnectorOnboardingTests {
         fallsBackToLegacySingleConnectorOnlyWhenDiscoveryIsEmpty()
         parsesCommandArguments()
         rejectsMalformedCommandArguments()
-        print("ConnectorOnboardingTests and CommandArgumentParser tests passed")
+        quotesDisplayedShellArguments()
+        print("ConnectorOnboardingTests, CommandArgumentParser, and ShellQuoting tests passed")
     }
 
     private static func parsesInstalledConnectorsInSupportedOrder() {
@@ -93,6 +94,15 @@ struct ConnectorOnboardingTests {
     private static func rejectsMalformedCommandArguments() {
         expectParseFailure(#""unclosed"#, "unclosed command quote")
         expectParseFailure("trailing\\", "trailing command backslash")
+    }
+
+    private static func quotesDisplayedShellArguments() {
+        expect(ShellQuoting.quote("defenseclaw") == "defenseclaw", "safe shell token")
+        expect(ShellQuoting.quote("") == "''", "empty shell token")
+        expect(ShellQuoting.quote("two words") == "'two words'", "shell whitespace")
+        expect(ShellQuoting.quote("can't") == "'can'\\''t'", "embedded shell quote")
+        expect(ShellQuoting.quote("$(whoami)") == "'$(whoami)'", "shell command substitution")
+        expect(ShellQuoting.quote("allow;rm") == "'allow;rm'", "shell command separator")
     }
 
     private static func expectParseFailure(_ input: String, _ label: String) {
