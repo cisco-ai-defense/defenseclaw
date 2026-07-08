@@ -164,6 +164,8 @@ class CommandExecutor:
         self._process = process
         try:
             self._process_tree = self._process_tree_factory(process.pid)
+            if os.name == "nt" and self._process_tree is None:
+                raise OSError("Windows process tree setup returned no job object")
         except OSError as exc:
             process.kill()
             await process.wait()

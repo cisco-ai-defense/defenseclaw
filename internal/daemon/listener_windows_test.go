@@ -24,6 +24,9 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestListenerOwnerPIDNativeDisposableIPv4(t *testing.T) {
@@ -96,5 +99,34 @@ func TestListenerAddressMatchingPreservesBindFamilyAndWildcardSemantics(t *testi
 		if got := listenerAddressMatches(tc.host, net.ParseIP(tc.actual)); got != tc.want {
 			t.Errorf("listenerAddressMatches(%q, %q) = %v, want %v", tc.host, tc.actual, got, tc.want)
 		}
+	}
+}
+
+func TestWalkExtendedTCPTableRetriesWhenTheTableGrows(t *testing.T) {
+	original := callExtendedTCPTable
+	t.Cleanup(func() { callExtendedTCPTable = original })
+	calls := 0
+	callExtendedTCPTable = func(table unsafe.Pointer, size *uint32, _ uint32) windows.Errno {
+		calls++
+		switch calls {
+		case 1:
+			*size = uint32(unsafe.Sizeof(uint32(0)))
+			return errorInsufficientBuffer
+		case 2:
+			*size = 2 * uint32(unsafe.Sizeof(uint32(0)))
+			return errorInsufficientBuffer
+		default:
+			*(*uint32)(table) = 0
+			return 0
+		}
+	}
+
+	if err := walkExtendedTCPTable(windows.AF_INET, unsafe.Sizeof(tcp4OwnerPIDRow{}), func(unsafe.Pointer) {
+		t.Fatal("empty synthetic table must not visit rows")
+	}); err != nil {
+		t.Fatalf("walkExtendedTCPTable: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("GetExtendedTcpTable calls = %d, want sizing call plus retry", calls)
 	}
 }

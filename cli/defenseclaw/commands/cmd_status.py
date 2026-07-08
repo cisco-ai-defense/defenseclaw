@@ -196,10 +196,7 @@ def status(app: AppContext, as_json: bool) -> None:
             ):
                 click.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
-            click.echo(
-                f"    {ux._style('unavailable', fg='yellow')} "
-                f"{ux.dim(f'(audit DB error: {db_error})')}"
-            )
+            click.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
         ux.section("Activity")
         if counts is not None:
@@ -209,10 +206,7 @@ def status(app: AppContext, as_json: bool) -> None:
             ):
                 click.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
-            click.echo(
-                f"    {ux._style('unavailable', fg='yellow')} "
-                f"{ux.dim(f'(audit DB error: {db_error})')}"
-            )
+            click.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
     # Observability destinations (OTel exporter + audit sinks)
     _print_observability_status(cfg)
@@ -532,10 +526,7 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     trust_check = "on" if bool(state.get("require_trusted_binary_paths")) else "off"
     click.echo(
         "                "
-        + ux.dim(
-            f"auto guardrail={guardrail_mode} asset_policy={asset_mode} "
-            f"trusted-path-check={trust_check}"
-        )
+        + ux.dim(f"auto guardrail={guardrail_mode} asset_policy={asset_mode} trusted-path-check={trust_check}")
     )
 
     discovered = [r for r in state.get("discovered") or [] if isinstance(r, dict)]
@@ -575,8 +566,7 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
         click.echo("                " + ux.bold("last activation errors"))
         for conn, err in sorted(errors.items()):
             click.echo(
-                f"                  {_friendly_connector_name(conn)} ({conn}) — "
-                f"{ux._style(str(err), fg='yellow')}"
+                f"                  {_friendly_connector_name(conn)} ({conn}) — {ux._style(str(err), fg='yellow')}"
             )
 
 
@@ -736,12 +726,7 @@ def _print_observability_status(cfg) -> None:
     # configured observability (avoids the YAML read when possible).
     from defenseclaw.observability import list_destinations
     from defenseclaw.observability.presets import PRESETS
-    from defenseclaw.platform_support import (
-        is_local_observability_stack_destination,
-        is_local_splunk_stack_destination,
-        local_observability_stack_supported,
-        local_splunk_stack_supported,
-    )
+    from defenseclaw.platform_support import destination_platform_unsupported
 
     try:
         destinations = list_destinations(cfg.data_dir)
@@ -756,23 +741,11 @@ def _print_observability_status(cfg) -> None:
 
     for d in destinations:
         label = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
-        local_unsupported = (
-            (
-                not local_observability_stack_supported()
-                and is_local_observability_stack_destination(
-                    name=d.name,
-                    preset_id=d.preset_id,
-                    kind=d.kind,
-                    endpoint=d.endpoint,
-                )
-            )
-            or (
-                not local_splunk_stack_supported()
-                and is_local_splunk_stack_destination(
-                    kind=d.kind,
-                    endpoint=d.endpoint,
-                )
-            )
+        local_unsupported = destination_platform_unsupported(
+            name=d.name,
+            preset_id=d.preset_id,
+            kind=d.kind,
+            endpoint=d.endpoint,
         )
         if local_unsupported:
             state = ux._style("unsupported on native Windows", fg="yellow")
@@ -823,9 +796,7 @@ def _scanner_overrides_summary(cfg) -> str:
                 for surface in ("install", "file", "runtime"):
                     action = surface_actions.get(surface)
                     if action:
-                        flat.append(
-                            (str(scanner_type), str(severity), surface, str(action))
-                        )
+                        flat.append((str(scanner_type), str(severity), surface, str(action)))
     return format_scanner_overrides_summary(tuple(flat))
 
 
@@ -905,13 +876,16 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         name = str(row.get("connector") or "").strip().lower()
         if not name:
             continue
-        rows.setdefault(name, {
-            "name": name,
-            "friendly": _friendly_connector_name(name),
-            "mode": _effective_status_mode(cfg, name, "automatic"),
-            "enabled": True,
-            "source": "automatic",
-        })
+        rows.setdefault(
+            name,
+            {
+                "name": name,
+                "friendly": _friendly_connector_name(name),
+                "mode": _effective_status_mode(cfg, name, "automatic"),
+                "enabled": True,
+                "source": "automatic",
+            },
+        )
     return [rows[name] for name in sorted(rows)]
 
 

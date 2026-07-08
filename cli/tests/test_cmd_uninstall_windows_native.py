@@ -21,6 +21,46 @@ from pathlib import Path
 
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")
 class WindowsManagedVenvResetTests(unittest.TestCase):
+    def test_windows_process_access_mask_constants_preserve_required_rights(self) -> None:
+        from defenseclaw.commands import cmd_uninstall
+
+        access_mask = (
+            cmd_uninstall._WIN_SYNCHRONIZE  # noqa: SLF001
+            | cmd_uninstall._WIN_PROCESS_QUERY_LIMITED_INFORMATION  # noqa: SLF001
+        )
+
+        self.assertEqual(access_mask, 0x00101000)
+
+    def test_deferred_helper_accepts_utf8_shim_for_non_ascii_profile(self) -> None:
+        from defenseclaw.commands import windows_uninstall_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = root / "kévin profile"
+            install_root = profile / ".local" / "bin"
+            data_dir = profile / ".defenseclaw"
+            managed_venv = data_dir / ".venv"
+            install_root.mkdir(parents=True)
+            managed_venv.mkdir(parents=True)
+            target = install_root / "defenseclaw-gateway.exe"
+            target.write_bytes(b"MZfixture")
+            (install_root / "defenseclaw.cmd").write_text(
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n',
+                encoding="utf-8",
+            )
+            plan = {
+                "install_root": str(install_root),
+                "data_dir": str(data_dir),
+                "managed_venv": str(managed_venv),
+                "protected_paths": [],
+                "binary_targets": [str(target)],
+                "remove_data_dir": False,
+            }
+
+            _install_root, _data_dir, targets = windows_uninstall_helper._validate_plan(plan)
+
+            self.assertEqual(targets, [os.path.normcase(os.path.abspath(target))])
+
     def test_deferred_helper_rejects_unowned_target_and_reports_failure(self) -> None:
         source = Path(__file__).resolve().parents[1] / "defenseclaw" / "commands" / "windows_uninstall_helper.py"
         with tempfile.TemporaryDirectory() as tmp:

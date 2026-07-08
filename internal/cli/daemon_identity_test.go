@@ -315,6 +315,8 @@ func TestSidecarURLsNormalizeWildcardAndIPv6(t *testing.T) {
 	}{
 		{"0.0.0.0", "http://127.0.0.1:18970/health", "http://127.0.0.1:18970/status"},
 		{"::", "http://[::1]:18970/health", "http://[::1]:18970/status"},
+		{"::0", "http://[::1]:18970/health", "http://[::1]:18970/status"},
+		{"0:0:0:0:0:0:0:0", "http://[::1]:18970/health", "http://[::1]:18970/status"},
 		{"::1", "http://[::1]:18970/health", "http://[::1]:18970/status"},
 	} {
 		cfg := config.DefaultConfig()

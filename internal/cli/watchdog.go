@@ -668,8 +668,8 @@ func writeWatchdogPIDInfo(f *os.File, info watchdogPIDInfo) error {
 // readWatchdogPIDInfo parses the JSON PID file. For backward compat with
 // older watchdog versions that wrote a bare integer PID, the parser also
 // accepts a plain decimal number; in that case the returned info has no
-// Executable / StartTime and verifyWatchdogProcess only does the liveness
-// check.
+// Executable / StartTime / StartIdentity and verifyWatchdogProcess only does
+// the liveness check.
 func readWatchdogPIDInfo(path string) (watchdogPIDInfo, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -695,11 +695,11 @@ func readWatchdogPIDInfo(path string) (watchdogPIDInfo, error) {
 }
 
 // verifyWatchdogProcess returns true only if the PID still resolves to a
-// running process AND, when an executable fingerprint is available and the
-// platform exposes /proc, /proc/<pid>/exe matches. Without this the
-// previous implementation treated ANY live process at the recorded PID as
-// "the watchdog" and would happily terminate an unrelated process that
-// grabbed the recycled PID after a crash. See DeepSec S3.HIGH_BUG.
+// running process and every available identity fingerprint matches. Windows
+// uses the kernel process-creation identity; Linux additionally compares
+// /proc/<pid>/exe. Without this the previous implementation treated ANY live
+// process at the recorded PID as "the watchdog" and could terminate an
+// unrelated process that grabbed the recycled PID after a crash.
 func verifyWatchdogProcess(info watchdogPIDInfo) bool {
 	if info.PID <= 0 {
 		return false
@@ -711,13 +711,20 @@ func verifyWatchdogProcess(info watchdogPIDInfo) bool {
 	if !watchdogProcessAlive(info.PID, proc) {
 		return false
 	}
+	if info.StartIdentity != "" {
+		currentIdentity := watchdogProcessStartIdentity(info.PID)
+		if currentIdentity == "" || currentIdentity != info.StartIdentity {
+			return false
+		}
+	}
 	if info.Executable == "" {
-		// Legacy/bare-int pid file: liveness is all we can verify.
+		// No executable fingerprint remains; any start identity was already
+		// verified above. Legacy bare-int files therefore use liveness only.
 		return true
 	}
-	// Linux exposes the running binary at /proc/<pid>/exe; on platforms
-	// without it (macOS, Windows) we conservatively trust the liveness
-	// check, matching the daemon-side limitation.
+	// Linux exposes the running binary at /proc/<pid>/exe. On platforms
+	// without it, retain the verified start identity when available and
+	// otherwise preserve the legacy liveness fallback.
 	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
 	if err != nil || exePath == "" {
 		return true

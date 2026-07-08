@@ -38,6 +38,31 @@ function Protect-LogText([AllowNull()][string]$Text) {
     return $safe
 }
 
+function Protect-TestDirectory([string]$Path) {
+    $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.User) { throw 'current Windows identity has no user SID' }
+
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    foreach ($sid in @($identity.User, $system)) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+    [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
+}
+
 function Invoke-NativeProcess {
     [CmdletBinding()]
     param(
@@ -90,24 +115,26 @@ function Invoke-NativeProcess {
 
 function Get-EventLines([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
-    for ($attempt = 1; $attempt -le 20; $attempt++) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
         $stream = $null
         $reader = $null
         try {
-            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $share = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
             $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
-            $reader = [IO.StreamReader]::new($stream)
-            $text = $reader.ReadToEnd()
-            return @($text -split "`r?`n" | Where-Object { $_.Trim() })
-        } catch [IO.IOException] {
-            if ($attempt -eq 20) { throw }
-            Start-Sleep -Milliseconds 100
+            $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+            $content = $reader.ReadToEnd()
+            return @($content -split '\r?\n' | Where-Object { $_.Trim() })
+        } catch {
+            $exception = $_.Exception
+            if ($exception -isnot [IO.IOException] -and $exception.InnerException -isnot [IO.IOException]) { throw }
+            if ([DateTime]::UtcNow -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 50
         } finally {
             if ($null -ne $reader) { $reader.Dispose() }
             elseif ($null -ne $stream) { $stream.Dispose() }
         }
-    }
-    return @()
+    } while ([DateTime]::UtcNow -lt $deadline)
 }
 
 function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
@@ -121,9 +148,9 @@ function Test-BlockVerdict([string]$Path, [int]$Since) {
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
-            $event = $line | ConvertFrom-Json
-            if ($event.event_type -eq 'verdict' -and $event.verdict.action -in @('block', 'deny')) { return $true }
-            if ($event.event_type -eq 'scan' -and $event.scan.verdict -in @('block', 'deny')) { return $true }
+            $eventRecord = $line | ConvertFrom-Json
+            if ($eventRecord.event_type -eq 'verdict' -and $eventRecord.verdict.action -in @('block', 'deny')) { return $true }
+            if ($eventRecord.event_type -eq 'scan' -and $eventRecord.scan.verdict -in @('block', 'deny')) { return $true }
         } catch { continue }
     }
     return $false
@@ -156,10 +183,10 @@ function Get-LatestHookDecision([string]$Path, [string]$Name, [int]$Since) {
     $match = $null
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
-            $event = $line | ConvertFrom-Json
-            if ($event.event_type -ne 'hook_decision' -or $null -eq $event.hook_decision) { continue }
-            if (-not [string]::Equals([string]$event.hook_decision.connector, $Name, [StringComparison]::OrdinalIgnoreCase)) { continue }
-            $match = $event.hook_decision
+            $eventRecord = $line | ConvertFrom-Json
+            if ($eventRecord.event_type -ne 'hook_decision' -or $null -eq $eventRecord.hook_decision) { continue }
+            if (-not [string]::Equals([string]$eventRecord.hook_decision.connector, $Name, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $match = $eventRecord.hook_decision
         } catch { continue }
     }
     return $match
@@ -170,18 +197,18 @@ function Test-OtlpEvent([string]$Path, [string]$Name, [int]$Since) {
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
-            $event = $line | ConvertFrom-Json
-            if ($event.event_type -in @('tool_invocation', 'llm_prompt', 'llm_response') -and $line.ToLowerInvariant().Contains($Name.ToLowerInvariant())) { return $true }
+            $eventRecord = $line | ConvertFrom-Json
+            if ($eventRecord.event_type -in @('tool_invocation', 'llm_prompt', 'llm_response') -and $line.ToLowerInvariant().Contains($Name.ToLowerInvariant())) { return $true }
         } catch { continue }
     }
     return $false
 }
 
-function Write-Result([string]$Event, [string]$Status, [string]$Detail = '') {
-    $record = [ordered]@{ connector = $Connector; os = 'windows'; event = $Event; status = $Status; version = $script:AgentVersion; detail = (Protect-LogText $Detail) }
+function Write-Result([string]$EventName, [string]$Status, [string]$Detail = '') {
+    $record = [ordered]@{ connector = $Connector; os = 'windows'; event = $EventName; status = $Status; version = $script:AgentVersion; detail = (Protect-LogText $Detail) }
     $json = $record | ConvertTo-Json -Compress
     [IO.File]::AppendAllText($script:ResultsPath, $json + [Environment]::NewLine)
-    Write-Host "[$($Status.ToUpperInvariant())] $Connector/windows/$Event $($record.detail)"
+    Write-Host "[$($Status.ToUpperInvariant())] $Connector/windows/$EventName $($record.detail)"
 }
 
 function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0), [string]$InputPath = '', [int]$Timeout = $CommandTimeoutSeconds) {
@@ -277,7 +304,17 @@ function Assert-DoctorHookRegistration {
 }
 
 function Initialize-DefenseClawEnv {
-    [IO.Directory]::CreateDirectory($env:DEFENSECLAW_HOME) | Out-Null
+    $privateDirectories = @(
+        $env:DEFENSECLAW_HOME,
+        (Join-Path $env:DEFENSECLAW_HOME 'quarantine'),
+        (Join-Path $env:DEFENSECLAW_HOME 'plugins'),
+        (Join-Path $env:DEFENSECLAW_HOME 'policies'),
+        (Join-Path $env:DEFENSECLAW_HOME 'connector_backups'),
+        (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\codex'),
+        (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\claudecode'),
+        (Join-Path $env:DEFENSECLAW_HOME 'hooks')
+    )
+    foreach ($directory in $privateDirectories) { Protect-TestDirectory $directory }
     $envPath = Join-Path $env:DEFENSECLAW_HOME '.env'
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($name in @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LLM_API_KEY')) {
@@ -304,17 +341,17 @@ function Invoke-Teardown {
     }
 }
 
-function Invoke-Hook([string]$Event, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
+function Invoke-Hook([string]$EventName, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
-    $result = Invoke-Tool 'defenseclaw-hook' @('hook', '--connector', $Connector, '--event', $Event) @(0, 2) $Payload
+    $result = Invoke-Tool 'defenseclaw-hook' @('hook', '--connector', $Connector, '--event', $EventName) @(0, 2) -InputPath $Payload
     Start-Sleep -Milliseconds 800
-    if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $before)) { throw "$Event did not reach the gateway" }
-    if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$Event should allow but exited $($result.ExitCode)" }
-    if ($Expected -eq 'block' -and $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') { throw "$Event did not shape a block decision" }
-    if ($Expected -eq 'block' -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$Event has no gateway block verdict" }
-    if ($RequireGatewayBlock -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$Event has no observe-mode would-block verdict" }
-    Write-Result "$Event`:fires" pass "jsonl line $before"
-    Write-Result "$Event`:verdict" pass "exit=$($result.ExitCode) expected=$Expected"
+    if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $before)) { throw "$EventName did not reach the gateway" }
+    if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$EventName should allow but exited $($result.ExitCode)" }
+    if ($Expected -eq 'block' -and $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') { throw "$EventName did not shape a block decision" }
+    if ($Expected -eq 'block' -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no gateway block verdict" }
+    if ($RequireGatewayBlock -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no observe-mode would-block verdict" }
+    Write-Result "$EventName`:fires" pass "jsonl line $before"
+    Write-Result "$EventName`:verdict" pass "exit=$($result.ExitCode) expected=$Expected"
 }
 
 function New-DangerousCommandPayload([string]$Name, [string]$Command, [string]$Root) {
@@ -540,12 +577,12 @@ function Install-Agent {
 }
 
 function Invoke-Agent([string]$Label, [string]$Prompt, [int[]]$AllowedExitCodes = @(0)) {
-    $args = if ($Connector -eq 'codex') {
+    $agentArgs = if ($Connector -eq 'codex') {
         @('exec', '--json', '--full-auto', '--model', ($env:CODEX_MODEL ?? 'gpt-5-mini'), $Prompt)
     } else {
         @('-p', $Prompt, '--output-format', 'json', '--model', ($env:CLAUDE_MODEL ?? 'claude-haiku-4-5'), '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash')
     }
-    return Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList $args -TimeoutSeconds $CommandTimeoutSeconds -AllowedExitCodes $AllowedExitCodes -LogPath (Join-Path $script:LogRoot "agent-$Label.log")
+    return Invoke-NativeProcess -FilePath $script:AgentPath -ArgumentList $agentArgs -TimeoutSeconds $CommandTimeoutSeconds -AllowedExitCodes $AllowedExitCodes -LogPath (Join-Path $script:LogRoot "agent-$Label.log")
 }
 
 function Assert-Evidence([int]$Since = 0) {
@@ -651,12 +688,31 @@ function Invoke-LiveRun {
     Write-Result teardown pass
 }
 
-function Stop-IsolatedProcesses {
+function Stop-IsolatedProcessTree {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
     $root = [IO.Path]::GetFullPath($StateRoot)
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
-    } | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $descendantIds = @{}
+    $frontier = @([int]$PID)
+    while ($frontier.Count -gt 0) {
+        $children = @($processes | Where-Object {
+            [int]$_.ProcessId -ne $PID -and
+            [int]$_.ParentProcessId -in $frontier -and
+            -not $descendantIds.ContainsKey([int]$_.ProcessId)
+        })
+        foreach ($child in $children) { $descendantIds[[int]$child.ProcessId] = $true }
+        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
+    }
+    foreach ($process in $processes) {
+        $processId = [int]$process.ProcessId
+        $matchesRoot = $process.CommandLine -and
+            $process.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($processId -ne $PID -and ($descendantIds.ContainsKey($processId) -or $matchesRoot) -and
+            $PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -684,7 +740,7 @@ if (-not $NoRun) {
     if (-not $HomeRoot.StartsWith($StateRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw 'HomeRoot must be contained by StateRoot'
     }
-    [IO.Directory]::CreateDirectory($StateRoot) | Out-Null
+    Protect-TestDirectory $StateRoot
     $script:ResultsPath = if ($ResultsPath) { [IO.Path]::GetFullPath($ResultsPath) } else { Join-Path $StateRoot 'results.jsonl' }
     $script:ArtifactPath = if ($ArtifactPath) { [IO.Path]::GetFullPath($ArtifactPath) } else { Join-Path $StateRoot 'artifacts' }
     [IO.Directory]::CreateDirectory((Split-Path -Parent $script:ResultsPath)) | Out-Null
@@ -693,13 +749,13 @@ if (-not $NoRun) {
     $script:CommandIndex = 0; $script:AgentVersion = 'unversioned'
     $env:USERPROFILE = $HomeRoot; $env:HOME = $env:USERPROFILE
     $env:DEFENSECLAW_HOME = if ($useHomeDataRoot) { Join-Path $HomeRoot '.defenseclaw' } else { Join-Path $StateRoot 'defenseclaw' }
-    [IO.Directory]::CreateDirectory($env:USERPROFILE) | Out-Null
+    Protect-TestDirectory $env:USERPROFILE
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'
     if ($Operation -eq 'capture') { Stage-Diagnostics; return }
     if ($Operation -eq 'cleanup') {
         try { Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 15 | Out-Null } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
-        Stop-IsolatedProcesses
+        Stop-IsolatedProcessTree
         Remove-Item -LiteralPath $StateRoot -Recurse -Force -ErrorAction SilentlyContinue
         return
     }
@@ -712,6 +768,6 @@ if (-not $NoRun) {
         try { Invoke-Teardown } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
         try { Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 15 | Out-Null } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
         Stage-Diagnostics
-        Stop-IsolatedProcesses
+        Stop-IsolatedProcessTree
     }
 }

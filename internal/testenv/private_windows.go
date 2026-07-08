@@ -39,6 +39,25 @@ func PrivateTempDir(t *testing.T) string {
 			t.Errorf("remove private temp dir %s: %v", dir, err)
 		}
 	})
+	// Some Windows CI images assign newly created objects to the built-in
+	// Administrators group. This path was just created by this helper, so make
+	// the current user its explicit owner before exercising the production
+	// refusal to rewrite genuinely foreign-owned directories.
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		dir,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		user.User.Sid,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("own private temp dir: %v", err)
+	}
 	if err := safefile.ProtectDirectory(dir); err != nil {
 		t.Fatalf("protect private temp dir: %v", err)
 	}

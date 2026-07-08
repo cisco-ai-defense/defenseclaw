@@ -43,11 +43,13 @@ import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import defenseclaw.commands.cmd_setup_observability as observability_module
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup_observability import observability as observability_cmd
 from defenseclaw.context import AppContext
 from defenseclaw.observability import (
     PRESETS,
+    Destination,
     apply_preset,
     list_destinations,
     migrate_flat_otel,
@@ -59,6 +61,30 @@ from defenseclaw.observability import (
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.presets import Preset
 from defenseclaw.tui.panels.setup import OBSERVABILITY_PRESETS
+
+
+def test_destination_header_aligns_with_unsupported_rows(capsys) -> None:
+    destination = Destination(
+        name="fixture",
+        target="otel",
+        kind="otel",
+        enabled=False,
+        preset_id="fixture-preset",
+        endpoint="https://example.invalid/otlp",
+        protocol="grpc",
+        signals={"traces": True, "metrics": False, "logs": False},
+    )
+    with (
+        patch.object(observability_module, "_destination_platform_status", return_value="unsupported"),
+        patch.object(observability_module.ux, "bold", side_effect=lambda value: value),
+    ):
+        observability_module._print_destination_header()
+        observability_module._print_destination_row(destination)
+
+    header, _separator, row = capsys.readouterr().out.splitlines()
+    assert header.index("PROTOCOL") == row.index("grpc")
+    assert header.index("SIGNALS") == row.index("traces")
+    assert header.index("PRESET") == row.index("fixture-preset")
 
 # ---------------------------------------------------------------------------
 # flat OTel migration

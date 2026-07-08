@@ -17,7 +17,7 @@
 package inventory
 
 import (
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 )
@@ -60,7 +60,7 @@ func collectWindowsSnapshot(reader windowsSnapshotReader) ([]processInfo, error)
 	}
 	infos := make([]processInfo, 0, len(entries))
 	for _, entry := range entries {
-		comm := strings.ToLower(strings.TrimSpace(filepath.Base(entry.Comm)))
+		comm := windowsProcessBasename(entry.Comm)
 		if entry.PID <= 0 || comm == "" {
 			continue
 		}
@@ -126,9 +126,17 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 }
 
 func normalizedWindowsProcessName(value string) string {
-	name := strings.ToLower(strings.TrimSpace(filepath.Base(value)))
+	name := windowsProcessBasename(value)
 	for _, suffix := range []string{".exe", ".cmd"} {
 		name = strings.TrimSuffix(name, suffix)
 	}
 	return name
+}
+
+func windowsProcessBasename(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(path.Base(strings.ReplaceAll(value, `\`, "/")))
 }

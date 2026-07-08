@@ -9185,7 +9185,7 @@ def setup_splunk(
     # Gate every explicit local route before AppContext access, executable
     # lookup, prompts, token generation, bundle refresh, or config writes.
     # Remote O11y/HEC routes deliberately remain available on Windows.
-    local_route_requested = enable_logs or s3_export or show_credentials or (disable and enable_logs)
+    local_route_requested = enable_logs or s3_export
     if local_route_requested and not local_shell_stacks_supported():
         raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
 

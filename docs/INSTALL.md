@@ -50,8 +50,8 @@ upgrades, and troubleshooting.
 
 - **Certified:** Codex CLI and Claude Code.
 - **Not certified:** Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity,
-  OpenCode, and Hermes. These require separate certification; Hermes is preview,
-  which is not the same as certified.
+  OpenCode, and Hermes. These require separate certification before use on
+  native Windows x64.
 - **Unsupported:** OpenHands, OmniGent, OpenClaw, and ZeptoClaw.
 
 Certified command-hook connectors invoke the native, no-console

@@ -684,7 +684,7 @@ def test_f0301_local_install_rejects_parent_traversal(app_ctx, tmp_path):
         )
 
     assert result.exit_code != 0, result.output
-    assert "invalid plugin" in result.output.lower()
+    assert "invalid plugin identity" in result.output.lower()
     # The out-of-tree file and the managed dir must both be intact.
     assert marker.exists()
     assert plugin_dir.exists()

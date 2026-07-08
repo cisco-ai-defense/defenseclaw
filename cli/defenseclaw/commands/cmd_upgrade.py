@@ -44,6 +44,10 @@ import requests
 
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.platform_support import (
+    WINDOWS_CERTIFIED_ARCHITECTURES,
+    WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
+)
 
 GITHUB_REPO = "cisco-ai-defense/defenseclaw"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}"
@@ -414,11 +418,14 @@ def _detect_platform() -> tuple[str, str]:
         ux.err(f"Unsupported OS: {system}", indent="  ")
         raise SystemExit(1)
 
-    if system == "windows" and arch != "amd64":
+    if system == "windows" and arch in WINDOWS_NOT_CERTIFIED_ARCHITECTURES:
         ux.err(
-            "Windows ARM64 is not certified for this release; use certified Windows x64 (amd64).",
+            f"Windows {arch.upper()} is not certified for this release; use certified Windows x64 (amd64).",
             indent="  ",
         )
+        raise SystemExit(1)
+    if system == "windows" and arch not in WINDOWS_CERTIFIED_ARCHITECTURES:
+        ux.err(f"Unsupported Windows architecture: {arch}", indent="  ")
         raise SystemExit(1)
 
     return system, arch

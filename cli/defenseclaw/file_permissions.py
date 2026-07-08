@@ -18,11 +18,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import TextIO
 
 
 class UnsafePathError(OSError):
@@ -48,12 +51,31 @@ def make_private_directory(path: str | os.PathLike[str]) -> None:
 def protect_private_file(path: str | os.PathLike[str]) -> None:
     """Tighten an existing regular file to POSIX 0600 or a private DACL."""
     target = os.path.abspath(os.fspath(path))
-    _reject_reparse_path(target, allow_missing=False)
-    fd = os.open(target, os.O_RDONLY)
+    fd = open_regular_file_no_follow(target)
     try:
         set_file_mode(fd, target, 0o600)
     finally:
         os.close(fd)
+
+
+def open_regular_file_no_follow(path: str | os.PathLike[str]) -> int:
+    """Open one regular file without following a swapped symlink/reparse point."""
+    target = os.path.abspath(os.fspath(path))
+    _reject_reparse_chain(os.path.dirname(target) or os.curdir)
+    expected = _reject_reparse_path(target, allow_missing=False)
+    assert expected is not None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(target, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise UnsafePathError(f"refusing sensitive access to non-file: {target}")
+        if not os.path.samestat(expected, opened):
+            raise UnsafePathError(f"sensitive file changed while opening: {target}")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
 
 
 def set_file_mode(fd: int, path: str, mode: int) -> None:
@@ -81,6 +103,56 @@ def set_file_mode(fd: int, path: str, mode: int) -> None:
         fchmod(fd, mode)
     else:
         os.chmod(path, mode)
+
+
+def atomic_write_text_secure(
+    path: str,
+    write: Callable[[TextIO], None],
+    *,
+    prefix: str,
+) -> None:
+    """Atomically replace a secret-bearing text file without widening access.
+
+    A new parent directory is owner-only on POSIX, while an existing directory
+    is never chmodded. The staging file is protected before ``write`` receives
+    its stream, and every failure path closes and removes the staging file.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+
+    target_mode = 0o600
+    if os.name != "nt":
+        try:
+            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            existing_mode = None
+        if existing_mode is not None and existing_mode != 0o600:
+            target_mode = existing_mode & 0o600
+            if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
+                target_mode = 0o640
+            elif target_mode == 0:
+                target_mode = 0o600
+
+    fd = -1
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
+        set_file_mode(fd, tmp, target_mode)
+        stream = os.fdopen(fd, "w")
+        fd = -1
+        with stream:
+            write(stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 def copy_windows_dacl(source: str, destination: str) -> None:
@@ -111,13 +183,26 @@ def copy_windows_dacl(source: str, destination: str) -> None:
     ]
     get_file_security.restype = wintypes.BOOL
 
-    set_file_security = advapi32.SetFileSecurityW
-    set_file_security.argtypes = [
-        wintypes.LPCWSTR,
+    get_descriptor_dacl = advapi32.GetSecurityDescriptorDacl
+    get_descriptor_dacl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    get_descriptor_dacl.restype = wintypes.BOOL
+
+    set_named_security_info = advapi32.SetNamedSecurityInfoW
+    set_named_security_info.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
         wintypes.DWORD,
         wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
     ]
-    set_file_security.restype = wintypes.BOOL
+    set_named_security_info.restype = wintypes.DWORD
 
     needed = wintypes.DWORD()
     ctypes.set_last_error(0)
@@ -141,12 +226,98 @@ def copy_windows_dacl(source: str, destination: str) -> None:
         ctypes.byref(needed),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
-    if not set_file_security(
-        destination,
-        dacl_security_information | protected_dacl_security_information,
+
+    dacl_present = wintypes.BOOL()
+    dacl = wintypes.LPVOID()
+    dacl_defaulted = wintypes.BOOL()
+    if not get_descriptor_dacl(
         descriptor,
+        ctypes.byref(dacl_present),
+        ctypes.byref(dacl),
+        ctypes.byref(dacl_defaulted),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
+    if not dacl_present.value or not dacl.value:
+        raise OSError(f"refusing to copy a missing or NULL Windows DACL: {source}")
+
+    result = set_named_security_info(
+        destination,
+        1,  # SE_FILE_OBJECT
+        dacl_security_information | protected_dacl_security_information,
+        None,
+        None,
+        dacl,
+        None,
+    )
+    if result:
+        raise OSError(result, ctypes.FormatError(result), destination)
+    if not _windows_dacl_is_protected(destination):
+        raise OSError(f"copied Windows DACL remains inheritable: {destination}")
+
+
+def _windows_dacl_is_protected(path: str | os.PathLike[str]) -> bool:
+    """Return whether *path* has the ``SE_DACL_PROTECTED`` control bit."""
+
+    if os.name != "nt":
+        raise OSError("Windows DACL inspection is only available on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    dacl_security_information = 0x00000004
+    error_insufficient_buffer = 122
+    se_dacl_protected = 0x1000
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    get_file_security = advapi32.GetFileSecurityW
+    get_file_security.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    get_file_security.restype = wintypes.BOOL
+    get_descriptor_control = advapi32.GetSecurityDescriptorControl
+    get_descriptor_control.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    get_descriptor_control.restype = wintypes.BOOL
+
+    needed = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    found = get_file_security(
+        os.fspath(path),
+        dacl_security_information,
+        None,
+        0,
+        ctypes.byref(needed),
+    )
+    error = ctypes.get_last_error()
+    if not found and error != error_insufficient_buffer:
+        raise ctypes.WinError(error)
+
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not get_file_security(
+        os.fspath(path),
+        dacl_security_information,
+        descriptor,
+        needed,
+        ctypes.byref(needed),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    if not get_descriptor_control(
+        descriptor,
+        ctypes.byref(control),
+        ctypes.byref(revision),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return bool(control.value & se_dacl_protected)
 
 
 def atomic_write_private(
@@ -487,18 +658,19 @@ def _reject_reparse_chain(path: str) -> None:
         current = current.parent
 
 
-def _reject_reparse_path(path: str, *, allow_missing: bool) -> None:
+def _reject_reparse_path(path: str, *, allow_missing: bool) -> os.stat_result | None:
     try:
         info = os.lstat(path)
     except FileNotFoundError:
         if allow_missing:
-            return
+            return None
         raise
     if os.path.islink(path):
         raise UnsafePathError(f"refusing sensitive write through symlink: {path}")
     attributes = getattr(info, "st_file_attributes", 0)
     if attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
         raise UnsafePathError(f"refusing sensitive write through reparse point: {path}")
+    return info
 
 
 def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, int, str]]]:

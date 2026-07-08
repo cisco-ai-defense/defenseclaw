@@ -111,7 +111,7 @@ def _validate_plan(plan: dict[str, object]) -> tuple[str, str, list[str]]:
         shim = os.path.join(install_root, "defenseclaw.cmd")
         if not os.path.isfile(shim) or _is_reparse(shim):
             raise ValueError("installer-owned defenseclaw.cmd shim is missing")
-        with open(shim, encoding="ascii", errors="strict") as stream:
+        with open(shim, encoding="utf-8-sig", errors="strict") as stream:
             contents = stream.read(16_385)
         if len(contents) > 16_384:
             raise ValueError("Windows CLI shim is oversized")

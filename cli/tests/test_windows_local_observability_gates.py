@@ -51,13 +51,9 @@ def test_local_otlp_preset_is_available_on_windows(tmp_path: Path) -> None:
     app = _app(tmp_path / "preset state")
     with (
         patch("defenseclaw.platform_support.host_os", return_value="windows"),
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.apply_preset"
-        ) as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
     ):
-        result = CliRunner().invoke(
-            observability, ["add", "local-otlp", "--non-interactive"], obj=app
-        )
+        result = CliRunner().invoke(observability, ["add", "local-otlp", "--non-interactive"], obj=app)
     assert result.exit_code == 0, result.output
     apply_preset.assert_called_once()
 
@@ -119,9 +115,7 @@ def test_loopback_splunk_hec_preset_is_available(tmp_path: Path) -> None:
     app = _app(tmp_path / "hec state")
     with (
         patch("defenseclaw.platform_support.host_os", return_value="windows"),
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.apply_preset"
-        ) as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
     ):
         result = CliRunner().invoke(
             observability,
@@ -146,9 +140,7 @@ def test_remote_splunk_hec_remains_available(tmp_path: Path) -> None:
     app = _app(tmp_path / "remote state")
     with (
         patch("defenseclaw.platform_support.host_os", return_value="windows"),
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.apply_preset"
-        ) as apply_preset,
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
     ):
         result = CliRunner().invoke(
             observability,
@@ -165,6 +157,77 @@ def test_remote_splunk_hec_remains_available(tmp_path: Path) -> None:
         )
     assert result.exit_code == 0, result.output
     apply_preset.assert_called_once()
+
+
+def test_local_splunk_defaults_are_resolved_before_an_unavailable_stack_gate(
+    tmp_path: Path,
+) -> None:
+    from defenseclaw.commands.cmd_setup_observability import observability
+    from defenseclaw.platform_support import LOCAL_SPLUNK_UNSUPPORTED_REASON
+
+    app = _app(tmp_path / "default local splunk preset")
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
+            return_value=False,
+        ),
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+    ):
+        result = CliRunner().invoke(
+            observability,
+            ["add", "splunk-hec", "--non-interactive"],
+            obj=app,
+        )
+
+    assert result.exit_code != 0
+    assert LOCAL_SPLUNK_UNSUPPORTED_REASON in result.output
+    apply_preset.assert_not_called()
+
+
+def test_splunk_enterprise_loopback_is_not_the_bundled_local_stack(tmp_path: Path) -> None:
+    from defenseclaw.commands.cmd_setup_observability import observability
+
+    app = _app(tmp_path / "loopback enterprise")
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
+            return_value=False,
+        ),
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+    ):
+        result = CliRunner().invoke(
+            observability,
+            [
+                "add",
+                "splunk-enterprise",
+                "--endpoint",
+                "http://localhost:8088/services/collector/event",
+                "--token",
+                "synthetic-token",
+                "--non-interactive",
+            ],
+            obj=app,
+        )
+
+    assert result.exit_code == 0, result.output
+    apply_preset.assert_called_once()
+
+
+def test_destination_classifier_keeps_loopback_enterprise_remote() -> None:
+    from defenseclaw.platform_support import destination_platform_unsupported
+
+    assert not destination_platform_unsupported(
+        preset_id="splunk-enterprise",
+        kind="splunk_hec",
+        endpoint="http://localhost:8088/services/collector/event",
+        os_name="plan9",
+    )
+    assert destination_platform_unsupported(
+        preset_id="splunk-hec",
+        kind="splunk_hec",
+        endpoint="http://localhost:8088/services/collector/event",
+        os_name="plan9",
+    )
 
 
 def test_json_status_marks_both_local_stacks_supported(
@@ -220,23 +283,14 @@ def test_tui_capabilities_are_split_on_windows() -> None:
     from defenseclaw.tui.registry import build_registry
 
     model = SetupPanelModel(os_name="windows")
-    info = next(
-        item
-        for item in model.wizard_infos()
-        if item.wizard == SetupWizard.LOCAL_OBSERVABILITY
-    )
+    info = next(item for item in model.wizard_infos() if item.wizard == SetupWizard.LOCAL_OBSERVABILITY)
     assert info.status != "unsupported"
     assert model.wizard_available(SetupWizard.LOCAL_OBSERVABILITY) is True
-    assert any(
-        entry.cli_args[:2] == ("setup", "local-observability")
-        for entry in build_registry("windows")
-    )
+    assert any(entry.cli_args[:2] == ("setup", "local-observability") for entry in build_registry("windows"))
 
     mode = next(field for field in splunk_wizard_fields("windows") if field.label == "Mode")
     assert "local-docker" in mode.options
-    preset = next(
-        field for field in observability_wizard_fields("splunk-o11y") if field.label == "Preset"
-    )
+    preset = next(field for field in observability_wizard_fields("splunk-o11y") if field.label == "Preset")
     assert "local-otlp" in preset.options
 
 
@@ -252,11 +306,7 @@ def test_overview_state_marks_both_local_stacks_enabled() -> None:
     model.set_health(
         HealthSnapshot(
             telemetry=SubsystemHealth(
-                details={
-                    "destinations": [
-                        {"name": "local-observability", "preset": "local-otlp", "enabled": True}
-                    ]
-                }
+                details={"destinations": [{"name": "local-observability", "preset": "local-otlp", "enabled": True}]}
             ),
             sinks=SubsystemHealth(
                 details={

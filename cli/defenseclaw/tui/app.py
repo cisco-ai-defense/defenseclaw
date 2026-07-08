@@ -6746,6 +6746,9 @@ class DefenseClawTUI(App[None]):
         elif self._strip_state == "success":
             snippet = self._strip_summary
             snippet_color = TOKENS.accent_green
+        elif self._strip_state == "cancelled":
+            snippet = self._strip_summary
+            snippet_color = TOKENS.accent_amber
         else:
             snippet = self._strip_summary
             snippet_color = TOKENS.accent_red
@@ -6761,6 +6764,7 @@ class DefenseClawTUI(App[None]):
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
             "success": "press A for full output  ·  q or click Dismiss to clear",
             "failure": "press A for full output  ·  q or click Dismiss to clear",
+            "cancelled": "press A for full output  ·  q or click Dismiss to clear",
             "rejected": "press : to retry  ·  q or click Dismiss to clear",
         }.get(self._strip_state, "")
         self.query_one("#command-progress-hint", Static).update(

@@ -19,7 +19,11 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hook_contract_lock,
     _DoctorResult,
 )
-from defenseclaw.doctor_hooks import resolve_windows_command, validate_windows_hook_registration
+from defenseclaw.doctor_hooks import (
+    _split_windows,
+    resolve_windows_command,
+    validate_windows_hook_registration,
+)
 
 
 class WindowsHookDoctorTests(unittest.TestCase):
@@ -115,11 +119,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
     def _contract_check(self, connector: str, config: Path) -> tuple[_DoctorResult, str]:
         obsolete = [
             str(self.data / "hooks" / "inspect-tool.sh"),
-            str(
-                self.data
-                / "hooks"
-                / ("codex-hook.sh" if connector == "codex" else "claude-code-hook.sh")
-            ),
+            str(self.data / "hooks" / ("codex-hook.sh" if connector == "codex" else "claude-code-hook.sh")),
         ]
         self._lock(connector, config, runtime_paths=obsolete)
         result = _DoctorResult()
@@ -283,14 +283,13 @@ class WindowsHookDoctorTests(unittest.TestCase):
         runtime_stats = iter((runtime_stat, changed))
 
         def race_runtime_lstat(path: str | os.PathLike[str]):
-            if os.path.normcase(os.path.abspath(os.fspath(path))) == os.path.normcase(
-                os.path.abspath(str(runtime))
-            ):
+            if os.path.normcase(os.path.abspath(os.fspath(path))) == os.path.normcase(os.path.abspath(str(runtime))):
                 return next(runtime_stats)
             return real_lstat(path)
 
         with (
             patch("defenseclaw.doctor_hooks.is_link_or_reparse", return_value=False),
+            patch("defenseclaw.doctor_hooks.os.path.realpath", side_effect=os.path.abspath),
             patch(
                 "defenseclaw.doctor_hooks.os.lstat",
                 side_effect=race_runtime_lstat,
@@ -340,8 +339,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         cases = (
             (
                 "codex",
-                "set NoDefaultCurrentDirectoryInExePath=1&& "
-                "defenseclaw-hook hook --connector codex",
+                "set NoDefaultCurrentDirectoryInExePath=1&& defenseclaw-hook hook --connector codex",
             ),
             ("claudecode", f'"{runtime}" hook --connector claudecode'),
         )
@@ -422,8 +420,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         cases = (
             (
                 "codex",
-                "set NoDefaultCurrentDirectoryInExePath=1&& "
-                "defenseclaw-hook.exe hook --connector codex",
+                "set NoDefaultCurrentDirectoryInExePath=1&& defenseclaw-hook.exe hook --connector codex",
             ),
             ("claudecode", f'"{runtime}" hook --connector claudecode'),
         )
@@ -452,6 +449,12 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
 
 class WindowsHookResolutionTests(unittest.TestCase):
+    def test_double_quoted_call_target_preserves_literal_apostrophes(self) -> None:
+        self.assertEqual(
+            _split_windows(r"""& "C:\Tools\hook''name.ps1" hook"""),
+            ["&", r"C:\Tools\hook''name.ps1", "hook"],
+        )
+
     def test_pathext_is_case_insensitive_and_ignores_unsafe_extensions(self) -> None:
         with tempfile.TemporaryDirectory(prefix="doctor-pathext-") as tmp:
             Path(tmp, "defenseclaw-hook.ps1").write_text("untrusted", encoding="utf-8")
