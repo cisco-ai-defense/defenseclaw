@@ -78,6 +78,7 @@ class PluginLLMDefaultOnTests(unittest.TestCase):
         cap = self._run(llm, True)
         self.assertFalse((cap["options"].llm_override or {}).get("enabled"))
         self.assertIn("running static", cap["stderr"])
+        self.assertIn("DEFENSECLAW_LLM_KEY is not configured", cap["stderr"])
 
     def test_explicit_off_disables_even_with_model(self):
         llm = LLMConfig(model="claude-3-5-haiku", provider="anthropic", api_key="k")

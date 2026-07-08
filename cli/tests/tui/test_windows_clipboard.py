@@ -19,6 +19,7 @@ class FakeClipboardAPI:
     set_ok: bool = True
     read_override: str | None = None
     close_error: bool = False
+    free_error: bool = False
     open_calls: int = 0
     close_calls: int = 0
     free_calls: list[int] = field(default_factory=list)
@@ -44,6 +45,8 @@ class FakeClipboardAPI:
 
     def free(self, handle: int) -> None:
         self.free_calls.append(handle)
+        if self.free_error:
+            raise ClipboardError("clipboard free failed")
 
     def set_unicode(self, handle: int) -> bool:
         assert handle == 41
@@ -128,6 +131,16 @@ def test_failed_set_frees_allocation_and_closes() -> None:
         copy_windows_clipboard("secret", api=api)
 
     assert api.free_calls == [41]
+
+
+def test_free_failure_still_closes_clipboard() -> None:
+    api = FakeClipboardAPI(set_ok=False, free_error=True)
+
+    with pytest.raises(ClipboardError, match="free failed"):
+        copy_windows_clipboard("secret", api=api)
+
+    assert api.free_calls == [41]
+    assert api.close_calls == 1
     assert api.close_calls == 1
 
 

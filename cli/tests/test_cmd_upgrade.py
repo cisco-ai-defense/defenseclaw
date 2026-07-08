@@ -216,6 +216,25 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             self.assertFalse(os.path.lexists(os.path.join(install_dir, "defenseclaw.exe")))
             self.assertTrue(os.path.isfile(os.path.join(install_dir, "defenseclaw.cmd")))
 
+    def test_windows_launcher_reports_non_ascii_executable_path(self):
+        with TemporaryDirectory() as home:
+            install_dir = os.path.join(home, ".local", "bin")
+            scripts = os.path.join(home, "månaged", "Scripts")
+            os.makedirs(install_dir)
+            os.makedirs(scripts)
+            cli_exe = os.path.join(scripts, "defenseclaw.exe")
+            with open(cli_exe, "w", encoding="utf-8") as stream:
+                stream.write("managed")
+
+            with patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _publish_windows_cli_launcher(cli_exe, install_dir)
+
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertIn("non-ASCII path", err.call_args.args[0])
+            self.assertFalse(os.path.lexists(os.path.join(install_dir, "defenseclaw.cmd")))
+            self.assertEqual(os.listdir(install_dir), [])
+
     def test_non_windows_install_leaves_windows_exe_name_untouched(self):
         with TemporaryDirectory() as home:
             venv = os.path.join(home, ".defenseclaw", ".venv")
@@ -1158,6 +1177,53 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             )
             with open(installed_hook, "rb") as stream:
                 self.assertEqual(stream.read(), b"hook")
+
+    def test_windows_install_rolls_back_hook_if_gateway_replace_fails(self):
+        with TemporaryDirectory() as staging, TemporaryDirectory() as fake_home:
+            install_dir = os.path.join(fake_home, ".local", "bin")
+            os.makedirs(install_dir)
+            gateway_target = os.path.join(install_dir, "defenseclaw-gateway.exe")
+            hook_target = os.path.join(install_dir, "defenseclaw-hook.exe")
+            with open(gateway_target, "wb") as stream:
+                stream.write(b"old gateway")
+            with open(hook_target, "wb") as stream:
+                stream.write(b"old hook")
+
+            gateway = os.path.join(staging, "defenseclaw.exe")
+            hook = os.path.join(staging, "defenseclaw-hook.exe")
+            with open(gateway, "wb") as stream:
+                stream.write(b"new gateway")
+            with open(hook, "wb") as stream:
+                stream.write(b"new hook")
+
+            real_replace = os.replace
+
+            def fail_gateway_replace(source, destination):
+                if os.path.normpath(destination) == os.path.normpath(gateway_target):
+                    raise PermissionError("gateway is locked")
+                return real_replace(source, destination)
+
+            def fake_expanduser(path):
+                return path.replace("~", fake_home, 1)
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade.os.path.expanduser",
+                side_effect=fake_expanduser,
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.os.replace",
+                side_effect=fail_gateway_replace,
+            ):
+                with self.assertRaises(PermissionError):
+                    _install_gateway(gateway, "windows")
+
+            with open(gateway_target, "rb") as stream:
+                self.assertEqual(stream.read(), b"old gateway")
+            with open(hook_target, "rb") as stream:
+                self.assertEqual(stream.read(), b"old hook")
+            self.assertEqual(
+                sorted(os.listdir(install_dir)),
+                ["defenseclaw-gateway.exe", "defenseclaw-hook.exe"],
+            )
 
 
 class TestPostInstallVersionVerification(unittest.TestCase):

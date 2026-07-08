@@ -332,6 +332,8 @@ def _command_target(command: str, connector: str) -> tuple[str, list[str], str]:
             raise _InspectionError("malformed", "PowerShell hook command must use -File") from exc
         if file_index + 1 >= len(parts):
             raise _InspectionError("malformed", "PowerShell hook command has no script target")
+        if lowered[1:file_index] != ["-noprofile", "-noninteractive"]:
+            raise _InspectionError("malformed", "PowerShell hook command has unsupported launcher arguments")
         target = parts[file_index + 1]
         args = parts[file_index + 2 :]
         kind = "powershell"
