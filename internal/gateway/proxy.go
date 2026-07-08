@@ -2416,15 +2416,19 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		redactAuthValue(r.Header.Get("Authorization")),
 		redactAuthValue(r.Header.Get("api-key")),
 		scrubURLSecrets(r.Header.Get("X-DC-Target-URL")))
-	// The raw LLM request body frequently contains user prompts
-	// (SSNs, emails, passwords, API keys). Stderr is operator-
-	// facing, so we honor DEFENSECLAW_REVEAL_PII via
-	// redaction.MessageContent: set DEFENSECLAW_REVEAL_PII=1 to
-	// get the raw body back for live debugging. Every persistent
-	// sink (audit store, webhooks, OTel) already redacts further
-	// downstream and never consults this flag.
-	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n",
-		len(body), truncateLog(redaction.MessageContent(string(body)), 2000))
+	// Request bodies contain prompts, conversation history, and tool
+	// results. Keep only their size in the pretty stderr stream because
+	// the daemon persists that stream to gateway.log and deployments may
+	// forward it to a centralized log service. This omission is
+	// unconditional: diagnostic reveal/redaction switches must not turn
+	// gateway.log into a transcript store.
+	//
+	// TODO(v8-logging-refactor): Re-evaluate an explicit, safe local-debug
+	// channel before restoring the former preview path below. Do not uncomment
+	// it while stderr is persisted or forwarded as an operational log.
+	// fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n",
+	// 	len(body), truncateLog(redaction.MessageContent(string(body)), 2000))
+	logRequestBodyMetadata(body)
 
 	var req ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -4065,6 +4069,10 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 // Logging
 // ---------------------------------------------------------------------------
 
+func logRequestBodyMetadata(body []byte) {
+	fmt.Fprintf(os.Stderr, "[guardrail] raw body: %d bytes (content omitted)\n", len(body))
+}
+
 func (p *GuardrailProxy) logPreCall(model string, messages []ChatMessage, verdict *ScanVerdict, elapsed time.Duration) {
 	ts := time.Now().UTC().Format("15:04:05")
 	severity := verdict.Severity
@@ -4075,13 +4083,15 @@ func (p *GuardrailProxy) logPreCall(model string, messages []ChatMessage, verdic
 		ts, model, len(messages), float64(elapsed.Milliseconds()))
 
 	for i, msg := range messages {
-		// Message bodies are verbatim user/assistant text. The
-		// original length is preserved in the log so operators
-		// can still see whether a payload was trimmed by the
-		// caller; only the preview itself is masked when
-		// Reveal is off.
-		preview := truncateLog(redaction.MessageContent(msg.Content), 500)
-		fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars): %s\n", i, msg.Role, len(msg.Content), preview)
+		// Keep role and length for diagnostics without persisting a
+		// transcript in gateway.log (or any collector fed from stderr).
+		// Content remains omitted even when diagnostic reveal is enabled.
+		//
+		// TODO(v8-logging-refactor): Preserve the former bounded preview for
+		// consideration when v8 separates local debugging from shipped logs.
+		// preview := truncateLog(redaction.MessageContent(msg.Content), 500)
+		// fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars): %s\n", i, msg.Role, len(msg.Content), preview)
+		fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars; content omitted)\n", i, msg.Role, len(msg.Content))
 	}
 
 	logVerdict(severity, action, verdict, elapsed)
@@ -4101,13 +4111,15 @@ func (p *GuardrailProxy) logPostCall(model, content string, verdict *ScanVerdict
 	}
 	fmt.Fprintf(os.Stderr, "\033[92m[%s]\033[0m \033[1mPOST-CALL\033[0m  model=%s%s  \033[2m%.0fms\033[0m\n",
 		ts, model, tokStr, float64(elapsed.Milliseconds()))
-	// LLM responses can echo user PII (the model re-emits
-	// personal data verbatim in summaries, translations, etc.)
-	// or surface new secrets authored by the model itself. Both
-	// flows are operator-facing; the Reveal flag gates
-	// unredacted output for live debugging.
-	preview := truncateLog(redaction.MessageContent(content), 800)
-	fmt.Fprintf(os.Stderr, "  response (%d chars): %s\n", len(content), preview)
+	// Responses can echo prompts or author new sensitive content. Retain
+	// only the size so pretty logs remain useful without becoming a
+	// transcript store. Diagnostic reveal does not override this rule.
+	//
+	// TODO(v8-logging-refactor): Preserve the former bounded preview for
+	// consideration when v8 separates local debugging from shipped logs.
+	// preview := truncateLog(redaction.MessageContent(content), 800)
+	// fmt.Fprintf(os.Stderr, "  response (%d chars): %s\n", len(content), preview)
+	fmt.Fprintf(os.Stderr, "  response (%d chars; content omitted)\n", len(content))
 
 	logVerdict(severity, action, verdict, elapsed)
 	fmt.Fprintf(os.Stderr, "\033[92m%s\033[0m\n", strings.Repeat("─", 60))

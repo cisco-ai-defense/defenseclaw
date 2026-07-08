@@ -641,15 +641,17 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				contentStr = string(msg.Content)
 			}
 		}
-		// contentStr is a verbatim message body from an LLM
-		// session. The full length is preserved in the log
-		// metadata so operators can still tell at a glance
-		// whether the payload was truncated by the caller; only
-		// the preview is masked when Reveal is off.
-		contentPreview := truncate(redaction.MessageContent(contentStr), 120)
-
-		readLoopLogf("[bifrost] session.message: role=%s msgId=%s seq=%d session=%s content=(%d chars) %q",
-			msg.Role, envelope.MessageID, envelope.MessageSeq, envelope.SessionKey, len(contentStr), contentPreview)
+		// Session message bodies are prompts and responses. The daemon
+		// persists stderr to gateway.log, so log only routing metadata and
+		// length rather than creating a second conversation transcript.
+		//
+		// TODO(v8-logging-refactor): Preserve the former bounded preview for
+		// consideration when v8 separates local debugging from shipped logs.
+		// contentPreview := truncate(redaction.MessageContent(contentStr), 120)
+		// readLoopLogf("[bifrost] session.message: role=%s msgId=%s seq=%d session=%s content=(%d chars) %q",
+		// 	msg.Role, envelope.MessageID, envelope.MessageSeq, envelope.SessionKey, len(contentStr), contentPreview)
+		readLoopLogf("[bifrost] session.message: role=%s msgId=%s seq=%d session=%s content_len=%d content=omitted",
+			msg.Role, envelope.MessageID, envelope.MessageSeq, envelope.SessionKey, len(contentStr))
 
 		msgCtx := ContextWithSessionID(context.Background(), envelope.SessionKey)
 		msgMeta := streamLLMEventMeta(r, envelope.SessionKey, envelope.RunID, msg.Provider, msg.Model, "")
