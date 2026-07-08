@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -122,7 +123,11 @@ type APIServer struct {
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
-	policyReloader func() error
+	policyEngine           *policy.Engine
+	policyReloader         func() error
+	policyStatusProvider   func() policy.EngineStatus
+	policyRestartRequester func() error
+	rulePackStatusProvider func() guardrail.ManagedRulePackStatus
 
 	claudeCodeMu                      sync.Mutex
 	claudeCodeLastComponentScan       time.Time
@@ -583,6 +588,34 @@ func (a *APIServer) SetPolicyReloader(fn func() error) {
 	a.policyReloader = fn
 }
 
+// SetPolicyEngine registers the shared OPA engine used by every live
+// enforcement surface. Reloading this engine therefore updates proxy,
+// hook, and direct policy-evaluation requests as one atomic operation.
+func (a *APIServer) SetPolicyEngine(engine *policy.Engine) {
+	a.policyEngine = engine
+}
+
+// SetPolicyStatusProvider registers a callback that returns metadata swapped
+// atomically with the shared OPA store. It lets policy publishers verify the
+// exact Agent Control artifact that became active after reload.
+func (a *APIServer) SetPolicyStatusProvider(fn func() policy.EngineStatus) {
+	a.policyStatusProvider = fn
+}
+
+// SetPolicyRestartRequester registers the supervisor-aware process restart
+// transaction used to activate rule-pack overlays. The callback must arrange
+// the restart only after the handler has had time to flush its response.
+func (a *APIServer) SetPolicyRestartRequester(fn func() error) {
+	a.policyRestartRequester = fn
+}
+
+// SetRulePackStatusProvider registers the process-start/config-activation
+// snapshot for the managed Agent Control rule artifact. The provider must not
+// read the live file or it could report an unactivated publication as active.
+func (a *APIServer) SetRulePackStatusProvider(fn func() guardrail.ManagedRulePackStatus) {
+	a.rulePackStatusProvider = fn
+}
+
 // SetConnectorRegistry attaches the connector registry so the
 // /v1/connectors endpoint can list available connectors.
 func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
@@ -777,6 +810,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/policy/evaluate/audit", a.handlePolicyEvaluateAudit)
 	mux.HandleFunc("/policy/evaluate/skill-actions", a.handlePolicyEvaluateSkillActions)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
+	mux.HandleFunc("/policy/restart", a.handlePolicyRestart)
+	mux.HandleFunc("/policy/status", a.handlePolicyStatus)
 	mux.HandleFunc("/skills", a.handleSkills)
 	mux.HandleFunc("/mcps", a.handleMCPs)
 	mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
@@ -2917,10 +2952,14 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	// action mode (and an explicit alert in observe mode for
 	// audit visibility).
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err != nil {
-			return policyOutageVerdict(input,
-				fmt.Sprintf("policy engine load failed: %v", err)), nil
+		engine := a.policyEngine
+		if engine == nil {
+			var err error
+			engine, err = policy.New(a.scannerCfg.PolicyDir)
+			if err != nil {
+				return policyOutageVerdict(input,
+					fmt.Sprintf("policy engine load failed: %v", err)), nil
+			}
 		}
 		out, evalErr := engine.EvaluateGuardrail(ctx, input)
 		if evalErr != nil {
@@ -3398,10 +3437,12 @@ func (a *APIServer) policyListEntries(blocked bool) []policy.ListEntry {
 
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput) (*policy.AdmissionOutput, error) {
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err == nil {
-			out, evalErr := engine.Evaluate(ctx, input)
-			if evalErr == nil {
+		engine := a.policyEngine
+		if engine == nil {
+			engine, _ = policy.New(a.scannerCfg.PolicyDir)
+		}
+		if engine != nil {
+			if out, evalErr := engine.Evaluate(ctx, input); evalErr == nil {
 				return out, nil
 			}
 		}
@@ -3614,6 +3655,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	// If a shared OPA engine is wired, use its atomic Reload(); otherwise
 	// validate by constructing a throwaway engine (backward-compatible).
+	var activeStatus policy.EngineStatus
 	if a.policyReloader != nil {
 		if err := a.policyReloader(); err != nil {
 			if a.otel != nil {
@@ -3624,6 +3666,9 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 				"status": "failed",
 			})
 			return
+		}
+		if a.policyStatusProvider != nil {
+			activeStatus = a.policyStatusProvider()
 		}
 	} else {
 		engine, err := policy.New(a.scannerCfg.PolicyDir)
@@ -3637,6 +3682,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		activeStatus = engine.Status()
 		if err := engine.Compile(); err != nil {
 			if a.otel != nil {
 				a.otel.RecordPolicyReload(r.Context(), "failed")
@@ -3667,14 +3713,97 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		"source":     "api",
 	})
 
-	a.writeJSON(w, http.StatusOK, map[string]string{
+	response := map[string]interface{}{
 		"status":     "reloaded",
 		"policy_dir": a.scannerCfg.PolicyDir,
+	}
+	if activeStatus.Generation > 0 {
+		response["generation"] = activeStatus.Generation
+		response["agent_control"] = activeStatus.AgentControl
+	}
+	if a.rulePackStatusProvider != nil {
+		response["rule_pack"] = a.rulePackStatusProvider()
+	}
+	a.writeJSON(w, http.StatusOK, response)
+}
+
+// POST /policy/restart requests a full gateway process restart so immutable
+// process-lifetime rule-pack caches can activate a newly published overlay.
+// Authentication and CSRF protection are supplied by the normal API chain.
+func (a *APIServer) handlePolicyRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.policyRestartRequester == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "policy restart is unavailable",
+		})
+		return
+	}
+	if err := a.policyRestartRequester(); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "policy restart request failed: " + err.Error(),
+		})
+		return
+	}
+	a.writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":    "restart_requested",
+		"rule_pack": a.currentRulePackStatus(),
 	})
 }
 
-// loadPolicyEngine creates a fresh policy engine from the configured policy_dir.
+func (a *APIServer) currentRulePackStatus() guardrail.ManagedRulePackStatus {
+	if a.rulePackStatusProvider == nil {
+		return guardrail.ManagedRulePackStatus{}
+	}
+	return a.rulePackStatusProvider()
+}
+
+// GET /policy/status returns metadata for the OPA store currently serving
+// evaluations. The route is protected by the same gateway token middleware as
+// /policy/reload; no raw policy values are returned.
+func (a *APIServer) handlePolicyStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.scannerCfg == nil || a.scannerCfg.PolicyDir == "" {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy_dir not configured"})
+		return
+	}
+
+	var status policy.EngineStatus
+	if a.policyStatusProvider != nil {
+		status = a.policyStatusProvider()
+	} else {
+		engine, err := a.loadPolicyEngine()
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy status failed: " + err.Error()})
+			return
+		}
+		if err := engine.Compile(); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy status failed: " + err.Error()})
+			return
+		}
+		status = engine.Status()
+	}
+
+	rulePackStatus := a.currentRulePackStatus()
+	a.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":        "ready",
+		"generation":    status.Generation,
+		"agent_control": status.AgentControl,
+		"rule_pack":     rulePackStatus,
+	})
+}
+
+// loadPolicyEngine returns the shared reloadable engine when the sidecar wired
+// one, and constructs a compatibility fallback only for isolated/test servers.
 func (a *APIServer) loadPolicyEngine() (*policy.Engine, error) {
+	if a.policyEngine != nil {
+		return a.policyEngine, nil
+	}
 	if a.scannerCfg == nil || a.scannerCfg.PolicyDir == "" {
 		return nil, fmt.Errorf("policy_dir not configured")
 	}

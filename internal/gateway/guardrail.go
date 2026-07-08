@@ -288,6 +288,32 @@ func demoteLocalBlockForManaged(v *ScanVerdict) *ScanVerdict {
 	return &cp
 }
 
+// SetPolicyEngine installs the shared sidecar OPA engine. The API reload
+// endpoint, watcher admission path, and proxy guardrail must all observe the
+// same atomic store; otherwise a successful /policy/reload would not update
+// prompt/completion enforcement.
+func (g *GuardrailInspector) SetPolicyEngine(engine *policy.Engine) {
+	if g == nil || engine == nil {
+		return
+	}
+	setEngine := func() {
+		g.engineMu.Lock()
+		g.engine = engine
+		g.engineLoadErr = nil
+		g.engineMu.Unlock()
+	}
+	initializedHere := false
+	// Install the pointer inside the once closure so a concurrent first
+	// evaluation cannot observe "initialized" before the shared engine exists.
+	g.engineInitOnce.Do(func() {
+		setEngine()
+		initializedHere = true
+	})
+	if !initializedHere {
+		setEngine()
+	}
+}
+
 // SetTracerFunc installs the OTel span emitter. Pass nil to
 // disable span emission entirely (tests typically never call
 // this). The sidecar wires this to telemetry.Provider once

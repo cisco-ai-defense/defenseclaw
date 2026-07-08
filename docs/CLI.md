@@ -517,3 +517,23 @@ defenseclaw doctor [--json]
 
 Runs connectivity and credential checks against all configured services
 (sidecar, guardrail proxy, Cisco AI Defense, Splunk, scanners).
+## Agent Control synchronization
+
+```text
+defenseclaw agent-control setup [--target-id ID] [--enable-rule-pack]
+defenseclaw agent-control sync --once
+defenseclaw agent-control sync --watch
+defenseclaw agent-control status [--json-output]
+defenseclaw agent-control validate SNAPSHOT.json
+```
+
+`setup` creates or persists the stable `defenseclaw.installation` target ID,
+validates SDK connectivity, prepares managed files, and optionally adds the
+strict rule-pack overlay. `sync --watch` is a separate Python process: it owns
+one Agent Control SDK session and polls that SDK's in-process cache. The Go
+sidecar never polls Agent Control. After publishing changed native artifacts,
+the synchronizer sends authenticated loopback requests to reload OPA or
+restart for rule-pack changes and verifies the resulting digest. `status`
+never prints credentials or raw policy content. `validate` runs both the
+closed Python schema checks and the gateway's authoritative Go/Rego validators
+against temporary candidate files without publishing or activating them.

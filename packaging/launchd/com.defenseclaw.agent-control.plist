@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.defenseclaw.agent-control</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/DefenseClaw/bin/defenseclaw</string>
+    <string>agent-control</string>
+    <string>sync</string>
+    <string>--watch</string>
+  </array>
+  <key>UserName</key>
+  <string>defenseclaw</string>
+  <key>GroupName</key>
+  <string>defenseclaw</string>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/DefenseClaw</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DEFENSECLAW_HOME</key>
+    <string>/Library/Application Support/DefenseClaw</string>
+    <key>DEFENSECLAW_CONFIG</key>
+    <string>/Library/Application Support/DefenseClaw/config.yaml</string>
+    <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
+    <string>managed_enterprise</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/DefenseClaw/agent-control.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/DefenseClaw/agent-control.err.log</string>
+</dict>
+</plist>

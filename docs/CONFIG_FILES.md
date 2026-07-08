@@ -506,3 +506,44 @@ notifications:
 | **Set by** | `defenseclaw setup notifications` (preferred) or operator via `config.yaml`. |
 | **Read by** | **Go sidecar** at startup via `config.Load()` → `notifier.New(cfg.Notifications)` (wired into hooks, proxy, asset runtime, and `HILTApprovalManager`). **Python CLI** via `config.load()` for round-trip preservation; the Python side does not emit notifications itself. |
 | **Effect** | The dispatcher fires `internal/notify.SendNotification` in a goroutine so request latency is unaffected. On macOS this calls `osascript` (`display notification … with title …`); on Linux it calls `notify-send`; on unsupported platforms it falls back to a structured stderr log line. State (dedup LRU + token bucket) is per-process and resets on gateway restart. |
+## Agent Control policy synchronization
+
+The optional `agent_control` block configures the persistent policy
+synchronizer. Credentials are environment variables and must not be stored in
+this block.
+
+```yaml
+agent_control:
+  enabled: true
+  agent_name: defenseclaw-policy-sync
+  target_type: defenseclaw.installation
+  target_id: 7a7f412e-d0cc-42de-a35d-f7ff3caecce8
+  refresh_seconds: 60
+  cache_poll_seconds: 2
+  init_retry_max_seconds: 300
+  managed_dir: ""
+  opa:
+    enabled: true
+    precedence: stricter
+    activation: reload
+  rule_pack:
+    enabled: false
+    activation: restart
+    max_rules: 1000
+```
+
+`stricter` keeps whichever local/remote threshold activates earlier and the
+stricter Cisco trust level. `remote` uses the remote threshold/trust values
+while a control is present. HILT, guardrail mode, hook fail mode, scanner
+strategy, and the local policy baseline remain local in both modes.
+
+Run `defenseclaw agent-control setup` instead of editing the target identity
+or managed overlay path manually.
+
+Persistent service templates are provided at
+`packaging/systemd/defenseclaw-agent-control.service` and
+`packaging/launchd/com.defenseclaw.agent-control.plist`. The systemd unit may
+read `/etc/defenseclaw/agent-control.env`; both platforms also use the normal
+DefenseClaw data-directory `.env` loading. Keep Agent Control and gateway
+credentials in those protected environment files, never in `config.yaml` or
+the service definition.

@@ -48,6 +48,10 @@ dependencies = [
 # ``pip install 'defenseclaw[vertex]'``. Bedrock is bundled by
 # default — see the ``boto3`` entry under ``[project].dependencies``.
 vertex = ["google-cloud-aiplatform>=1.60", "google-auth>=2.30"]
+# Agent Control SDK 8.2.x requires Python 3.12+. DefenseClaw core remains
+# installable on 3.10/3.11; the command group lazy-imports this extra and
+# reports a clear compatibility error on older interpreters.
+agent-control = ["agent-control-sdk>=8.2,<9; python_version >= '3.12'"]
 
 [dependency-groups]
 dev = [

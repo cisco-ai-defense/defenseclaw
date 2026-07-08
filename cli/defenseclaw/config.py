@@ -1805,6 +1805,10 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
+    # Strict rules-only overlays applied after every connector's effective
+    # base pack. Agent Control uses one managed entry here without replacing
+    # local suppressions, judge prompts, or profile selection.
+    rule_pack_overlay_dirs: list[str] = field(default_factory=list)
     connector: str = ""  # empty => fall back to claw.mode; otherwise a registered connector name
     hilt: HILTConfig = field(default_factory=HILTConfig)
     # ``hook_fail_mode`` is the operator-chosen response-layer fail
@@ -1954,6 +1958,17 @@ class GuardrailConfig:
         loop. Raises :class:`ValueError` with a named message on the
         first violation.
         """
+        seen_overlay_dirs: set[str] = set()
+        for index, directory in enumerate(self.rule_pack_overlay_dirs):
+            if not isinstance(directory, str) or not directory.strip():
+                raise ValueError(f"guardrail.rule_pack_overlay_dirs[{index}]: path cannot be empty")
+            normalized = os.path.normpath(directory.strip())
+            if normalized in seen_overlay_dirs:
+                raise ValueError(
+                    f"guardrail.rule_pack_overlay_dirs[{index}]: duplicate path {directory!r}"
+                )
+            seen_overlay_dirs.add(normalized)
+
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
@@ -2263,6 +2278,60 @@ def _normalize_connector_key(name: str | None) -> str:
 
 
 @dataclass
+class AgentControlOPAConfig:
+    enabled: bool = True
+    precedence: str = "stricter"
+    activation: str = "reload"
+
+
+@dataclass
+class AgentControlRulePackConfig:
+    enabled: bool = False
+    activation: str = "restart"
+    max_rules: int = 1000
+
+
+@dataclass
+class AgentControlConfig:
+    """Optional Agent Control policy-distribution synchronizer settings."""
+
+    enabled: bool = False
+    agent_name: str = "defenseclaw-policy-sync"
+    target_type: str = "defenseclaw.installation"
+    target_id: str = ""
+    refresh_seconds: int = 60
+    cache_poll_seconds: int = 2
+    init_retry_max_seconds: int = 300
+    managed_dir: str = ""
+    opa: AgentControlOPAConfig = field(default_factory=AgentControlOPAConfig)
+    rule_pack: AgentControlRulePackConfig = field(default_factory=AgentControlRulePackConfig)
+
+    def validate(self) -> None:
+        if self.agent_name != "defenseclaw-policy-sync":
+            raise ValueError("agent_control.agent_name must be 'defenseclaw-policy-sync'")
+        if self.target_type != "defenseclaw.installation":
+            raise ValueError("agent_control.target_type must be 'defenseclaw.installation'")
+        if len(self.target_id) > 255:
+            raise ValueError("agent_control.target_id cannot exceed 255 characters")
+        if self.enabled and not self.target_id.strip():
+            raise ValueError("agent_control.target_id is required when integration is enabled")
+        if self.refresh_seconds <= 0:
+            raise ValueError("agent_control.refresh_seconds must be greater than zero")
+        if self.cache_poll_seconds <= 0:
+            raise ValueError("agent_control.cache_poll_seconds must be greater than zero")
+        if self.init_retry_max_seconds <= 0:
+            raise ValueError("agent_control.init_retry_max_seconds must be greater than zero")
+        if self.opa.precedence not in {"stricter", "remote"}:
+            raise ValueError("agent_control.opa.precedence must be 'stricter' or 'remote'")
+        if self.opa.activation not in {"reload", "manual"}:
+            raise ValueError("agent_control.opa.activation must be 'reload' or 'manual'")
+        if self.rule_pack.activation not in {"restart", "manual"}:
+            raise ValueError("agent_control.rule_pack.activation must be 'restart' or 'manual'")
+        if not 1 <= self.rule_pack.max_rules <= 1000:
+            raise ValueError("agent_control.rule_pack.max_rules must be between 1 and 1000")
+
+
+@dataclass
 class Config:
     data_dir: str = ""
     # Unified v5 LLM configuration. Every LLM-using component resolves
@@ -2290,6 +2359,7 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
+    agent_control: AgentControlConfig = field(default_factory=AgentControlConfig)
     splunk: SplunkConfig = field(default_factory=SplunkConfig)
     otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
@@ -2901,6 +2971,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    if not guardrail.get("rule_pack_overlay_dirs"):
+        guardrail.pop("rule_pack_overlay_dirs", None)
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
     # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
@@ -2943,6 +3015,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             for entry in conns.values():
                 if isinstance(entry, dict) and entry.get("enabled") is None:
                     entry.pop("enabled", None)
+    if cfg.agent_control == AgentControlConfig():
+        d.pop("agent_control", None)
     # v4: the legacy top-level `splunk:` block is rejected by the Go
     # gateway at startup (see internal/config/config.go::detectLegacySplunk).
     # The Python dataclass retains a SplunkConfig for backwards-compatible
@@ -4053,11 +4127,60 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
+        rule_pack_overlay_dirs=[str(value) for value in raw.get("rule_pack_overlay_dirs", []) or []],
         connector=raw.get("connector", ""),
         hilt=_merge_hilt(hilt_raw),
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
         llm_role=_normalize_llm_role(raw.get("llm_role", "")),
         connectors=_merge_guardrail_connectors(raw.get("connectors")),
+    )
+
+
+def _merge_agent_control(raw: Any) -> AgentControlConfig:
+    if not isinstance(raw, dict):
+        return AgentControlConfig()
+    allowed = {
+        "enabled",
+        "agent_name",
+        "target_type",
+        "target_id",
+        "refresh_seconds",
+        "cache_poll_seconds",
+        "init_retry_max_seconds",
+        "managed_dir",
+        "opa",
+        "rule_pack",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"agent_control contains unsupported keys: {unknown}")
+    opa_raw = raw.get("opa") if isinstance(raw.get("opa"), dict) else {}
+    rule_raw = raw.get("rule_pack") if isinstance(raw.get("rule_pack"), dict) else {}
+    unknown_opa = sorted(set(opa_raw) - {"enabled", "precedence", "activation"})
+    if unknown_opa:
+        raise ValueError(f"agent_control.opa contains unsupported keys: {unknown_opa}")
+    unknown_rule = sorted(set(rule_raw) - {"enabled", "activation", "max_rules"})
+    if unknown_rule:
+        raise ValueError(f"agent_control.rule_pack contains unsupported keys: {unknown_rule}")
+    return AgentControlConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        agent_name=str(raw.get("agent_name", "defenseclaw-policy-sync") or ""),
+        target_type=str(raw.get("target_type", "defenseclaw.installation") or ""),
+        target_id=str(raw.get("target_id", "") or ""),
+        refresh_seconds=int(raw.get("refresh_seconds", 60)),
+        cache_poll_seconds=int(raw.get("cache_poll_seconds", 2)),
+        init_retry_max_seconds=int(raw.get("init_retry_max_seconds", 300)),
+        managed_dir=str(raw.get("managed_dir", "") or ""),
+        opa=AgentControlOPAConfig(
+            enabled=_coerce_bool(opa_raw.get("enabled", True), default=True),
+            precedence=str(opa_raw.get("precedence", "stricter") or ""),
+            activation=str(opa_raw.get("activation", "reload") or ""),
+        ),
+        rule_pack=AgentControlRulePackConfig(
+            enabled=_coerce_bool(rule_raw.get("enabled", False)),
+            activation=str(rule_raw.get("activation", "restart") or ""),
+            max_rules=int(rule_raw.get("max_rules", 1000)),
+        ),
     )
 
 
@@ -4710,6 +4833,7 @@ def load() -> Config:
             anchor_name=raw.get("firewall", {}).get("anchor_name", "com.defenseclaw"),
         ),
         guardrail=_merge_guardrail(raw.get("guardrail"), data_dir),
+        agent_control=_merge_agent_control(raw.get("agent_control")),
         splunk=SplunkConfig(
             hec_endpoint=splunk_raw.get("hec_endpoint", "https://localhost:8088/services/collector/event"),
             hec_token=splunk_raw.get("hec_token", ""),
@@ -4764,6 +4888,7 @@ def load() -> Config:
     # gateway's Load() which rejects the same shapes. Value-only check —
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
+    cfg.agent_control.validate()
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.

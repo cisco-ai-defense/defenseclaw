@@ -1,0 +1,1 @@
+{"agent_control":{"enabled":true,"guardrail":{"alert_threshold":2,"block_threshold":3,"cisco_trust_level":"full"},"precedence":"stricter","schema_version":1,"source_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}

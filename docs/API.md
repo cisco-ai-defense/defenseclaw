@@ -30,6 +30,8 @@ Source: `internal/gateway/api.go`, `internal/gateway/inspect.go`
 | `/policy/evaluate/audit` | POST | OPA audit retention policy evaluation | No production callers |
 | `/policy/evaluate/skill-actions` | POST | OPA skill-actions policy evaluation | No production callers |
 | `/policy/reload` | POST | Reload OPA policy engine from disk | Go CLI (`internal/cli/policy.go`) |
+| `/policy/restart` | POST | Request a supervisor-aware gateway restart for rule-pack activation | Agent Control synchronizer |
+| `/policy/status` | GET | Read active OPA generation and managed artifact digests | Agent Control synchronizer, operators |
 | `/api/v1/network-egress` | GET/POST | Network egress policy management | Go CLI, TS plugin |
 | `/scan/result` | POST | Store scan result in audit log | TS plugin (`enforcer.ts`, `client.ts`) |
 | `/v1/skill/scan` | POST | Run skill scanner on a local path | Python CLI (`gateway.py`, `cmd_skill.py`) |
@@ -478,10 +480,11 @@ PolicyEnforcer.evaluateSkill() / evaluateMCPServer() / evaluatePlugin()
 ## Policy Domains (OPA)
 
 These endpoints evaluate inputs against specific OPA policy domains.
-They share the same pattern: load the policy engine from
-`scannerCfg.PolicyDir`, evaluate the domain-specific input, and return
-the policy output. All return `503` if the policy engine cannot be
-loaded and `500` if evaluation fails.
+The running sidecar evaluates them through the same shared engine used by the
+proxy, hooks, and watcher, so `/policy/reload` changes one atomic active store
+for every enforcement surface. Isolated/test API servers construct a
+compatibility engine from `scannerCfg.PolicyDir`. Endpoints return `503` if an
+engine cannot be loaded and `500` if evaluation fails.
 
 Source: `internal/gateway/api.go`, `internal/policy/types.go`
 
@@ -640,7 +643,8 @@ without restarting the sidecar.
 > rescan/drift-detection settings — it does **not** enable automatic
 > filesystem watching of policy files themselves.
 
-**Callers:** CLI `policy reload`, or any HTTP client.
+**Callers:** CLI `policy reload`, Agent Control synchronizer, or any
+authenticated HTTP client.
 
 **Request:** No request body.
 
@@ -649,12 +653,72 @@ without restarting the sidecar.
 ```json
 {
   "status": "reloaded",
-  "policy_dir": "/Users/you/.defenseclaw/policies"
+  "policy_dir": "/Users/you/.defenseclaw/policies",
+  "generation": 4,
+  "agent_control": {
+    "present": true,
+    "enabled": true,
+    "schema_version": 1,
+    "source_digest": "sha256:...",
+    "artifact_digest": "sha256:..."
+  },
+  "rule_pack": {
+    "present": true,
+    "artifact_digest": "sha256:..."
+  }
 }
 ```
 
+The digest fields are additive. They identify the exact Agent Control policy
+data and managed rule artifact active in the process. The rule-pack digest
+does not change on OPA reload; rule packs activate on gateway restart.
+
 **Errors:** `503` if `policy_dir` is not configured, `500` if engine
 reload fails (disk read or compilation error).
+
+### GET /policy/status
+
+Returns the OPA generation and active Agent Control artifact digests without
+returning raw policy values. This endpoint uses the same gateway-token
+authentication as `/policy/reload`.
+
+```json
+{
+  "status": "ready",
+  "generation": 4,
+  "agent_control": {
+    "present": true,
+    "enabled": true,
+    "schema_version": 1,
+    "source_digest": "sha256:...",
+    "artifact_digest": "sha256:..."
+  },
+  "rule_pack": {
+    "present": false
+  }
+}
+```
+
+### POST /policy/restart
+
+Requests a full gateway process restart for process-lifetime rule-pack cache
+activation. The route uses the normal gateway bearer authentication and CSRF
+middleware. It returns `202 Accepted` only after the gateway has arranged a
+user-daemon helper or a managed-supervisor restart, then the process exits.
+
+```json
+{
+  "status": "restart_requested",
+  "rule_pack": {
+    "present": true,
+    "artifact_digest": "sha256:..."
+  }
+}
+```
+
+The returned digest is the pre-restart active value. Callers must wait for the
+gateway to return and verify the new exact digest through `/policy/status`;
+acceptance of the restart request is not activation proof.
 
 ---
 

@@ -29,12 +29,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
 func init() {
 	rootCmd.AddCommand(policyCmd)
 	policyCmd.AddCommand(policyValidateCmd)
+	policyCmd.AddCommand(policyValidateRulePackCmd)
 	policyCmd.AddCommand(policyShowCmd)
 	policyCmd.AddCommand(policyEvaluateCmd)
 	policyCmd.AddCommand(policyEvaluateFirewallCmd)
@@ -45,6 +47,16 @@ func init() {
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
 	policyEvaluateCmd.Flags().String("severity", "", "Max severity of scan result (empty = pre-scan)")
 	policyEvaluateCmd.Flags().Int("findings", 0, "Number of findings")
+	policyValidateCmd.Flags().StringVar(&policyValidateRegoDir, "rego-dir", "", "Policy Rego directory to validate")
+	policyValidateCmd.Flags().StringVar(&policyValidateAgentControlCandidate, "candidate-agent-control", "", "Validate this Agent Control supplemental file instead of the active file")
+	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackBaseDir, "base-dir", "", "Operator rule-pack directory to preserve beneath the overlay")
+	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackOverlayDir, "overlay-dir", "", "Managed rules-only overlay directory to validate")
+	// Native pre-publication validation must be side-effect free and usable
+	// before the gateway/audit database is running. These two commands resolve
+	// every required path from flags and therefore skip the root config, audit,
+	// sink, and telemetry bootstrap.
+	policyValidateCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
+	policyValidateRulePackCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
 
 	policyEvaluateFirewallCmd.Flags().String("destination", "", "Destination hostname or IP")
 	policyEvaluateFirewallCmd.Flags().Int("port", 443, "Destination port")
@@ -58,6 +70,13 @@ var policyCmd = &cobra.Command{
 	Long:  "Validate, inspect, evaluate, and reload DefenseClaw OPA policies.",
 }
 
+var (
+	policyValidateRegoDir               string
+	policyValidateAgentControlCandidate string
+	policyValidateRulePackBaseDir       string
+	policyValidateRulePackOverlayDir    string
+)
+
 // ---------------------------------------------------------------------------
 // policy validate
 // ---------------------------------------------------------------------------
@@ -66,9 +85,22 @@ var policyValidateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Compile-check all Rego modules and validate data.json",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		regoDir := resolveRegoDir()
+		regoDir := policyValidateRegoDir
+		if strings.TrimSpace(regoDir) == "" {
+			regoDir = resolveRegoDir()
+		}
 		if regoDir == "" {
 			return fmt.Errorf("policy: cannot resolve rego directory — set policy_dir in config")
+		}
+
+		candidate := policyValidateAgentControlCandidate
+		if strings.TrimSpace(candidate) != "" {
+			staged, cleanup, err := stageAgentControlCandidate(regoDir, candidate)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			regoDir = staged
 		}
 
 		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
@@ -80,6 +112,13 @@ var policyValidateCmd = &cobra.Command{
 
 		if err := engine.Compile(); err != nil {
 			return fmt.Errorf("policy: compilation failed:\n%w", err)
+		}
+		if strings.TrimSpace(candidate) != "" {
+			if err := validateAgentControlGuardrailSmoke(engine); err != nil {
+				return fmt.Errorf("policy: Agent Control smoke validation failed: %w", err)
+			}
+			status := engine.Status().AgentControl
+			fmt.Printf("Agent Control candidate: artifact_digest=%s source_digest=%s\n", status.ArtifactDigest, status.SourceDigest)
 		}
 
 		fmt.Println("All Rego modules compiled successfully.")
@@ -103,6 +142,109 @@ var policyValidateCmd = &cobra.Command{
 		}
 
 		fmt.Println("data.json schema: OK")
+		return nil
+	},
+}
+
+func validateAgentControlGuardrailSmoke(engine *policy.Engine) error {
+	inputs := []policy.GuardrailInput{
+		{
+			Direction:   "prompt",
+			Mode:        "action",
+			ScannerMode: "local",
+			LocalResult: &policy.GuardrailScanResult{Action: "allow", Severity: "NONE", Findings: []string{}},
+		},
+		{
+			Direction:   "prompt",
+			Mode:        "action",
+			ScannerMode: "local",
+			LocalResult: &policy.GuardrailScanResult{Action: "alert", Severity: "HIGH", Findings: []string{"smoke"}},
+		},
+	}
+	for i, input := range inputs {
+		out, err := engine.EvaluateGuardrail(context.Background(), input)
+		if err != nil {
+			return fmt.Errorf("case %d: %w", i, err)
+		}
+		switch out.Action {
+		case "allow", "alert", "block", "confirm":
+		default:
+			return fmt.Errorf("case %d returned invalid action %q", i, out.Action)
+		}
+	}
+	return nil
+}
+
+func stageAgentControlCandidate(regoDir, candidate string) (string, func(), error) {
+	regoDir = normalizePolicyRegoDir(regoDir)
+	info, err := os.Stat(regoDir)
+	if err != nil || !info.IsDir() {
+		return "", func() {}, fmt.Errorf("policy: invalid rego directory %s", regoDir)
+	}
+	rawCandidate, err := os.ReadFile(candidate)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("policy: read Agent Control candidate: %w", err)
+	}
+	staged, err := os.MkdirTemp("", "defenseclaw-policy-validate-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(staged) }
+	entries, err := os.ReadDir(regoDir)
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if filepath.Ext(name) != ".rego" && name != "data.json" && name != "data-sandbox.json" {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(regoDir, name))
+		if readErr != nil {
+			cleanup()
+			return "", func() {}, readErr
+		}
+		if writeErr := os.WriteFile(filepath.Join(staged, name), raw, 0o600); writeErr != nil {
+			cleanup()
+			return "", func() {}, writeErr
+		}
+	}
+	if err := os.WriteFile(filepath.Join(staged, "data-agent-control.json"), rawCandidate, 0o600); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return staged, cleanup, nil
+}
+
+func normalizePolicyRegoDir(policyDir string) string {
+	nested := filepath.Join(policyDir, "rego")
+	if info, err := os.Stat(nested); err == nil && info.IsDir() {
+		return nested
+	}
+	return policyDir
+}
+
+// ---------------------------------------------------------------------------
+// policy validate-rule-pack — strict managed-overlay validation
+// ---------------------------------------------------------------------------
+
+var policyValidateRulePackCmd = &cobra.Command{
+	Use:   "validate-rule-pack",
+	Short: "Strictly validate a managed rules-only overlay",
+	RunE: func(_ *cobra.Command, _ []string) error {
+		overlayDir := strings.TrimSpace(policyValidateRulePackOverlayDir)
+		if overlayDir == "" {
+			return fmt.Errorf("policy: --overlay-dir is required")
+		}
+		pack, err := guardrail.LoadRulePackWithOverlays(policyValidateRulePackBaseDir, []string{overlayDir})
+		if err != nil {
+			return fmt.Errorf("policy: managed rule-pack validation failed: %w", err)
+		}
+		fmt.Printf("Managed rule-pack overlay valid (%d rule files).\n", len(pack.RuleFiles))
 		return nil
 	},
 }

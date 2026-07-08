@@ -21,6 +21,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -58,6 +59,8 @@ import (
 var launchConfigRestartHelper = defaultLaunchConfigRestartHelper
 var validateManagedGuardianAuthorization = managed.ValidateTrustedFilePath
 
+var errProcessRestartRequested = errors.New("gateway process restart requested")
+
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
@@ -87,12 +90,15 @@ type Sidecar struct {
 	apiServer          *APIServer
 	proxyMu            sync.RWMutex
 	guardrailProxy     *GuardrailProxy
+	rulePackStatusMu   sync.RWMutex
+	rulePackStatus     guardrail.ManagedRulePackStatus
 	apiRestartCh       chan struct{}
 	watcherRestartCh   chan struct{}
 	guardrailRestartCh chan struct{}
 	aiRestartCh        chan struct{}
 	runCancelMu        sync.Mutex
 	runCancel          context.CancelFunc
+	processRestart     atomic.Bool
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -244,7 +250,14 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	router.SetDefaultPolicyID(cfg.Guardrail.Mode)
 
 	// Load guardrail rule pack for judge prompts, suppressions, etc.
-	rp := loadSidecarRulePack(cfg)
+	rp, err := loadSidecarRulePack(cfg)
+	if err != nil {
+		return nil, err
+	}
+	rulePackStatus, err := guardrail.AgentControlRulePackStatus(cfg.Guardrail.RulePackOverlayDirs)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar: managed rule-pack status: %w", err)
+	}
 	router.SetRulePack(rp)
 	ApplyRulePackOverrides(rp)
 	// local-patterns.yaml replaces the compiled-in local pattern set
@@ -488,6 +501,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		alertCancel:        alertCancel,
 		events:             events,
 		judge:              hookJudge,
+		rulePackStatus:     rulePackStatus,
 		judgeStore:         judgeStore,
 		judgeBodyStore:     judgeBodyStore,
 	}
@@ -837,6 +851,9 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		_ = tel.Shutdown(context.Background())
 	}
 	telemetry.ActivateProvider(nil)
+	if s.processRestart.Load() {
+		return errProcessRestartRequested
+	}
 
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {
@@ -959,8 +976,22 @@ func (s *Sidecar) requestProcessRestart() {
 	cancel := s.runCancel
 	s.runCancelMu.Unlock()
 	if cancel != nil {
+		s.processRestart.Store(true)
 		cancel()
 	}
+}
+
+func (s *Sidecar) schedulePolicyProcessRestart() error {
+	if launchConfigRestartHelper != nil {
+		if err := launchConfigRestartHelper(); err != nil {
+			return err
+		}
+	}
+	// Let the authenticated HTTP response reach the synchronizer before the
+	// API listener is torn down. Managed supervisors observe the deliberate
+	// non-zero process result; user-mode daemon children use the helper above.
+	time.AfterFunc(250*time.Millisecond, s.requestProcessRestart)
+	return nil
 }
 
 func configReloadMode(cfg *config.Config) string {
@@ -1021,11 +1052,21 @@ func configRestartHelperArgs(argv []string) []string {
 	return args
 }
 
-func loadSidecarRulePack(cfg *config.Config) *guardrail.RulePack {
-	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
+func loadSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error) {
+	rp, err := guardrail.LoadRulePackWithOverlays(cfg.Guardrail.RulePackDir, cfg.Guardrail.RulePackOverlayDirs)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar: load managed rule-pack overlay: %w", err)
+	}
 	rp.Validate()
 	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
-	return rp
+	return rp, nil
+}
+
+func loadCachedRulePackWithOverlays(cache *guardrail.RulePackCache, baseDir string, overlayDirs []string) (*guardrail.RulePack, error) {
+	if len(overlayDirs) == 0 {
+		return cache.Load(baseDir), nil
+	}
+	return guardrail.LoadRulePackWithOverlays(baseDir, overlayDirs)
 }
 
 func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
@@ -1033,7 +1074,12 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
 		return nil
 	}
 	if rp == nil {
-		rp = loadSidecarRulePack(cfg)
+		var err error
+		rp, err = loadSidecarRulePack(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge rule-pack load failed: %v\n", err)
+			return nil
+		}
 	}
 	dotenvPath := filepath.Join(cfg.DataDir, ".env")
 	judgeLLM := cfg.ResolveLLM("guardrail.judge")
@@ -1139,8 +1185,29 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	var nextRulePack *guardrail.RulePack
+	var nextRulePackStatus guardrail.ManagedRulePackStatus
 	if rulePackReload || judgeReload {
-		nextRulePack = loadSidecarRulePack(&next)
+		var err error
+		nextRulePack, err = loadSidecarRulePack(&next)
+		if err != nil {
+			if nextSinks != nil {
+				_ = nextSinks.Close()
+			}
+			if nextOTel != nil {
+				_ = nextOTel.Shutdown(context.Background())
+			}
+			return err
+		}
+		nextRulePackStatus, err = guardrail.AgentControlRulePackStatus(next.Guardrail.RulePackOverlayDirs)
+		if err != nil {
+			if nextSinks != nil {
+				_ = nextSinks.Close()
+			}
+			if nextOTel != nil {
+				_ = nextOTel.Shutdown(context.Background())
+			}
+			return fmt.Errorf("config reload managed rule-pack status: %w", err)
+		}
 	}
 
 	var nextJudge *LLMJudge
@@ -1201,6 +1268,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 			s.router.SetRulePack(nextRulePack)
 			ApplyRulePackOverrides(nextRulePack)
 			ApplyLocalPatternsOverride(nextRulePack.LocalPatterns)
+			s.setRulePackStatus(nextRulePackStatus)
 		}
 		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
 		s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
@@ -1353,7 +1421,8 @@ func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	return oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir
+	return oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir ||
+		!reflect.DeepEqual(oldCfg.Guardrail.RulePackOverlayDirs, newCfg.Guardrail.RulePackOverlayDirs)
 }
 
 func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {
@@ -1374,7 +1443,8 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		oldG.Connector != newG.Connector ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
-		oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+		oldG.RulePackDir != newG.RulePackDir ||
+		!reflect.DeepEqual(oldG.RulePackOverlayDirs, newG.RulePackOverlayDirs) || oldG.HookSelfHeal != newG.HookSelfHeal ||
 		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
 		oldG.Judge.Enabled != newG.Judge.Enabled || !reflect.DeepEqual(oldG.Judge, newG.Judge) {
 		return true
@@ -1524,6 +1594,18 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 	s.proxyMu.RLock()
 	defer s.proxyMu.RUnlock()
 	return s.guardrailProxy
+}
+
+func (s *Sidecar) setRulePackStatus(status guardrail.ManagedRulePackStatus) {
+	s.rulePackStatusMu.Lock()
+	s.rulePackStatus = status
+	s.rulePackStatusMu.Unlock()
+}
+
+func (s *Sidecar) rulePackStatusSnapshot() guardrail.ManagedRulePackStatus {
+	s.rulePackStatusMu.RLock()
+	defer s.rulePackStatusMu.RUnlock()
+	return s.rulePackStatus
 }
 
 // runGatewayLoop connects to the gateway and reconnects on disconnect,
@@ -2133,7 +2215,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// router, avoiding a redundant disk/embed read and potential drift.
 	rp := s.router.rp
 	if rp == nil {
-		rp = guardrail.LoadRulePack(s.currentConfig().Guardrail.RulePackDir)
+		var err error
+		rp, err = guardrail.LoadRulePackWithOverlays(
+			s.currentConfig().Guardrail.RulePackDir,
+			s.currentConfig().Guardrail.RulePackOverlayDirs,
+		)
+		if err != nil {
+			return err
+		}
 		rp.Validate()
 		fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded (fallback): %s\n", rp)
 	}
@@ -2168,7 +2257,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
-	rp = guardrail.LoadRulePack(s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()))
+	rp, err = guardrail.LoadRulePackWithOverlays(
+		s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()),
+		s.currentConfig().Guardrail.RulePackOverlayDirs,
+	)
+	if err != nil {
+		return err
+	}
 	rp.Validate()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded for %s: %s\n", conn.Name(), rp)
 	if s.router != nil {
@@ -2385,6 +2480,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetWebhookDispatcher(webhooks)
 	}
 	if err == nil && proxy != nil {
+		proxy.SetPolicyEngine(s.opa)
 		s.setGuardrailProxy(proxy)
 		defer s.setGuardrailProxy(nil)
 		proxy.SetDefaultAgentName(string(s.currentConfig().Claw.Mode))
@@ -2618,7 +2714,14 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// are loaded separately via the cache.
 	primaryRP := s.router.rp
 	if primaryRP == nil {
-		primaryRP = guardrail.LoadRulePack(s.currentConfig().Guardrail.RulePackDir)
+		var err error
+		primaryRP, err = guardrail.LoadRulePackWithOverlays(
+			s.currentConfig().Guardrail.RulePackDir,
+			s.currentConfig().Guardrail.RulePackOverlayDirs,
+		)
+		if err != nil {
+			return err
+		}
 		primaryRP.Validate()
 	}
 
@@ -2902,7 +3005,14 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	succeeded := make([]string, 0, len(registrations))
 	for _, registration := range registrations {
 		registration.conn.SetCredentials(registration.opts.APIToken, masterKey)
-		rp := cache.Load(s.currentConfig().EffectiveRulePackDirForConnector(registration.conn.Name()))
+		rp, loadErr := loadCachedRulePackWithOverlays(
+			cache,
+			s.currentConfig().EffectiveRulePackDirForConnector(registration.conn.Name()),
+			s.currentConfig().Guardrail.RulePackOverlayDirs,
+		)
+		if loadErr != nil {
+			return loadErr
+		}
 		if rp != nil {
 			rp.Validate()
 		}
@@ -3173,7 +3283,14 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 
 	// Load + validate this connector's effective rule pack through the
 	// shared cache. Connectors sharing a profile read disk once.
-	rp := cache.Load(s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()))
+	rp, err := loadCachedRulePackWithOverlays(
+		cache,
+		s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()),
+		s.currentConfig().Guardrail.RulePackOverlayDirs,
+	)
+	if err != nil {
+		return err
+	}
 	if rp != nil {
 		rp.Validate()
 	}
@@ -3709,8 +3826,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetAIDiscoveryService(s.aiDiscoverySnapshot())
 	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {
+		api.SetPolicyEngine(s.opa)
 		api.SetPolicyReloader(s.opa.Reload)
+		api.SetPolicyStatusProvider(s.opa.Status)
 	}
+	api.SetPolicyRestartRequester(s.schedulePolicyProcessRestart)
+	api.SetRulePackStatusProvider(s.rulePackStatusSnapshot)
 	reg := connector.NewDefaultRegistry()
 	if s.currentConfig().PluginDir != "" {
 		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)

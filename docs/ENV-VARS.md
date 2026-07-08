@@ -192,3 +192,15 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 Run `defenseclaw doctor`. It walks the same env-var resolution
 code paths as the running gateway and surfaces effective values
 plus any active opt-outs.
+## Agent Control
+
+| Variable | Purpose |
+|---|---|
+| `AGENT_CONTROL_URL` | Agent Control server URL used by the optional synchronizer |
+| `AGENT_CONTROL_API_KEY` | Regular/runtime Agent Control API key |
+| `AGENT_CONTROL_API_KEY_HEADER` | Optional API-key header override supported by the SDK |
+
+The synchronizer also needs the normal `DEFENSECLAW_GATEWAY_TOKEN` so it can
+authenticate loopback `/policy/reload`, `/policy/restart`, and `/policy/status`
+calls. Do not put these secrets in generated policy artifacts or
+`agent_control:` config.

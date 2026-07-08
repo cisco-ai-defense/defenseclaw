@@ -13,6 +13,30 @@ DefenseClaw splits guardrail behavior across two separate layers:
 | OPA policy | Block / alert thresholds, severity-to-action behavior, enforcement rules | `defenseclaw policy activate default|strict|permissive` |
 | Guardrail rule pack | Judge prompts, PII category severity, pre-judge strips, `suppressions.yaml`, sensitive tool rules | `guardrail.rule_pack_dir` in `~/.defenseclaw/config.yaml` |
 
+### Managed rules-only overlays
+
+`guardrail.rule_pack_overlay_dirs` adds strictly validated `rules/*.yaml`
+after the selected base pack. Unlike `rule_pack_dir`, an overlay cannot replace
+judge prompts, suppressions, sensitive-tool configuration, or local patterns.
+The Agent Control integration uses this mechanism so centrally distributed
+rules remain complementary to the operator's selected profile:
+
+```yaml
+guardrail:
+  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
+  rule_pack_overlay_dirs:
+    - ~/.defenseclaw/agent-control/rule-pack/current
+```
+
+Managed overlays are strict: missing directories, unexpected files, unknown
+fields, duplicate rule IDs, invalid Go/RE2 patterns, unsupported severities,
+or exceeded size/count limits prevent activation. Rule packs are loaded into
+a process-lifetime cache, so changing an overlay requires a gateway restart.
+The synchronizer requests that restart through authenticated
+`POST /policy/restart`, waits for the gateway to return, and verifies the new
+exact digest through `GET /policy/status`. A restart request alone is not
+activation proof; failures restore and verify the previous overlay.
+
 The important gotcha is that these are **not the same switch**.
 
 `defenseclaw policy activate strict` updates the OPA-backed policy data, but it

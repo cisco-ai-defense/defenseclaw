@@ -30,9 +30,58 @@ package safefile
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
+
+// ReadRegular reads a bounded security-sensitive file without following a
+// symlink or accepting a hard link, unexpected owner, or path swap. Root-owned
+// files are accepted for managed installations; otherwise the owner must match
+// the current process. The final identity check closes the lstat/open race.
+func ReadRegular(path string, maxBytes int64) ([]byte, error) {
+	if path == "" {
+		return nil, errors.New("safefile: empty path")
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("safefile: managed input must be a regular non-symlink file: %s", path)
+	}
+	if err := validateReadOwnerAndLinks(before); err != nil {
+		return nil, fmt.Errorf("safefile: unsafe managed input %s: %w", path, err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(before, opened) || !opened.Mode().IsRegular() {
+		return nil, fmt.Errorf("safefile: managed input changed while opening: %s", path)
+	}
+	limit := maxBytes
+	if limit < 0 {
+		limit = 1<<63 - 2
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("safefile: managed input exceeds %d bytes: %s", limit, path)
+	}
+	after, err := os.Lstat(path)
+	if err != nil || after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
+		return nil, fmt.Errorf("safefile: managed input changed while reading: %s", path)
+	}
+	return raw, nil
+}
 
 // ErrSymlinkRefused is returned when the target path is a symlink.
 // We refuse to follow symlinks for secret writes because that opens

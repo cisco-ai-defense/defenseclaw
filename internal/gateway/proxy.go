@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
@@ -457,6 +458,17 @@ func NewGuardrailProxy(
 	}
 	p.resolveProviderFn = p.resolveProviderFromHeaders
 	return p, nil
+}
+
+// SetPolicyEngine wires the proxy inspector to the sidecar's shared OPA
+// engine so authenticated hot reload affects the actual guardrail data path.
+func (p *GuardrailProxy) SetPolicyEngine(engine *policy.Engine) {
+	if p == nil || engine == nil {
+		return
+	}
+	if inspector, ok := p.inspector.(*GuardrailInspector); ok {
+		inspector.SetPolicyEngine(engine)
+	}
 }
 
 // SetConnectorSwitchState stores the registry and setup options so the proxy

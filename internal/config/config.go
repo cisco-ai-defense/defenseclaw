@@ -201,6 +201,7 @@ type Config struct {
 	Watch           WatchConfig                `mapstructure:"watch"            yaml:"watch"`
 	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
 	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
+	AgentControl    AgentControlConfig         `mapstructure:"agent_control"    yaml:"agent_control,omitempty"`
 	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
 	CloudAuth       CloudAuthConfig            `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
 	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
@@ -231,6 +232,65 @@ type Config struct {
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
+}
+
+// AgentControlConfig configures the optional Python SDK synchronizer. The Go
+// gateway never contacts Agent Control; it models this block so config parity
+// and validation remain strict while the Python service owns the SDK session.
+type AgentControlConfig struct {
+	Enabled             bool                       `mapstructure:"enabled"                yaml:"enabled"`
+	AgentName           string                     `mapstructure:"agent_name"             yaml:"agent_name"`
+	TargetType          string                     `mapstructure:"target_type"            yaml:"target_type"`
+	TargetID            string                     `mapstructure:"target_id"              yaml:"target_id"`
+	RefreshSeconds      int                        `mapstructure:"refresh_seconds"         yaml:"refresh_seconds"`
+	CachePollSeconds    int                        `mapstructure:"cache_poll_seconds"      yaml:"cache_poll_seconds"`
+	InitRetryMaxSeconds int                        `mapstructure:"init_retry_max_seconds" yaml:"init_retry_max_seconds"`
+	ManagedDir          string                     `mapstructure:"managed_dir"             yaml:"managed_dir,omitempty"`
+	OPA                 AgentControlOPAConfig      `mapstructure:"opa"                     yaml:"opa"`
+	RulePack            AgentControlRulePackConfig `mapstructure:"rule_pack"               yaml:"rule_pack"`
+}
+
+type AgentControlOPAConfig struct {
+	Enabled    bool   `mapstructure:"enabled"    yaml:"enabled"`
+	Precedence string `mapstructure:"precedence" yaml:"precedence"`
+	Activation string `mapstructure:"activation" yaml:"activation"`
+}
+
+type AgentControlRulePackConfig struct {
+	Enabled    bool   `mapstructure:"enabled"    yaml:"enabled"`
+	Activation string `mapstructure:"activation" yaml:"activation"`
+	MaxRules   int    `mapstructure:"max_rules"  yaml:"max_rules"`
+}
+
+func (c *AgentControlConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if c.AgentName != "defenseclaw-policy-sync" {
+		return fmt.Errorf("agent_name must be defenseclaw-policy-sync")
+	}
+	if c.TargetType != "defenseclaw.installation" {
+		return fmt.Errorf("target_type must be defenseclaw.installation")
+	}
+	if len(c.TargetID) > 255 || c.Enabled && strings.TrimSpace(c.TargetID) == "" {
+		return fmt.Errorf("target_id is required when enabled and cannot exceed 255 characters")
+	}
+	if c.RefreshSeconds <= 0 || c.CachePollSeconds <= 0 || c.InitRetryMaxSeconds <= 0 {
+		return fmt.Errorf("refresh_seconds, cache_poll_seconds, and init_retry_max_seconds must be positive")
+	}
+	if c.OPA.Precedence != "stricter" && c.OPA.Precedence != "remote" {
+		return fmt.Errorf("opa.precedence must be stricter or remote")
+	}
+	if c.OPA.Activation != "reload" && c.OPA.Activation != "manual" {
+		return fmt.Errorf("opa.activation must be reload or manual")
+	}
+	if c.RulePack.Activation != "restart" && c.RulePack.Activation != "manual" {
+		return fmt.Errorf("rule_pack.activation must be restart or manual")
+	}
+	if c.RulePack.MaxRules < 1 || c.RulePack.MaxRules > 1000 {
+		return fmt.Errorf("rule_pack.max_rules must be between 1 and 1000")
+	}
+	return nil
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries
@@ -1337,12 +1397,13 @@ type GuardrailConfig struct {
 	// upstream model name the client will see rewritten onto outgoing
 	// requests (Bifrost model-routing). It is orthogonal to the
 	// LLM block.
-	OriginalModel     string      `mapstructure:"original_model"       yaml:"original_model,omitempty"`
-	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
-	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
-	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
-	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
-	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	OriginalModel       string      `mapstructure:"original_model"       yaml:"original_model,omitempty"`
+	BlockMessage        string      `mapstructure:"block_message"        yaml:"block_message"`
+	StreamBufferBytes   int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	RulePackDir         string      `mapstructure:"rule_pack_dir"          yaml:"rule_pack_dir"`
+	RulePackOverlayDirs []string    `mapstructure:"rule_pack_overlay_dirs" yaml:"rule_pack_overlay_dirs,omitempty"`
+	Judge               JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+	HILT                HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
 	// Detection strategy: "regex_only", "regex_judge" (default), "judge_first".
 	// Per-direction overrides take precedence over the global setting.
@@ -1657,6 +1718,17 @@ func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
 func (g *GuardrailConfig) Validate() error {
 	if g == nil {
 		return nil
+	}
+	seenOverlayDirs := make(map[string]struct{}, len(g.RulePackOverlayDirs))
+	for i, dir := range g.RulePackOverlayDirs {
+		cleaned := filepath.Clean(strings.TrimSpace(dir))
+		if strings.TrimSpace(dir) == "" {
+			return fmt.Errorf("guardrail.rule_pack_overlay_dirs[%d]: path cannot be empty", i)
+		}
+		if _, duplicate := seenOverlayDirs[cleaned]; duplicate {
+			return fmt.Errorf("guardrail.rule_pack_overlay_dirs[%d]: duplicate path %q", i, dir)
+		}
+		seenOverlayDirs[cleaned] = struct{}{}
 	}
 	// Per-connector overrides, in sorted order for deterministic errors.
 	names := make([]string, 0, len(g.Connectors))
@@ -2358,6 +2430,12 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.AgentControl.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "agent_control_invalid")
+		}
+		return nil, fmt.Errorf("config: agent_control: %w", err)
 	}
 	if err := cfg.ApplicationProtection.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3294,6 +3372,21 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
+	viper.SetDefault("guardrail.rule_pack_overlay_dirs", []string{})
+	viper.SetDefault("agent_control.enabled", false)
+	viper.SetDefault("agent_control.agent_name", "defenseclaw-policy-sync")
+	viper.SetDefault("agent_control.target_type", "defenseclaw.installation")
+	viper.SetDefault("agent_control.target_id", "")
+	viper.SetDefault("agent_control.refresh_seconds", 60)
+	viper.SetDefault("agent_control.cache_poll_seconds", 2)
+	viper.SetDefault("agent_control.init_retry_max_seconds", 300)
+	viper.SetDefault("agent_control.managed_dir", "")
+	viper.SetDefault("agent_control.opa.enabled", true)
+	viper.SetDefault("agent_control.opa.precedence", "stricter")
+	viper.SetDefault("agent_control.opa.activation", "reload")
+	viper.SetDefault("agent_control.rule_pack.enabled", false)
+	viper.SetDefault("agent_control.rule_pack.activation", "restart")
+	viper.SetDefault("agent_control.rule_pack.max_rules", 1000)
 	viper.SetDefault("guardrail.hilt.enabled", false)
 	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
 	viper.SetDefault("guardrail.judge.enabled", false)

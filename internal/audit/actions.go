@@ -67,12 +67,16 @@ const (
 	ActionToolResult Action = "tool-result"
 
 	// Operator mutations (v7 Activity)
-	ActionConfigUpdate  Action = "config-update"
-	ActionPolicyUpdate  Action = "policy-update"
-	ActionPolicyReload  Action = "policy-reload"
-	ActionAction        Action = "action" // generic action mutation (block/allow list update)
-	ActionAckAlerts     Action = "acknowledge-alerts"
-	ActionDismissAlerts Action = "dismiss-alerts"
+	ActionConfigUpdate         Action = "config-update"
+	ActionPolicyUpdate         Action = "policy-update"
+	ActionPolicyReload         Action = "policy-reload"
+	ActionAgentControlSync     Action = "agent-control-sync"
+	ActionAgentControlPublish  Action = "agent-control-publish"
+	ActionAgentControlActivate Action = "agent-control-activate"
+	ActionAgentControlRollback Action = "agent-control-rollback"
+	ActionAction               Action = "action" // generic action mutation (block/allow list update)
+	ActionAckAlerts            Action = "acknowledge-alerts"
+	ActionDismissAlerts        Action = "dismiss-alerts"
 
 	// Webhook / notifier
 	ActionWebhookDelivered Action = "webhook-delivered"
@@ -338,6 +342,10 @@ func AllActions() []Action {
 		ActionConfigUpdate,
 		ActionPolicyUpdate,
 		ActionPolicyReload,
+		ActionAgentControlSync,
+		ActionAgentControlPublish,
+		ActionAgentControlActivate,
+		ActionAgentControlRollback,
 		ActionAction,
 		ActionAckAlerts,
 		ActionDismissAlerts,
