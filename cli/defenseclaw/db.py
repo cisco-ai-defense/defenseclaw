@@ -768,14 +768,15 @@ class Store:
             """SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
                       sr.max_severity, sr.raw_json
                FROM scan_results sr
-               INNER JOIN (
-                   SELECT target, MAX(timestamp) as max_ts
-                   FROM scan_results
-                   WHERE scanner = ?
-                   GROUP BY target
-               ) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-               WHERE sr.scanner = ?""",
-            (scanner_name, scanner_name),
+               WHERE sr.scanner = ?
+                 AND sr.rowid = (
+                     SELECT candidate.rowid FROM scan_results candidate
+                     WHERE candidate.scanner = sr.scanner
+                       AND candidate.target = sr.target
+                     ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                     LIMIT 1
+                 )""",
+            (scanner_name,),
         )
         results: list[dict[str, Any]] = []
         for row in cur.fetchall():
@@ -804,7 +805,7 @@ class Store:
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC LIMIT 1
+                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
                )
                GROUP BY f.severity""",
             (target, scanner),
@@ -824,7 +825,7 @@ class Store:
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC LIMIT 1
+                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
                )
                ORDER BY CASE f.severity
                    WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
