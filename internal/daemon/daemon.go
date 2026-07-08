@@ -524,15 +524,19 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !processExists(pid) {
+		if !d.verifyProcess(info) {
 			d.removePIDFileIfStarted(info)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	if !d.verifyProcess(info) {
+		d.removePIDFileIfStarted(info)
+		return nil
+	}
 	_ = sendKillSignal(proc)
 	time.Sleep(100 * time.Millisecond)
-	if processExists(pid) {
+	if d.verifyProcess(info) {
 		return ErrStopTimeout
 	}
 	d.removePIDFileIfStarted(info)

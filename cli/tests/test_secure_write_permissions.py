@@ -368,6 +368,64 @@ def test_copy_windows_dacl_protects_destination_from_parent_inheritance(tmp_path
     assert file_permissions._windows_acl_has_required_access(destination)
 
 
+def test_windows_post_replace_verification_repairs_target(monkeypatch, tmp_path):
+    target = tmp_path / "repair.json"
+    target.write_bytes(b"sensitive")
+    problems = iter(["untrusted write grant", None])
+    repaired: list[str] = []
+
+    monkeypatch.setattr(file_permissions, "windows_acl_write_error", lambda _path: next(problems))
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
+    monkeypatch.setattr(file_permissions, "_set_windows_owner_only_acl", repaired.append)
+
+    file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
+
+    assert repaired == [os.fspath(target)]
+    assert target.read_bytes() == b"sensitive"
+
+
+def test_windows_post_replace_verification_removes_unrepairable_target(monkeypatch, tmp_path):
+    target = tmp_path / "unsafe.json"
+    target.write_bytes(b"sensitive")
+
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_write_error",
+        lambda _path: "untrusted read grant",
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "_set_windows_owner_only_acl",
+        lambda _path: (_ for _ in ()).throw(OSError("access denied")),
+    )
+
+    with pytest.raises(OSError, match="repair failed: access denied"):
+        file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
+
+    assert not target.exists()
+
+
+def test_windows_post_replace_inspection_error_removes_target(monkeypatch, tmp_path):
+    target = tmp_path / "unverifiable.json"
+    target.write_bytes(b"sensitive")
+
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_write_error",
+        lambda _path: (_ for _ in ()).throw(OSError("inspection denied")),
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "_set_windows_owner_only_acl",
+        lambda _path: (_ for _ in ()).throw(OSError("repair denied")),
+    )
+
+    with pytest.raises(OSError, match="ACL inspection failed: inspection denied"):
+        file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
+
+    assert not target.exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows junction refusal")
 @pytest.mark.allow_subprocess
 def test_private_atomic_write_refuses_windows_junction_escape(tmp_path):

@@ -97,6 +97,47 @@ func TestWriteWindowsPreservesStricterExistingDACL(t *testing.T) {
 	}
 }
 
+func TestWriteWindowsReplacesForeignReadACE(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "private.json")
+	if err := Write(path, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(user.User.Sid, windows.GENERIC_ALL),
+		windowsAccessEntry(system, windows.GENERIC_ALL),
+		windowsAccessEntry(everyone, windows.GENERIC_READ),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(path, []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if mask := windowsAllowMaskForSID(t, path, everyone); mask != 0 {
+		t.Fatalf("Everyone retained read access mask 0x%x", uint32(mask))
+	}
+}
+
 func TestProtectDirectoryWindowsRejectsNestedJunction(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
@@ -112,6 +153,27 @@ func TestProtectDirectoryWindowsRejectsNestedJunction(t *testing.T) {
 
 	if err := ProtectDirectory(filepath.Join(junction, "child")); err == nil {
 		t.Fatal("ProtectDirectory accepted a nested junction escape")
+	}
+}
+
+func TestCreateExclusiveWindowsRejectsParentJunction(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	junction := filepath.Join(root, "junction")
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", junction, outside).CombinedOutput(); err != nil {
+		t.Skipf("junction creation unavailable: %v (%s)", err, output)
+	}
+	defer os.Remove(junction)
+
+	target := filepath.Join(junction, "exclusive.json")
+	if _, err := CreateExclusive(target); err == nil {
+		t.Fatal("CreateExclusive accepted a parent junction escape")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "exclusive.json")); !os.IsNotExist(err) {
+		t.Fatalf("exclusive file escaped through junction: %v", err)
 	}
 }
 

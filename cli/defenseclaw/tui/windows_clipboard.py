@@ -164,10 +164,12 @@ def copy_windows_clipboard(
         primary_error = exc
         raise
     finally:
-        if handle and not transferred:
-            native.free(handle)
         try:
-            native.close()
-        except ClipboardError:
-            if primary_error is None:
-                raise
+            if handle and not transferred:
+                native.free(handle)
+        finally:
+            try:
+                native.close()
+            except ClipboardError:
+                if primary_error is None:
+                    raise

@@ -258,7 +258,6 @@ func privateDACLIsSafe(path string) (bool, error) {
 	if owner == nil || !owner.Equals(user.User.Sid) {
 		return false, nil
 	}
-	const writeLike = windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | 0x40
 	foundOwner := false
 	foundSystem := false
 	for index := uint16(0); index < dacl.AceCount; index++ {
@@ -278,16 +277,15 @@ func privateDACLIsSafe(path string) (bool, error) {
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			continue
 		}
-		if ace.Mask != 0 && (sid.Equals(user.User.Sid) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)) {
-			foundOwner = true
-		}
-		if ace.Mask != 0 && sid.Equals(system) {
-			foundSystem = true
-		}
-		if ace.Mask&writeLike == 0 {
+		if ace.Mask == 0 {
 			continue
 		}
-		if sid.Equals(user.User.Sid) || sid.Equals(system) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) {
+		if sid.Equals(user.User.Sid) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) {
+			foundOwner = true
+			continue
+		}
+		if sid.Equals(system) {
+			foundSystem = true
 			continue
 		}
 		return false, nil
