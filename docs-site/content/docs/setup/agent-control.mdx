@@ -1,0 +1,310 @@
+---
+title: Central policy with Agent Control
+description: Distribute DefenseClaw OPA settings and managed guardrail rules from either a self-hosted Agent Control deployment or Cisco Cloud Control.
+keywords:
+  - DefenseClaw Agent Control
+  - Agent Control integration
+  - Cisco Cloud Control
+  - centralized AI policy
+  - OPA policy distribution
+  - managed rule packs
+  - self-hosted Agent Control
+---
+
+Agent Control gives DefenseClaw a central authoring and distribution plane. Operators attach versioned DefenseClaw controls to one stable installation target; a dedicated local synchronizer reads the Agent Control SDK cache, converts matching controls into native DefenseClaw policy, and activates them locally.
+
+You can run that control plane in either of two ways:
+
+<Cards>
+  <Card
+    title="Self-host Agent Control"
+    description="Run the open-source server and UI in your own infrastructure. You own availability, authentication, database operations, upgrades, and network placement."
+  />
+  <Card
+    title="Cisco Cloud Control (enterprise)"
+    description="Use the Cisco-managed Agent Control-compatible endpoint supplied with your enterprise tenant. Cisco operates the control plane; your endpoint still enforces policy locally."
+  />
+</Cards>
+
+<Callout title="Agent Control is not in the enforcement request path">
+The synchronizer sends no prompts, completions, tool arguments, or tool results to Agent Control. It fetches the target-effective **policy snapshot** through the Agent Control SDK. DefenseClaw remains the runtime enforcement authority, and its last-known-good local policy keeps serving when the control plane is temporarily unavailable.
+</Callout>
+
+## Architecture
+
+<Flow
+  direction="TB"
+  compact
+  caption="The hosting choice changes who operates the distribution plane. It does not change DefenseClaw's local validation or enforcement path."
+>
+  <Node id="operator" kind="operator">Security / platform team</Node>
+  <Node id="self" kind="policy">Self-hosted Agent Control</Node>
+  <Node id="cloud" kind="policy">Cisco Cloud Control</Node>
+  <Node id="sdk" kind="connector">Agent Control SDK cache</Node>
+  <Node id="sync" kind="operator">DefenseClaw synchronizer</Node>
+  <Node id="opa" kind="policy">OPA supplemental data</Node>
+  <Node id="rules" kind="policy">Managed rule overlay</Node>
+  <Node id="gateway" kind="gateway">DefenseClaw gateway</Node>
+  <Node id="agents" kind="agent">Protected AI agents</Node>
+  <Edge from="operator" to="self" label="author + target" />
+  <Edge from="operator" to="cloud" label="author + target" />
+  <Edge from="self" to="sdk" label="choose one" />
+  <Edge from="cloud" to="sdk" label="choose one" />
+  <Edge from="sdk" to="sync" label="cached effective controls" />
+  <Edge from="sync" to="opa" label="validate + publish" />
+  <Edge from="sync" to="rules" label="validate + publish" />
+  <Edge from="opa" to="gateway" label="authenticated reload" />
+  <Edge from="rules" to="gateway" label="supervised restart" />
+  <Edge from="gateway" to="agents" label="local enforcement" />
+</Flow>
+
+The synchronizer uses one dedicated Agent Control identity:
+
+| Field | Required value |
+| --- | --- |
+| Agent name | `defenseclaw-policy-sync` |
+| Target type | `defenseclaw.installation` |
+| Target ID | A stable UUID or immutable installation ID |
+
+Bind DefenseClaw controls to that target. Do not reuse an application agent identity: the controls in this integration distribute policy; they do not evaluate application steps in Agent Control.
+
+## Choose the control-plane model
+
+<Tabs items={['Self-hosted Agent Control', 'Cisco Cloud Control']}>
+
+<Tab value="Self-hosted Agent Control">
+
+Choose self-hosting when policy data must remain in your infrastructure, you need private-network deployment, or your team already operates PostgreSQL-backed services.
+
+You own:
+
+- Agent Control server and UI availability;
+- TLS, ingress, authentication, API-key rotation, and network policy;
+- database backup, restore, retention, and migration;
+- evaluator package deployment and version compatibility;
+- monitoring and upgrades.
+
+Start with the official [Agent Control quickstart](https://docs.agentcontrol.dev/core/quickstart), then harden authentication and networking before connecting production DefenseClaw endpoints. The quickstart disables authentication for local development; do not expose that configuration outside an isolated development environment.
+
+Point the DefenseClaw synchronizer at your deployment:
+
+```bash
+export AGENT_CONTROL_URL="https://agent-control.example.internal"
+export AGENT_CONTROL_API_KEY="${AGENT_CONTROL_API_KEY_FROM_SECRET_STORE}"
+export AGENT_CONTROL_RUNTIME_AUTH_MODE="auto"
+```
+
+Use a non-administrator runtime credential scoped to the DefenseClaw installation target. Keep it in your service secret facility, never in `config.yaml`, generated OPA data, or a rule file.
+
+</Tab>
+
+<Tab value="Cisco Cloud Control">
+
+Choose Cisco Cloud Control when you want Cisco to operate the enterprise distribution plane and your organization has a provisioned tenant or entitlement.
+
+Your Cisco onboarding material supplies the tenant endpoint, credential, required API-key header, and identity requirements. Configure those values in the synchronizer's service environment:
+
+```bash
+export AGENT_CONTROL_URL="${CISCO_PROVIDED_AGENT_CONTROL_URL}"
+export AGENT_CONTROL_API_KEY="${CISCO_PROVIDED_RUNTIME_CREDENTIAL}"
+export AGENT_CONTROL_API_KEY_HEADER="${CISCO_PROVIDED_API_KEY_HEADER}"
+export AGENT_CONTROL_RUNTIME_AUTH_MODE="auto"
+```
+
+Do not guess the cloud hostname or credential header, and do not copy an administrator credential from the management UI. Use the target-scoped runtime credential provided for the deployment.
+
+Cisco operates the cloud control plane; you still own:
+
+- the stable `defenseclaw.installation` target ID;
+- the DefenseClaw gateway and synchronizer service on each endpoint;
+- local precedence, activation mode, HILT, and fail-mode choices;
+- local service credentials, policy-directory permissions, health monitoring, and rollback response.
+
+<Callout type="info" title="Same wire contract">
+Self-hosted Agent Control and Cisco Cloud Control use the same evaluator IDs, target identity, SDK cache, deterministic artifacts, and activation/readback flow. Moving between them changes endpoint and credentials, not the DefenseClaw policy model.
+</Callout>
+
+</Tab>
+
+</Tabs>
+
+## Before setup
+
+The endpoint running the synchronizer needs:
+
+- Python 3.12 or newer for Agent Control SDK 8.2.x;
+- the `defenseclaw[agent-control]` optional dependency;
+- a running DefenseClaw gateway with `policy_dir` configured;
+- an Agent Control URL and non-admin runtime credential;
+- `DEFENSECLAW_GATEWAY_TOKEN` for automatic local reload or restart;
+- a policy directory writable by the synchronizer service identity and readable by the gateway;
+- a process supervisor when automatic rule-pack restart activation is enabled.
+
+<Callout type="warn" title="Keep the policy directory in service-writable storage">
+The synchronizer atomically writes `rego/data-agent-control.json` beneath `policy_dir`. For a managed Linux deployment, use a service-owned path such as `/var/lib/defenseclaw/policies`, not a read-only path under `/etc`. Run the gateway and synchronizer with compatible ownership and a `0077` umask.
+</Callout>
+
+Install the optional integration in the same Python environment as the DefenseClaw CLI:
+
+```bash
+python3.12 -m pip install 'defenseclaw[agent-control]'
+```
+
+The gateway token authorizes only the local activation calls. It is separate from the Agent Control credential:
+
+```bash
+export DEFENSECLAW_GATEWAY_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN_FROM_SECRET_STORE}"
+```
+
+## Configure the installation target
+
+Run setup once with a stable target ID. Omit `--target-id` to generate and persist a UUID:
+
+```bash
+defenseclaw agent-control setup
+```
+
+Or use an ID provisioned by inventory or MDM:
+
+```bash
+defenseclaw agent-control setup \
+  --target-id "550e8400-e29b-41d4-a716-446655440000"
+```
+
+Setup verifies SDK connectivity, creates the managed directories, writes a disabled supplemental OPA artifact when none exists, and prints the exact agent/target pair to bind in the selected control plane.
+
+Enable the managed rule lane only after the gateway runs under a supervisor:
+
+```bash
+defenseclaw agent-control setup --enable-rule-pack
+```
+
+## Author the two DefenseClaw control types
+
+The integration consumes only these evaluator IDs:
+
+| Evaluator | Produces | Activation |
+| --- | --- | --- |
+| `defenseclaw.opa_policy` | `rego/data-agent-control.json` with thresholds and Cisco trust level | Atomic `POST /policy/reload` |
+| `defenseclaw.rule_pack` | `rules/agent-control.yaml` additive managed rules | Supervised `POST /policy/restart` |
+
+Both controls must use the distribution envelope below:
+
+```json
+{
+  "enabled": true,
+  "execution": "sdk",
+  "scope": {},
+  "condition": {
+    "selector": {"path": "*"},
+    "evaluator": {
+      "name": "defenseclaw.opa_policy",
+      "config": {}
+    }
+  },
+  "action": {"decision": "observe"}
+}
+```
+
+The evaluator's typed form supplies the versioned `config`. DefenseClaw rejects composite conditions, server execution, non-global selectors, non-observe actions, unknown provider fields, unsupported versions, and values outside native limits.
+
+### OPA precedence
+
+`agent_control.opa.precedence` is a local DefenseClaw choice:
+
+| Value | Behavior |
+| --- | --- |
+| `stricter` | Default. The stricter local/remote thresholds and trust posture win. |
+| `remote` | The present Agent Control values replace local thresholds and trust posture. |
+
+<Callout type="warn" title="Remote precedence delegates downgrade authority">
+With `remote`, a central operator can raise block/alert thresholds or set Cisco trust to `none`, making policy less strict than the local baseline. Use it only when the selected Agent Control deployment is the intended security authority. HILT enablement, HILT severity, hook fail mode, action/observe mode, severity ranking, and connector topology always remain local.
+</Callout>
+
+### Additive managed rules
+
+Managed rules are appended after each connector's effective base rule pack. They cannot replace local judge prompts, suppressions, sensitive tools, or local patterns. DefenseClaw strictly rejects unsafe paths, unexpected files, unknown YAML fields, duplicate IDs, invalid Go/RE2 patterns, unsupported severities, invalid confidence, and exceeded size/count limits.
+
+Rule packs are process-lifetime state. Automatic activation intentionally restarts the gateway and verifies the exact active digest after it returns.
+
+<Callout type="warn" title="Do not use automatic rule activation without a supervisor">
+For a foreground or otherwise unsupervised gateway, set `agent_control.rule_pack.activation: manual`. An automatic restart stops the process; without systemd, launchd, or another supervisor, nothing brings it back and rollback cannot be verified.
+</Callout>
+
+## Run and verify synchronization
+
+Test one successful snapshot first:
+
+```bash
+defenseclaw agent-control sync --once
+defenseclaw agent-control status
+```
+
+Then run continuously:
+
+```bash
+defenseclaw agent-control sync --watch
+```
+
+The SDK owns network refresh and fail-stale cache behavior. The DefenseClaw process polls that local cache; it does not create a second network refresh loop.
+
+Check local activation readback:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer ${DEFENSECLAW_GATEWAY_TOKEN}" \
+  http://127.0.0.1:18970/policy/status
+```
+
+Status exposes generations and SHA-256 artifact digests, never raw central policy or Agent Control credentials.
+
+### Snapshot and failure behavior
+
+| Condition | Behavior |
+| --- | --- |
+| SDK returns `None` before first success | Retry full SDK initialization with capped exponential backoff; publish nothing. |
+| SDK cache temporarily returns `None` after success | Preserve the active last-known-good artifacts. |
+| Successful snapshot is `[]` | Disable/remove only Agent Control-managed policy. Keep the local DefenseClaw baseline. |
+| One evaluator lane is invalid | Reject that lane and preserve its last-known-good state; the other lane can still advance. |
+| Native validation fails | Do not publish or activate the candidate. |
+| Reload/restart digest does not match | Restore the exact previous bytes, reactivate them, and verify rollback. |
+| Rollback cannot be verified | Report `critical_disk_runtime_divergence`; require operator intervention. |
+
+## Service credentials
+
+On Linux, put secrets in the root-managed environment file consumed by `defenseclaw-agent-control.service`:
+
+```bash
+sudo install -o root -g defenseclaw -m 0640 /dev/null \
+  /etc/defenseclaw/agent-control.env
+```
+
+Populate it from your secret manager with `AGENT_CONTROL_URL`, `AGENT_CONTROL_API_KEY`, optional `AGENT_CONTROL_API_KEY_HEADER`, and `DEFENSECLAW_GATEWAY_TOKEN`. Do not commit or print the file.
+
+<Callout type="warn" title="macOS requires an approved secret-injection path">
+The packaged launchd plist intentionally contains no credential values, and launchd does not read systemd-style `EnvironmentFile` entries. Before enabling the LaunchDaemon, use your MDM or enterprise secret-injection mechanism to make both runtime credentials available to the service. Do not place literal API keys in the plist or DefenseClaw YAML. If no secure injection path exists, do not enable automatic synchronization on macOS.
+</Callout>
+
+## Validate before binding production targets
+
+Validate an exported effective snapshot without publishing it:
+
+```bash
+defenseclaw agent-control validate snapshot.json
+```
+
+The command runs the closed Python schema checks and the authoritative native Go/Rego and rule-pack validators. For rollout:
+
+1. Start with `opa.precedence: stricter`.
+2. Keep the managed rule lane disabled until supervised restart/readback is tested.
+3. Bind a canary `defenseclaw.installation` target.
+4. Run `sync --once` and compare published/active digests.
+5. Exercise one allow and one block through every enabled connector.
+6. Start the continuous service and alert on LKG preservation, repeated activation errors, or disk/runtime divergence.
+
+<Cards>
+  <Card title="Agent Control documentation" href="https://docs.agentcontrol.dev/core/overview" description="Open-source control-plane concepts, quickstart, UI, controls, and evaluators." />
+  <Card title="Enterprise deployment" href="/docs/setup/enterprise-deployment" description="DefenseClaw service identities, trust boundaries, filesystem ownership, and supervisor hardening." />
+  <Card title="Configuration reference" href="/docs/reference/configuration" description="DefenseClaw config.yaml fields and managed deployment settings." />
+  <Card title="Gateway API" href="/docs/reference/gateway-api" description="Authenticated policy reload, restart, status, and other local API routes." />
+</Cards>
