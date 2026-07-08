@@ -16,7 +16,7 @@ export default function NotFound() {
       <div className="flex flex-wrap justify-center gap-3">
         <Link
           href="/docs"
-          className="inline-flex items-center gap-2 rounded-md bg-[var(--brand-cisco)] px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-[var(--brand-cisco-strong)]"
+          className="inline-flex items-center gap-2 rounded-sm bg-[var(--brand-cisco)] px-4 py-2 text-sm font-medium text-[var(--editorial-on-blue)] transition-colors hover:bg-[var(--brand-cisco-strong)]"
         >
           Open the docs
         </Link>

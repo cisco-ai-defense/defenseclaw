@@ -13,6 +13,12 @@ keywords:
 
 DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, or `block`—for guardrail events. Connector adapters then map that action onto the host's actual response vocabulary, such as allow/ask/deny. Admission, firewall, sandbox, and asset-policy evaluations have their own domain-specific outputs.
 
+<DefenseClawDemo scenario="policy-decision-trace" />
+
+## What you just saw
+
+The guided trace normalizes a connector event, matches a deterministic rule, checks suppressions, skips the optional judge when it is disabled, assigns severity, and resolves the active runtime action. Runtime guardrail actions are separate from the `skill_actions` and `mcp_actions` admission mappings used by scanners.
+
 <Cards>
   <Card
     title="Policy creator"
