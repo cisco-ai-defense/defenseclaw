@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
@@ -48,12 +49,30 @@ def make_private_directory(path: str | os.PathLike[str]) -> None:
 def protect_private_file(path: str | os.PathLike[str]) -> None:
     """Tighten an existing regular file to POSIX 0600 or a private DACL."""
     target = os.path.abspath(os.fspath(path))
-    _reject_reparse_path(target, allow_missing=False)
-    fd = os.open(target, os.O_RDONLY)
+    fd = open_regular_file_no_follow(target)
     try:
         set_file_mode(fd, target, 0o600)
     finally:
         os.close(fd)
+
+
+def open_regular_file_no_follow(path: str | os.PathLike[str]) -> int:
+    """Open one regular file without following a swapped symlink/reparse point."""
+    target = os.path.abspath(os.fspath(path))
+    expected = _reject_reparse_path(target, allow_missing=False)
+    assert expected is not None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(target, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise UnsafePathError(f"refusing sensitive access to non-file: {target}")
+        if not os.path.samestat(expected, opened):
+            raise UnsafePathError(f"sensitive file changed while opening: {target}")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
 
 
 def set_file_mode(fd: int, path: str, mode: int) -> None:
@@ -487,18 +506,19 @@ def _reject_reparse_chain(path: str) -> None:
         current = current.parent
 
 
-def _reject_reparse_path(path: str, *, allow_missing: bool) -> None:
+def _reject_reparse_path(path: str, *, allow_missing: bool) -> os.stat_result | None:
     try:
         info = os.lstat(path)
     except FileNotFoundError:
         if allow_missing:
-            return
+            return None
         raise
     if os.path.islink(path):
         raise UnsafePathError(f"refusing sensitive write through symlink: {path}")
     attributes = getattr(info, "st_file_attributes", 0)
     if attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
         raise UnsafePathError(f"refusing sensitive write through reparse point: {path}")
+    return info
 
 
 def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, int, str]]]:

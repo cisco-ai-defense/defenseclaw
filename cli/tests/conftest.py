@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner, Result
 
+from tests.environment import isolated_home_env
+
 _ORIGINAL_ISOLATION = CliRunner.isolation
 _ORIGINAL_STDERR_GETTER = Result.stderr.fget
 
@@ -47,26 +49,8 @@ for _stream in (sys.stdout, sys.stderr):
 def _set_windows_identity(setenv, home: Path) -> None:
     """Point every Windows user-state root at one disposable home."""
     home.mkdir(parents=True, exist_ok=True)
-    drive, tail = os.path.splitdrive(os.fspath(home))
-    roots = {
-        "HOME": home,
-        "USERPROFILE": home,
-        "HOMEDRIVE": drive,
-        "HOMEPATH": tail or os.sep,
-        "APPDATA": home / "AppData" / "Roaming",
-        "LOCALAPPDATA": home / "AppData" / "Local",
-        "XDG_CONFIG_HOME": home / ".config",
-        "XDG_CACHE_HOME": home / ".cache",
-        "XDG_DATA_HOME": home / ".local" / "share",
-        "NPM_CONFIG_PREFIX": home / ".npm-global",
-        "DEFENSECLAW_HOME": home / ".defenseclaw",
-        "CODEX_HOME": home / ".codex",
-        "CLAUDE_CONFIG_DIR": home / ".claude",
-        "HERMES_HOME": home / "AppData" / "Local" / "hermes",
-    }
-    for name, value in roots.items():
-        path = os.fspath(value)
-        setenv(name, path)
+    for name, value in isolated_home_env(home).items():
+        setenv(name, value)
 
 
 @pytest.fixture(autouse=True)

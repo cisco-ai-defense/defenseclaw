@@ -64,7 +64,10 @@ except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
 
 import yaml
 
-from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.file_permissions import (
+    atomic_write_private_bytes,
+    open_regular_file_no_follow,
+)
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -2263,9 +2266,11 @@ def _capture_managed_mcp_backup(path: str) -> None:
         # right absolute path even when called from a different cwd.
         _registry_register(os.path.abspath(path), backup)
         return
-    # follow_symlinks=False is defense-in-depth: even if a symlink slips
-    # past the lstat above (e.g. TOCTOU), copy2 will not follow it.
-    with open(path, "rb") as source:
+    # The descriptor-level identity check is defense-in-depth: even if a
+    # symlink/reparse point slips past the lstat above (e.g. TOCTOU), the read
+    # refuses to follow it or a replacement file.
+    fd = open_regular_file_no_follow(path)
+    with os.fdopen(fd, "rb") as source:
         atomic_write_private_bytes(backup, source.read())
     _registry_register(os.path.abspath(path), backup)
 

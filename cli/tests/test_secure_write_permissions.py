@@ -84,6 +84,23 @@ def _assert_staging_cleanup(record: dict[str, object]) -> None:
     assert staging_exists is False
 
 
+def test_protect_private_file_rejects_path_replacement(monkeypatch, tmp_path):
+    target = tmp_path / "target"
+    replacement = tmp_path / "replacement"
+    target.write_bytes(b"original")
+    replacement.write_bytes(b"replacement")
+    real_open = os.open
+
+    def replace_before_open(path, flags, *args, **kwargs):
+        os.replace(replacement, target)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replace_before_open)
+
+    with pytest.raises(file_permissions.UnsafePathError, match="changed while opening"):
+        file_permissions.protect_private_file(target)
+
+
 @pytest.mark.parametrize(("_name", "module", "write"), _ATOMIC_WRITERS)
 @pytest.mark.parametrize("failure_stage", ["permission", "serialize", "replace"])
 def test_atomic_writers_close_and_remove_staging_file_on_failure(
