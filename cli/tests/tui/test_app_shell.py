@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -88,6 +89,14 @@ def _assert_sensitive_export_is_owner_only(path: Path) -> None:
     windows_acl.assert_trusted_owner(security)
     windows_acl.assert_not_broadly_writable(security)
     windows_acl.assert_not_broadly_readable(security)
+
+
+async def _wait_for_background(predicate, *, timeout: float = 8.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("timed out waiting for TUI background work")
+        await asyncio.sleep(0.01)
 
 
 def _v8_destination(
@@ -1611,6 +1620,13 @@ async def test_catalog_control_action_uses_visible_table_cursor() -> None:
 
         table = app.query_one("#panel-table", DataTable)
         table.move_cursor(row=1, column=0, animate=False)
+        await _wait_for_background(lambda: table.cursor_row == 1)
+        # move_cursor updates the coordinate synchronously but delivers its
+        # RowHighlighted message on a later Textual turn. Drain that turn (and
+        # any already-queued table paint) before deliberately desynchronizing
+        # the model, so the control handler is the only remaining writer.
+        await pilot.pause()
+        assert table.cursor_row == 1
         skills.set_cursor(0)
 
         app._handle_catalog_control("skills", "skills-block")  # noqa: SLF001
@@ -5425,6 +5441,13 @@ async def test_connector_filter_defaults_to_all_and_narrows() -> None:
     )
     overview = OverviewPanelModel(cfg, version="test")
     app = DefenseClawTUI(overview_model=overview)
+    # This test counts render calls caused by picker actions. Disable the
+    # independent mount timers/polls so a periodic Overview refresh cannot
+    # be charged to the picker while the full suite is under load.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_health_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_config_poll = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(170, 44)) as pilot:
         await pilot.pause()
