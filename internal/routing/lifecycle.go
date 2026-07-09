@@ -43,7 +43,7 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	procCtx, cancel := context.WithCancel(ctx)
 	l.cancel = cancel
 
-	args := []string{"serve", "--config", l.configPath}
+	args := []string{"serve", "--config", l.configPath, "--minimal", "--image-pull-policy", "ifnotpresent"}
 
 	l.cmd = exec.CommandContext(procCtx, srCLIName, args...)
 	l.cmd.Stdout = os.Stderr
