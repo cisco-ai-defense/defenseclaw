@@ -338,23 +338,32 @@ func (s *Server) SocketPath() string { return s.socketPath }
 // SocketMode returns the resolved socket permission bits.
 func (s *Server) SocketMode() os.FileMode { return s.socketMode }
 
-// setHealth is a convenience for reporting SidecarHealth.Managed. The
-// details map carries the resolved socket path so /health JSON is
-// self-describing.
+// setHealth is a convenience for reporting SidecarHealth.Managed.
+//
+// The details map is deliberately empty. GET /health on the admin
+// REST API is exempt from bearer-token auth (see APIServer.tokenAuth
+// in internal/gateway/api.go) so it can be probed by oncall /
+// watchdog / load balancer without a credential. That makes it the
+// wrong place to publish the effective peer-auth policy (allowed
+// team / signing / bundle ids, require-flags, resolved socket
+// path/mode) — an attacker on loopback would learn exactly which
+// codesign identity to spoof.
+//
+// Operators who need to inspect the effective policy read the
+// startup log line at /Library/Logs/Cisco/SecureClient/DefenseClaw/
+// gateway.err.log (root:wheel 0640, root-only readable), which
+// carries the full team_ids / signing_ids / bundle_ids /
+// require_unix_peer / require_signing_metadata dump.
+//
+// Consumers of /health get only the subsystem's lifecycle state:
+// starting → running → stopped / error. That's enough for
+// liveness checks and matches what every other subsystem
+// (gateway, api, watcher) reports.
 func (s *Server) setHealth(state gateway.SubsystemState, lastErr string) {
 	if s.opts.Health == nil {
 		return
 	}
-	details := map[string]interface{}{
-		"socket_path":              s.socketPath,
-		"socket_mode":              fmt.Sprintf("%#o", s.socketMode),
-		"allowed_team_ids":         s.allowedTeamIDs,
-		"allowed_signing_ids":      s.allowedSigningIDs,
-		"allowed_bundle_ids":       s.allowedBundleIDs,
-		"require_unix_peer":        s.requireUnixPeer,
-		"require_signing_metadata": s.requireSigningMetadata,
-	}
-	s.opts.Health.SetManaged(state, lastErr, details)
+	s.opts.Health.SetManaged(state, lastErr, nil)
 }
 
 // logReject formats a peer-auth rejection for stderr. UID/PID are
