@@ -73,7 +73,7 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
 
 
 def test_install_docs_do_not_pipe_main_upgrader() -> None:
-    text = (ROOT / "docs/INSTALL.md").read_text()
+    text = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
     assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh" not in text
 
     upgrade_start = text.index("### Upgrading from 0.2.0 to an artifact-backed release")
