@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const managedBackupVersion = 1
@@ -203,13 +205,8 @@ func ensureManagedBackupDirRestricted(dir string) error {
 	if dir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := safefile.ProtectDirectory(dir); err != nil {
 		return fmt.Errorf("create managed backup dir %s: %w", dir, err)
-	}
-	// Tighten perms even when MkdirAll was a no-op (existing dir
-	// from an older defenseclaw build that used 0o755).
-	if err := os.Chmod(dir, 0o700); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("chmod managed backup dir %s: %w", dir, err)
 	}
 	return nil
 }

@@ -64,9 +64,7 @@ from tests.helpers import cleanup_app, make_app_context
 
 WINDOWS_SUPPORTED = {"codex", "claudecode"}
 WINDOWS_PREVIEW: set[str] = set()
-WINDOWS_NOT_CERTIFIED = {
-    "cursor", "windsurf", "geminicli", "copilot", "antigravity", "opencode", "hermes"
-}
+WINDOWS_NOT_CERTIFIED = {"cursor", "windsurf", "geminicli", "copilot", "antigravity", "opencode", "hermes"}
 WINDOWS_UNSUPPORTED = {"openhands", "omnigent", "openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
 
@@ -97,11 +95,14 @@ def test_destination_platform_unsupported_centralizes_local_stack_gate() -> None
         "endpoint": "http://localhost:8088/services/collector/event",
     }
 
-    assert destination_platform_unsupported(**local, os_name="windows") is True
+    assert destination_platform_unsupported(**local, os_name="windows") is False
     assert destination_platform_unsupported(**local, os_name="linux") is False
     assert destination_platform_unsupported(**remote, os_name="windows") is False
-    assert destination_platform_unsupported(**local_splunk, os_name="windows") is True
+    assert destination_platform_unsupported(**local_splunk, os_name="windows") is False
     assert destination_platform_unsupported(**enterprise_splunk, os_name="windows") is False
+    assert destination_platform_unsupported(**local, os_name="plan9") is True
+    assert destination_platform_unsupported(**local_splunk, os_name="plan9") is True
+    assert destination_platform_unsupported(**enterprise_splunk, os_name="plan9") is False
 
 
 def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
@@ -115,11 +116,7 @@ def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
         assert support.reason.strip(), name
 
     go_source = (
-        Path(__file__).resolve().parents[2]
-        / "internal"
-        / "gateway"
-        / "connector"
-        / "platform_support.go"
+        Path(__file__).resolve().parents[2] / "internal" / "gateway" / "connector" / "platform_support.go"
     ).read_text(encoding="utf-8")
     go_status = {
         SUPPORTED: "PlatformSupported",
@@ -130,7 +127,7 @@ def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
     for name, support in WINDOWS_CONNECTOR_SUPPORT.items():
         pattern = (
             rf'"{re.escape(name)}":\s*\{{\s*'
-            rf'Status:\s*{go_status[support.status]},\s*'
+            rf"Status:\s*{go_status[support.status]},\s*"
             rf'Reason:\s*"{re.escape(support.reason)}",'
         )
         assert re.search(pattern, go_source), f"Go status/reason drift for {name}"
@@ -282,25 +279,34 @@ def test_non_windows_views_are_unfiltered() -> None:
 
 def test_discovery_default_preserves_non_windows_and_avoids_unsupported_windows() -> None:
     discovery = object()
-    with patch(
-        "defenseclaw.commands.cmd_init.agent_discovery.discover_agents",
-        return_value=discovery,
-    ), patch(
-        "defenseclaw.commands.cmd_init.agent_discovery.first_installed",
-        return_value="openclaw",
-    ), patch("defenseclaw.platform_support.host_os", return_value="linux"):
+    with (
+        patch(
+            "defenseclaw.commands.cmd_init.agent_discovery.discover_agents",
+            return_value=discovery,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_init.agent_discovery.first_installed",
+            return_value="openclaw",
+        ),
+        patch("defenseclaw.platform_support.host_os", return_value="linux"),
+    ):
         assert _normalize_connector_arg(None, discover_default=True) == "openclaw"
 
-    with patch(
-        "defenseclaw.commands.cmd_init.agent_discovery.discover_agents",
-        return_value=discovery,
-    ), patch(
-        "defenseclaw.commands.cmd_init.agent_discovery.first_installed",
-        return_value="openclaw",
-    ), patch(
-        "defenseclaw.commands.cmd_init._installed_hook_connectors",
-        return_value=["codex"],
-    ), patch("defenseclaw.platform_support.host_os", return_value="windows"):
+    with (
+        patch(
+            "defenseclaw.commands.cmd_init.agent_discovery.discover_agents",
+            return_value=discovery,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_init.agent_discovery.first_installed",
+            return_value="openclaw",
+        ),
+        patch(
+            "defenseclaw.commands.cmd_init._installed_hook_connectors",
+            return_value=["codex"],
+        ),
+        patch("defenseclaw.platform_support.host_os", return_value="windows"),
+    ):
         assert _normalize_connector_arg(None, discover_default=True) == "codex"
 
 

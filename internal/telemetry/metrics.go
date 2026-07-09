@@ -2940,34 +2940,7 @@ type AgentLifecycleObservation struct {
 // timelines. Existing values must never be renumbered because historical
 // Prometheus samples are rendered with the same value mappings as live data.
 func AgentPhaseCode(phase string) int {
-	switch strings.ToLower(strings.TrimSpace(phase)) {
-	case "session":
-		return 1
-	case "planning":
-		return 2
-	case "model":
-		return 3
-	case "tool":
-		return 4
-	case "approval":
-		return 5
-	case "waiting":
-		return 6
-	case "responding":
-		return 7
-	case "maintenance":
-		return 8
-	case "completed":
-		return 9
-	case "failed":
-		return 10
-	case "interrupted":
-		return 11
-	case "observed":
-		return 12
-	default:
-		return 0
-	}
+	return gatewaylog.AgentPhaseCode(phase)
 }
 
 // RecordAgentLifecycle updates the automatic agent inventory and records the

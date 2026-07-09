@@ -54,7 +54,7 @@ from defenseclaw.doctor_gateway import (
     canonical_path,
     gateway_executable_name,
 )
-from defenseclaw.doctor_hooks import validate_windows_hook_registration
+from defenseclaw.doctor_hooks import WindowsHookCheck, validate_windows_hook_registration
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
 from defenseclaw.scanner_binary import resolve_scanner_binary
@@ -1344,6 +1344,34 @@ def _check_windows_native_hooks(
     pathext: str | None = None,
 ) -> None:
     """Validate the command Windows setup actually registered, without running it."""
+    check = _windows_native_hook_check(
+        cfg,
+        connector,
+        config_path=config_path,
+        install_root=install_root,
+        search_path=search_path,
+        pathext=pathext,
+    )
+    status = "pass" if check.healthy else "fail"
+    _emit(status, label, f"{check.state}: {check.detail}", r=r)
+
+
+def _windows_native_hook_check(
+    cfg,
+    connector: str,
+    *,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> WindowsHookCheck:
+    """Return the authoritative passive runtime inspection for Windows.
+
+    Both the Services registration row and the Hook contract row use this
+    exact path.  The lock records portable generated assets for digest and
+    freshness checks; the live agent registration is the source of truth for
+    the runtime Windows will actually resolve.
+    """
     paths = _hook_health_paths_from_lock(cfg, connector)
     if config_path is None:
         config_path = (
@@ -1353,7 +1381,7 @@ def _check_windows_native_hooks(
         )
     if install_root is None:
         install_root = os.path.expanduser("~/.local/bin")
-    check = validate_windows_hook_registration(
+    return validate_windows_hook_registration(
         connector=connector,
         config_path=config_path,
         data_dir=getattr(cfg, "data_dir", "") or "",
@@ -1361,8 +1389,6 @@ def _check_windows_native_hooks(
         search_path=os.environ.get("PATH", "") if search_path is None else search_path,
         pathext=os.environ.get("PATHEXT", "") if pathext is None else pathext,
     )
-    status = "pass" if check.healthy else "fail"
-    _emit(status, label, f"{check.state}: {check.detail}", r=r)
 
 
 def _check_claudecode_hooks(
@@ -4251,7 +4277,17 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("pass", "Detection", detail, r=r)
 
 
-def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
+def _check_hook_contract_lock(
+    cfg,
+    connector: str,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
     if connector in {"openclaw", "zeptoclaw"}:
         _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
         return
@@ -4285,27 +4321,51 @@ def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
     if script_version:
         detail += f" script={script_version}"
     locations = entry.get("locations") or {}
+    native_runtime = None
+    if (platform_name or os.name) == "nt" and connector in {"codex", "claudecode"}:
+        native_runtime = _windows_native_hook_check(
+            cfg,
+            connector,
+            config_path=config_path,
+            install_root=install_root,
+            search_path=search_path,
+            pathext=pathext,
+        )
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
         runtime_paths = [str(v) for v in locations.get("hook_script_paths", []) if v]
+        if (platform_name or os.name) == "nt":
+            # The lock also records portable generated assets for digest and
+            # freshness checks.  They are not Windows runtimes.  Retain real
+            # native artifacts such as Cursor's .ps1 adapter and OmniGent's
+            # .py/.pth files, but never label a generated shell script as the
+            # configured Windows runtime.
+            runtime_paths = [path for path in runtime_paths if not path.lower().endswith(".sh")]
+        if native_runtime is not None:
+            runtime_paths = []
         if workspace_dir:
             detail += f" workspace={workspace_dir}"
         if hook_paths:
             detail += f" hook_path={hook_paths[0]}"
         if runtime_paths:
             detail += f" runtime_path={runtime_paths[0]}"
+    if native_runtime is not None:
+        detail += f" {native_runtime.runtime_description}"
 
     current_version = _discovered_agent_version(data_dir, connector)
     if current_version and raw_version and current_version != raw_version:
         _emit(
             "fail",
             "Hook contract",
-            f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}",
+            f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}"
+            + (f"; {native_runtime.runtime_description}" if native_runtime is not None else ""),
             r=r,
         )
         return
-    if status == "unknown":
+    if native_runtime is not None and not native_runtime.healthy:
+        _emit("fail", "Hook contract", detail, r=r)
+    elif status == "unknown":
         _emit("fail", "Hook contract", detail, r=r)
     elif status in {"known", "unversioned"}:
         _emit("pass", "Hook contract", detail, r=r)

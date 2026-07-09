@@ -161,8 +161,15 @@ func makePrivateDirectories(path string) error {
 	if len(missing) == 0 {
 		return nil
 	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("safefile: current token user: %w", err)
+	}
+	if user == nil || user.User.Sid == nil {
+		return fmt.Errorf("safefile: current token user is unavailable")
+	}
 	descriptor, err := windows.SecurityDescriptorFromString(
-		"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)",
+		fmt.Sprintf("O:%sD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", user.User.Sid),
 	)
 	if err != nil {
 		return err
@@ -218,6 +225,17 @@ func setPrivateDACL(path string, inherit bool) error {
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		user.User.Sid,
+		nil,
+		nil,
+		nil,
+	); err != nil {
 		return err
 	}
 	return windows.SetNamedSecurityInfo(

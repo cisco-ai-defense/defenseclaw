@@ -36,6 +36,8 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+pytestmark = pytest.mark.supported_connector_host
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import config as cfg_mod  # noqa: E402

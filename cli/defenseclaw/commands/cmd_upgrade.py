@@ -56,6 +56,19 @@ _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _SHA256_HEX = set("0123456789abcdefABCDEF")
 _UPGRADE_PROTOCOL_VERSION = 1
 _UPGRADE_MANIFEST_FILENAME = "upgrade-manifest.json"
+_TUI_SMOKE_CODE = """
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
+
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+asyncio.run(smoke())
+"""
 
 
 @click.command("upgrade")
@@ -1453,6 +1466,38 @@ def _check_post_upgrade_drift(target_version: str) -> None:
     )
 
 
+def _run_managed_validation(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    failure_message: str,
+) -> None:
+    """Run one bounded post-install check and preserve failure diagnostics."""
+
+    try:
+        subprocess.run(
+            argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            env=env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        def output_text(value: str | bytes | None) -> str:
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return value or ""
+
+        output = "\n".join((output_text(exc.stdout), output_text(exc.stderr)))
+        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
+        suffix = f": {detail[:1000]}" if detail else ""
+        ux.err(f"{failure_message}{suffix}", indent="  ")
+        raise SystemExit(1) from exc
+
+
 def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
     """Install a pre-downloaded Python CLI wheel.
 
@@ -1478,7 +1523,36 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
         click.echo(f"  {ux.dim('→')} Creating venv ...")
         subprocess.run([uv, "--no-config", "venv", venv, "--python", "3.12"], check=True)
 
-    subprocess.run([uv, "--no-config", "pip", "install", "--python", venv_python, "--quiet", whl_path], check=True)
+    managed_env = os.environ.copy()
+    managed_env.pop("PYTHONHOME", None)
+    managed_env.pop("PYTHONPATH", None)
+    subprocess.run(
+        [
+            uv,
+            "--no-config",
+            "pip",
+            "install",
+            "--python",
+            venv_python,
+            "--quiet",
+            "--reinstall",
+            "--no-cache",
+            "--strict",
+            whl_path,
+        ],
+        check=True,
+        env=managed_env,
+    )
+    _run_managed_validation(
+        [uv, "--no-config", "pip", "check", "--python", venv_python],
+        env=managed_env,
+        failure_message="Managed CLI dependency validation failed",
+    )
+    _run_managed_validation(
+        [venv_python, "-I", "-c", _TUI_SMOKE_CODE],
+        env=managed_env,
+        failure_message="Managed TUI launch validation failed",
+    )
 
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)

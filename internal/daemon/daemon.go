@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
@@ -90,7 +92,22 @@ func (d *Daemon) LogFile() string { return d.logFile }
 // approach (re-wrapping in lumberjack) is what caused the EPIPE regression,
 // so rotation needs a SIGUSR1-reopen or supervised sidecar instead.
 func (d *Daemon) openLogFileForChild() (*os.File, error) {
-	return os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if _, err := os.Lstat(d.logFile); err == nil {
+		if err := safefile.ProtectFile(d.logFile); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	f, err := os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := safefile.ProtectFile(d.logFile); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 type pidInfo struct {
@@ -286,7 +303,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 
 	d.killStaleProcesses()
 
-	if err := os.MkdirAll(d.dataDir, 0700); err != nil {
+	if err := safefile.ProtectDirectory(d.dataDir); err != nil {
 		return 0, fmt.Errorf("daemon: create data dir: %w", err)
 	}
 
@@ -358,6 +375,11 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// the legacy behavior on platforms without /proc.
 	startIdentity, _ := processStartIdentity(pid)
 
+	// On Windows the breakaway child also writes this same strong identity at
+	// its earliest sidecar pre-run hook. That closes the launcher-cancellation
+	// window between CreateProcess and this parent-side write: a surviving
+	// breakaway child is always PID-file-managed. Keep the parent write as the
+	// authoritative handoff/error check and to preserve the existing Unix path.
 	if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
 		_ = cmd.Process.Kill()
 		<-exitCh // reap the child so it doesn't become a zombie
@@ -591,9 +613,40 @@ func (d *Daemon) writePIDInfo(pid int, executable string, startIdentity string) 
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.pidFile, data, 0600)
+	return safefile.WritePrivate(d.pidFile, data)
 }
 
 func IsDaemonChild() bool {
 	return os.Getenv(EnvDaemon) == "1"
+}
+
+// RegisterCurrentProcess records the strong identity of a Windows daemon
+// child before sidecar initialization. Managed Windows children can explicitly
+// leave a TUI Job Object, so they must not depend solely on the launcher
+// remaining alive long enough to write gateway.pid. Other platforms keep the
+// existing parent-owned registration path unchanged.
+func RegisterCurrentProcess() error {
+	if !IsDaemonChild() || !daemonChildRegistersPID() {
+		return nil
+	}
+	dataDir := strings.TrimSpace(os.Getenv(EnvDataDir))
+	if dataDir == "" {
+		return fmt.Errorf("daemon: %s is empty for daemon child", EnvDataDir)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("daemon: get child executable: %w", err)
+	}
+	pid := os.Getpid()
+	startIdentity, err := processStartIdentity(pid)
+	if err != nil {
+		return fmt.Errorf("daemon: get child process identity: %w", err)
+	}
+	if startIdentity == "" {
+		return errors.New("daemon: child process identity is empty")
+	}
+	if err := New(dataDir).writePIDInfo(pid, executable, startIdentity); err != nil {
+		return fmt.Errorf("daemon: register child process: %w", err)
+	}
+	return nil
 }

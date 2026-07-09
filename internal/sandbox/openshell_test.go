@@ -16,10 +16,12 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestOpenShell_ReloadPolicyExitRecordsMetric(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	requireOpenShellRuntime(t)
+	testenv.SetHome(t, t.TempDir())
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-openshell")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 7\n"), 0o700); err != nil {
@@ -66,8 +68,9 @@ func TestOpenShell_ReloadPolicyExitRecordsMetric(t *testing.T) {
 }
 
 func TestOpenShell_StartNonZeroExitEmitted(t *testing.T) {
+	requireOpenShellRuntime(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-openshell")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$1\" = start ]; then echo fail >&2; exit 127; fi\nexit 0\n"), 0o700); err != nil {

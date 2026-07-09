@@ -27,6 +27,8 @@ from defenseclaw.codeguard_skill import (
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.context import AppContext
 
+from tests.permissions import assert_owner_only_directory
+
 
 def _cfg(active: str, root, *, data_dir: str | None = None):
     return SimpleNamespace(
@@ -103,7 +105,6 @@ def test_ensure_codeguard_skill_is_noop(tmp_path):
 
 def test_codeguard_rule_replace_archives_prior_content(tmp_path, monkeypatch):
     """``--replace`` must back up the previous file under data_dir/connector_backups."""
-    import os
     from pathlib import Path
 
     monkeypatch.chdir(tmp_path)
@@ -124,8 +125,7 @@ def test_codeguard_rule_replace_archives_prior_content(tmp_path, monkeypatch):
     # Per-connector dir must not be world-readable — it leaks operator
     # state and the archived payload may carry intent the operator
     # considered private.
-    mode = os.stat(archive_root.parent).st_mode & 0o777
-    assert mode & 0o077 == 0, f"archive root group/world-readable: {oct(mode)}"
+    assert_owner_only_directory(archive_root.parent)
 
 
 def test_codeguard_skill_replace_archives_prior_content(tmp_path, monkeypatch):

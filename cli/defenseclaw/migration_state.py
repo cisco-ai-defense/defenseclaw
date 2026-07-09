@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -242,7 +241,6 @@ def save(data_dir: str, state: MigrationState) -> None:
     will just bootstrap again from ``from_version``, which usually
     re-applies idempotent migrations harmlessly.
     """
-    os.makedirs(data_dir, exist_ok=True)
     target = state_path(data_dir)
 
     payload = {
@@ -252,30 +250,10 @@ def save(data_dir: str, state: MigrationState) -> None:
         "applied_at": state.applied_at,
     }
 
-    # NamedTemporaryFile in delete=False mode so we control the rename
-    # explicitly. dir=data_dir keeps the rename on the same filesystem
-    # as the target — required for os.replace to be atomic.
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".migration_state.", suffix=".tmp", dir=data_dir,
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        # Tighten perms BEFORE the rename so the file appears at its
-        # final path with the intended mode (and never spends a
-        # microsecond at the default 0o600/0o644 from mkstemp).
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, target)
-    except OSError:
-        # Clean up the temp file if the rename never happened.
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    atomic_write_private_bytes(target, body.encode("utf-8"))
 
 
 def is_applied(state: MigrationState | None, version: str) -> bool:

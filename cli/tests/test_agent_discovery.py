@@ -849,7 +849,7 @@ def test_windows_trust_check_is_case_insensitive(monkeypatch, tmp_path):
 def test_windows_defaults_are_narrow_and_reject_drive_root():
     local_app_data = os.environ["LOCALAPPDATA"]
     expected = os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin")
-    default_keys = {ad._path_key(path) for path in ad._TRUSTED_BIN_PREFIXES_DEFAULT}
+    default_keys = {ad._path_key(path) for path in ad._builtin_trusted_bin_prefixes()}
 
     assert ad._path_key(expected) in default_keys
     assert ad._path_key(local_app_data) not in default_keys

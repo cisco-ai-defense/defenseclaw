@@ -31,7 +31,12 @@ from defenseclaw.commands import cmd_setup_observability as setup_writer
 from defenseclaw.observability import writer as observability_writer
 from defenseclaw.webhooks import writer as webhook_writer
 
-from tests.permissions import assert_owner_only_file, grant_everyone, set_known_windows_directory_acl
+from tests.permissions import (
+    assert_owner_only_directory,
+    assert_owner_only_file,
+    grant_everyone,
+    set_known_windows_directory_acl,
+)
 
 _ATOMIC_WRITERS = [
     (
@@ -61,6 +66,12 @@ _ATOMIC_WRITERS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _private_windows_tmp_path(tmp_path):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+
+
 def _assert_staging_cleanup(record: dict[str, object]) -> None:
     fd = record["fd"]
     path = record["path"]
@@ -82,6 +93,23 @@ def _assert_staging_cleanup(record: dict[str, object]) -> None:
 
     assert descriptor_open is False
     assert staging_exists is False
+
+
+def test_protect_private_file_rejects_path_replacement(monkeypatch, tmp_path):
+    target = tmp_path / "target"
+    replacement = tmp_path / "replacement"
+    target.write_bytes(b"original")
+    replacement.write_bytes(b"replacement")
+    real_open = os.open
+
+    def replace_before_open(path, flags, *args, **kwargs):
+        os.replace(replacement, target)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replace_before_open)
+
+    with pytest.raises(file_permissions.UnsafePathError, match="changed while opening"):
+        file_permissions.protect_private_file(target)
 
 
 @pytest.mark.parametrize(("_name", "module", "write"), _ATOMIC_WRITERS)
@@ -139,7 +167,7 @@ def test_migration_writer_closes_and_removes_staging_file_when_permissions_fail(
     monkeypatch.setattr(
         migrations,
         "set_file_mode",
-        lambda *_args: (_ for _ in ()).throw(OSError("injected permission failure")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected permission failure")),
     )
 
     target = tmp_path / "migration-secret.yaml"
@@ -160,7 +188,7 @@ def test_dotenv_writer_closes_descriptor_when_permissions_fail(monkeypatch, tmp_
     monkeypatch.setattr(
         observability_writer,
         "set_file_mode",
-        lambda *_args: (_ for _ in ()).throw(OSError("injected permission failure")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected permission failure")),
     )
 
     with pytest.raises(OSError, match="injected permission failure"):
@@ -237,9 +265,7 @@ def test_private_atomic_write_can_preserve_operator_selected_parent(tmp_path):
     file_permissions.atomic_write_private_bytes(target, b"synthetic fixture", protect_parent=False)
 
     after = (
-        file_permissions._windows_acl_snapshot(os.fspath(parent))
-        if os.name == "nt"
-        else parent.stat().st_mode & 0o777
+        file_permissions._windows_acl_snapshot(os.fspath(parent)) if os.name == "nt" else parent.stat().st_mode & 0o777
     )
     assert after == before
     assert_owner_only_file(target)
@@ -310,6 +336,7 @@ def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
 def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
     broad_dir = tmp_path / name
     broad_dir.mkdir()
+    set_known_windows_directory_acl(broad_dir)
     grant_everyone(broad_dir, "(RX)")
     target = broad_dir / "secret.yaml"
 
@@ -321,11 +348,24 @@ def test_secret_writers_replace_inherited_windows_access(tmp_path, name, write):
     assert_owner_only_file(target)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory read/traverse ACLs")
+@pytest.mark.allow_subprocess
+def test_owner_only_directory_assertion_rejects_untrusted_read_access(tmp_path):
+    directory = tmp_path / "readable-directory"
+    directory.mkdir()
+    set_known_windows_directory_acl(directory)
+    grant_everyone(directory, "RX")
+
+    with pytest.raises(AssertionError, match="untrusted SID"):
+        assert_owner_only_directory(directory)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL preservation")
 @pytest.mark.allow_subprocess
 def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_path):
     target = tmp_path / "stricter ACL 雪.json"
     target.write_text("old", encoding="utf-8")
+    file_permissions._set_windows_current_user_owner(os.fspath(target))
     subprocess.run(
         [
             "icacls",
@@ -353,13 +393,15 @@ def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_pat
 def test_copy_windows_dacl_protects_destination_from_parent_inheritance(tmp_path):
     source = tmp_path / "source.json"
     source.write_text("source", encoding="utf-8")
-    file_permissions._set_windows_owner_only_acl(os.fspath(source))
+    file_permissions._set_windows_owner_only_acl(os.fspath(source), set_owner=True)
 
     broad_dir = tmp_path / "broad-parent"
     broad_dir.mkdir()
+    set_known_windows_directory_acl(broad_dir)
     grant_everyone(broad_dir)
     destination = broad_dir / "destination.json"
     destination.write_text("destination", encoding="utf-8")
+    file_permissions._set_windows_current_user_owner(os.fspath(destination))
     assert file_permissions._windows_dacl_is_protected(destination) is False
 
     file_permissions.copy_windows_dacl(os.fspath(source), os.fspath(destination))
@@ -493,10 +535,41 @@ def test_private_directory_refuses_foreign_owner_without_acl_rewrite(monkeypatch
         file_permissions._protect_private_directory("synthetic")
 
 
+def test_private_directory_creation_descriptor_names_current_owner(monkeypatch):
+    owner = "S-1-5-21-1000-1001-1002-1003"
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: owner)
+
+    descriptor = file_permissions._windows_private_directory_sddl()
+
+    assert descriptor.startswith(f"O:{owner}D:P")
+    assert "(A;OICI;FA;;;OW)" in descriptor
+    assert "(A;OICI;FA;;;SY)" in descriptor
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory inheritance")
+def test_private_directory_keeps_existing_managed_venv_accessible(tmp_path):
+    private_home = tmp_path / "private-home"
+    managed_venv = private_home / ".venv"
+    managed_venv.mkdir(parents=True)
+    existing = managed_venv / "existing.txt"
+    existing.write_text("before", encoding="utf-8")
+    set_known_windows_directory_acl(private_home)
+
+    file_permissions.make_private_directory(private_home)
+
+    assert existing.read_text(encoding="utf-8") == "before"
+    created = managed_venv / "created-after-hardening.txt"
+    created.write_text("after", encoding="utf-8")
+    assert created.read_text(encoding="utf-8") == "after"
+    assert file_permissions.windows_acl_write_error(private_home) is None
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows directory-swap lock")
 def test_private_atomic_write_holds_parent_against_directory_swap(tmp_path):
     parent = tmp_path / "managed"
     parent.mkdir()
+    if os.name == "nt":
+        set_known_windows_directory_acl(parent)
     moved = tmp_path / "moved"
     swap_refused = False
 

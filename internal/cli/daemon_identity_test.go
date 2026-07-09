@@ -156,7 +156,7 @@ func TestInspectConfiguredListenerRejectsManagedPIDWithoutListener(t *testing.T)
 	}
 }
 
-func TestWaitForConfiguredPortFreeRetriesTransientStoppedOwner(t *testing.T) {
+func TestWaitForConfiguredPortFreeRetriesRestartRelease(t *testing.T) {
 	cfg := startupTestConfig(t)
 	var probes atomic.Int32
 	withStartupListenerInspector(t, func(string, int) (int, error) {
@@ -165,7 +165,7 @@ func TestWaitForConfiguredPortFreeRetriesTransientStoppedOwner(t *testing.T) {
 		}
 		return 0, daemon.ErrNoListener
 	})
-	if err := waitForConfiguredPortFree(cfg, time.Second, time.Millisecond); err != nil {
+	if err := waitForConfiguredPortFree(cfg, 42, time.Second, time.Millisecond); err != nil {
 		t.Fatalf("waitForConfiguredPortFree: %v", err)
 	}
 	if got := probes.Load(); got != 3 {
@@ -173,12 +173,19 @@ func TestWaitForConfiguredPortFreeRetriesTransientStoppedOwner(t *testing.T) {
 	}
 }
 
-func TestWaitForConfiguredPortFreeKeepsPersistentCollisionFatal(t *testing.T) {
+func TestWaitForConfiguredPortFreeKeepsForeignCollisionTerminal(t *testing.T) {
 	cfg := startupTestConfig(t)
-	withStartupListenerInspector(t, func(string, int) (int, error) { return 9001, nil })
-	err := waitForConfiguredPortFree(cfg, 0, 0)
-	if err == nil || !strings.Contains(err.Error(), "occupied by PID 9001") {
-		t.Fatalf("error = %v, want persistent collision", err)
+	var probes atomic.Int32
+	withStartupListenerInspector(t, func(string, int) (int, error) {
+		probes.Add(1)
+		return 99, nil
+	})
+	err := waitForConfiguredPortFree(cfg, 42, time.Second, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "occupied by PID 99") {
+		t.Fatalf("error = %v, want occupied-port failure", err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("foreign-listener probes = %d, want immediate failure after 1", got)
 	}
 }
 
@@ -215,6 +222,36 @@ func TestWaitForGatewayReadinessRequiresAuthRuntimeAndListenerIdentity(t *testin
 	_, ready, err := waitForGatewayReadiness(srv.Client(), srv.URL, time.Second, time.Millisecond, requirements, func() bool { return true })
 	if err != nil || !ready {
 		t.Fatalf("ready = %v, error = %v", ready, err)
+	}
+}
+
+func TestWaitForGatewayReadinessIdentityProvenButStartingAtDeadlineFails(t *testing.T) {
+	dataDir := t.TempDir()
+	status := gatewayStatusEnvelope{Health: readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled)}
+	status.Runtime.PID = 77
+	status.Runtime.DataDir = dataDir
+	srv := authenticatedStatusServer(t, "secret", status)
+	defer srv.Close()
+	requirements := daemonReadinessRequirements{
+		guardrailEnabled: true,
+		expectedPID:      77,
+		expectedDataDir:  dataDir,
+		token:            func() string { return "secret" },
+		listenerHost:     "127.0.0.1",
+		listenerPort:     18970,
+		listenerOwner:    func(string, int) (int, error) { return 77, nil },
+		requireOwnership: true,
+	}
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(),
+		srv.URL,
+		25*time.Millisecond,
+		5*time.Millisecond,
+		requirements,
+		func() bool { return true },
+	)
+	if err == nil || !strings.Contains(err.Error(), "remained STARTING") || ready {
+		t.Fatalf("ready = %v, error = %v, want terminal timeout after identity proof", ready, err)
 	}
 }
 

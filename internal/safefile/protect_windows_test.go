@@ -20,6 +20,7 @@ func TestWriteWindowsRemovesInheritedUnauthorizedWriter(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	ownWindowsTestPath(t, dir)
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +58,25 @@ func TestWriteWindowsRemovesInheritedUnauthorizedWriter(t *testing.T) {
 	}
 	assertNoUnauthorizedWindowsWriter(t, path)
 	assertNoUnauthorizedWindowsWriter(t, dir)
+}
+
+func ownWindowsTestPath(t *testing.T, path string) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		user.User.Sid,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("own test path %s: %v", path, err)
+	}
 }
 
 func TestWriteWindowsPreservesStricterExistingDACL(t *testing.T) {

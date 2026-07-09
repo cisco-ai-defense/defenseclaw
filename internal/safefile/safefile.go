@@ -138,7 +138,7 @@ func write(path string, data []byte) error {
 	if err := preserveExistingProtection(path, tmpName); err != nil {
 		return fmt.Errorf("safefile: preserve existing protection: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("safefile: rename: %w", err)
 	}
 	if d, err := os.Open(dir); err == nil {
@@ -212,4 +212,57 @@ func ProtectDirectory(path string) error {
 		return err
 	}
 	return protectDirectory(path)
+}
+
+// ProtectFile applies the platform-native owner-only protection contract to an
+// existing regular file.
+func ProtectFile(path string) error {
+	expected, err := validateRegularFilePath(path)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		return fmt.Errorf("safefile: file changed while opening: %s", path)
+	}
+	current, err := validateRegularFilePath(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(opened, current) {
+		return fmt.Errorf("safefile: file changed while validating: %s", path)
+	}
+	return protectFile(path, f)
+}
+
+func validateRegularFilePath(path string) (os.FileInfo, error) {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if err := rejectReparseChain(dir); err != nil {
+		return nil, err
+	}
+	if err := rejectReparsePath(path); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSymlinkRefused, path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("safefile: path is not a regular file: %s", path)
+	}
+	return info, nil
 }

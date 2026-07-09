@@ -601,6 +601,17 @@ func (s *ContinuousDiscoveryService) InventoryStore() *InventoryStore {
 	return s.invStore
 }
 
+// Close releases the optional SQLite history store. Callers that construct a
+// service outside the sidecar lifecycle must call Close before removing its
+// data directory, especially on Windows where open databases cannot be
+// unlinked.
+func (s *ContinuousDiscoveryService) Close() error {
+	if s == nil || s.invStore == nil {
+		return nil
+	}
+	return s.invStore.Close()
+}
+
 // ConfidenceParams returns the policy + tunables the engine uses
 // when scoring components. Gateway handlers call ComputeComponentConfidence
 // with this value to get scores for the live snapshot.
@@ -3159,13 +3170,13 @@ func projectRootForManifest(path string) string {
 			// Project root is the dir CONTAINING `.cargo` --
 			// for `~/.cargo/registry/...` that's the user's
 			// home, the natural attribution for global crates.
-			return strings.Join(parts[:i-1], "/")
+			return filepath.FromSlash(strings.Join(parts[:i-1], "/"))
 		}
 		if seg == "cache" && i > 0 && strings.ToLower(parts[i-1]) == ".yarn" {
-			return strings.Join(parts[:i-1], "/")
+			return filepath.FromSlash(strings.Join(parts[:i-1], "/"))
 		}
 		if cacheSegments[seg] {
-			return strings.Join(parts[:i], "/")
+			return filepath.FromSlash(strings.Join(parts[:i], "/"))
 		}
 	}
 	return dir

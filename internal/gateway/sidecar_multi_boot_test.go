@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -156,7 +157,7 @@ func TestSetupOneConnector_SetupErrorReturnsWithoutRollback(t *testing.T) {
 // and leaves the connector installed (no teardown).
 func TestSetupOneConnector_SuccessNoTeardown(t *testing.T) {
 	s := multiBootSidecar(t)
-	conn := &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}
+	conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 	cache := guardrail.NewRulePackCache()
 
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
@@ -222,9 +223,9 @@ func TestSetupOneConnector_ObserveOverrideIgnoresGlobalActionContractGate(t *tes
 	s := multiBootSidecar(t)
 	s.cfg.Guardrail.Mode = "action"
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"hermes": {Mode: "observe"},
+		"claudecode": {Mode: "observe"},
 	}
-	conn := &bootStubConnector{stubConnector: stubConnector{name: "hermes"}}
+	conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
 	if opts.AgentVersion != "" {
@@ -251,8 +252,8 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 
 	discovery := map[string]any{
 		"agents": map[string]any{
-			"codex":  map[string]any{"version": "codex-cli 0.142.4"},
-			"cursor": map[string]any{"version": "3.9.16"},
+			"codex":      map[string]any{"version": "codex-cli 0.142.4"},
+			"claudecode": map[string]any{"version": "Claude Code v2.1.144"},
 		},
 	}
 	raw, err := json.Marshal(discovery)
@@ -285,7 +286,7 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 		stubConnector: stubConnector{name: "codex"},
 		artifactPath:  artifact,
 	}
-	added := &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}
+	added := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 	got, err := s.setupConnectorsIsolated(
 		context.Background(),
 		[]connector.Connector{existing, added},
@@ -295,7 +296,7 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
 	}
-	if want := []string{"codex", "cursor"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"codex", "claudecode"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("refreshed connectors=%v, want %v", got, want)
 	}
 	if existing.setupCalls != 1 || added.setupCalls != 1 {
@@ -313,13 +314,13 @@ func TestSetupConnectorsIsolated_AllSucceed(t *testing.T) {
 	s := multiBootSidecar(t)
 	conns := []connector.Connector{
 		&bootStubConnector{stubConnector: stubConnector{name: "codex"}},
-		&bootStubConnector{stubConnector: stubConnector{name: "cursor"}},
+		&bootStubConnector{stubConnector: stubConnector{name: "claudecode"}},
 	}
 	got, err := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
 	}
-	want := []string{"codex", "cursor"}
+	want := []string{"codex", "claudecode"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("succeeded=%v, want %v", got, want)
 	}
@@ -332,8 +333,8 @@ func TestSetupConnectorsIsolated_AllSucceed(t *testing.T) {
 func TestSetupConnectorsIsolated_DN1_MiddleFailsOthersSurvive(t *testing.T) {
 	s := multiBootSidecar(t)
 	first := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
-	middle := &bootStubConnector{stubConnector: stubConnector{name: "cursor"}, setupErr: errors.New("middle boom")}
-	last := &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}
+	middle := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}, setupErr: errors.New("middle boom")}
+	last := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 
 	got, err := s.setupConnectorsIsolated(
 		context.Background(),
@@ -345,14 +346,14 @@ func TestSetupConnectorsIsolated_DN1_MiddleFailsOthersSurvive(t *testing.T) {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
 	}
 
-	want := []string{"codex", "windsurf"}
+	want := []string{"codex", "codex"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("survivors=%v, want %v (middle connector failure must not cascade)", got, want)
 	}
 	// Every connector's Setup must have been attempted — the failing one in
 	// the middle must not short-circuit the connector after it.
 	if first.setupCalls != 1 || middle.setupCalls != 1 || last.setupCalls != 1 {
-		t.Errorf("setupCalls codex=%d cursor=%d windsurf=%d, want 1/1/1",
+		t.Errorf("setupCalls first(codex)=%d middle(claudecode)=%d last(codex)=%d, want 1/1/1",
 			first.setupCalls, middle.setupCalls, last.setupCalls)
 	}
 	if middle.teardownCalls != 1 {
@@ -424,8 +425,8 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 		t.Errorf("cursor HookFailMode=%q, want override %q", cursorOpts.HookFailMode, "closed")
 	}
 	windsurfOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}, "tok", "a", "b")
-	if windsurfOpts.HookFailMode != "open" {
-		t.Errorf("windsurf HookFailMode=%q, want observe-mode open", windsurfOpts.HookFailMode)
+	if windsurfOpts.HookFailMode != "closed" {
+		t.Errorf("windsurf HookFailMode=%q, want connector override independent of observe mode", windsurfOpts.HookFailMode)
 	}
 }
 
@@ -605,6 +606,9 @@ func TestConnectorSetupTokensUnmanagedFallsBackToMasterToken(t *testing.T) {
 }
 
 func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("proxy connectors are unsupported on native Windows; platform gate coverage remains active")
+	}
 	tokens, err := connectorSetupTokensFor(t.TempDir(), connector.NewOpenClawConnector(), "gateway-master", false)
 	if err != nil {
 		t.Fatalf("connectorSetupTokensFor proxy: %v", err)
@@ -618,6 +622,9 @@ func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
 }
 
 func TestConnectorSetupTokensOmnigentGetsScopedToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OmniGent is unsupported on native Windows; platform gate coverage remains active")
+	}
 	tokens, err := connectorSetupTokensFor(t.TempDir(), connector.NewOmnigentConnector(), "gateway-master", false)
 	if err != nil {
 		t.Fatalf("connectorSetupTokensFor omnigent: %v", err)
@@ -658,6 +665,9 @@ func TestRunGuardrailMulti_FailFastProxyGuard(t *testing.T) {
 }
 
 func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed enterprise hook lifecycle is rejected on native Windows")
+	}
 	dir := t.TempDir()
 	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
 	prevCodex := connector.CodexConfigPathOverride
@@ -698,6 +708,9 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 }
 
 func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed enterprise hook lifecycle is rejected on native Windows")
+	}
 	dir := t.TempDir()
 	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
 	claudeSettings := filepath.Join(t.TempDir(), ".claude", "settings.json")

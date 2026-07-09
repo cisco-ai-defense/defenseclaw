@@ -295,6 +295,7 @@ class TestConfigSaveAuthoritativeNestedDicts(unittest.TestCase):
         self.assertEqual(attrs, {})
 
 
+@unittest.skipIf(os.name == "nt", "POSIX mode preservation; native Windows DACL preservation has dedicated coverage")
 class TestConfigSavePreservesFileMode(unittest.TestCase):
     """P1 security regression: ``Config.save()`` must NOT widen the
     file mode of an existing config.yaml. The pre-fix path opened

@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.logger import Logger
 from defenseclaw.models import Event, Finding, ScanResult, compare_severity
 
@@ -57,6 +58,16 @@ class ModelsDbTests(unittest.TestCase):
         self.assertGreater(compare_severity("CRITICAL", "HIGH"), 0)
         self.assertGreater(compare_severity("HIGH", "MEDIUM"), 0)
         self.assertLess(compare_severity("LOW", "HIGH"), 0)
+
+    def test_unknown_hook_action_is_clamped_to_allow(self):
+        self.assertEqual(connector_hook_decision("action=skip"), "allow")
+
+    def test_latest_scan_query_has_composite_lookup_index(self):
+        indexes = {
+            row[1]: row
+            for row in self.store.db.execute("PRAGMA index_list(scan_results)").fetchall()
+        }
+        self.assertIn("idx_scan_scanner_target_timestamp", indexes)
 
     def test_policy_engine_block_allow(self):
         pe = PolicyEngine(self.store)
@@ -174,6 +185,27 @@ class ModelsDbTests(unittest.TestCase):
         counts = self.store.get_counts()
         self.assertEqual(counts.blocked_egress_calls, 1)
 
+    def test_store_enables_quarantine_foreign_key_cascade(self):
+        self.assertEqual(self.store.db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        record = self.store.create_quarantine_record(
+            "skill",
+            "unsafe-skill",
+            "/tmp/unsafe-skill",
+            "/tmp/quarantine/unsafe-skill",
+            "sha256-fixture",
+            "test",
+            "codex",
+        )
+
+        with self.store.db:
+            self.store.db.execute("DELETE FROM quarantine_records WHERE id = ?", (record.id,))
+
+        association = self.store.db.execute(
+            "SELECT 1 FROM quarantine_record_connectors WHERE quarantine_id = ?",
+            (record.id,),
+        ).fetchone()
+        self.assertIsNone(association)
+
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()
         os.unlink(self.tmp.name)
@@ -263,6 +295,121 @@ class ModelsDbTests(unittest.TestCase):
         stats = self.store.connector_hook_event_stats()
 
         self.assertEqual(stats["codex"]["calls"], 2)
+        self.assertEqual(stats["codex"]["blocks"], 1)
+
+    def test_connector_hook_stats_are_complete_and_classify_effective_decisions(self):
+        base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        rows = [
+            (
+                f"codex-{index}",
+                (base + timedelta(seconds=index)).isoformat(),
+                "connector-hook",
+                "PreToolUse",
+                "defenseclaw",
+                "connector=codex action=allow mode=observe",
+                "INFO",
+                "codex",
+                None,
+            )
+            for index in range(501)
+        ]
+        rows.extend(
+            [
+                (
+                    "claude-older-observe-block",
+                    (base - timedelta(hours=1)).isoformat(),
+                    "connector-hook",
+                    "PreToolUse",
+                    "defenseclaw",
+                    (
+                        "connector=claudecode action=allow raw_action=block "
+                        "mode=observe would_block=true"
+                    ),
+                    "INFO",
+                    "claudecode",
+                    None,
+                ),
+                (
+                    "codex-enforced-block",
+                    (base + timedelta(seconds=600)).isoformat(),
+                    "connector-hook",
+                    "PreToolUse",
+                    "defenseclaw",
+                    "connector=codex action=block raw_action=block mode=action",
+                    "INFO",
+                    "codex",
+                    1,
+                ),
+                (
+                    "codex-quoted-action-text",
+                    (base + timedelta(seconds=601)).isoformat(),
+                    "connector-hook",
+                    "PreToolUse",
+                    "defenseclaw",
+                    (
+                        'connector=codex action=allow mode=observe '
+                        'raw_payload="contains action=block marker"'
+                    ),
+                    "INFO",
+                    "codex",
+                    None,
+                ),
+            ]
+        )
+        self.store.db.executemany(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, target, actor, details, severity,
+                   connector, enforced
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        self.store.db.commit()
+
+        stats = self.store.connector_hook_event_stats()
+
+        self.assertEqual(stats["codex"]["calls"], 503)
+        self.assertEqual(stats["codex"]["blocks"], 1)
+        self.assertEqual(stats["codex"]["alerts"], 0)
+        self.assertEqual(stats["claudecode"]["calls"], 1)
+        self.assertEqual(stats["claudecode"]["blocks"], 0)
+        self.assertEqual(stats["claudecode"]["alerts"], 1)
+        self.assertEqual(
+            stats["claudecode"]["newest"],
+            (base - timedelta(hours=1)).isoformat(),
+        )
+
+    def test_connector_hook_stats_classify_structured_only_legacy_rows(self):
+        self.store.log_event(
+            Event(
+                id="structured-observe",
+                action="connector-hook",
+                structured={
+                    "connector": "claudecode",
+                    "action": "allow",
+                    "raw_action": "block",
+                    "mode": "observe",
+                    "would_block": True,
+                },
+            )
+        )
+        self.store.log_event(
+            Event(
+                id="structured-enforced",
+                action="connector-hook",
+                structured={
+                    "connector": "codex",
+                    "action": "block",
+                    "raw_action": "block",
+                    "mode": "action",
+                },
+            )
+        )
+
+        stats = self.store.connector_hook_event_stats()
+
+        self.assertEqual(stats["claudecode"]["alerts"], 1)
+        self.assertEqual(stats["claudecode"]["blocks"], 0)
+        self.assertEqual(stats["codex"]["alerts"], 0)
         self.assertEqual(stats["codex"]["blocks"], 1)
 
     def test_event_reader_parses_zulu_timestamps(self):

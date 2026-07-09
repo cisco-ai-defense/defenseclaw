@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/spf13/cobra"
 )
 
@@ -44,7 +45,7 @@ func TestEnterpriseHooksWindowsGatePrecedesRootAndCommandLifecycle(t *testing.T)
 			userHome := filepath.Join(scope, "home", "alice")
 			t.Setenv("DEFENSECLAW_HOME", dataDir)
 			t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
-			t.Setenv("HOME", filepath.Join(scope, "home"))
+			testenv.SetHome(t, filepath.Join(scope, "home"))
 			t.Setenv("USERPROFILE", filepath.Join(scope, "home"))
 
 			before := snapshotEnterpriseHooksTree(t, scope)

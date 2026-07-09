@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -106,6 +107,17 @@ type HookAuditEnvelope struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
+	// Agent lifecycle correlation is copied from the same phase snapshot used
+	// by the native lifecycle/tool/hook-decision events. These additive v1
+	// fields let the durable SQLite structured_json row prove which transition
+	// produced the connector-facing decision without a lossy JSONL join.
+	AgentPhase         string `json:"agent_phase,omitempty"`
+	AgentPreviousPhase string `json:"agent_previous_phase,omitempty"`
+	AgentSequence      int64  `json:"agent_sequence,omitempty"`
+	AgentLifecycleID   string `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID   string `json:"agent_execution_id,omitempty"`
+	AgentOperationID   string `json:"agent_operation_id,omitempty"`
+
 	// AuditActionOverride steers the audit ROW action (not the
 	// envelope JSON). When non-empty, the audit.Logger writes the
 	// row under this action constant instead of
@@ -157,6 +169,19 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	// for any envelope whose Reason actually contained PII.
 	env.Reason = preRedactEnvelopeFreeForm(env.Reason)
 	env.RulePackDir = stripLogInjectionRunes(env.RulePackDir)
+	if phase, ok := gatewaylog.NormalizeAgentPhase(env.AgentPhase); ok {
+		env.AgentPhase = phase
+	} else {
+		env.AgentPhase = stripLogInjectionRunes(env.AgentPhase)
+	}
+	if previous, ok := gatewaylog.NormalizeAgentPhase(env.AgentPreviousPhase); ok {
+		env.AgentPreviousPhase = previous
+	} else {
+		env.AgentPreviousPhase = ""
+	}
+	env.AgentLifecycleID = stripLogInjectionRunes(env.AgentLifecycleID)
+	env.AgentExecutionID = stripLogInjectionRunes(env.AgentExecutionID)
+	env.AgentOperationID = stripLogInjectionRunes(env.AgentOperationID)
 	env.RawOrigin = stripLogInjectionRunes(env.RawOrigin)
 	for i, id := range env.RawEventIDs {
 		env.RawEventIDs[i] = stripLogInjectionRunes(id)

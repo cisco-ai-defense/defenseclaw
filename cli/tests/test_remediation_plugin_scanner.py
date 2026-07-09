@@ -46,6 +46,8 @@ from defenseclaw.scanner.plugin_scanner.rules import BINARY_EXTENSIONS
 from defenseclaw.scanner.plugin_scanner.scanner import _load_manifest, scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import PluginScanOptions
 
+from tests.environment import requires_symlink_privilege
+
 
 def _rule_ids(result) -> list[str]:
     return [f.rule_id for f in result.findings if f.rule_id]
@@ -289,6 +291,7 @@ class F0361SymlinkManifestRead(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp)
 
+    @requires_symlink_privilege
     def test_escaping_symlink_manifest_is_rejected(self):
         leaked_name = "LEAKED_NAME_FROM_OUTSIDE"
         outside = os.path.join(self.tmp, "outside-host.json")

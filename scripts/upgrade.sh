@@ -681,8 +681,22 @@ if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
 fi
 
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-"${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
+"${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet \
+    --reinstall --no-cache --strict "${STAGING_DIR}/${whl_name}" \
     || die "Failed to install CLI wheel"
+"${UV_BIN}" --no-config pip check --python "${VENV_PYTHON}" \
+    || die "CLI dependency validation failed; launcher was not published"
+"${VENV_PYTHON}" -I -c '
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+asyncio.run(smoke())
+' || die "CLI TUI launch validation failed; launcher was not published"
 ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
 ok "Python CLI installed"
 

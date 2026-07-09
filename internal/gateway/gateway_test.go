@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,7 +48,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func testStoreAndLogger(t *testing.T) (*audit.Store, *audit.Logger) {
@@ -5260,7 +5263,7 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 		logger: logger,
 		store:  store,
 		scannerCfg: &config.Config{
-			DataDir: "/nonexistent/path/that/will/fail",
+			DataDir: string([]byte{0}),
 			Gateway: config.GatewayConfig{Token: tok},
 			Guardrail: config.GuardrailConfig{
 				Mode:        "observe",
@@ -5316,12 +5319,14 @@ func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
 	if !bytes.Equal(got, original) {
 		t.Fatalf("restored config = %q, want %q", got, original)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat restored config: %v", err)
-	}
-	if gotMode := info.Mode().Perm(); gotMode != 0o640 {
-		t.Fatalf("restored config mode = %o, want 640", gotMode)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat restored config: %v", err)
+		}
+		if gotMode := info.Mode().Perm(); gotMode != 0o640 {
+			t.Fatalf("restored config mode = %o, want 640", gotMode)
+		}
 	}
 }
 
@@ -6866,7 +6871,11 @@ func TestMaxBodyMiddleware_RejectsOversizedBody(t *testing.T) {
 }
 
 func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
-	dataDir := t.TempDir()
+	root := testenv.PrivateTempDir(t)
+	dataDir := filepath.Join(root, "data")
+	if err := safefile.ProtectDirectory(dataDir); err != nil {
+		t.Fatal(err)
+	}
 	reg := connector.NewDefaultRegistry()
 	scoped := map[string]string{}
 	hookPaths := map[string]string{}
@@ -6967,7 +6976,11 @@ func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
 }
 
 func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
-	dataDir := t.TempDir()
+	root := testenv.PrivateTempDir(t)
+	dataDir := filepath.Join(root, "data")
+	if err := safefile.ProtectDirectory(dataDir); err != nil {
+		t.Fatal(err)
+	}
 	oldToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
 	if err != nil {
 		t.Fatalf("EnsureHookAPIToken: %v", err)

@@ -37,10 +37,11 @@ import (
 
 const (
 	defaultStopTimeout           = 10 * time.Second
-	defaultPortReleaseTimeout    = 2 * time.Second
-	defaultStartReadinessTimeout = 10 * time.Second
+	defaultStartReadinessTimeout = 60 * time.Second
 	defaultReadinessPollInterval = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout  = time.Second
+	restartPortReleaseTimeout    = 2 * time.Second
+	restartPortReleaseInterval   = 25 * time.Millisecond
 )
 
 var startCmd = &cobra.Command{
@@ -143,7 +144,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
-	snap, ready, err := waitForStartedDaemon(
+	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
 		client,
@@ -157,7 +158,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap, ready, defaultStartReadinessTimeout)
+	printDaemonStartResult(pid, snap)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -225,7 +226,12 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
-	if err := waitForConfiguredPortFree(cfg, defaultPortReleaseTimeout, defaultReadinessPollInterval); err != nil {
+	if err := waitForConfiguredPortFree(
+		cfg,
+		pid,
+		restartPortReleaseTimeout,
+		restartPortReleaseInterval,
+	); err != nil {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 
@@ -243,7 +249,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
-	snap, ready, err := waitForStartedDaemon(
+	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
 		client,
@@ -257,7 +263,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap, ready, defaultStartReadinessTimeout)
+	printDaemonStartResult(pid, snap)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
@@ -416,37 +422,37 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 	return true, managedPID, nil
 }
 
-func requireConfiguredPortFree(cfg *config.Config) error {
+// waitForConfiguredPortFree handles the short Windows listener-table handoff
+// after a verified managed process has stopped. GetExtendedTcpTable can retain
+// that PID's listener row briefly after process exit. Retry only that exact
+// stopped owner; a different PID still fails immediately as a foreign
+// collision. Other platforms retain the previous no-op behavior.
+func waitForConfiguredPortFree(
+	cfg *config.Config,
+	stoppedPID int,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) error {
 	if !requireStartupListenerOwnership {
 		return nil
 	}
-	pid, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
-	if errors.Is(err, daemon.ErrNoListener) {
-		return nil
+	if pollInterval <= 0 {
+		pollInterval = restartPortReleaseInterval
 	}
-	if err != nil {
-		return err
-	}
-	return fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
-}
-
-func waitForConfiguredPortFree(cfg *config.Config, timeout, pollInterval time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		err := requireConfiguredPortFree(cfg)
-		if err == nil {
+		pid, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+		if errors.Is(err, daemon.ErrNoListener) {
 			return nil
 		}
-		if time.Now().After(deadline) {
+		if err != nil {
 			return err
 		}
-		delay := pollInterval
-		if remaining := time.Until(deadline); delay <= 0 || delay > remaining {
-			delay = remaining
+		collision := fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
+		if stoppedPID <= 0 || pid != stoppedPID || time.Now().After(deadline) {
+			return collision
 		}
-		if delay > 0 {
-			time.Sleep(delay)
-		}
+		time.Sleep(pollInterval)
 	}
 }
 
@@ -514,9 +520,9 @@ type attemptedProcessStopper interface {
 	StopStarted(int, time.Duration) error
 }
 
-// waitForStartedDaemon centralizes the readiness and fatal-startup cleanup
-// shared by start and restart. A live process that is merely slow returns a
-// non-ready snapshot without an error and is deliberately left running.
+// waitForStartedDaemon centralizes the readiness and failed-startup cleanup
+// shared by start and restart. Only a fully ready process with the exact
+// executable and creation identity launched by this attempt may succeed.
 func waitForStartedDaemon(
 	d daemonReadinessProcess,
 	pid int,
@@ -537,8 +543,14 @@ func waitForStartedDaemon(
 			return running && currentPID == pid
 		},
 	)
+	if err == nil && ready {
+		if identity, ok := d.(managedProcessIdentity); !ok || identity.HasManagedProcessIdentity(pid) {
+			return snap, true, nil
+		}
+		err = fmt.Errorf("launched gateway PID %d lacks matching executable and process start identity", pid)
+	}
 	if err == nil {
-		return snap, ready, nil
+		err = fmt.Errorf("gateway did not reach READY before the startup deadline")
 	}
 
 	var stopErr error
@@ -601,8 +613,6 @@ func waitForGatewayReadiness(
 	deadline := time.Now().Add(timeout)
 	var lastSnap gateway.HealthSnapshot
 	var lastProbeErr error
-	identityVerified := false
-
 	for {
 		if processRunning != nil && !processRunning() {
 			if lastProbeErr != nil {
@@ -638,9 +648,6 @@ func waitForGatewayReadiness(
 					return lastSnap, false, fmt.Errorf("%w: configured listener PID %d does not match launched PID %d", errGatewayIdentityMismatch, ownerPID, requirements.expectedPID)
 				}
 			}
-			if err == nil {
-				identityVerified = true
-			}
 		} else {
 			snap, err = fetchSidecarHealth(client, healthURL)
 		}
@@ -665,17 +672,10 @@ func waitForGatewayReadiness(
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			// A live, authenticated process whose PID, data home, start
-			// identity, and listener ownership were proven may continue its
-			// existing STARTING contract when optional subsystems are slow.
-			// We never allow that compatibility path before identity proof.
-			if requirements.expectedPID == 0 || identityVerified {
-				return lastSnap, false, nil
-			}
 			if lastProbeErr != nil {
 				return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout (last probe: %v)", lastProbeErr)
 			}
-			return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout")
+			return lastSnap, false, fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout)
 		}
 		delay := pollInterval
 		if remaining < delay {
@@ -761,14 +761,23 @@ func gatewaySnapshotReady(
 	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
 		return false, nil
 	}
-	if !subsystemMatchesConfiguredState(snap.Guardrail.State, requirements.guardrailEnabled) {
-		return false, nil
-	}
-	// Guardrail starts life as disabled in NewSidecarHealth. When disabled is
-	// the configured final state, require the guardrail goroutine to publish a
-	// newer health record so the initial placeholder cannot win the race.
-	if !requirements.guardrailEnabled && !snap.StartedAt.IsZero() && !snap.Guardrail.Since.After(snap.StartedAt) {
-		return false, nil
+	if requirements.guardrailEnabled {
+		if snap.Guardrail.State != gateway.StateRunning {
+			return false, nil
+		}
+	} else {
+		// Connector-native lifecycle hooks can remain active for observation
+		// while the local proxy is disabled. Both running hooks and a finalized
+		// disabled state are ready; the initial disabled placeholder is not.
+		switch snap.Guardrail.State {
+		case gateway.StateRunning:
+		case gateway.StateDisabled:
+			if !snap.StartedAt.IsZero() && !snap.Guardrail.Since.After(snap.StartedAt) {
+				return false, nil
+			}
+		default:
+			return false, nil
+		}
 	}
 	if !subsystemMatchesConfiguredState(snap.Telemetry.State, requirements.telemetryEnabled) {
 		return false, nil
@@ -786,18 +795,9 @@ func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool)
 	return state == gateway.StateDisabled
 }
 
-func printDaemonStartResult(pid int, snap gateway.HealthSnapshot, ready bool, timeout time.Duration) {
-	if ready {
-		fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
-		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
-		return
-	}
-
-	fmt.Printf("%s (PID %d)\n", Style("STARTING", "fg=yellow", "bold"), pid)
-	fmt.Printf(
-		"  Health: still starting after %s (use 'defenseclaw-gateway status')\n",
-		timeout,
-	)
+func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
+	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+	fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
 }
 
 func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {

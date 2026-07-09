@@ -25,6 +25,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestWriteAndReadPIDInfo(t *testing.T) {
@@ -392,14 +395,7 @@ func TestWritePIDInfoUsesRestrictedPerms(t *testing.T) {
 	d := New(dir)
 	_ = d.writePIDInfo(99999, "/usr/bin/test", "")
 
-	info, err := os.Stat(d.pidFile)
-	if err != nil {
-		t.Fatalf("stat pidFile: %v", err)
-	}
-	mode := info.Mode().Perm()
-	if mode != 0600 {
-		t.Errorf("pidFile perms = %04o, want 0600", mode)
-	}
+	testenv.AssertPrivateFile(t, d.pidFile)
 }
 
 func TestDataDirAndLogFilePerms(t *testing.T) {
@@ -407,30 +403,41 @@ func TestDataDirAndLogFilePerms(t *testing.T) {
 	dataDir := filepath.Join(base, "nested", "data")
 	d := New(dataDir)
 
-	if err := os.MkdirAll(d.dataDir, 0700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	if err := safefile.ProtectDirectory(d.dataDir); err != nil {
+		t.Fatalf("ProtectDirectory: %v", err)
 	}
-	info, err := os.Stat(d.dataDir)
-	if err != nil {
-		t.Fatalf("stat dataDir: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0700 {
-		t.Errorf("dataDir perms = %04o, want 0700", perm)
-	}
+	testenv.AssertPrivateDirectory(t, d.dataDir)
 
 	logPath := d.LogFile()
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := d.openLogFileForChild()
 	if err != nil {
 		t.Fatalf("create logFile: %v", err)
 	}
 	f.Close()
 
-	logInfo, err := os.Stat(logPath)
-	if err != nil {
-		t.Fatalf("stat logFile: %v", err)
+	testenv.AssertPrivateFile(t, logPath)
+}
+
+func TestOpenLogFileForChildRejectsSymlink(t *testing.T) {
+	d := New(t.TempDir())
+	outside := filepath.Join(t.TempDir(), "outside.log")
+	if err := os.WriteFile(outside, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if perm := logInfo.Mode().Perm(); perm != 0600 {
-		t.Errorf("logFile perms = %04o, want 0600", perm)
+	if err := os.Symlink(outside, d.logFile); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	f, err := d.openLogFileForChild()
+	if f != nil {
+		_ = f.Close()
+	}
+	if err == nil {
+		t.Fatal("openLogFileForChild accepted a symlink")
+	}
+	data, readErr := os.ReadFile(outside)
+	if readErr != nil || string(data) != "unchanged" {
+		t.Fatalf("outside log changed: data=%q err=%v", data, readErr)
 	}
 }
 

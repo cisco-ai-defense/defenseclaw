@@ -44,9 +44,10 @@ UNSUPPORTED: SupportStatus = "unsupported"
 
 PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 
-LOCAL_SHELL_STACKS_UNSUPPORTED_REASON = (
-    "Local observability and local Splunk are unsupported on native Windows."
-)
+LOCAL_OBSERVABILITY_UNSUPPORTED_REASON = "Bundled local observability is unavailable on this operating system."
+LOCAL_SPLUNK_UNSUPPORTED_REASON = "Bundled Local Splunk is unavailable on this operating system."
+# Compatibility name retained for callers that predate the native controller.
+LOCAL_SHELL_STACKS_UNSUPPORTED_REASON = LOCAL_SPLUNK_UNSUPPORTED_REASON
 
 
 @dataclass(frozen=True)
@@ -142,8 +143,6 @@ WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
         "omnigent",
         "openclaw",
         "zeptoclaw",
-        "local-observability-shell-stack",
-        "splunk-shell-stack",
         "native-desktop-toasts",
     }
 )
@@ -218,17 +217,54 @@ def connector_preview_on_os(name: str, os_name: str | None = None) -> bool:
     return connector_support_status(name, os_name) == PREVIEW
 
 
-def local_shell_stacks_supported(os_name: str | None = None) -> bool:
-    """Whether extensionless Bash-backed local telemetry stacks may run.
-
-    This is the authoritative capability boundary for both the bundled local
-    observability stack and the bundled local Splunk stack.  Keeping it in the
-    platform taxonomy makes CLI and TUI behavior injectable in tests without
-    probing executables or mutating operator state.
-    """
+def local_observability_stack_supported(os_name: str | None = None) -> bool:
+    """Whether the shared Python-backed observability controller is available."""
 
     resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
-    return resolved_os != "windows"
+    return resolved_os in {"windows", "darwin", "linux"}
+
+
+def local_splunk_stack_supported(os_name: str | None = None) -> bool:
+    """Whether bundled Local Splunk has a certified lifecycle controller."""
+
+    resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    return resolved_os in {"windows", "darwin", "linux"}
+
+
+def local_shell_stacks_supported(os_name: str | None = None) -> bool:
+    """Backward-compatible alias for bundled Local Splunk availability."""
+
+    return local_splunk_stack_supported(os_name)
+
+
+def is_local_observability_stack_destination(
+    *,
+    name: str = "",
+    preset_id: str = "",
+    kind: str = "",
+    endpoint: str = "",
+) -> bool:
+    """Classify config/runtime state owned by bundled local observability."""
+
+    if preset_id == "local-otlp" or name in {"local-observability", "local-otlp-logs"}:
+        return True
+    return False
+
+
+def is_local_splunk_stack_destination(
+    *,
+    preset_id: str = "",
+    kind: str = "",
+    endpoint: str = "",
+) -> bool:
+    """Classify loopback Splunk HEC state owned by the local Splunk stack."""
+
+    if kind != "splunk_hec":
+        return False
+    if preset_id == "splunk-enterprise":
+        return False
+    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
+    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
 
 
 def is_local_shell_stack_destination(
@@ -238,16 +274,15 @@ def is_local_shell_stack_destination(
     kind: str = "",
     endpoint: str = "",
 ) -> bool:
-    """Classify config/runtime state owned by the unsupported local stacks."""
+    """Backward-compatible union classifier for older callers."""
 
-    if preset_id == "local-otlp" or name in {"local-observability", "local-otlp-logs"}:
-        return True
-    if kind != "splunk_hec":
-        return False
-    if preset_id == "splunk-enterprise":
-        return False
-    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
-    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+    return is_local_observability_stack_destination(
+        name=name, preset_id=preset_id, kind=kind, endpoint=endpoint
+    ) or is_local_splunk_stack_destination(
+        preset_id=preset_id,
+        kind=kind,
+        endpoint=endpoint,
+    )
 
 
 def destination_platform_unsupported(
@@ -260,16 +295,24 @@ def destination_platform_unsupported(
 ) -> bool:
     """Whether a destination belongs to a local stack unavailable here."""
 
-    return not local_shell_stacks_supported(os_name) and is_local_shell_stack_destination(
-        name=name,
-        preset_id=preset_id,
-        kind=kind,
-        endpoint=endpoint,
+    return (
+        not local_observability_stack_supported(os_name)
+        and is_local_observability_stack_destination(
+            name=name,
+            preset_id=preset_id,
+            kind=kind,
+            endpoint=endpoint,
+        )
+    ) or (
+        not local_splunk_stack_supported(os_name)
+        and is_local_splunk_stack_destination(
+            preset_id=preset_id,
+            kind=kind,
+            endpoint=endpoint,
+        )
     )
 
 
-def supported_connectors(
-    names: Iterable[str], os_name: str | None = None
-) -> list[str]:
+def supported_connectors(names: Iterable[str], os_name: str | None = None) -> list[str]:
     """Filter *names* to supported/preview entries, preserving order."""
     return [n for n in names if connector_supported_on_os(n, os_name)]
