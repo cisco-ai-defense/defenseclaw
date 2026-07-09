@@ -1785,7 +1785,7 @@ def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install
 
 def test_quickstart_docs_do_not_pipe_main_installer() -> None:
     for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh" not in text
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1" not in text
         for expected in expected_lines:
