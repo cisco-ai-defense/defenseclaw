@@ -10221,3 +10221,61 @@ def _print_routing_status(app: AppContext) -> None:
     click.echo(f"    Port:      {port}")
     click.echo(f"    Algorithm: {app.cfg.routing.algorithm or 'static (default)'}")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup training
+# ---------------------------------------------------------------------------
+
+
+@setup.command("training")
+@click.option("--enable", is_flag=True, help="Enable training pipeline.")
+@click.option("--disable", is_flag=True, help="Disable training pipeline.")
+@click.option("--status", is_flag=True, help="Show training status.")
+@pass_ctx
+def setup_training(app: AppContext, enable: bool, disable: bool, status: bool) -> None:
+    """Configure model training pipeline.
+
+    When enabled, DefenseClaw captures traces and trains local models
+    for continuous improvement.
+
+    \b
+    Examples:
+      defenseclaw setup training --enable
+      defenseclaw setup training --disable
+      defenseclaw setup training --status
+    """
+    if enable and disable:
+        raise click.UsageError("Cannot use --enable and --disable together.")
+
+    if status or (not enable and not disable):
+        click.echo()
+        click.echo("  Training Pipeline Status")
+        click.echo("  ════════════════════════")
+        if not app.cfg.training.enabled:
+            click.echo("    Status: disabled")
+            click.echo()
+            click.echo("    Enable with: defenseclaw setup training --enable")
+            return
+        click.echo("    Status:  enabled")
+        backend = app.cfg.training.backend or "not set"
+        click.echo(f"    Backend: {backend}")
+        click.echo()
+        return
+
+    if enable:
+        app.cfg.training.enabled = True
+        if not app.cfg.training.backend:
+            app.cfg.training.backend = "mlx-lm-lora"
+        app.cfg.save()
+        click.echo()
+        click.echo("  ✓ Training pipeline enabled")
+        click.echo(f"    Backend: {app.cfg.training.backend}")
+        click.echo()
+        click.echo("  The pipeline will start automatically with the gateway.")
+
+    if disable:
+        app.cfg.training.enabled = False
+        app.cfg.save()
+        click.echo()
+        click.echo("  ✓ Training pipeline disabled")

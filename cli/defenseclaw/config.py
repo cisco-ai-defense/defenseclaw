@@ -2083,6 +2083,16 @@ class RoutingConfig:
 
 
 @dataclass
+class TrainingConfig:
+    """Training pipeline configuration. Mirrors internal/config.TrainingConfig."""
+
+    enabled: bool = False
+    backend: str = ""
+    models_dir: str = ""
+    llama_server_port: int = 0
+
+
+@dataclass
 class PrivacyConfig:
     """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
 
@@ -2336,6 +2346,7 @@ class Config:
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -4776,6 +4787,7 @@ def load() -> Config:
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
+        training=_merge_training(raw.get("training")),
     )
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
@@ -4796,6 +4808,18 @@ def load() -> Config:
     cfg.observability.validate()
     cfg.application_protection.validate()
     return cfg
+
+
+def _merge_training(raw: dict[str, Any] | None) -> TrainingConfig:
+    """Build a :class:`TrainingConfig` from the YAML ``training:`` block."""
+    if not isinstance(raw, dict):
+        return TrainingConfig()
+    return TrainingConfig(
+        enabled=bool(raw.get("enabled", False)),
+        backend=raw.get("backend", ""),
+        models_dir=raw.get("models_dir", ""),
+        llama_server_port=_as_int(raw.get("llama_server_port"), 0),
+    )
 
 
 def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
