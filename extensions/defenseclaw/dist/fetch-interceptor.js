@@ -234,6 +234,33 @@ function extractHost(urlStr) {
         return "";
     }
 }
+export const UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV = "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES";
+const CHATGPT_CODEX_RESPONSES_PATH = "/backend-api/codex/responses";
+function truthyEnv(name) {
+    return (process.env[name] || "").trim().toLowerCase() === "1";
+}
+function isChatGPTCodexResponseBackendUrl(urlStr) {
+    try {
+        const parsed = new URL(urlStr);
+        return (parsed.hostname.toLowerCase() === "chatgpt.com" &&
+            (parsed.pathname === CHATGPT_CODEX_RESPONSES_PATH ||
+                parsed.pathname.startsWith(`${CHATGPT_CODEX_RESPONSES_PATH}/`)));
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * The ChatGPT/Codex responses backend carries prompt/completion traffic, so it
+ * must stay on the guardrail path by default. Operators who explicitly prefer
+ * availability over inspection while OAuth-aware proxy support is missing can
+ * opt into an unguarded escape hatch with
+ * DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES=1.
+ */
+export function shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr) {
+    return (isChatGPTCodexResponseBackendUrl(urlStr) &&
+        truthyEnv(UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV));
+}
 /**
  * Host-boundary domain match. A registered entry "api.openai.com"
  * matches the exact host "api.openai.com" and any subdomain
@@ -798,6 +825,7 @@ export function createFetchInterceptor(portOrOpts) {
     let originalHttpRequest = null;
     let originalHttpGet = null;
     let egressReporter = null;
+    let chatgptCodexPassthroughWarned = false;
     // Extract { host, path } from a URL string without throwing. Missing
     // pieces are tolerated so the caller's downstream fetch is never
     // perturbed by a malformed URL in telemetry. Query-parameter values are
@@ -812,6 +840,23 @@ export function createFetchInterceptor(portOrOpts) {
         catch {
             return { host: "", path: urlStr };
         }
+    }
+    function reportChatGPTCodexResponsePassthrough(urlStr) {
+        if (!chatgptCodexPassthroughWarned) {
+            chatgptCodexPassthroughWarned = true;
+            console.warn(`[defenseclaw] ${UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV}=1: ` +
+                `ChatGPT/Codex responses are being passed through unguarded: ${scrubUrlForLog(urlStr)}`);
+        }
+        const hp = extractHostPath(urlStr);
+        egressReporter?.report({
+            targetHost: hp.host,
+            targetPath: hp.path,
+            bodyShape: "none",
+            looksLikeLLM: true,
+            branch: "passthrough",
+            decision: "allow",
+            reason: "chatgpt-codex-oauth-passthrough",
+        });
     }
     function start() {
         if (originalFetch)
@@ -833,6 +878,10 @@ export function createFetchInterceptor(portOrOpts) {
             // Never self-loop: a request already aimed at the guardrail proxy
             // short-circuits before any shape inspection so we don't peek its body.
             if (isAlreadyProxied(urlStr, guardrailPort)) {
+                return originalFetch(input, init);
+            }
+            if (shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+                reportChatGPTCodexResponsePassthrough(urlStr);
                 return originalFetch(input, init);
             }
             // Layer 0: the known-provider allowlist is cheap and path-free.
@@ -1013,6 +1062,10 @@ export function createFetchInterceptor(portOrOpts) {
         }
         function patchedHttpsRequest(urlOrOptions, optionsOrCallback, callback) {
             const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+            if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+                reportChatGPTCodexResponsePassthrough(urlStr);
+                return originalHttpsRequest(urlOrOptions, optionsOrCallback, callback);
+            }
             // Path-only shape detection for https.request — the body is
             // written via req.write after this call returns, so peeking is
             // not an option. hasLLMPathSuffix still catches the overwhelming
@@ -1201,6 +1254,7 @@ export function createFetchInterceptor(portOrOpts) {
             egressReporter.stop();
             egressReporter = null;
         }
+        chatgptCodexPassthroughWarned = false;
         console.log("[defenseclaw] LLM fetch interceptor stopped");
     }
     return { start, stop };

@@ -718,19 +718,23 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			capturer := training.NewCapturer(trainingStore)
 			defer capturer.Stop()
 
-			// Start llama-server
+			// Start llama-server (only if binary is available)
 			modelsDir := s.currentConfig().Training.ModelsDir
 			if modelsDir == "" {
 				modelsDir = filepath.Join(s.currentConfig().DataDir, "models")
 			}
-			llamaSrv := training.NewLlamaServer(training.LlamaConfig{
-				ModelsDir: modelsDir,
-				Port:      s.currentConfig().Training.LlamaServerPort,
-			})
-			if err := llamaSrv.Start(runCtx); err != nil {
-				fmt.Fprintf(os.Stderr, "[training] llama-server start failed: %v\n", err)
+			if _, lookErr := exec.LookPath("llama-server"); lookErr != nil {
+				fmt.Fprintf(os.Stderr, "[training] llama-server not found on PATH (install with: brew install llama.cpp)\n")
 			} else {
-				defer llamaSrv.Stop()
+				llamaSrv := training.NewLlamaServer(training.LlamaConfig{
+					ModelsDir: modelsDir,
+					Port:      s.currentConfig().Training.LlamaServerPort,
+				})
+				if err := llamaSrv.Start(runCtx); err != nil {
+					fmt.Fprintf(os.Stderr, "[training] llama-server start failed: %v\n", err)
+				} else {
+					defer llamaSrv.Stop()
+				}
 			}
 
 			// Start auto-trigger

@@ -10264,15 +10264,82 @@ def setup_training(app: AppContext, enable: bool, disable: bool, status: bool) -
         return
 
     if enable:
+        import shutil
+        import subprocess as _sp
+        import platform
+
         app.cfg.training.enabled = True
         if not app.cfg.training.backend:
-            app.cfg.training.backend = "mlx-lm-lora"
+            app.cfg.training.backend = "mlx-lm-lora" if platform.system() == "Darwin" else "unsloth"
+
+        click.echo()
+        click.echo("  Setting up training pipeline...")
+        click.echo()
+
+        # 1. Install training backend
+        backend = app.cfg.training.backend
+        if backend == "mlx-lm-lora":
+            if shutil.which("mlx-lm-lora") or _sp.run(["pip", "show", "mlx-lm-lora"], capture_output=True).returncode == 0:
+                click.echo("  ✓ mlx-lm-lora already installed")
+            else:
+                click.echo("  Installing mlx-lm-lora...")
+                result = _sp.run(["pip", "install", "-U", "mlx-lm-lora"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    click.echo("  ✓ mlx-lm-lora installed")
+                else:
+                    click.echo(f"  ✗ mlx-lm-lora install failed: {result.stderr.strip()[:200]}")
+                    click.echo("    Install manually: pip install mlx-lm-lora")
+        elif backend == "unsloth":
+            if _sp.run(["pip", "show", "unsloth"], capture_output=True).returncode == 0:
+                click.echo("  ✓ unsloth already installed")
+            else:
+                click.echo("  Installing unsloth...")
+                result = _sp.run(["pip", "install", "unsloth"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    click.echo("  ✓ unsloth installed")
+                else:
+                    click.echo(f"  ✗ unsloth install failed: {result.stderr.strip()[:200]}")
+                    click.echo("    Install manually: pip install unsloth")
+
+        # 2. Install llama-server (model hosting)
+        if shutil.which("llama-server"):
+            click.echo("  ✓ llama-server already installed")
+        else:
+            click.echo("  Installing llama.cpp (llama-server)...")
+            if platform.system() == "Darwin":
+                result = _sp.run(["brew", "install", "llama.cpp"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    click.echo("  ✓ llama-server installed (via brew)")
+                else:
+                    click.echo("  ✗ brew install failed. Install manually: brew install llama.cpp")
+            else:
+                click.echo("  ⚠ Install llama-server manually:")
+                click.echo("    Linux: download from https://github.com/ggml-org/llama.cpp/releases")
+
+        # 3. Verify Docker (needed for SR)
+        docker_ok = _sp.run(["docker", "info"], capture_output=True).returncode == 0
+        if docker_ok:
+            click.echo("  ✓ Docker is running")
+        else:
+            click.echo("  ⚠ Docker not running (needed for semantic router)")
+
+        # 4. Set defaults
+        if not app.cfg.training.llama_server_port:
+            app.cfg.training.llama_server_port = 8090
+        if not app.cfg.training.models_dir:
+            import os
+            app.cfg.training.models_dir = os.path.join(app.cfg.data_dir, "models")
+
+        # 5. Save config
         app.cfg.save()
         click.echo()
         click.echo("  ✓ Training pipeline enabled")
-        click.echo(f"    Backend: {app.cfg.training.backend}")
+        click.echo(f"    Backend:      {app.cfg.training.backend}")
+        click.echo(f"    Models dir:   {app.cfg.training.models_dir}")
+        click.echo(f"    llama-server: port {app.cfg.training.llama_server_port}")
         click.echo()
-        click.echo("  The pipeline will start automatically with the gateway.")
+        click.echo("  Next: add training categories to config.yaml under training.categories[]")
+        click.echo("  Then restart gateway: defenseclaw-gateway restart")
 
     if disable:
         app.cfg.training.enabled = False
