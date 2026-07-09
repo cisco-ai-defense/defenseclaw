@@ -9,7 +9,7 @@ PLUGIN_DIR  := extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 
 DIST_DIR    := dist
-UPGRADE_SMOKE_FROM ?= 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
+UPGRADE_SMOKE_FROM ?= 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -577,6 +577,29 @@ BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 # BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
 # argument (no shell re-parsing / eval).
 BUNDLE_LDFLAGS := -X main.version=$(VERSION)
+# BUNDLE_TAGS is the comma-separated `go build -tags` value applied to
+# the packaged gateway binary. The macOS bundle ships as the managed
+# distribution and pulls the managed cloud auth provider via
+# internal/managed/cloudreg/provider_cisco.go. Override to "" only for
+# local packaging tests where the private overlay isn't available; the
+# resulting binary will fail-closed under managed_enterprise mode.
+BUNDLE_TAGS  ?= cmid
+# CMID_OVERLAY is the absolute (or repo-relative) path to the real
+# cloudreg provider_cisco.go file — the one that imports the managed
+# cloud auth module. The OSS working tree only ships a stub at that
+# location so `go build`/`go test`/`go mod tidy` succeed in a clean
+# environment with no private-registry access. Release builds pass
+# CMID_OVERLAY=<path> plus CMID_VERSION=<pseudo-version>; the bundle
+# script swaps the overlay in, `go get`s the pinned version, builds,
+# then restores the stub from a snapshot whether the build succeeded or
+# failed.
+#
+# Example (release):
+#   make packaging-macos-bundle \
+#     CMID_OVERLAY=/path/to/private/provider_cisco.go \
+#     CMID_VERSION=v0.0.0-20260708144546-897b54f9678e
+CMID_OVERLAY ?=
+CMID_VERSION ?=
 
 packaging-macos-bundle:
 	@scripts/build-macos-bundle.sh \
@@ -586,7 +609,10 @@ packaging-macos-bundle:
 	    "$(BUNDLE_DIR)" \
 	    "$(DIST_DIR)" \
 	    "$(VERSION)" \
-	    "$(BUNDLE_LDFLAGS)"
+	    "$(BUNDLE_LDFLAGS)" \
+	    "$(BUNDLE_TAGS)" \
+	    "$(CMID_OVERLAY)" \
+	    "$(CMID_VERSION)"
 
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.

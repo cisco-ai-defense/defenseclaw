@@ -62,7 +62,7 @@ Options:
 Examples:
   make upgrade-smoke
   scripts/test-upgrade-release.sh --from-version 0.7.2
-  scripts/test-upgrade-release.sh --from-versions "0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.0,0.5.0,0.4.0"
+  scripts/test-upgrade-release.sh --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.0,0.5.0,0.4.0"
   scripts/test-upgrade-release.sh --release-dir dist --baseline-mode seed
 
 For a Linux host without the repo's Go toolchain, build/copy artifacts first:

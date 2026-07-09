@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -120,6 +121,12 @@ type Sidecar struct {
 	// close it after the queue drains; the audit.Store keeps
 	// audit_events / activity_events on its own file.
 	judgeBodyStore *audit.JudgeBodyStore
+
+	// cmidProviderMu guards cmidProviderInst. The provider is lazily
+	// constructed on first request via ensureCMIDProvider and reused
+	// for the sidecar's lifetime. Managed-mode wiring only.
+	cmidProviderMu   sync.Mutex
+	cmidProviderInst cloudreg.Provider
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -1429,6 +1436,78 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	s.apiMu.Unlock()
 }
 
+// pickInspector selects the AID inspector implementation based on
+// deployment_mode. Returns a non-nil Inspector interface only when the
+// concrete constructor produced a non-nil value; the returned
+// interface's nil-status is the sole signal the caller should trust.
+//
+// Managed-mode fail-closed behavior: when deployment_mode =
+// managed_enterprise but ensureCMIDProvider errors (unsupported OS,
+// no managed cloud auth provider registered, agent unavailable), this
+// returns nil AND logs an ERROR — remote inspection is disabled
+// entirely rather than silently falling back to API-key auth.
+func (s *Sidecar) pickInspector(ctx context.Context, tel *telemetry.Provider) Inspector {
+	cfg := s.currentConfig()
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return s.newManagedInspector(ctx, tel, "remote inspection disabled")
+	}
+	// Opensource path — unchanged from before the picker was added.
+	if c := NewCiscoInspectClient(&cfg.CiscoAIDefense, filepath.Join(cfg.DataDir, ".env")); c != nil {
+		c.SetTelemetry(tel)
+		return c
+	}
+	return nil
+}
+
+// newManagedInspector constructs the managed_enterprise Inspector:
+// ensure the cloud auth provider is available, then build a
+// CiscoDefenseClawInspectClient and wire telemetry. Returns nil (and
+// logs a Cisco error using siteLabel) when the provider or client
+// can't be constructed — callers rely on that nil to take the
+// fail-closed path (see pickInspector's caller contract at
+// [Sidecar.pickInspector] and the proxy-swap block in runGuardrail).
+// Both call sites always read a fresh cfg snapshot, so this helper does
+// too.
+func (s *Sidecar) newManagedInspector(ctx context.Context, tel *telemetry.Provider, siteLabel string) Inspector {
+	cfg := s.currentConfig()
+	prov, err := s.ensureCMIDProvider(ctx)
+	if err != nil {
+		EmitCiscoError(ctx, tel, gatewaylog.ErrCodeUpstreamError,
+			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+err.Error())
+		return nil
+	}
+	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
+	if m == nil {
+		return nil
+	}
+	m.SetTelemetry(tel)
+	return m
+}
+
+// ensureCMIDProvider lazily constructs the managed cloud auth provider
+// on first use and caches it for the sidecar's lifetime.
+// Managed_enterprise only. Returns an error when the underlying
+// provider cannot Refresh (unsupported OS, no provider registered,
+// agent unavailable after the retry ladder). The error is surfaced so
+// the caller can take the fail-closed path.
+func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
+	s.cmidProviderMu.Lock()
+	defer s.cmidProviderMu.Unlock()
+	if s.cmidProviderInst != nil {
+		return s.cmidProviderInst, nil
+	}
+	cfg := s.currentConfig()
+	prov, err := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath})
+	if err != nil {
+		return nil, err
+	}
+	if err := prov.Refresh(ctx); err != nil {
+		return nil, err
+	}
+	s.cmidProviderInst = prov
+	return prov, nil
+}
+
 func (s *Sidecar) apiSnapshot() *APIServer {
 	s.apiMu.RLock()
 	defer s.apiMu.RUnlock()
@@ -2325,6 +2404,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
 		proxy.SetNotifier(s.osNotifier)
+		// In managed_enterprise mode, replace the proxy's opensource
+		// AID client (constructed by NewGuardrailProxy from the same
+		// CiscoAIDefenseConfig) with the token-authenticated managed
+		// variant, and flip the merge dispatch to mergeVerdictsManaged.
+		// Fail-closed: if the managed cloud auth provider can't
+		// initialize, remote inspection stays disabled entirely.
+		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, tel, "proxy remote inspection disabled"))
+		}
 		// Start connector hook self-heal before the observability-only
 		// short-circuit below. Hook-native connectors (codex, claudecode,
 		// cursor, ...) never reach proxy.Run, so the guard MUST be started
@@ -3628,13 +3716,24 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward
-	// tool calls + tool results to AID for operators who configured
-	// cisco_ai_defense.api_key_env. NewCiscoInspectClient returns nil
-	// when no key resolves; the hook lane silently skips AID in that
-	// case and falls back to the regex + CodeGuard verdict.
-	if cisco := NewCiscoInspectClient(&s.currentConfig().CiscoAIDefense, filepath.Join(s.currentConfig().DataDir, ".env")); cisco != nil {
-		cisco.SetTelemetry(tel)
-		api.SetCiscoInspector(cisco)
+	// tool calls + tool results to AID.
+	//
+	// Selection:
+	//   - deployment_mode = managed_enterprise → construct the
+	//     token-authenticated CiscoDefenseClawInspectClient. If the
+	//     managed cloud auth provider can't initialize (unsupported
+	//     OS, no provider registered, agent unavailable after the
+	//     retry ladder), leave the inspector unset — remote inspection
+	//     is disabled, with no silent fallback to API-key auth.
+	//   - otherwise → the opensource NewCiscoInspectClient, unchanged.
+	//     Returns nil when no key resolves; the hook lane silently
+	//     skips AID and falls back to the regex + CodeGuard verdict.
+	//
+	// Callers must nil-check the concrete pointer BEFORE assigning to
+	// Inspector (interface): a typed-nil wrapper is a non-nil
+	// interface and defeats every downstream `!= nil` guard.
+	if inspector := s.pickInspector(ctx, tel); inspector != nil {
+		api.SetCiscoInspector(inspector)
 	}
 	// Wire the LLM judge onto the API server so hook connectors listed
 	// in guardrail.judge.hook_connectors get live-content adjudication

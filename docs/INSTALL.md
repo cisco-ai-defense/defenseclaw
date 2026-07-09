@@ -687,21 +687,27 @@ running `defenseclaw doctor` for the full report.
 
 ## Upgrading
 
-### Upgrading from 0.2.0 to 0.3.0
+### Upgrading from 0.2.0 to an artifact-backed release
 
 Release 0.2.0 does not include the `defenseclaw upgrade` CLI command. Use the
-standalone upgrade shell script instead:
+standalone upgrade shell script instead. Historical 0.3.x tags do not publish
+the wheel and gateway release assets required by the upgrader, so use 0.4.0 or
+newer as the target release.
 
 ```bash
-# Upgrade to 0.3.0 (downloads from GitHub Releases)
-curl -sSfL https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh \
-  | bash -s -- --version 0.3.0
+# Upgrade to 0.4.0 (downloads from GitHub Releases)
+UPGRADE_SCRIPT_VERSION=0.8.3
+UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"
+curl -sSfL "$UPGRADE_URL" | bash -s -- --version 0.4.0
 ```
+
+`UPGRADE_SCRIPT_VERSION` pins the upgrade script itself; `--version` is the
+release you are installing.
 
 Or, if you have the repository cloned:
 
 ```bash
-./scripts/upgrade.sh --version 0.3.0
+./scripts/upgrade.sh --version 0.4.0
 ```
 
 Add `--yes` to skip the confirmation prompt.
@@ -718,6 +724,8 @@ After this upgrade completes, the `defenseclaw upgrade` CLI command becomes
 available for all future upgrades.
 
 #### 0.3.0 migration: legacy model provider cleanup
+
+This migration still runs when upgrading directly from 0.2.0 to 0.4.0 or newer.
 
 The 0.2.0 guardrail setup redirected LLM traffic by writing provider and model
 entries directly into `~/.openclaw/openclaw.json`:
@@ -786,8 +794,9 @@ cp ~/.defenseclaw/backups/upgrade-20260429T120000/openclaw.json ~/.openclaw/
 # Downgrade to the previous version
 defenseclaw upgrade --version 0.2.0
 # Or use the shell script if the CLI is broken:
-curl -sSfL https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh \
-  | bash -s -- --version 0.2.0
+UPGRADE_SCRIPT_VERSION=0.8.3
+UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"
+curl -sSfL "$UPGRADE_URL" | bash -s -- --version 0.2.0
 ```
 
 ---

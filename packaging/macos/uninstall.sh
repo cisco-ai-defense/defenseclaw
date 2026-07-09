@@ -2,10 +2,18 @@
 #
 # DefenseClaw macOS uninstaller.
 #
-# Removes:
+# Removes (current managed layout):
+#   - LaunchDaemon (com.cisco.secureclient.defenseclaw)
+#   - /opt/cisco/secureclient/defenseclaw/  (binary + config + runtime)
+#   - /Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
+#
+# Also sweeps legacy DefenseClaw locations from pre-managed-layout installs:
 #   - LaunchDaemon (com.defenseclaw.gateway)
-#   - /Library/DefenseClaw/  (binary)
+#   - /Library/DefenseClaw/                        (binary)
+#   - /Library/Application Support/DefenseClaw/    (config + runtime)
+#   - /Library/Logs/DefenseClaw/                   (logs)
 #   - /Library/LaunchDaemons/com.defenseclaw.gateway.plist
+# so 'sudo ./uninstall.sh --purge' cleanly cuts over a pre-move install.
 #
 # By default, system runtime state is PRESERVED so reinstall keeps audit
 # history. Pass --purge to wipe everything (system + per-user hook footprint).
@@ -24,15 +32,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRUB_PY="${SCRIPT_DIR}/lib/scrub_agent_configs.py"
 
-INSTALL_PREFIX="/Library/DefenseClaw"
-SUPPORT_DIR="/Library/Application Support/DefenseClaw"
-LOGS_DIR="/Library/Logs/DefenseClaw"
-PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
-LAUNCHD_LABEL="com.defenseclaw.gateway"
-SERVICE_USER_DEFAULT="defenseclaw"
-# Names we recognize as DefenseClaw-owned and safe to auto-delete on
-# --purge. Matches the hostname the gateway binary hardcodes in
-# trustedRuntimeOwner (see internal/managed/trust_unix.go).
+INSTALL_PREFIX="/opt/cisco/secureclient/defenseclaw"
+SUPPORT_DIR="${INSTALL_PREFIX}"
+LOGS_DIR="/Library/Logs/Cisco/SecureClient/DefenseClaw"
+PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
+LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw"
+
+# Legacy paths + labels from pre-managed-layout DefenseClaw installs.
+# Kept so that running the new uninstall.sh on an old-layout host
+# cleans up everything in one pass.
+LEGACY_INSTALL_PREFIX="/Library/DefenseClaw"
+LEGACY_SUPPORT_DIR="/Library/Application Support/DefenseClaw"
+LEGACY_LOGS_DIR="/Library/Logs/DefenseClaw"
+LEGACY_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
+LEGACY_LAUNCHD_LABEL="com.defenseclaw.gateway"
+
+# Legacy service-user names swept on --purge. Pre-root DefenseClaw
+# installs created these accounts via ensure_service_user in install.sh.
+# Modern (Cisco-path, root-mode) installs never create a service user.
 SERVICE_USER_KNOWN=(defenseclaw)
 
 PURGE="false"
@@ -40,7 +57,6 @@ ASSUME_YES="false"
 TARGET_USER=""
 KEEP_AGENT_CONFIGS="false"
 SCRUB_FAILED="false"
-SERVICE_USER=""
 
 # ---- helpers ------------------------------------------------------------
 
@@ -54,12 +70,14 @@ Usage: sudo $0 [options]
 
 Options:
   --purge               Also delete:
-                          ${SUPPORT_DIR}  (config + audit DB)
-                          ${LOGS_DIR}                       (gateway logs)
+                          ${SUPPORT_DIR}/  (config + runtime — Cisco path)
+                          ${LOGS_DIR}/     (gateway logs)
+                          Legacy pre-Cisco-path locations if present:
+                            /Library/Application Support/DefenseClaw/
+                            /Library/Logs/DefenseClaw/
                           ~/.defenseclaw/ for the target user (hook scripts)
-                          /Users/defenseclaw + /Groups/defenseclaw dscl
-                              records (service principal — deleted even if
-                              only half-provisioned by a prior failed run)
+                          Any legacy /Users/defenseclaw + /Groups/defenseclaw
+                              dscl records from pre-root DefenseClaw installs
                         AND scrub DefenseClaw entries from:
                           ~/.codex/config.toml
                           ~/.claude/settings.json
@@ -70,8 +88,6 @@ Options:
                         that fail-close every agent tool call. Use only if
                         you intend to immediately reinstall.
   --user USER           Per-user cleanup target for --purge (default: \$SUDO_USER)
-  --service-user NAME   macOS service user to delete on --purge
-                        (default: read from the installed plist, else defenseclaw)
   -y, --yes             Don't prompt for --purge confirmation
   -h, --help            Show this help
 
@@ -86,25 +102,28 @@ while [[ $# -gt 0 ]]; do
     --purge)               PURGE="true"; shift;;
     --keep-agent-configs)  KEEP_AGENT_CONFIGS="true"; shift;;
     --user)                TARGET_USER="${2:?}"; shift 2;;
-    --service-user)        SERVICE_USER="${2:?}"; shift 2;;
     -y|--yes)              ASSUME_YES="true"; shift;;
     -h|--help)             usage; exit 0;;
+    # --service-user was a pre-root-switch install flag. Accepted here
+    # (with a deprecation warning) for backward compat with legacy MDM
+    # / release automation that still passes it — the legacy user is
+    # already swept unconditionally via SERVICE_USER_KNOWN below, so
+    # the flag's value is redundant but not harmful. Advance by 2 only
+    # when a value actually follows and isn't the next flag; otherwise
+    # advance by 1. Blindly calling `shift 2` would either fail under
+    # `set -e` when --service-user is the last token or silently
+    # swallow the next option.
+    --service-user)
+      warn "--service-user is deprecated and ignored; legacy 'defenseclaw' user is swept automatically on --purge"
+      if [[ $# -ge 2 && "$2" != -* ]]; then
+        shift 2
+      else
+        shift
+      fi
+      ;;
     *) die "unknown flag: $1 (try --help)";;
   esac
 done
-
-# Resolve which service user to delete on --purge. Precedence:
-#   1. --service-user flag
-#   2. UserName in the installed plist (matches whatever install.sh set)
-#   3. SERVICE_USER_DEFAULT (= "defenseclaw", matching the gateway's
-#      trustedRuntimeOwner user.Lookup("defenseclaw") in
-#      internal/managed/trust_unix.go)
-if [[ -z "${SERVICE_USER}" ]]; then
-  if [[ -f "${PLIST_DST}" ]]; then
-    SERVICE_USER="$(/usr/bin/plutil -extract UserName raw "${PLIST_DST}" 2>/dev/null || true)"
-  fi
-  SERVICE_USER="${SERVICE_USER:-${SERVICE_USER_DEFAULT}}"
-fi
 
 # ---- preflight ----------------------------------------------------------
 
@@ -124,6 +143,11 @@ if [[ "${PURGE}" == "true" ]]; then
   if [[ "${ASSUME_YES}" != "true" ]]; then
     printf '[uninstall] --purge will DELETE:\n'
     printf '  %s\n' "${SUPPORT_DIR}" "${LOGS_DIR}"
+    if [[ -d "${LEGACY_SUPPORT_DIR}" || -d "${LEGACY_LOGS_DIR}" ]]; then
+      printf '  (also sweeping legacy pre-Cisco-path locations)\n'
+      [[ -d "${LEGACY_SUPPORT_DIR}" ]] && printf '  %s\n' "${LEGACY_SUPPORT_DIR}"
+      [[ -d "${LEGACY_LOGS_DIR}" ]]    && printf '  %s\n' "${LEGACY_LOGS_DIR}"
+    fi
     if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" ]]; then
       printf '  %s/.defenseclaw/\n' "${TARGET_HOME}"
       if [[ "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
@@ -142,27 +166,36 @@ if [[ "${PURGE}" == "true" ]]; then
   fi
 fi
 
-# ---- stop the daemon ----------------------------------------------------
+# ---- stop the daemon(s) -------------------------------------------------
+#
+# Sweep BOTH the current (Cisco-path) label and the legacy one so an
+# upgrade from a pre-move install cleanly stops the old daemon before
+# we delete its files.
 
-if launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
-  log "stopping LaunchDaemon (${LAUNCHD_LABEL})"
-  # Try both bootout forms (target vs plist path); either works and
-  # both are safe when the target is already gone.
-  launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || \
-    launchctl bootout system "${PLIST_DST}" 2>/dev/null || \
-    warn "bootout failed; the daemon may already be stopped"
+stop_daemon() {
+  local label="$1"
+  local plist="$2"
+  if launchctl print "system/${label}" >/dev/null 2>&1; then
+    log "stopping LaunchDaemon (${label})"
+    # Try both bootout forms (target vs plist path); either works and
+    # both are safe when the target is already gone.
+    launchctl bootout "system/${label}" 2>/dev/null || \
+      launchctl bootout system "${plist}" 2>/dev/null || \
+      warn "bootout failed for ${label}; may already be stopped"
 
-  # Wait briefly for launchd to fully release the service so a
-  # subsequent install can bootstrap without seeing "already loaded".
-  settle=0
-  while (( settle < 5 )); do
-    launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || break
-    sleep 1
-    settle=$((settle + 1))
-  done
-else
-  log "daemon not loaded; skipping bootout"
-fi
+    # Wait briefly for launchd to fully release the service so a
+    # subsequent install can bootstrap without seeing "already loaded".
+    local settle=0
+    while (( settle < 5 )); do
+      launchctl print "system/${label}" >/dev/null 2>&1 || break
+      sleep 1
+      settle=$((settle + 1))
+    done
+  fi
+}
+
+stop_daemon "${LAUNCHD_LABEL}"        "${PLIST_DST}"
+stop_daemon "${LEGACY_LAUNCHD_LABEL}" "${LEGACY_PLIST_DST}"
 
 # ---- agent-config scrub (BEFORE we delete ~/.defenseclaw) --------------
 #
@@ -210,80 +243,88 @@ if [[ "${PURGE}" == "true" \
 fi
 
 # ---- remove files we own unconditionally --------------------------------
+#
+# Sweep both the current and legacy plist / binary tree.
 
-if [[ -f "${PLIST_DST}" ]]; then
-  log "removing ${PLIST_DST}"
-  rm -f "${PLIST_DST}"
+for plist in "${PLIST_DST}" "${LEGACY_PLIST_DST}"; do
+  if [[ -f "${plist}" ]]; then
+    log "removing ${plist}"
+    rm -f "${plist}"
+  fi
+done
+
+# INSTALL_PREFIX is /opt/cisco/secureclient/defenseclaw/ — a
+# DefenseClaw-owned subtree. Under the managed layout it holds bin/ AND
+# etc/ + runtime/ + hook-guardian-state/. The default (non-purge)
+# uninstall preserves runtime state so a reinstall keeps audit history
+# (see usage text above), so on the non-purge path only the binary
+# subtree is removed; the full tree drops on --purge.
+#
+# LEGACY_INSTALL_PREFIX is /Library/DefenseClaw/ — binary-only in the
+# old layout (runtime lived under LEGACY_SUPPORT_DIR), so it's safe to
+# remove wholesale in either mode.
+# `${var:?}` on the rm targets is defence-in-depth against an empty/unset
+# INSTALL_PREFIX after a future refactor — a bare `rm -rf /` or `rm -rf
+# /bin` would be catastrophic. Shellcheck SC2115. The `[[ -d ]]` guards
+# already handle the empty case at runtime, but the shell-parameter form
+# turns any unset-variable slip into a hard error instead of a delete.
+if [[ "${PURGE}" == "true" ]]; then
+  if [[ -d "${INSTALL_PREFIX:?}" ]]; then
+    log "removing ${INSTALL_PREFIX}"
+    rm -rf "${INSTALL_PREFIX:?}"
+  fi
+elif [[ -d "${INSTALL_PREFIX:?}/bin" ]]; then
+  log "removing ${INSTALL_PREFIX}/bin (runtime/config preserved for reinstall)"
+  rm -rf "${INSTALL_PREFIX:?}/bin"
 fi
-
-if [[ -d "${INSTALL_PREFIX}" ]]; then
-  log "removing ${INSTALL_PREFIX}"
-  rm -rf "${INSTALL_PREFIX}"
+if [[ -d "${LEGACY_INSTALL_PREFIX:?}" ]]; then
+  log "removing ${LEGACY_INSTALL_PREFIX}"
+  rm -rf "${LEGACY_INSTALL_PREFIX:?}"
 fi
 
 # ---- runtime state ------------------------------------------------------
 
 if [[ "${PURGE}" == "true" ]]; then
-  for d in "${SUPPORT_DIR}" "${LOGS_DIR}"; do
+  # SUPPORT_DIR equals INSTALL_PREFIX under the managed layout and was
+  # already removed above on --purge, so we only need to sweep LOGS_DIR
+  # here. For legacy installs, SUPPORT_DIR and LOGS_DIR are separate
+  # trees that still need explicit removal.
+  for d in "${LOGS_DIR}" "${LEGACY_SUPPORT_DIR}" "${LEGACY_LOGS_DIR}"; do
     if [[ -d "${d}" ]]; then
       log "purging ${d}"
       rm -rf "${d}"
     fi
   done
 
-  # Remove the service user + group when SERVICE_USER matches one of
-  # our known installer-created names (SERVICE_USER_KNOWN allowlist —
-  # currently just "defenseclaw", matching the gateway's hardcoded
-  # trustedRuntimeOwner lookup). Never delete an admin-configured name
-  # that only happens to share the SERVICE_USER slot: we gate on the
-  # allowlist, not on any naming-convention heuristic like an
-  # underscore prefix.
-  #
-  # We handle /Groups and /Users independently — each gets its own
-  # dscl -read gate and its own delete. A half-provisioned prior
-  # install can leave an orphan Groups record even when the Users
-  # record is already gone; the independent gates make sure both are
-  # cleaned up.
-  #
-  # Pin to /Local/Default like install.sh does. Otherwise a Mac bound
-  # to an unreachable network directory (AD/LDAP/managed OD) can hang
-  # or ENETUNREACH us on the read/delete calls.
-  is_known="no"
-  for known in "${SERVICE_USER_KNOWN[@]}"; do
-    if [[ "${SERVICE_USER}" == "${known}" ]]; then
-      is_known="yes"; break
+  # Modern (root-mode) installs let the managed cloud auth provider
+  # create its own log file under a shared log tree; there's nothing
+  # for us to sweep. But a pre-root install may have pre-created the
+  # file with defenseclaw ownership, so remove it if present. Never
+  # rm the parent dir — it's shared.
+  CMID_LOG_FILE="/Library/Logs/Cisco/SecureClient/CloudManagement/defenseclaw-gateway_cmidapi.log"
+  if [[ -f "${CMID_LOG_FILE}" ]]; then
+    log "removing legacy managed-auth log file: ${CMID_LOG_FILE}"
+    rm -f "${CMID_LOG_FILE}"
+  fi
+
+  # NOTE: the daemon runs as root, so no service-user cleanup is
+  # necessary here. Older DefenseClaw installs (pre-root switch)
+  # created a dedicated 'defenseclaw' user via sysadminctl/dseditgroup
+  # + a matching group. If this uninstall runs on a machine still
+  # carrying those records, sweep them so the next re-install starts
+  # clean and no orphan uid remains.
+  for legacy_name in "${SERVICE_USER_KNOWN[@]}"; do
+    if dscl /Local/Default -read "/Groups/${legacy_name}" >/dev/null 2>&1; then
+      log "removing legacy DefenseClaw group ${legacy_name} (pre-root install)"
+      /usr/sbin/dseditgroup -o delete "${legacy_name}" >/dev/null 2>&1 \
+        || warn "dseditgroup delete ${legacy_name} failed"
+    fi
+    if dscl /Local/Default -read "/Users/${legacy_name}" >/dev/null 2>&1; then
+      log "removing legacy DefenseClaw user ${legacy_name} (pre-root install)"
+      /usr/sbin/sysadminctl -deleteUser "${legacy_name}" >/dev/null 2>&1 \
+        || warn "sysadminctl deleteUser ${legacy_name} failed"
     fi
   done
-  if [[ -n "${SERVICE_USER}" && "${is_known}" == "yes" ]]; then
-    # SIP protects /var/db/dslocal, so `rm plist` returns "Operation
-    # not permitted" even for root. Use the SIP-safe official tools:
-    # dseditgroup for groups, sysadminctl for users. Both route through
-    # opendirectoryd's authenticated API and atomically clean up the
-    # on-disk plists.
-    removed_any=no
-
-    if dscl /Local/Default -read "/Groups/${SERVICE_USER}" >/dev/null 2>&1; then
-      log "removing group ${SERVICE_USER} via dseditgroup"
-      /usr/sbin/dseditgroup -o delete "${SERVICE_USER}" >/dev/null 2>&1 && \
-        removed_any=yes || warn "dseditgroup delete ${SERVICE_USER} failed"
-    fi
-    if dscl /Local/Default -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
-      log "removing user ${SERVICE_USER} via sysadminctl"
-      /usr/sbin/sysadminctl -deleteUser "${SERVICE_USER}" >/dev/null 2>&1 && \
-        removed_any=yes || warn "sysadminctl deleteUser ${SERVICE_USER} failed"
-    fi
-
-    if [[ "${removed_any}" == "yes" ]]; then
-      log "removed ${SERVICE_USER} service principal"
-    else
-      log "no ${SERVICE_USER} records to remove"
-    fi
-  elif [[ -n "${SERVICE_USER}" ]]; then
-    warn "service user '${SERVICE_USER}' is not one of the known DefenseClaw installer names (${SERVICE_USER_KNOWN[*]}); refusing to auto-delete"
-    warn "  delete it manually if it was created for DefenseClaw:"
-    warn "    sudo dscl /Local/Default -delete /Users/${SERVICE_USER}"
-    warn "    sudo dscl /Local/Default -delete /Groups/${SERVICE_USER}"
-  fi
 
   if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" && -d "${TARGET_HOME}/.defenseclaw" ]]; then
     if [[ "${SCRUB_FAILED}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
@@ -314,11 +355,14 @@ fi
 # ---- sanity check -------------------------------------------------------
 
 REMAINING=()
-[[ -e "${PLIST_DST}" ]]      && REMAINING+=("${PLIST_DST}")
-[[ -e "${INSTALL_PREFIX}" ]] && REMAINING+=("${INSTALL_PREFIX}")
+[[ -e "${PLIST_DST}" ]]              && REMAINING+=("${PLIST_DST}")
+[[ -e "${LEGACY_PLIST_DST}" ]]       && REMAINING+=("${LEGACY_PLIST_DST}")
+[[ -e "${INSTALL_PREFIX}" ]]         && REMAINING+=("${INSTALL_PREFIX}")
+[[ -e "${LEGACY_INSTALL_PREFIX}" ]]  && REMAINING+=("${LEGACY_INSTALL_PREFIX}")
 if [[ "${PURGE}" == "true" ]]; then
-  [[ -e "${SUPPORT_DIR}" ]] && REMAINING+=("${SUPPORT_DIR}")
-  [[ -e "${LOGS_DIR}" ]]    && REMAINING+=("${LOGS_DIR}")
+  [[ -e "${LOGS_DIR}" ]]         && REMAINING+=("${LOGS_DIR}")
+  [[ -e "${LEGACY_SUPPORT_DIR}" ]] && REMAINING+=("${LEGACY_SUPPORT_DIR}")
+  [[ -e "${LEGACY_LOGS_DIR}" ]]    && REMAINING+=("${LEGACY_LOGS_DIR}")
   [[ -n "${TARGET_HOME:-}" && -e "${TARGET_HOME}/.defenseclaw" ]] && REMAINING+=("${TARGET_HOME}/.defenseclaw")
 fi
 if (( ${#REMAINING[@]} > 0 )); then

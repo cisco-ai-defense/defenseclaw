@@ -60,17 +60,21 @@ t_install_requires_root() {
   assert_contains "${out}" "must run as root" "explains root requirement"
 }
 
-t_install_help_documents_service_user() {
+t_install_help_omits_service_user() {
+  # DefenseClaw's macOS daemon runs as root (see the plist rationale in
+  # packaging/launchd/com.cisco.secureclient.defenseclaw.plist); the --service-user
+  # flag was removed with the switch. Guard against reintroducing it —
+  # a reappearance means someone re-plumbed a non-root path without
+  # solving the managed cloud auth provider's root requirement.
   local out
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
-  assert_contains "${out}" "--service-user NAME"    "service-user flag documented"
-  assert_contains "${out}" "default: defenseclaw"    "default service user shown"
+  assert_not_contains "${out}" "--service-user" "install --help must not mention --service-user (root-mode daemon)"
 }
 
-t_uninstall_help_documents_service_user() {
+t_uninstall_help_omits_service_user() {
   local out
   out="$("${UNINSTALL_SH}" --help 2>&1)" || _fail "uninstall --help should exit 0"
-  assert_contains "${out}" "--service-user NAME"    "uninstall service-user flag documented"
+  assert_not_contains "${out}" "--service-user" "uninstall --help must not mention --service-user (root-mode daemon)"
 }
 
 t_install_default_redaction_is_on() {
@@ -110,9 +114,38 @@ t_uninstall_help() {
   local out
   out="$("${UNINSTALL_SH}" --help 2>&1)" || _fail "uninstall --help should exit 0"
   assert_contains "${out}" "--purge"                 "purge flag documented"
-  assert_contains "${out}" "audit DB"                "preservation note"
+  assert_contains "${out}" "config + runtime"        "purge target preserved-state note"
   assert_contains "${out}" "--keep-agent-configs"    "scrub opt-out documented"
   assert_contains "${out}" "scrub DefenseClaw"        "scrub behavior documented"
+}
+
+t_install_help_documents_env() {
+  local out
+  out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
+  assert_contains "${out}" "--env {prod|preview}" "env flag in help"
+  assert_contains "${out}" "cisco_ai_defense.endpoint" "env flag help mentions endpoint"
+}
+
+t_install_bad_env_exits_nonzero() {
+  # --env garbage must be rejected at arg-validation time, before root
+  # check, so managed hosts can't accidentally target a non-existent
+  # AID environment.
+  local out rc=0
+  out="$("${INSTALL_SH}" --env garbage 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "bad --env should exit non-zero"
+  assert_contains "${out}" "--env must be 'prod' or 'preview'" "explains valid env values"
+}
+
+t_install_default_env_is_prod() {
+  # Parse install.sh's own defaults directly to catch a silent flip
+  # from prod to preview or vice versa.
+  local default
+  default="$(grep -E '^DEFAULT_ENV=' "${INSTALL_SH}" | head -1 | cut -d'"' -f2)"
+  if [[ -z "${default}" ]]; then
+    _fail "could not find DEFAULT_ENV in install.sh"
+    return 1
+  fi
+  assert_eq "${default}" "prod" "install.sh DEFAULT_ENV must be prod"
 }
 
 t_uninstall_unknown_flag() {
@@ -133,8 +166,8 @@ t_uninstall_requires_root() {
 }
 
 run_case "install --help"                 t_install_help
-run_case "install service-user documented" t_install_help_documents_service_user
-run_case "uninstall service-user documented" t_uninstall_help_documents_service_user
+run_case "install --help omits --service-user (root-mode)" t_install_help_omits_service_user
+run_case "uninstall --help omits --service-user (root-mode)" t_uninstall_help_omits_service_user
 run_case "install --mode garbage"         t_install_bad_mode_exits_nonzero
 run_case "install --bogus"                t_install_unknown_flag_exits_nonzero
 run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_nonzero
@@ -142,6 +175,9 @@ run_case "install --port out-of-range"    t_install_bad_port_exits_nonzero
 run_case "install unsupported connector"  t_install_warns_unsupported_connector
 run_case "install non-root rejected"      t_install_requires_root
 run_case "install default redaction on"   t_install_default_redaction_is_on
+run_case "install --env flag documented"  t_install_help_documents_env
+run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero
+run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
 run_case "uninstall --help"               t_uninstall_help
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

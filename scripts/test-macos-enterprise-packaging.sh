@@ -21,8 +21,8 @@ installer="${root}/packaging/launchd/install-enterprise.sh"
 managed_root="/Library/Application Support/DefenseClaw"
 config_dest="${managed_root}/config.yaml"
 binary_root=/Library/DefenseClaw
-gateway_plist=/Library/LaunchDaemons/com.defenseclaw.gateway.plist
-guardian_plist=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
+gateway_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
+guardian_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
 log_dir=/Library/Logs/DefenseClaw
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-packaging.XXXXXX")"
 user_created=false
@@ -33,8 +33,8 @@ cleanup() {
     local status=$?
     trap - EXIT
     if [ "$installation_owned" = true ]; then
-        sudo -n launchctl bootout system/com.defenseclaw.hook-guardian >/dev/null 2>&1 || true
-        sudo -n launchctl bootout system/com.defenseclaw.gateway >/dev/null 2>&1 || true
+        sudo -n launchctl bootout system/com.cisco.secureclient.defenseclaw.hook-guardian >/dev/null 2>&1 || true
+        sudo -n launchctl bootout system/com.cisco.secureclient.defenseclaw >/dev/null 2>&1 || true
         sudo -n rm -rf -- "$binary_root" "$managed_root" "$log_dir"
         sudo -n rm -f -- "$gateway_plist" "$guardian_plist"
     fi
@@ -54,7 +54,7 @@ trap 'exit 130' HUP INT TERM
 for path in "$binary_root" "$managed_root" "$log_dir" "$gateway_plist" "$guardian_plist"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || fail "refusing to overwrite pre-existing path: $path"
 done
-for label in com.defenseclaw.gateway com.defenseclaw.hook-guardian; do
+for label in com.cisco.secureclient.defenseclaw com.cisco.secureclient.defenseclaw.hook-guardian; do
     if sudo -n launchctl print "system/${label}" >/dev/null 2>&1; then
         fail "refusing to unload pre-existing job: $label"
     fi

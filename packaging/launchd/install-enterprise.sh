@@ -17,8 +17,8 @@ AUTH_DIR="${MANAGED_ROOT}/hook-guardian-state"
 LOG_DIR=/Library/Logs/DefenseClaw
 CONFIG_DEST="${MANAGED_ROOT}/config.yaml"
 MANIFEST_DEST="${GUARDIAN_DIR}/targets.yaml"
-GATEWAY_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.gateway.plist
-GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
+GATEWAY_PLIST_DEST=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
+GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
 
 die() {
     printf 'defenseclaw enterprise install: %s\n' "$*" >&2
@@ -228,11 +228,11 @@ done
 require_regular_source "$CONFIG_SOURCE" "managed config"
 require_regular_source "$MANIFEST_SOURCE" "guardian manifest"
 require_regular_source "$BINARY_SOURCE" "gateway binary"
-require_regular_source "${SCRIPT_DIR}/com.defenseclaw.gateway.plist" "gateway plist"
-require_regular_source "${SCRIPT_DIR}/com.defenseclaw.hook-guardian.plist" "guardian plist"
+require_regular_source "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" "gateway plist"
+require_regular_source "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" "guardian plist"
 
-plist_pins_managed_mode "${SCRIPT_DIR}/com.defenseclaw.gateway.plist" || die "gateway plist does not pin managed_enterprise"
-plist_pins_managed_mode "${SCRIPT_DIR}/com.defenseclaw.hook-guardian.plist" || die "guardian plist does not pin managed_enterprise"
+plist_pins_managed_mode "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" || die "gateway plist does not pin managed_enterprise"
+plist_pins_managed_mode "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" || die "guardian plist does not pin managed_enterprise"
 
 SERVICE_UID="$(/usr/bin/id -u "$SERVICE_USER" 2>/dev/null)" || die "service user does not exist: $SERVICE_USER"
 SERVICE_GID="$(/usr/bin/id -g "$SERVICE_USER" 2>/dev/null)" || die "service group does not exist: $SERVICE_GROUP"
@@ -264,8 +264,8 @@ for destination in \
     fi
 done
 
-stop_job_if_loaded com.defenseclaw.hook-guardian
-stop_job_if_loaded com.defenseclaw.gateway
+stop_job_if_loaded com.cisco.secureclient.defenseclaw.hook-guardian
+stop_job_if_loaded com.cisco.secureclient.defenseclaw
 
 /usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR"
 /usr/bin/install -d -o root -g "$SERVICE_GROUP" -m 0750 "$MANAGED_ROOT" "$GUARDIAN_DIR" "$AUTH_DIR"
@@ -274,8 +274,8 @@ stop_job_if_loaded com.defenseclaw.gateway
 install_file_atomic "$BINARY_SOURCE" "${BIN_DIR}/defenseclaw-gateway" root wheel 0755
 install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root "$SERVICE_GROUP" 0640
 install_file_atomic "$MANIFEST_SOURCE" "$MANIFEST_DEST" root "$SERVICE_GROUP" 0640
-install_file_atomic "${SCRIPT_DIR}/com.defenseclaw.gateway.plist" "$GATEWAY_PLIST_DEST" root wheel 0644
-install_file_atomic "${SCRIPT_DIR}/com.defenseclaw.hook-guardian.plist" "$GUARDIAN_PLIST_DEST" root wheel 0644
+install_file_atomic "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" "$GATEWAY_PLIST_DEST" root wheel 0644
+install_file_atomic "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" "$GUARDIAN_PLIST_DEST" root wheel 0644
 
 assert_path_metadata "$BINARY_ROOT" dir 0 "$WHEEL_GID" 755
 assert_path_metadata "$BIN_DIR" dir 0 "$WHEEL_GID" 755

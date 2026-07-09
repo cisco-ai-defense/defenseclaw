@@ -36,7 +36,6 @@ Common flags:
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
 | `--disable-redaction` | on | Turn off audit/sink redaction |
-| `--service-user NAME` | `defenseclaw` | Service user; created via `dscl` if missing |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
 | `--skip-connector` | — | Gateway only; skip user-space hook wiring |
 | `--skip-launchd` | — | Install files without bootstrapping the daemon |
@@ -50,8 +49,8 @@ Full reference: `./install.sh --help`.
 `install.sh` picks the LaunchDaemon plist from the first path that exists in this order:
 
 1. `--plist <path>` flag or `DEFENSECLAW_PLIST_SRC` env var (**explicit override**)
-2. `com.defenseclaw.gateway.plist` next to `install.sh` (**bundle default**)
-3. `packaging/launchd/com.defenseclaw.gateway.plist` under a repo checkout (**dev-tree default**)
+2. `com.cisco.secureclient.defenseclaw.plist` next to `install.sh` (**bundle default**)
+3. `packaging/launchd/com.cisco.secureclient.defenseclaw.plist` under a repo checkout (**dev-tree default**)
 
 The plist source is validated before it is copied to `/Library/LaunchDaemons/`:
 
@@ -71,7 +70,7 @@ sudo chmod 0644 <path-to-plist>          # required for either tier
 
 ## 3. Uninstall
 
-Full wipe (system files, runtime state, service user, and DefenseClaw entries in per-user agent configs — non-DefenseClaw entries preserved):
+Full wipe (system files, runtime state, any legacy service-user records, and DefenseClaw entries in per-user agent configs — non-DefenseClaw entries preserved):
 
 ```sh
 sudo ./uninstall.sh --purge -y
@@ -87,10 +86,9 @@ Purge flags:
 
 | Flag | Purpose |
 | --- | --- |
-| `--purge` | Delete `/Library/Application Support/DefenseClaw`, `/Library/Logs/DefenseClaw`, `~/.defenseclaw/`, dscl records, and scrub `~/.codex/config.toml`, `~/.claude/settings.json`, `~/.cursor/hooks.json` |
+| `--purge` | Delete `/opt/cisco/secureclient/defenseclaw/` (runtime + config + audit DB), `/Library/Logs/Cisco/SecureClient/DefenseClaw/`, `~/.defenseclaw/`, legacy service-user dscl records from pre-root installs, and scrub `~/.codex/config.toml`, `~/.claude/settings.json`, `~/.cursor/hooks.json` |
 | `--keep-agent-configs` | With `--purge`, skip the agent-config scrub. Only safe if reinstalling immediately — otherwise dangling hook refs will fail-close every agent tool call. |
 | `--user USER` | Per-user cleanup target (default `$SUDO_USER`) |
-| `--service-user NAME` | Override service user to delete (default: read from installed plist) |
 | `-y, --yes` | Skip purge confirmation prompt |
 
 Full reference: `./uninstall.sh --help`.
@@ -98,7 +96,7 @@ Full reference: `./uninstall.sh --help`.
 ## 4. Verification after install
 
 ```sh
-sudo launchctl print system/com.defenseclaw.gateway | head
+sudo launchctl print system/com.cisco.secureclient.defenseclaw | head
 curl -sS http://127.0.0.1:18970/healthz
 ```
 
@@ -121,17 +119,20 @@ curl -sS http://127.0.0.1:18970/healthz
 
 Requires `sudo`. The installer:
 
-- Creates directories (all `root:wheel` unless noted):
-  - `/Library/DefenseClaw/bin/` — `0755`
-  - `/Library/Application Support/DefenseClaw/` — `0750`
-  - `/Library/Application Support/DefenseClaw/runtime/` — `0750`, chown'd `defenseclaw:defenseclaw`
-  - `/Library/Application Support/DefenseClaw/runtime-hook-guardian/` — `0750`, chown'd to service user
-  - `/Library/Logs/DefenseClaw/` — `0750`, chown'd to service user
-- Writes `/Library/LaunchDaemons/com.defenseclaw.gateway.plist` (`root:wheel 0644`) and `launchctl bootstrap`s it.
-- Writes `/Library/Application Support/DefenseClaw/config.yaml` as `root:wheel 0640`.
-- Creates a hidden system service user + group named `defenseclaw` (override with `--service-user`) via `dseditgroup` and `dscl` under `/Local/Default`. UID/GID in the system range, `NFSHomeDirectory=/var/empty`, `UserShell=/usr/bin/false`, `IsHidden=1`.
+- Creates directories under the managed install tree (all `root:wheel`):
+  - `/opt/cisco/secureclient/defenseclaw/bin/` — `0755` (gateway binary)
+  - `/opt/cisco/secureclient/defenseclaw/etc/` — `0755` (config.yaml)
+  - `/opt/cisco/secureclient/defenseclaw/runtime/` — `0750` (audit DB, tokens, device key)
+  - `/opt/cisco/secureclient/defenseclaw/hook-guardian-state/` — `0750` (authorization records)
+  - `/Library/Logs/Cisco/SecureClient/DefenseClaw/` — `0750`
+- Writes `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` (`root:wheel 0644`) and `launchctl bootstrap`s it.
+- Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:wheel 0640`.
+- Does NOT create a dedicated service user. The gateway daemon runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
 - Wires per-user hook configs in the target user's `~/.codex/config.toml`, `~/.claude/settings.json`, and/or `~/.cursor/hooks.json` depending on `--connector`.
+- Sweeps legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `com.defenseclaw.gateway.plist`) if present — an upgrade from an older install produces a clean cutover.
 
 ### Runtime privileges
 
-The daemon runs as the unprivileged **`defenseclaw`** user (per plist `UserName` / `GroupName`), not as root.
+The daemon runs as **root** (uid 0). The plist deliberately omits `UserName` / `GroupName` so launchd defaults to root; the managed cloud auth provider requires root to read and re-perm its on-disk credential store. No dedicated service user is created. Every install-time chown of a DefenseClaw-owned path uses `root:wheel`.
+
+Upgrades from a pre-root install (which provisioned a `defenseclaw` service user via `dscl` / `sysadminctl`) are handled by `uninstall.sh --purge`, which sweeps the legacy uid/gid so a subsequent reinstall starts from a clean uid namespace.

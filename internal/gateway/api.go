@@ -178,7 +178,12 @@ type APIServer struct {
 	// hook surface (Codex / Claude Code / Cursor / Windsurf /
 	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
 	// reach AID without per-script changes.
-	ciscoInspector *CiscoInspectClient
+	// Widened from *CiscoInspectClient to the Inspector interface so
+	// managed_enterprise installs can inject the token-authenticated
+	// *CiscoDefenseClawInspectClient instead. Callers still hold the
+	// same nil-guard semantics: only assign non-nil concrete values to
+	// this field (see inspector.go for the nil-interface trap).
+	ciscoInspector Inspector
 
 	// hookJudge forwards hook-lane message content (prompts + tool
 	// results delivered by hook connectors) to the LLM judge — the
@@ -197,9 +202,13 @@ type APIServer struct {
 }
 
 // SetCiscoInspector wires the Cisco AI Defense client onto the API
-// server. Pass nil to disable the hook-lane AID call (e.g. when the
-// operator did not configure cisco_ai_defense.api_key_env).
-func (a *APIServer) SetCiscoInspector(c *CiscoInspectClient) {
+// server. Accepts any Inspector implementation — opensource installs
+// pass *CiscoInspectClient, managed_enterprise installs pass
+// *CiscoDefenseClawInspectClient. Pass a nil INTERFACE (not a typed-nil
+// concrete pointer) to disable the hook-lane AID call. Callers should
+// only invoke this when their concrete constructor returned a non-nil
+// value.
+func (a *APIServer) SetCiscoInspector(c Inspector) {
 	a.ciscoInspector = c
 }
 

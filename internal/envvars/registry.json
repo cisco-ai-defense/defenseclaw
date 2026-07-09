@@ -628,7 +628,7 @@
       "consumers": [
         {"location": "internal/config/config.go", "description": "Pins deployment mode before parsing or trusting config.yaml"},
         {"location": "packaging/systemd/defenseclaw-gateway.service", "description": "Managed Linux service pin"},
-        {"location": "packaging/launchd/com.defenseclaw.gateway.plist", "description": "Managed macOS service pin"}
+        {"location": "packaging/launchd/com.cisco.secureclient.defenseclaw.plist", "description": "Managed macOS service pin"}
       ],
       "since": "0.8.0",
       "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks."
