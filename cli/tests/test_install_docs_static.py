@@ -73,8 +73,18 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
 def test_install_docs_do_not_pipe_main_upgrader() -> None:
     text = (ROOT / "docs/INSTALL.md").read_text()
     assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh" not in text
+
+    upgrade_start = text.index("### Upgrading from 0.2.0 to an artifact-backed release")
+    rollback_start = text.index("### Rollback")
+    troubleshooting_start = text.index("## Troubleshooting")
+    upgrade_section = text[upgrade_start:rollback_start]
+    rollback_section = text[rollback_start:troubleshooting_start]
+
+    for section in (upgrade_section, rollback_section):
+        for expected in UPGRADE_SCRIPT_LINES:
+            assert expected in section
     for expected in UPGRADE_SCRIPT_LINES:
-        assert expected in text
+        assert text.count(expected) == 2
 
 
 def test_installer_help_does_not_pipe_main_installer() -> None:
