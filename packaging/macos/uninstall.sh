@@ -104,6 +104,14 @@ while [[ $# -gt 0 ]]; do
     --user)                TARGET_USER="${2:?}"; shift 2;;
     -y|--yes)              ASSUME_YES="true"; shift;;
     -h|--help)             usage; exit 0;;
+    # --service-user was a pre-root-switch install flag. Accepted here
+    # (with a deprecation warning) for backward compat with legacy MDM
+    # / release automation that still passes it — the legacy user is
+    # already swept unconditionally via SERVICE_USER_KNOWN below, so
+    # the flag's value is redundant but not harmful.
+    --service-user)
+      warn "--service-user is deprecated and ignored; legacy 'defenseclaw' user is swept automatically on --purge"
+      shift 2;;
     *) die "unknown flag: $1 (try --help)";;
   esac
 done
