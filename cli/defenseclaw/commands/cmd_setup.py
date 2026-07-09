@@ -10109,3 +10109,76 @@ def _show_splunk_credentials(data_dir: str) -> None:
     click.echo("    Username:  admin")
     click.echo(f"    Password:  {password}")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup routing
+# ---------------------------------------------------------------------------
+
+
+@setup.command("routing")
+@click.option("--enable", is_flag=True, help="Enable semantic model routing.")
+@click.option("--disable", is_flag=True, help="Disable semantic model routing.")
+@click.option("--status", is_flag=True, help="Show routing status.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts.")
+@pass_ctx
+def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, yes: bool) -> None:
+    """Configure semantic model routing.
+
+    When enabled, DefenseClaw downloads and manages the vLLM Semantic Router
+    as a local subprocess. All routing configuration lives in config.yaml
+    under the 'routing:' section.
+
+    \b
+    Examples:
+      defenseclaw setup routing --enable
+      defenseclaw setup routing --disable
+      defenseclaw setup routing --status
+    """
+    if enable and disable:
+        raise click.UsageError("Cannot use --enable and --disable together.")
+
+    if status or (not enable and not disable):
+        _print_routing_status(app)
+        return
+
+    if enable:
+        app.cfg.routing.enabled = True
+        if not app.cfg.routing.version:
+            app.cfg.routing.version = "0.3.0"
+        if not app.cfg.routing.port:
+            app.cfg.routing.port = 8080
+        app.cfg.save()
+        click.echo()
+        click.echo("  ✓ Semantic routing enabled")
+        click.echo(f"    Version: {app.cfg.routing.version}")
+        click.echo(f"    Port:    {app.cfg.routing.port}")
+        click.echo()
+        click.echo("  The router will start automatically with the gateway.")
+        if not yes:
+            click.echo("  Restart the gateway to activate: defenseclaw-gateway restart")
+
+    if disable:
+        app.cfg.routing.enabled = False
+        app.cfg.save()
+        click.echo()
+        click.echo("  ✓ Semantic routing disabled")
+        click.echo("    All requests will use the default provider.")
+
+
+def _print_routing_status(app: AppContext) -> None:
+    click.echo()
+    click.echo("  Semantic Router Status")
+    click.echo("  ══════════════════════")
+    if not app.cfg.routing.enabled:
+        click.echo("    Status:  disabled")
+        click.echo()
+        click.echo("    Enable with: defenseclaw setup routing --enable")
+        return
+    click.echo("    Status:    enabled")
+    version = app.cfg.routing.version or "0.3.0 (default)"
+    click.echo(f"    Version:   {version}")
+    port = app.cfg.routing.port or 8080
+    click.echo(f"    Port:      {port}")
+    click.echo(f"    Algorithm: {app.cfg.routing.algorithm or 'static (default)'}")
+    click.echo()
