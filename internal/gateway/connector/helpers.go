@@ -18,6 +18,8 @@ package connector
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -27,6 +29,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"unicode/utf16"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -133,13 +136,13 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 		return windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + connector
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
-	// characters through to direct exec. An absolute path containing spaces
-	// therefore cannot be quoted safely in its command field. The Windows
-	// installer adds the hook directory to PATH, so use the stable binary
-	// name for this one direct-exec surface. Other agents accept a normal
-	// quoted Windows command line and keep the absolute path.
+	// characters through to direct exec. Put only tokenizer-safe arguments in
+	// hooks.json, then let a system PowerShell process invoke the absolute
+	// managed launcher path from an encoded script. This avoids both quote
+	// corruption for user profiles with spaces and current-directory/PATH
+	// lookup for defenseclaw-hook.exe.
 	if connector == "antigravity" {
-		return windowsHookBinaryName + " " + nativeHookFlag + connector
+		return windowsAntigravityHookCommand()
 	}
 	// Cursor 3.9.x writes the hook payload to a temporary file and then feeds
 	// it through Windows PowerShell's object pipeline. A native executable on
@@ -199,6 +202,36 @@ func windowsQuoteExe(p string) string {
 // changing the command structure.
 func powershellQuoteLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func windowsAntigravityHookCommand() string {
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "antigravity",
+		"exit $LASTEXITCODE",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+func windowsSystemPowerShellExe() string {
+	root := strings.TrimSpace(os.Getenv("SystemRoot"))
+	if root == "" {
+		root = strings.TrimSpace(os.Getenv("WINDIR"))
+	}
+	if root == "" {
+		root = `C:\Windows`
+	}
+	return filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+}
+
+func powershellEncodedCommand(script string) string {
+	wide := utf16.Encode([]rune(script))
+	buf := make([]byte, len(wide)*2)
+	for i, value := range wide {
+		binary.LittleEndian.PutUint16(buf[i*2:], value)
+	}
+	return base64.StdEncoding.EncodeToString(buf)
 }
 
 // isNativeHookCommand reports whether cmd is the DefenseClaw native Go hook
