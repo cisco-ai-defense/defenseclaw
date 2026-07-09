@@ -1422,9 +1422,14 @@ async def test_alerts_filter_click_after_ack_survives_deferred_render(
             and not app.query_one("#alerts-controls").has_class("hidden")
         )
 
+        # Textual's pilot.pause() may wait up to one second for global CPU
+        # idleness. Complete that layout/readiness synchronization before
+        # timing the click so this assertion measures input acknowledgement,
+        # not unrelated runner load.
+        await pilot.pause()
         loop = asyncio.get_running_loop()
         started = loop.time()
-        assert await _click_when_ready(pilot, "#alerts-filter-high", timeout=1.0)
+        assert await pilot.click("#alerts-filter-high")
         assert loop.time() - started < 0.5
 
         assert alerts.severity_filter == "HIGH"
@@ -6247,6 +6252,10 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
 
     async with app.run_test(size=(170, 44)) as pilot:
         await pilot.pause()
+        # The initial Overview generation is detached from shell paint. Drain
+        # it before counting picker-triggered renders so a late startup apply
+        # cannot be misclassified as synchronous picker work.
+        await _wait_for_panel_render(app, "overview")
         app._overview_renderable()
 
         assert app._chip_click_segments == []

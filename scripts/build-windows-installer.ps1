@@ -134,7 +134,11 @@ function Copy-RequiredFile([string]$Source, [string]$Destination) {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
-function Write-ZipFromDirectory([string]$Source, [string]$Destination) {
+function Write-ZipFromDirectory(
+    [string]$Source,
+    [string]$Destination,
+    [switch]$IncludeSourceDirectory
+) {
     if (Test-Path -LiteralPath $Destination) {
         Remove-Item -LiteralPath $Destination -Force
     }
@@ -142,7 +146,11 @@ function Write-ZipFromDirectory([string]$Source, [string]$Destination) {
     if (-not $items) {
         throw "Cannot zip empty directory: $Source"
     }
-    Compress-Archive -LiteralPath ($items | ForEach-Object { $_.FullName }) -DestinationPath $Destination -Force
+    if ($IncludeSourceDirectory) {
+        Compress-Archive -LiteralPath $Source -DestinationPath $Destination -Force
+    } else {
+        Compress-Archive -LiteralPath ($items | ForEach-Object { $_.FullName }) -DestinationPath $Destination -Force
+    }
 }
 
 function Get-FileHashHex([string]$Path) {
@@ -467,7 +475,19 @@ $manifest = [ordered]@{
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $payload "manifest.json") -Encoding UTF8
 
 $embeddedPayload = Join-Path $repoRoot "cmd\defenseclaw-setup\payload\installer-payload.zip"
-Write-ZipFromDirectory $payload $embeddedPayload
+# loadPayload deliberately extracts into a private parent and resolves the
+# manifest below a single payload/ directory. Preserve that root in the ZIP;
+# the other archives built above intentionally contain only their children.
+Write-ZipFromDirectory $payload $embeddedPayload -IncludeSourceDirectory
+$embeddedArchive = [IO.Compression.ZipFile]::OpenRead($embeddedPayload)
+try {
+    $embeddedEntryNames = @($embeddedArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+    if ('payload/manifest.json' -notin $embeddedEntryNames) {
+        throw 'Embedded setup payload is missing payload/manifest.json.'
+    }
+} finally {
+    $embeddedArchive.Dispose()
+}
 
 $setupPath = Join-Path $out "DefenseClawSetup-x64.exe"
 try {

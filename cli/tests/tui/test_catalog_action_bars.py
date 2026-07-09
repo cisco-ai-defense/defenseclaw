@@ -104,6 +104,11 @@ async def test_catalog_filter_input_live_filters_model(panel: str) -> None:
         await pilot.pause()
         app.action_switch_panel(panel)
         await pilot.pause()
+        # First entry starts a catalog loader that may redraw the controls.
+        # End that unrelated worker before mutating Input.value so this test
+        # observes only the Input.Changed -> model filter contract.
+        app.workers.cancel_all()
+        await pilot.pause()
         model = app.catalog_models[panel]
         inp = app.query_one(f"#{panel}-filter", Input)
         # Setting Input.value fires Input.Changed which routes through
