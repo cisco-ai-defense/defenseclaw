@@ -27,12 +27,20 @@ import (
 // SRConfig is the semantic router's native configuration format.
 // DefenseClaw generates this from its own RoutingConfig.
 type SRConfig struct {
-	Server     SRServerConfig     `yaml:"server"`
-	Models     []SRModelConfig    `yaml:"models"`
-	Signals    SRSignalsConfig    `yaml:"signals"`
-	Decisions  []SRDecisionConfig `yaml:"decisions"`
-	Embedding  *SREmbeddingConfig `yaml:"embedding,omitempty"`
+	Server     SRServerConfig      `yaml:"server"`
+	Listeners  []SRListenerConfig  `yaml:"listeners"`
+	Models     []SRModelConfig     `yaml:"models"`
+	Signals    SRSignalsConfig     `yaml:"signals"`
+	Decisions  []SRDecisionConfig  `yaml:"decisions"`
+	Embedding  *SREmbeddingConfig  `yaml:"embedding,omitempty"`
 	Classifier *SRClassifierConfig `yaml:"classifier,omitempty"`
+}
+
+type SRListenerConfig struct {
+	Name    string `yaml:"name"`
+	Address string `yaml:"address"`
+	Port    int    `yaml:"port"`
+	Timeout string `yaml:"timeout,omitempty"`
 }
 
 type SRServerConfig struct {
@@ -186,11 +194,19 @@ func TranslateAndWrite(input TranslateInput, dir string) (string, error) {
 func Translate(input TranslateInput) *SRConfig {
 	port := input.Port
 	if port == 0 {
-		port = 8080
+		port = 8888
 	}
 
 	cfg := &SRConfig{
 		Server: SRServerConfig{Host: "127.0.0.1", Port: port},
+		Listeners: []SRListenerConfig{
+			{
+				Name:    fmt.Sprintf("http-%d", port),
+				Address: "0.0.0.0",
+				Port:    port,
+				Timeout: "300s",
+			},
+		},
 	}
 
 	// Models
