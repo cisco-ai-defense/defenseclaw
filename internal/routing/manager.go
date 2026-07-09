@@ -20,6 +20,11 @@ const (
 	defaultSRVersion      = "0.3.0"
 )
 
+// EnvSRBinary allows operators to point at a pre-built SR binary (e.g. from
+// a local build of github.com/vllm-project/semantic-router/src/semantic-router).
+// When set, the binary manager skips download and uses this path directly.
+const EnvSRBinary = "SEMANTIC_ROUTER_BIN"
+
 // BinaryManager handles downloading and verifying the semantic router binary.
 type BinaryManager struct {
 	dataDir string // ~/.defenseclaw
@@ -64,6 +69,15 @@ func (m *BinaryManager) NeedsDownload(desiredVersion string) bool {
 
 // EnsureBinary downloads the SR binary if needed. Returns the binary path.
 func (m *BinaryManager) EnsureBinary(ctx context.Context, version string) (string, error) {
+	// Check for pre-built binary override (e.g. local build from source)
+	if override := os.Getenv(EnvSRBinary); override != "" {
+		if _, err := os.Stat(override); err == nil {
+			fmt.Fprintf(os.Stderr, "[routing] using SEMANTIC_ROUTER_BIN=%s\n", override)
+			return override, nil
+		}
+		return "", fmt.Errorf("routing: SEMANTIC_ROUTER_BIN=%s does not exist", override)
+	}
+
 	if version == "" {
 		version = defaultSRVersion
 	}
