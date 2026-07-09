@@ -99,6 +99,14 @@ async def _wait_for_background(predicate, *, timeout: float = 8.0) -> None:
         await asyncio.sleep(0.01)
 
 
+async def _wait_for_panel_render(app: DefenseClawTUI, panel: str) -> None:
+    await _wait_for_background(
+        lambda: panel not in app._panel_render_queued  # noqa: SLF001
+        and panel not in app._panel_render_running  # noqa: SLF001
+        and panel not in app._panel_render_pending,  # noqa: SLF001
+    )
+
+
 def _v8_destination(
     *,
     name: str = "collector",
@@ -6316,19 +6324,21 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
         assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
         assert app._connector_filter() == ""
 
-        await pilot.click("#action-menu-row-1")
-        await pilot.pause()
-        assert app._connector_filter() == "codex"
-        assert "Codex (codex)" in scope_text()
-        assert "Hook Calls (codex)" in metric_labels()
+        assert await pilot.click("#action-menu-row-1")
+        await _wait_for_background(
+            lambda: app._connector_filter() == "codex" and "Codex (codex)" in scope_text()
+        )
+        # The scope acknowledgement is immediate; metric content remains the
+        # last coherent snapshot until the deferred generation completes.
+        assert "Hook Calls (2 connectors)" in metric_labels()
         assert deferred_calls == 1
 
         await pilot.press("m")
         await pilot.pause()
-        await pilot.click("#action-menu-row-0")
-        await pilot.pause()
-        assert app._connector_filter() == ""
-        assert "All connectors" in scope_text()
+        assert await pilot.click("#action-menu-row-0")
+        await _wait_for_background(
+            lambda: app._connector_filter() == "" and "All connectors" in scope_text()
+        )
         assert "Hook Calls (2 connectors)" in metric_labels()
         assert deferred_calls == 2
 
