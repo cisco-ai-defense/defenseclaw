@@ -351,7 +351,7 @@ After each response:
 |------|---------|
 | `internal/config/config.go` | Add `Mode`, `Version`, `Port`, `Embedding`, `LLMClassifier`, `Remote` fields to `RoutingConfig` |
 | `internal/gateway/sidecar.go` | Add SR lifecycle startup/shutdown in `Run()` |
-| `internal/gateway/model_router_adapter.go` | Switch on `cfg.Mode`: remote → `RemoteRouterClient`, local → existing keyword router |
+| `internal/gateway/model_router_adapter.go` | Construct `RemoteRouterClient` (managed or remote endpoint) |
 
 ---
 
@@ -417,10 +417,19 @@ For Docker/K8s, `routing.mode: remote` + `routing.remote.endpoint` can point to 
 
 ---
 
-## Migration Path
+## Modes (No Local Fallback)
 
-1. Existing `routing.enabled: true` configs with keywords/decisions continue to work via the local keyword router (backward compatible)
-2. Adding `routing.version: "0.3.0"` triggers SR download and managed mode
-3. `routing.mode: local` forces the old keyword-only path even when SR is available
-4. `routing.mode: remote` + `routing.remote.endpoint` uses an externally managed SR (K8s/Docker)
-5. Default mode (when version is set): `managed` (DefenseClaw downloads and manages SR)
+When `routing.enabled: true`, DefenseClaw **always** uses the semantic router. There is no local keyword-only fallback mode.
+
+| Mode | When | Behavior |
+|------|------|----------|
+| `managed` (default) | `routing.enabled: true` | DefenseClaw downloads SR binary, manages lifecycle, routes through it |
+| `remote` | `routing.remote.endpoint` is set | DefenseClaw connects to an externally managed SR instance (Docker/K8s) |
+
+If the SR is unavailable (crash, network error, timeout), the request **falls through to the default provider** (no routing override applied) — this is graceful degradation, not a "local routing mode". The user's configured `llm.model` or Bifrost default takes over until SR recovers.
+
+### Migration
+
+1. `routing.enabled: false` (or absent) — routing is off, zero overhead, all requests go to default provider
+2. `routing.enabled: true` — SR is required; DefenseClaw downloads and starts it automatically
+3. `routing.remote.endpoint: http://...` — uses external SR instead of managed subprocess
