@@ -27,20 +27,24 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from typing import Any, NamedTuple
+from enum import Enum
+from typing import Any, NamedTuple, TypedDict
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
-from defenseclaw.inventory.plugin_directories import plugin_directory_entries
+from defenseclaw.inventory.plugin_directories import discover_plugin_directories
+from defenseclaw.inventory.plugin_identity import (
+    AmbiguousPluginIdentityError,
+    filesystem_identity_key,
+)
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
 INVENTORY_VERSION = 3
 
-ALL_CATEGORIES: frozenset[str] = frozenset(
-    ["skills", "plugins", "mcp", "agents", "tools", "models", "memory"]
-)
+ALL_CATEGORIES: frozenset[str] = frozenset(["skills", "plugins", "mcp", "agents", "tools", "models", "memory"])
 
 _CATEGORY_ALIASES: dict[str, str] = {"model_providers": "models"}
 
@@ -72,9 +76,30 @@ class _CmdResult(NamedTuple):
     command: str
 
 
+class InventoryCapabilityStatus(str, Enum):
+    """Machine-readable availability of an inventory surface."""
+
+    UNSUPPORTED = "unsupported"
+
+
+class InventoryLimitation(TypedDict):
+    """Expected connector capability gap; never an attempted-operation error."""
+
+    connector: str
+    category: str
+    status: InventoryCapabilityStatus
+    reason: str
+
+
+class _FilesystemCollectionResult(NamedTuple):
+    items: list[dict[str, Any]]
+    error: dict[str, str] | None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def build_claw_aibom(
     cfg: Config,
@@ -128,11 +153,7 @@ def build_claw_aibom(
         "skills": _parse_skills(cache.get("skills_list")) if "skills" in cats else [],
         "plugins": _parse_plugins(cache.get("plugins_list")) if "plugins" in cats else [],
         "mcp": _parse_mcp(cache.get("mcp_list")) if "mcp" in cats else [],
-        "agents": (
-            _parse_agents(cache.get("agents_list"), cache.get("config_agents"))
-            if "agents" in cats
-            else []
-        ),
+        "agents": (_parse_agents(cache.get("agents_list"), cache.get("config_agents")) if "agents" in cats else []),
         "tools": _parse_tools(cache.get("plugins_list")) if "tools" in cats else [],
         "model_providers": (
             _parse_model_providers(
@@ -145,6 +166,7 @@ def build_claw_aibom(
         ),
         "memory": _parse_memory(cache.get("memory_status")) if "memory" in cats else [],
         "errors": errors,
+        "limitations": [],
     }
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
@@ -228,8 +250,12 @@ def enrich_with_policy(
         scan_map = _build_scan_map_for_type(store, scanner_name)
 
         counts: dict[str, int] = {
-            "blocked": 0, "allowed": 0, "rejected": 0,
-            "warning": 0, "clean": 0, "unscanned": 0,
+            "blocked": 0,
+            "allowed": 0,
+            "rejected": 0,
+            "warning": 0,
+            "clean": 0,
+            "unscanned": 0,
         }
 
         for item in items:
@@ -243,7 +269,12 @@ def enrich_with_policy(
             action_entry = _lookup_by_candidates(actions_map, candidates)
             policy_name = _inventory_policy_name(item, target_type, name, action_entry)
             source_path = _inventory_source_path(
-                item, target_type, candidates, scan_entry, action_entry, cfg,
+                item,
+                target_type,
+                candidates,
+                scan_entry,
+                action_entry,
+                cfg,
             )
             # F-0423: prior scans are indexed by both full target and
             # ``basename(target)``. A basename hit alone must NOT credit a
@@ -261,8 +292,11 @@ def enrich_with_policy(
             # for untrusted provenance so those rows still get scanned.
             allow_first_party = _source_allows_first_party(item.get("source"))
             verdict, detail = _admission_verdict(
-                pe, target_type, policy_name,
-                scan_entry, action_entry,
+                pe,
+                target_type,
+                policy_name,
+                scan_entry,
+                action_entry,
                 fallback_actions,
                 policy_dir=policy_dir,
                 source_path=source_path,
@@ -466,6 +500,9 @@ def _inventory_key_candidates(
         plugin_name = item.get("name", "")
         add(plugin_name)
         add(os.path.basename(str(plugin_name).rstrip("/")))
+        add(item.get("path", ""))
+        add(item.get("baseDir", ""))
+        add(item.get("filePath", ""))
     elif target_type == "mcp":
         add(item.get("url", ""))
         add(item.get("command", ""))
@@ -487,11 +524,7 @@ def _inventory_policy_name(
     if target_type == "plugin":
         plugin_name = str(item.get("name", "")).strip()
         alias = os.path.basename(plugin_name.rstrip("/"))
-        if alias and (
-            plugin_name.startswith("@")
-            or alias.endswith("-plugin")
-            or alias.endswith("-provider")
-        ):
+        if alias and (plugin_name.startswith("@") or alias.endswith("-plugin") or alias.endswith("-provider")):
             return alias
 
     return name
@@ -574,6 +607,7 @@ def format_claw_aibom_human(
         _render_models(console, inv.get("model_providers", []))
         _render_memory(console, inv.get("memory", []))
 
+    _render_limitations(console, inv.get("limitations", []))
     _render_errors(console, inv.get("errors", []))
 
 
@@ -585,8 +619,11 @@ def format_claw_aibom_human(
 # inventories; non-OpenClaw JSON should not imply OpenClaw is installed.
 # ---------------------------------------------------------------------------
 
+
 def _attach_connector_paths(
-    out: dict[str, Any], cfg: Config, connector: str,
+    out: dict[str, Any],
+    cfg: Config,
+    connector: str,
 ) -> None:
     """Populate ``connector_*`` polymorphic path fields on *out*.
 
@@ -683,6 +720,7 @@ def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
 # Summary builder (shared by JSON and human output)
 # ---------------------------------------------------------------------------
 
+
 def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
     skills = inv.get("skills", [])
     plugins = inv.get("plugins", [])
@@ -705,12 +743,14 @@ def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
         "total_items": total,
         **cats,
         "errors": len(inv.get("errors", [])),
+        "limitations": len(inv.get("limitations", [])),
     }
 
 
 # ---------------------------------------------------------------------------
 # Category helpers
 # ---------------------------------------------------------------------------
+
 
 def _resolve_categories(categories: set[str] | None) -> frozenset[str]:
     if categories is None:
@@ -734,6 +774,7 @@ def _needed_commands(cats: frozenset[str]) -> set[str]:
 # ---------------------------------------------------------------------------
 # Rich formatting helpers
 # ---------------------------------------------------------------------------
+
 
 def _render_summary(console: Any, inv: dict[str, Any]) -> None:
     from rich.table import Table
@@ -849,16 +890,11 @@ def _render_skills(console: Any, skills: list[dict[str, Any]]) -> None:
         console.print(table)
 
     if ineligible:
-        blocked_count = sum(
-            1 for s in ineligible if s.get("policy_verdict") == "blocked"
-        )
+        blocked_count = sum(1 for s in ineligible if s.get("policy_verdict") == "blocked")
         parts = ["missing deps"]
         if blocked_count:
             parts.append(f"{blocked_count} blocked by policy")
-        console.print(
-            f"  [dim]+ {len(ineligible)} ineligible skills "
-            f"({', '.join(parts)})[/dim]"
-        )
+        console.print(f"  [dim]+ {len(ineligible)} ineligible skills ({', '.join(parts)})[/dim]")
     console.print()
 
 
@@ -927,9 +963,7 @@ def _render_plugins(console: Any, plugins: list[dict[str, Any]]) -> None:
     console.print(table)
 
     if disabled:
-        blocked_count = sum(
-            1 for p in disabled if p.get("policy_verdict") == "blocked"
-        )
+        blocked_count = sum(1 for p in disabled if p.get("policy_verdict") == "blocked")
         parts = [f"{len(disabled)} disabled"]
         if blocked_count:
             parts.append(f"{blocked_count} blocked by policy")
@@ -1117,6 +1151,19 @@ def _render_errors(console: Any, errors: list[dict[str, Any]]) -> None:
     console.print()
 
 
+def _render_limitations(console: Any, limitations: list[dict[str, Any]]) -> None:
+    """Render expected connector gaps as information, never warnings."""
+
+    if not limitations:
+        return
+    console.print("[bold cyan]Unsupported inventory capabilities[/bold cyan] [dim](informational)[/dim]:")
+    for limitation in limitations:
+        category = limitation.get("category", "?")
+        reason = limitation.get("reason", "unsupported by this connector")
+        console.print(f"  [cyan]{category}[/cyan] — {reason}")
+    console.print()
+
+
 def _trunc(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
@@ -1124,6 +1171,7 @@ def _trunc(s: str, n: int) -> str:
 # ---------------------------------------------------------------------------
 # Parallel command dispatcher
 # ---------------------------------------------------------------------------
+
 
 def _run_openclaw(*args: str) -> _CmdResult:
     """Run an ``openclaw`` subcommand and return parsed JSON with error info.
@@ -1134,6 +1182,7 @@ def _run_openclaw(*args: str) -> _CmdResult:
     cmd_str = "openclaw " + " ".join(args) + " --json"
     try:
         from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+
         prefix = openclaw_cmd_prefix()
         proc = subprocess.run(
             [*prefix, openclaw_bin(), *args, "--json"],
@@ -1165,7 +1214,7 @@ def _run_openclaw(*args: str) -> _CmdResult:
         # stderr may contain Node.js warnings before or after the JSON;
         # find the earliest { or [ and try raw_decode from there.
         candidates = []
-        for ch in ('{', '['):
+        for ch in ("{", "["):
             pos = text.find(ch)
             if pos >= 0:
                 candidates.append(pos)
@@ -1189,11 +1238,7 @@ def _fetch_all(needed: set[str]) -> tuple[dict[str, Any], list[dict[str, str]]]:
         return cache, errors
 
     with ThreadPoolExecutor(max_workers=min(len(needed), 8)) as pool:
-        futures = {
-            pool.submit(_run_openclaw, *_COMMANDS[key]): key
-            for key in needed
-            if key in _COMMANDS
-        }
+        futures = {pool.submit(_run_openclaw, *_COMMANDS[key]): key for key in needed if key in _COMMANDS}
         for fut in as_completed(futures):
             key = futures[fut]
             result = fut.result()
@@ -1207,6 +1252,7 @@ def _fetch_all(needed: set[str]) -> tuple[dict[str, Any], list[dict[str, str]]]:
 # ---------------------------------------------------------------------------
 # Parsers — transform raw CLI JSON into normalized inventory rows
 # ---------------------------------------------------------------------------
+
 
 def _parse_skills(raw: Any) -> list[dict[str, Any]]:
     if not raw or not isinstance(raw, dict):
@@ -1255,8 +1301,7 @@ def _parse_plugins(raw: Any) -> list[dict[str, Any]]:
             "enabled": p.get("enabled", False),
             "status": p.get("status", ""),
         }
-        for field in ("toolNames", "providerIds", "hookNames",
-                       "channelIds", "cliCommands", "services"):
+        for field in ("toolNames", "providerIds", "hookNames", "channelIds", "cliCommands", "services"):
             val = p.get(field, [])
             if val:
                 row[field] = val
@@ -1301,13 +1346,15 @@ def _parse_agents(raw_agents: Any, raw_defaults: Any) -> list[dict[str, Any]]:
         for a in raw_agents:
             if not isinstance(a, dict):
                 continue
-            rows.append({
-                "id": a.get("id", ""),
-                "model": a.get("model", ""),
-                "workspace": a.get("workspace", ""),
-                "is_default": a.get("isDefault", False),
-                "bindings": a.get("bindings", 0),
-            })
+            rows.append(
+                {
+                    "id": a.get("id", ""),
+                    "model": a.get("model", ""),
+                    "workspace": a.get("workspace", ""),
+                    "is_default": a.get("isDefault", False),
+                    "bindings": a.get("bindings", 0),
+                }
+            )
 
     if isinstance(raw_defaults, dict) and raw_defaults.get("defaults"):
         d = raw_defaults["defaults"]
@@ -1351,23 +1398,27 @@ def _parse_model_providers(
     rows: list[dict[str, Any]] = []
 
     if isinstance(raw_status, dict):
-        rows.append({
-            "id": "_config",
-            "source": "models status",
-            "default_model": raw_status.get("defaultModel") or raw_status.get("resolvedDefault", ""),
-            "fallbacks": raw_status.get("fallbacks", []),
-            "allowed": raw_status.get("allowed", []),
-            "config_path": raw_status.get("configPath", ""),
-        })
+        rows.append(
+            {
+                "id": "_config",
+                "source": "models status",
+                "default_model": raw_status.get("defaultModel") or raw_status.get("resolvedDefault", ""),
+                "fallbacks": raw_status.get("fallbacks", []),
+                "allowed": raw_status.get("allowed", []),
+                "config_path": raw_status.get("configPath", ""),
+            }
+        )
         auth = raw_status.get("auth", {})
         if isinstance(auth, dict):
             for prov in auth.get("providers", []):
                 if isinstance(prov, dict):
-                    rows.append({
-                        "id": prov.get("provider", ""),
-                        "source": "auth",
-                        "status": prov.get("status", ""),
-                    })
+                    rows.append(
+                        {
+                            "id": prov.get("provider", ""),
+                            "source": "auth",
+                            "status": prov.get("status", ""),
+                        }
+                    )
             for m in auth.get("missingProvidersInUse", []):
                 rows.append({"id": str(m), "source": "auth", "status": "missing"})
 
@@ -1379,26 +1430,30 @@ def _parse_model_providers(
             for pid in p.get("providerIds", []):
                 if pid not in seen:
                     seen.add(pid)
-                    rows.append({
-                        "id": pid,
-                        "source": f"plugin:{p.get('id', '')}",
-                        "enabled": p.get("enabled", False),
-                        "status": p.get("status", ""),
-                    })
+                    rows.append(
+                        {
+                            "id": pid,
+                            "source": f"plugin:{p.get('id', '')}",
+                            "enabled": p.get("enabled", False),
+                            "status": p.get("status", ""),
+                        }
+                    )
 
     if isinstance(raw_models, dict):
         for m in raw_models.get("models", []):
             if not isinstance(m, dict):
                 continue
-            rows.append({
-                "id": m.get("key", ""),
-                "name": m.get("name", ""),
-                "source": "models list",
-                "available": m.get("available", False),
-                "local": m.get("local", False),
-                "input": m.get("input", ""),
-                "context_window": m.get("contextWindow", 0),
-            })
+            rows.append(
+                {
+                    "id": m.get("key", ""),
+                    "name": m.get("name", ""),
+                    "source": "models list",
+                    "available": m.get("available", False),
+                    "local": m.get("local", False),
+                    "input": m.get("input", ""),
+                    "context_window": m.get("contextWindow", 0),
+                }
+            )
 
     return rows
 
@@ -1442,7 +1497,7 @@ def _parse_memory(raw: Any) -> list[dict[str, Any]]:
 # components by walking the directory layouts documented in
 # defenseclaw.connector_paths. Categories that are OpenClaw-only
 # concepts (agents, models, memory, tools-as-plugin-export) come back
-# as empty lists with a clear "errors" entry pointing the reader at
+# as empty lists with typed limitation metadata pointing the reader at
 # the connector-specific surface that owns that concept.
 
 _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
@@ -1451,6 +1506,27 @@ _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
     "models": "model providers are configured inside the framework",
     "memory": "memory backend is private to the framework",
 }
+
+
+def _collect_filesystem_category(
+    connector: str,
+    category: str,
+    collector: Callable[[], list[dict[str, Any]]],
+) -> _FilesystemCollectionResult:
+    """Run one filesystem collector while preserving partial inventory.
+
+    An exception means an attempted collection unexpectedly failed and belongs
+    in ``errors``. An empty successful result is not an error; callers may
+    separately describe a connector's expected capability limitation.
+    """
+
+    try:
+        return _FilesystemCollectionResult(collector(), None)
+    except Exception as exc:  # noqa: BLE001 - partial inventory records the failure.
+        return _FilesystemCollectionResult(
+            [],
+            {"command": f"{connector}:{category}", "error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1489,15 +1565,19 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
             os.path.join(home, ".zeptoclaw", "agents.json"),
         )
     if name == "geminicli":
-        return _agents_from_md_dirs([
-            os.path.join(os.getcwd(), ".gemini", "agents"),
-            os.path.join(home, ".gemini", "agents"),
-        ])
+        return _agents_from_md_dirs(
+            [
+                os.path.join(os.getcwd(), ".gemini", "agents"),
+                os.path.join(home, ".gemini", "agents"),
+            ]
+        )
     if name == "copilot":
-        return _agents_from_md_dirs([
-            os.path.join(os.getcwd(), ".github", "agents"),
-            os.path.join(home, ".copilot", "agents"),
-        ])
+        return _agents_from_md_dirs(
+            [
+                os.path.join(os.getcwd(), ".github", "agents"),
+                os.path.join(home, ".copilot", "agents"),
+            ]
+        )
     return []
 
 
@@ -1548,12 +1628,16 @@ def _model_providers_for_connector(
     name = (connector or "").lower()
     if name == "claudecode":
         return _providers_from_env(
-            "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", default_provider="anthropic",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            default_provider="anthropic",
             default_base_url="https://api.anthropic.com",
         )
     if name == "codex":
         return _providers_from_env(
-            "OPENAI_BASE_URL", "OPENAI_API_KEY", default_provider="openai",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_KEY",
+            default_provider="openai",
             default_base_url="https://api.openai.com/v1",
         )
     if name == "zeptoclaw":
@@ -1592,13 +1676,15 @@ def _memory_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
             entry_count = sum(1 for _ in os.scandir(path))
         except OSError:
             entry_count = 0
-        rows.append({
-            "id": os.path.basename(path) or path,
-            "name": path,
-            "source": path,
-            "kind": "filesystem",
-            "entry_count": entry_count,
-        })
+        rows.append(
+            {
+                "id": os.path.basename(path) or path,
+                "name": path,
+                "source": path,
+                "kind": "filesystem",
+                "entry_count": entry_count,
+            }
+        )
     return rows
 
 
@@ -1621,12 +1707,14 @@ def _agents_from_md_dir(agents_dir: str) -> list[dict[str, Any]]:
         if not entry.endswith((".md", ".txt", ".json", ".yaml", ".yml")):
             continue
         agent_id = os.path.splitext(entry)[0]
-        rows.append({
-            "id": agent_id,
-            "name": agent_id,
-            "source": full,
-            "kind": "subagent",
-        })
+        rows.append(
+            {
+                "id": agent_id,
+                "name": agent_id,
+                "source": full,
+                "kind": "subagent",
+            }
+        )
     return rows
 
 
@@ -1655,13 +1743,15 @@ def _agents_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
         agent_id = item.get("id") or item.get("name")
         if not agent_id:
             continue
-        rows.append({
-            "id": str(agent_id),
-            "name": str(item.get("name") or agent_id),
-            "description": str(item.get("description", "")),
-            "source": path,
-            "kind": "agent",
-        })
+        rows.append(
+            {
+                "id": str(agent_id),
+                "name": str(item.get("name") or agent_id),
+                "description": str(item.get("description", "")),
+                "source": path,
+                "kind": "agent",
+            }
+        )
     return rows
 
 
@@ -1677,21 +1767,25 @@ def _tools_from_claude_settings(path: str) -> list[dict[str, Any]]:
                 rows.append({"id": item, "name": item, "source": path})
             elif isinstance(item, dict) and (item.get("name") or item.get("id")):
                 tool_id = item.get("id") or item.get("name")
-                rows.append({
-                    "id": str(tool_id),
-                    "name": str(item.get("name") or tool_id),
-                    "description": str(item.get("description", "")),
-                    "source": path,
-                })
+                rows.append(
+                    {
+                        "id": str(tool_id),
+                        "name": str(item.get("name") or tool_id),
+                        "description": str(item.get("description", "")),
+                        "source": path,
+                    }
+                )
     elif isinstance(tools, dict):
         for tool_id, item in tools.items():
             if isinstance(item, dict):
-                rows.append({
-                    "id": str(tool_id),
-                    "name": str(item.get("name") or tool_id),
-                    "description": str(item.get("description", "")),
-                    "source": path,
-                })
+                rows.append(
+                    {
+                        "id": str(tool_id),
+                        "name": str(item.get("name") or tool_id),
+                        "description": str(item.get("description", "")),
+                        "source": path,
+                    }
+                )
     return rows
 
 
@@ -1720,12 +1814,14 @@ def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
         if not isinstance(body, dict):
             rows.append({"id": str(tool_id), "name": str(tool_id), "source": path})
             continue
-        rows.append({
-            "id": str(tool_id),
-            "name": str(body.get("name") or tool_id),
-            "description": str(body.get("description", "")),
-            "source": path,
-        })
+        rows.append(
+            {
+                "id": str(tool_id),
+                "name": str(body.get("name") or tool_id),
+                "description": str(body.get("description", "")),
+                "source": path,
+            }
+        )
     return rows
 
 
@@ -1746,12 +1842,14 @@ def _tools_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
             if not tid or tid in seen:
                 continue
             seen.add(tid)
-            rows.append({
-                "id": str(tid),
-                "name": str(tool.get("name") or tid),
-                "description": str(tool.get("description", "")),
-                "source": path,
-            })
+            rows.append(
+                {
+                    "id": str(tid),
+                    "name": str(tool.get("name") or tid),
+                    "description": str(tool.get("description", "")),
+                    "source": path,
+                }
+            )
     return rows
 
 
@@ -1844,20 +1942,24 @@ def _tools_from_opencode_config(path: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for tool_id, body in raw_tools.items():
         if isinstance(body, dict):
-            rows.append({
-                "id": str(tool_id),
-                "name": str(body.get("name") or tool_id),
-                "description": str(body.get("description", "")),
-                "source": path,
-                "kind": "config-tool",
-            })
+            rows.append(
+                {
+                    "id": str(tool_id),
+                    "name": str(body.get("name") or tool_id),
+                    "description": str(body.get("description", "")),
+                    "source": path,
+                    "kind": "config-tool",
+                }
+            )
         else:
-            rows.append({
-                "id": str(tool_id),
-                "name": str(tool_id),
-                "source": path,
-                "kind": "config-tool",
-            })
+            rows.append(
+                {
+                    "id": str(tool_id),
+                    "name": str(tool_id),
+                    "source": path,
+                    "kind": "config-tool",
+                }
+            )
     return rows
 
 
@@ -1882,12 +1984,14 @@ def _tools_from_script_dirs(
             stem, ext = os.path.splitext(entry)
             if ext.lower() not in extensions:
                 continue
-            rows.append({
-                "id": stem,
-                "name": stem,
-                "source": full,
-                "kind": kind,
-            })
+            rows.append(
+                {
+                    "id": stem,
+                    "name": stem,
+                    "source": full,
+                    "kind": kind,
+                }
+            )
     return rows
 
 
@@ -1934,13 +2038,15 @@ def _providers_from_env(
     if not base_url_env and not has_key:
         return []
     base_url = base_url_env or default_base_url
-    return [{
-        "id": default_provider,
-        "name": default_provider,
-        "base_url": base_url,
-        "api_key_present": has_key,
-        "source": f"env:{base_url_var}",
-    }]
+    return [
+        {
+            "id": default_provider,
+            "name": default_provider,
+            "base_url": base_url,
+            "api_key_present": has_key,
+            "source": f"env:{base_url_var}",
+        }
+    ]
 
 
 def _providers_from_zeptoclaw_config(path: str) -> list[dict[str, Any]]:
@@ -1954,15 +2060,17 @@ def _providers_from_zeptoclaw_config(path: str) -> list[dict[str, Any]]:
     for pid, body in providers.items():
         if not isinstance(body, dict):
             continue
-        rows.append({
-            "id": str(pid),
-            "name": str(body.get("name") or pid),
-            "base_url": str(body.get("api_base") or ""),
-            # Don't echo the key. Reporting "present/absent" is the
-            # only safe inventory signal.
-            "api_key_present": bool(body.get("api_key")),
-            "source": path,
-        })
+        rows.append(
+            {
+                "id": str(pid),
+                "name": str(body.get("name") or pid),
+                "base_url": str(body.get("api_base") or ""),
+                # Don't echo the key. Reporting "present/absent" is the
+                # only safe inventory signal.
+                "api_key_present": bool(body.get("api_key")),
+                "source": path,
+            }
+        )
     return rows
 
 
@@ -1990,54 +2098,49 @@ def _build_aibom_from_filesystem(
     treat the result uniformly.
     """
     now = datetime.now(timezone.utc).isoformat()
-    errors: list[dict[str, str]] = []
-
-    skills: list[dict[str, Any]] = []
-    if "skills" in cats:
-        skills = _enumerate_skills_filesystem(cfg, connector)
-
-    plugins: list[dict[str, Any]] = []
-    if "plugins" in cats:
-        plugins = _enumerate_plugins_filesystem(cfg, connector)
-
-    mcps: list[dict[str, Any]] = []
-    if "mcp" in cats:
-        mcps = _enumerate_mcp_filesystem(cfg, connector)
-
-    # Plan C7: dispatch into per-connector adapters for the four
-    # categories that the CLI shellout used to own. When an adapter
-    # returns an empty list we still emit the informational note so
-    # operators see *why* a category is empty (no agent dir, no env
-    # var set, etc.).
-    agents = _agents_for_connector(connector, cfg) if "agents" in cats else []
-    tools = _tools_for_connector(connector, cfg) if "tools" in cats else []
-    model_providers = (
-        _model_providers_for_connector(connector, cfg) if "models" in cats else []
-    )
-    memory = _memory_for_connector(connector, cfg) if "memory" in cats else []
-
-    # Populate "errors" with informational notes for categories that
-    # don't translate to non-OpenClaw connectors. This keeps the
-    # output schema stable while telling operators why those buckets
-    # are empty.
-    _fs_only_results = {
-        "agents": agents,
-        "tools": tools,
-        "models": model_providers,
-        "memory": memory,
+    collectors: dict[str, Callable[[], list[dict[str, Any]]]] = {
+        "skills": lambda: _enumerate_skills_filesystem(cfg, connector),
+        "plugins": lambda: _enumerate_plugins_filesystem(cfg, connector),
+        "mcp": lambda: _enumerate_mcp_filesystem(cfg, connector),
+        "agents": lambda: _agents_for_connector(connector, cfg),
+        "tools": lambda: _tools_for_connector(connector, cfg),
+        "models": lambda: _model_providers_for_connector(connector, cfg),
+        "memory": lambda: _memory_for_connector(connector, cfg),
     }
+    results: dict[str, _FilesystemCollectionResult] = {}
+    for category, collector in collectors.items():
+        if category in cats:
+            results[category] = _collect_filesystem_category(connector, category, collector)
+
+    errors = [result.error for result in results.values() if result.error is not None]
+
+    def _items(category: str) -> list[dict[str, Any]]:
+        result = results.get(category)
+        return result.items if result is not None else []
+
+    skills = _items("skills")
+    plugins = _items("plugins")
+    mcps = _items("mcp")
+    agents = _items("agents")
+    tools = _items("tools")
+    model_providers = _items("models")
+    memory = _items("memory")
+
+    # Empty adapters for these connector-owned surfaces are deterministic
+    # capability gaps, not failed commands. Keep them typed and separate so
+    # automation never has to infer semantics from human-readable text.
+    limitations: list[InventoryLimitation] = []
     for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
         if cat_key not in cats:
             continue
-        # Only attach the "informational" note when the adapter
-        # actually returned no rows; if the adapter found rows we
-        # don't want to confuse operators with "agents are not a
-        # first-class concept" alongside a populated agents list.
-        if _fs_only_results.get(cat_key):
+        result = results.get(cat_key)
+        if result is None or result.items or result.error is not None:
             continue
-        errors.append({
-            "command": f"{connector}:{cat_key}",
-            "error": note,
+        limitations.append({
+            "connector": connector,
+            "category": cat_key,
+            "status": InventoryCapabilityStatus.UNSUPPORTED,
+            "reason": note,
         })
 
     out: dict[str, Any] = {
@@ -2061,6 +2164,7 @@ def _build_aibom_from_filesystem(
         "model_providers": model_providers,
         "memory": memory,
         "errors": errors,
+        "limitations": limitations,
     }
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
@@ -2069,7 +2173,8 @@ def _build_aibom_from_filesystem(
 
 
 def _enumerate_skills_filesystem(
-    cfg: Config, connector: str | None = None,
+    cfg: Config,
+    connector: str | None = None,
 ) -> list[dict[str, Any]]:
     """Walk every directory in ``cfg.skill_dirs(connector)`` and emit one
     row per immediate subdirectory. Codex's reserved ``.system`` container is
@@ -2090,9 +2195,7 @@ def _enumerate_skills_filesystem(
     for skill_dir in cfg.skill_dirs(connector):
         if not os.path.isdir(skill_dir):
             continue
-        for discovered in discover_skill_directories(
-            skill_dir, connector=connector or cfg.active_connector()
-        ):
+        for discovered in discover_skill_directories(skill_dir, connector=connector or cfg.active_connector()):
             entry = discovered.name
             if _is_openhands_installed_container(skill_dir, entry):
                 continue
@@ -2192,36 +2295,52 @@ def _frontmatter_description(text: str) -> str:
 
 
 def _enumerate_plugins_filesystem(
-    cfg: Config, connector: str | None = None,
+    cfg: Config,
+    connector: str | None = None,
 ) -> list[dict[str, Any]]:
-    """One row per plugin directory under ``cfg.plugin_dirs(connector)``.
+    """One row per logical plugin under ``cfg.plugin_dirs(connector)``.
 
     A plugin is treated as a directory containing one of the
     documented manifest names (matches plugin_scanner._MANIFEST_CANDIDATES
     after S2.3): package.json, manifest.json, plugin.json,
     openclaw.plugin.json, .codex-plugin/plugin.json,
-    .claude-plugin/plugin.json. ``connector`` scopes the walk for
-    multi-connector focus (defaults to active).
+    .claude-plugin/plugin.json. Codex cache registry buckets are expanded to
+    their exact manifest roots and logical names are deduplicated using Codex's
+    active-plugin metadata. ``connector`` scopes the walk for multi-connector
+    focus (defaults to active).
     """
     rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
+    resolved_connector = connector or cfg.active_connector()
     for plugin_dir in cfg.plugin_dirs(connector):
-        for entry, full in plugin_directory_entries(plugin_dir):
-            if entry in seen:
-                continue
-            seen.add(entry)
-            manifest = _detect_plugin_manifest(full)
+        for discovered in discover_plugin_directories(plugin_dir, connector=resolved_connector):
+            entry = discovered.id
+            entry_key = filesystem_identity_key(entry, plugin_dir)
+            full = discovered.path
+            if entry_key in seen and os.path.realpath(seen[entry_key]) != os.path.realpath(full):
+                raise AmbiguousPluginIdentityError(
+                    f"ambiguous plugin identity {entry!r}: {seen[entry_key]}, {full}; "
+                    "remove or rename duplicate directories"
+                )
+            seen[entry_key] = full
+            manifest = discovered.manifest or _detect_plugin_manifest(full)
             row: dict[str, Any] = {
                 "id": entry,
-                "name": entry,
-                "version": "",
-                "origin": plugin_dir,
-                "enabled": True,
-                "status": "loaded" if manifest else "no-manifest",
+                "name": discovered.name or entry,
+                "version": discovered.version,
+                "origin": discovered.origin or plugin_dir,
+                "enabled": discovered.enabled,
+                "status": ("loaded" if manifest and discovered.enabled else "disabled" if manifest else "no-manifest"),
                 "path": full,
             }
             if manifest:
-                row["manifest"] = manifest
+                row["manifest"] = manifest.replace("\\", "/")
+            if discovered.description:
+                row["description"] = discovered.description
+            if discovered.registry:
+                row["registry"] = discovered.registry
+            if discovered.cached:
+                row["cached"] = True
             rows.append(row)
     return rows
 
@@ -2245,7 +2364,8 @@ def _detect_plugin_manifest(plugin_root: str) -> str:
 
 
 def _enumerate_mcp_filesystem(
-    cfg: Config, connector: str | None = None,
+    cfg: Config,
+    connector: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read MCP servers via the connector-aware
     :meth:`Config.mcp_servers` helper and convert

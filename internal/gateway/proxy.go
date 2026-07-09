@@ -566,7 +566,8 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// Layer 4 (governance): the TypeScript fetch-interceptor fetches
 	// the merged provider list (built-ins + ~/.defenseclaw/custom-providers.json)
 	// at bootstrap so operators can extend coverage without rebuilding
-	// the Go binary. Public — domain names are not secrets.
+	// the Go binary. Authenticated because provider metadata is operator
+	// configuration state; the interceptor supplies X-DC-Auth.
 	mux.HandleFunc("/v1/config/providers", p.handleListProviders)
 	// Operator trigger to reread the overlay at runtime after editing
 	// custom-providers.json. Requires X-DC-Auth (same as every other

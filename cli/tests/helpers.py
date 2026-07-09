@@ -18,9 +18,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -38,6 +40,29 @@ from defenseclaw.config import (
 from defenseclaw.context import AppContext
 from defenseclaw.db import Store
 from defenseclaw.logger import Logger
+
+
+def seed_cached_plugin(
+    cache: str | os.PathLike[str],
+    registry: str,
+    name: str,
+    version: str,
+) -> str:
+    """Create one cached Codex plugin manifest and return its version root."""
+    root = Path(cache) / registry / name / version
+    manifest = root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "name": name,
+                "version": version,
+                "description": f"{name} plugin",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(root)
 
 
 def make_temp_store() -> tuple[Store, str]:
@@ -105,6 +130,7 @@ def invoke_with_app(cli_group, args: list[str], app: AppContext | None = None):
 def cleanup_app(app: AppContext, db_path: str, tmp_dir: str) -> None:
     """Close store and clean up temp files."""
     import shutil
+
     if app.store:
         app.store.close()
     try:

@@ -154,7 +154,7 @@ External skill / MCP catalog ingestion. See
 | `registry entries <id> [--approved\|--rejected]` | Show cached entries (after sync); operator-override filters |
 | `registry approve <id> <name> --type {skill\|mcp}` | Manually approve an entry |
 | `registry reject <id> <name> --type {skill\|mcp}` | Manually reject an entry (sets status to `blocked`) |
-| `registry require --type <t> --enabled/--disabled` | Toggle `asset_policy.<t>.registry_required` |
+| `registry require --type <t> --enabled/--disabled [--connector <name>]` | Scope to one connector, or update the global default and reconcile all active connectors |
 | `registry wizard` | Interactive add+sync convenience flow |
 | `setup registry` | Wrapper for `registry wizard` so it shows up in `setup --help` |
 

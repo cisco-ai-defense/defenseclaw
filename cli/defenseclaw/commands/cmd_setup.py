@@ -36,6 +36,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import click
+from click.core import ParameterSource
 
 # Tasteful TTY-aware color helpers. Imported as a module rather than
 # pulled name-by-name so the wizard call sites read like
@@ -77,9 +78,14 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import atomic_write_private_bytes, set_file_mode
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
+from defenseclaw.platform_support import (
+    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    local_shell_stacks_supported,
+)
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
@@ -99,6 +105,8 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 # ``setup guardrail --restart``); the auto-restart result callback
 # below honors this flag and becomes a no-op to avoid a double bounce.
 _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
+_NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
+_NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 
 
@@ -1706,32 +1714,9 @@ def _restore_regular_file_snapshot(
     except FileNotFoundError:
         pass
     restored_mode = mode if mode is not None else 0o600
-    directory = os.path.dirname(path) or "."
-    temp_path = os.path.join(directory, f".{os.path.basename(path)}.restore-{uuid.uuid4().hex}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor_chmod = getattr(os, "fchmod", None)
-    try:
-        fd = os.open(temp_path, flags, restored_mode)
-        with os.fdopen(fd, "wb") as handle:
-            _ensure_regular_file(os.fstat(handle.fileno()).st_mode, temp_path)
-            if descriptor_chmod is not None:
-                descriptor_chmod(handle.fileno(), restored_mode)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if descriptor_chmod is None:
-            os.chmod(temp_path, restored_mode)
-        reject_symlink(path, what=what)
-        try:
-            _ensure_regular_file(os.lstat(path).st_mode, path)
-        except FileNotFoundError:
-            pass
-        os.replace(temp_path, path)
-    finally:
-        try:
-            os.unlink(temp_path)
-        except FileNotFoundError:
-            pass
+    atomic_write_private_bytes(path, payload)
+    if os.name != "nt":
+        os.chmod(path, restored_mode)
 
 
 def _ensure_regular_file(mode: int, path: str) -> None:
@@ -1762,7 +1747,7 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     fd = -1
     try:
         fd = os.open(path, flags, 0o600)
-        set_file_mode(fd, path, 0o600)
+        set_file_mode(fd, path, 0o600, set_owner=True)
         stream = os.fdopen(fd, "w")
         fd = -1  # ownership transferred; stream closes on every with-path
         with stream as f:
@@ -2292,9 +2277,6 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     Python-side rotation produces the same byte-shape on disk as the
     Go-side first-boot synthesis.
     """
-    parent = os.path.dirname(dotenv_path) or "."
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-
     lines: list[str] = []
     if os.path.exists(dotenv_path):
         with open(dotenv_path, encoding="utf-8") as fh:
@@ -2308,24 +2290,17 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     lines.append(f"DEFENSECLAW_GATEWAY_TOKEN={new_token}")
     body = "\n".join(lines) + "\n"
 
-    tmp = dotenv_path + ".tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        os.write(fd, body.encode("utf-8"))
-    finally:
-        os.close(fd)
-    # Belt-and-suspenders: chmod in case the umask widened the perms.
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, dotenv_path)
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    atomic_write_private_bytes(dotenv_path, body.encode("utf-8"))
 
 
 @setup.command("rotate-token")
 @click.option(
     "--connector",
     default=None,
-    help="Override the connector used for the restart hint (the token is shared, "
-    "so ALL active connectors are refreshed regardless).",
+    help="Prefer an active connector for restart messaging (inactive hints are ignored; "
+    "the token is shared, so ALL active connectors are refreshed regardless).",
 )
 @click.option(
     "--no-restart",
@@ -2358,10 +2333,29 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     dotenv_path = _rotate_token_dotenv_path(app)
 
-    actives = list(app.cfg.active_connectors()) if hasattr(app.cfg, "active_connectors") else []
-    if not actives:
+    has_authoritative_roster = hasattr(app.cfg, "active_connectors")
+    if has_authoritative_roster:
+        actives = _normalized_connector_roster(app.cfg.active_connectors())
+    else:
+        # Compatibility for older/custom Config-like objects that predate the
+        # multi-connector roster. Do not use this fallback when
+        # active_connectors() exists and deliberately reports an empty roster:
+        # that is the authoritative "no connector configured" state.
         single = connector or (app.cfg.guardrail.connector or "").strip()
-        actives = [single] if single else []
+        actives = _normalized_connector_roster([single] if single else [])
+
+    requested = normalize_connector(connector)
+    if requested and requested not in actives:
+        scope = ", ".join(actives) if actives else "none"
+        ux.warn(
+            f"Ignoring inactive connector restart hint {requested!r}; "
+            f"active connector roster: {scope}."
+        )
+
+    primary = normalize_connector(app.cfg.active_connector())
+    restart_connector = requested if requested in actives else primary
+    if restart_connector not in actives:
+        restart_connector = actives[0] if actives else ""
 
     if not yes:
         scope = ", ".join(actives) if actives else "no active connector"
@@ -2395,7 +2389,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         app.cfg.data_dir,
         app.cfg.gateway.host,
         app.cfg.gateway.port,
-        connector=connector or app.cfg.active_connector(),
+        connector=restart_connector,
         connectors=actives,
     )
     ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
@@ -3571,6 +3565,100 @@ def _resolve_judge_hook_gate(
 # ---------------------------------------------------------------------------
 
 
+def _guardrail_setup_active_members(app: AppContext) -> list[str]:
+    try:
+        return list(app.cfg.active_connectors())
+    except Exception:  # noqa: BLE001 - older/test configs may not expose the resolver.
+        return _configured_connector_set(app.cfg.guardrail)
+
+
+def _ensure_guardrail_setup_member(app: AppContext, requested: str) -> None:
+    """Reject a non-member target when a multi-connector roster is active.
+
+    Fresh and legacy single-connector setup still accepts a connector choice.
+    Once two or more peers are configured, their authoritative active roster
+    must not be rewritten by ``setup guardrail --connector``.
+    """
+
+    active = _guardrail_setup_active_members(app)
+    if len(active) <= 1:
+        return
+    wanted = normalize_connector(requested)
+    members = {normalize_connector(name) for name in active}
+    if wanted not in members:
+        raise click.UsageError(
+            f"--connector {requested!r} is not an active connector. Choose one of: {', '.join(active)}."
+        )
+
+
+_GUARDRAIL_SETUP_GLOBAL_PARAMS = frozenset(
+    {
+        "guard_port",
+        "scanner_mode",
+        "cisco_endpoint",
+        "cisco_api_key_env",
+        "cisco_timeout_ms",
+        "detection_strategy",
+        "detection_strategy_prompt",
+        "detection_strategy_completion",
+        "detection_strategy_tool_call",
+        "judge_model",
+        "judge_api_base",
+        "judge_api_key_env",
+        "judge_provider",
+        "judge_region",
+        "judge_instance_name",
+        "judge_hook_connectors",
+        "llm_role",
+        "judge_inherit_from",
+        "judge_inherit_llm",
+        "judge_auth_mode",
+        "judge_bedrock_region",
+        "judge_bedrock_auth_mode",
+        "judge_bedrock_access_key_env",
+        "judge_bedrock_secret_key_env",
+        "judge_bedrock_session_token_env",
+        "judge_bedrock_profile_name",
+        "judge_bedrock_inference_profile",
+        "judge_bedrock_deployment_aliases",
+        "judge_vertex_project_id",
+        "judge_vertex_region",
+        "judge_vertex_auth_mode",
+        "judge_vertex_service_account_json_env",
+        "judge_azure_endpoint",
+        "judge_azure_api_version",
+        "judge_azure_auth_mode",
+        "judge_azure_deployment_aliases",
+        "judge_tls_ca_cert_file",
+        "judge_insecure_skip_verify",
+        "disable_redaction",
+    }
+)
+
+
+def _reject_mixed_guardrail_setup_options(app: AppContext) -> None:
+    """Reject process-global flags on a selected peer in a populated fleet."""
+
+    if len(_guardrail_setup_active_members(app)) <= 1:
+        return
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return
+    supplied: list[str] = []
+    for param in ctx.command.params:
+        if param.name not in _GUARDRAIL_SETUP_GLOBAL_PARAMS:
+            continue
+        if ctx.get_parameter_source(param.name) is not ParameterSource.COMMANDLINE:
+            continue
+        supplied.append(param.opts[0] if isinstance(param, click.Option) and param.opts else param.name)
+    if supplied:
+        raise click.UsageError(
+            "--connector scopes only mode, rule pack, block message, and HILT on a "
+            "multi-connector install; process-global option(s) cannot be mixed into "
+            f"that submission: {', '.join(supplied)}. Omit --connector to affect all active connectors."
+        )
+
+
 @setup.command("guardrail")
 @click.option(
     "--disable",
@@ -3916,17 +4004,57 @@ def setup_guardrail(
     gc = app.cfg.guardrail
     explicit_connector = normalize_connector(agent_name) if agent_name else None
 
-    if disable:
-        # Always restart on disable — leaving the proxy running defeats the
-        # purpose of disabling. The fetch interceptor also needs OpenClaw
-        # to restart (which happens automatically when openclaw.json changes).
-        _disable_guardrail(app, gc, restart=True)
-        return
-
-    # Validate explicit operator input before mutating the in-memory config.
-    # Stored/picked fallback values are checked after resolution below.
+    # Validate before disable handling or any in-memory/file/restart/output
+    # mutation. A populated fleet is authoritative; setup must never repoint
+    # its primary mirrors or apply global policy through an inactive target.
     if explicit_connector:
         _ensure_connector_available(explicit_connector)
+        _ensure_guardrail_setup_member(app, explicit_connector)
+        _reject_mixed_guardrail_setup_options(app)
+        if not disable and not non_interactive and len(_guardrail_setup_active_members(app)) > 1:
+            raise click.UsageError(
+                "interactive setup with --connector would mix connector policy and "
+                "process-global prompts on a multi-connector install. Use scoped "
+                "non-interactive mode/rule-pack/block-message/HILT flags, use the "
+                "guardrail action commands, or omit --connector for explicit global setup."
+            )
+
+    if disable:
+        if explicit_connector:
+            # Reuse the canonical scoped Guardrail backend: this writes only
+            # connectors[X].enabled and tears down only that active peer.
+            from defenseclaw.commands.cmd_guardrail import _toggle_connector_guardrail
+
+            _toggle_connector_guardrail(
+                app,
+                explicit_connector,
+                enable=False,
+                restart=restart,
+                yes=True,
+            )
+            if not restart:
+                ctx = click.get_current_context(silent=True)
+                if ctx is not None:
+                    ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        else:
+            # Route the legacy setup alias through the canonical global action
+            # so its messaging and restart fan-out name every active connector.
+            if gc.enabled:
+                from defenseclaw.commands.cmd_guardrail import disable_cmd
+
+                ctx = click.get_current_context()
+                ctx.invoke(
+                    disable_cmd,
+                    restart=restart,
+                    yes=True,
+                    connector_flag=None,
+                )
+                ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+            else:
+                # Preserve the setup alias's historical idempotent teardown
+                # behavior when the persisted master switch is already off.
+                _disable_guardrail(app, gc, restart=restart)
+        return
 
     aid = app.cfg.cisco_ai_defense
 
@@ -4390,7 +4518,11 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
     """
     if not data_dir:
         return
-    if connector not in _CONNECTOR_NAMES:
+    # Validate against the stable recognized connector catalog rather than the
+    # import-time host-filtered menu. Availability is enforced by the setup
+    # command before this helper runs, while the hint format must remain valid
+    # under platform-injected tests and cross-host config migration.
+    if connector not in _CONNECTOR_NAMES_FALLBACK:
         return
     try:
         os.makedirs(data_dir, exist_ok=True)
@@ -4937,7 +5069,41 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo()
 
 
-def _print_observability_summary(connector: str, cfg=None, *, mode: str = "observe") -> None:
+def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -> None:
+    """Print platform-appropriate commands for inspecting connector activity."""
+    if os_name is None:
+        os_name = os.name
+
+    click.echo("  Next steps:")
+    click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
+    click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
+    if os_name == "nt":
+        click.echo("    • Watch decisions live: defenseclaw tui")
+        click.echo(
+            "      Or in PowerShell: Get-Content -LiteralPath "
+            "(Join-Path $HOME '.defenseclaw\\gateway.jsonl') -Wait | "
+            "ForEach-Object { $_ | ConvertFrom-Json }"
+        )
+        click.echo(
+            f"    • Recent alerts for this connector: "
+            f"defenseclaw alerts --limit 25 --connector {connector}"
+        )
+        return
+
+    click.echo("    • Watch decisions live: defenseclaw tui  (or: tail -f ~/.defenseclaw/gateway.jsonl | jq)")
+    click.echo(
+        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
+        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
+    )
+
+
+def _print_observability_summary(
+    connector: str,
+    cfg=None,
+    *,
+    mode: str = "observe",
+    os_name: str | None = None,
+) -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
     if connector == "omnigent":
@@ -4990,14 +5156,7 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     click.echo()
     print_redaction_status_hint(cfg)
     click.echo()
-    click.echo("  Next steps:")
-    click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
-    click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
-    click.echo("    • Watch decisions live: defenseclaw tui  (or: tail -f ~/.defenseclaw/gateway.jsonl | jq)")
-    click.echo(
-        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
-        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
-    )
+    _print_connector_next_steps(connector, os_name=os_name)
     if multi:
         click.echo(f"    • Change this connector's mode: defenseclaw setup {connector} --mode observe|action")
     click.echo()
@@ -6307,9 +6466,10 @@ def _remove_connector(
       * Removing one of several connectors drops it from
         ``guardrail.connectors`` and repoints the singular
         ``guardrail.connector`` / ``claw.mode`` mirror at the new primary
-        (sorted-first remaining). When exactly one connector remains the
-        map is collapsed back to the legacy singular shape so a
-        single-connector install looks byte-identical to a pre-multi one.
+        (sorted-first remaining). A one-entry map is retained so the
+        survivor's explicit per-connector policy remains authoritative;
+        collapsing to the legacy singular shape would discard values that
+        cannot be represented losslessly, including ``enabled: false``.
       * Removing the LAST connector is gated (WU8 D2=A): refused unless
         ``--force``, which fully unconfigures enforcement (clears the map
         and the singular mirror). ``defenseclaw uninstall`` remains the
@@ -6336,6 +6496,9 @@ def _remove_connector(
     # `claude-code`, or `open-hands` interchangeably.
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
+        if requested_norm in _CONNECTOR_META:
+            click.echo(f"  ✓ Connector {requested_norm!r} is already absent; no changes made.")
+            return True
         configured_label = ", ".join(configured) if configured else "(none configured)"
         click.echo(
             f"  ✗ {requested!r} is not a configured connector. Configured: {configured_label}",
@@ -6383,14 +6546,11 @@ def _remove_connector(
         gc.connectors = {}
         gc.connector = ""
         cfg.claw.mode = ""
-    elif len(remaining) == 1:
-        # Collapse to the legacy singular shape for parity with a
-        # pre-multi single-connector install.
-        gc.connectors = {}
-        gc.connector = remaining[0]
-        cfg.claw.mode = remaining[0]
     else:
-        # Still multi: keep the map, repoint the primary mirror.
+        # Keep the authoritative map even when only one connector remains.
+        # Its override may contain policy that the singular compatibility
+        # fields cannot represent (especially an explicit enabled=false).
+        # The mirrors identify the primary but never replace the roster.
         primary = sorted(remaining)[0]
         gc.connector = primary
         cfg.claw.mode = primary
@@ -7201,12 +7361,20 @@ def setup_notifications(
     cfg = app.cfg
     nc = cfg.notifications
     current = bool(nc.enabled)
+    capability = desktop_notification_capability()
 
     normalized = action.strip().lower() if action else None
 
     if normalized == "status":
         ux.section("Notifications state")
-        click.echo(f"    {ux.dim('config (notifications.enabled):')} {'ON' if current else 'OFF'}")
+        click.echo(f"    {ux.dim('configured (notifications.enabled):')} {'ON' if current else 'OFF'}")
+        effective = capability.effective_enabled(current)
+        click.echo(f"    {ux.dim('native desktop delivery:')} {'ACTIVE' if effective else 'INACTIVE'}")
+        if not capability.supported:
+            click.echo(f"    {ux.dim('capability:')} UNSUPPORTED — {capability.unsupported_reason}")
+            if current:
+                click.echo("    Legacy configured ON is retained, but Windows toast delivery is not active.")
+            click.echo("    Delivery failures use a labelled terminal fallback; they are never desktop success.")
         click.echo(f"    {ux.dim('block_enforced:')} {'on' if nc.block_enforced else 'off'}")
         click.echo(f"    {ux.dim('block_would_block:')} {'on' if nc.block_would_block else 'off'}")
         click.echo(f"    {ux.dim('hitl_approval:')} {'on' if nc.hitl_approval else 'off'}")
@@ -7216,6 +7384,9 @@ def setup_notifications(
         click.echo(f"    {ux.dim('dedup_window:')} {nc.dedup_window or '30s'}")
         click.echo(f"    {ux.dim('max_per_minute:')} {nc.max_per_minute}")
         return
+
+    if not capability.supported and normalized != "off":
+        raise click.ClickException(capability.unsupported_reason)
 
     if normalized in ("on", "off"):
         desired = normalized == "on"
@@ -7240,6 +7411,7 @@ def setup_notifications(
     try:
         cfg.save()
     except OSError as exc:
+        nc.enabled = current
         ux.err(f"Failed to save config: {exc}")
         raise click.ClickException("config save failed") from exc
 
@@ -8041,20 +8213,25 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
         click.echo(f"  ✗ Failed to save config: {exc}")
         click.echo("    Guardrail may re-enable on next run")
 
-    # Restart the gateway so it runs conn.Teardown() — the sidecar checks
-    # guardrail.enabled on boot and calls Teardown instead of Setup when
-    # disabled. This restores agent configs (hooks, api_base, plugins,
-    # shims) to their pre-DefenseClaw state.
-    click.echo()
-    click.echo("  Restarting gateway to run connector teardown...")
-    _restart_services(
-        app.cfg.data_dir,
-        app.cfg.gateway.host,
-        app.cfg.gateway.port,
-        connector=connector_name,
-    )
-    click.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
-    click.echo()
+    if restart:
+        # Restart the gateway so it runs conn.Teardown() — the sidecar checks
+        # guardrail.enabled on boot and calls Teardown instead of Setup when
+        # disabled. This restores agent configs (hooks, api_base, plugins,
+        # shims) to their pre-DefenseClaw state.
+        click.echo()
+        click.echo("  Restarting gateway to run connector teardown...")
+        _restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=connector_name,
+        )
+        click.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
+        click.echo()
+    else:
+        click.echo()
+        click.echo("  --no-restart: connector teardown is deferred until the next gateway restart.")
+        click.echo()
 
     if app.logger:
         app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")
@@ -8183,6 +8360,40 @@ def _uninstall_plugin_from_sandbox(sandbox_home: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
+_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
+_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
+
+
+def _normalized_connector_roster(connectors: list[str]) -> list[str]:
+    """Return connector names normalized and de-duplicated in input order."""
+    roster: list[str] = []
+    seen: set[str] = set()
+    for raw in connectors:
+        name = normalize_connector(raw)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        roster.append(name)
+    return roster
+
+
+def _restart_targets(
+    connector: str | None,
+    connectors: list[str] | None,
+) -> list[str]:
+    """Resolve the authoritative restart target roster.
+
+    When ``connectors`` is supplied it is authoritative, including when it is
+    empty. A singular hint that is not present in that roster is ignored so it
+    cannot select an unrelated service operation (most importantly an
+    OpenClaw gateway restart on a hook-only install).
+    """
+    return _normalized_connector_roster(
+        [connector or ""] if connectors is None else connectors
+    )
+
+
 def _is_pid_alive(pid_file: str) -> bool:
     """Check whether the process recorded in ``pid_file`` is alive.
 
@@ -8212,11 +8423,10 @@ def _restart_services(
     always need to bounce.
 
     ``connector`` selects the single connector whose post-restart hint is
-    shown (and, for OpenClaw, whether its own gateway is bounced). For a
-    GLOBAL change on a multi-connector install (e.g. ``guardrail hilt`` with no
-    ``--connector``), pass the full active set as ``connectors`` so the
-    hook-bus hint names every affected connector instead of just the primary —
-    the gateway restart itself is always global regardless.
+    shown when no roster is available. When ``connectors`` is supplied, that
+    full active roster is authoritative for both output and connector-owned
+    service operations. An inactive singular hint is safely ignored. The
+    gateway restart itself is always global regardless.
 
     Avarice F-0142/F-0143: a failed gateway restart is fatal. We collect
     every restart failure and raise a ``ClickException`` at the end so the
@@ -8226,12 +8436,20 @@ def _restart_services(
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
+    restart_targets = _restart_targets(connector, connectors)
+
+    if connectors is not None and len(restart_targets) > 1:
+        ux.subhead(
+            f"{len(restart_targets)} active connectors "
+            f"({', '.join(restart_targets)}): applying the shared gateway restart "
+            "to the complete roster."
+        )
 
     hook_targets = sorted(
         {
-            normalize_connector(name)
-            for name in ((connectors or []) if connectors else [connector])
-            if name and normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
+            name
+            for name in restart_targets
+            if name in _HOOK_ENFORCED_CONNECTORS
         }
     )
     connector_state_before = (
@@ -8250,37 +8468,47 @@ def _restart_services(
             click.echo(" ✗")
             failed.append("connector runtime readiness")
 
-    # Multi-connector global change: every active hook connector is affected
-    # by the gateway bounce, so enumerate them rather than naming the primary.
-    hook_multi = [c for c in (connectors or []) if c in _HOOK_ENFORCED_CONNECTORS]
-    if connector != "openclaw" and len(hook_multi) > 1:
-        names = ", ".join(sorted(hook_multi))
-        ux.subhead(
-            f"{len(hook_multi)} hook connectors ({names}): enforcement via native "
-            f"lifecycle surfaces on the sidecar API port. No proxy listener — each talks directly "
-            f"to its native upstream."
-        )
-        click.echo()
-        _fail_if_restart_failed(failed)
-        return
-
-    if connector == "openclaw":
+    # OpenClaw owns a separate gateway process. Its presence in the active
+    # roster — never an unrelated singular hint — controls that operation.
+    if "openclaw" in restart_targets:
         if not _restart_openclaw_gateway():
             failed.append("openclaw-gateway")
         _check_openclaw_gateway(oc_host, oc_port)
-    elif connector in _PROXY_BACKED_CONNECTORS:
+
+    # Multi-connector global change: every active hook connector is affected
+    # by the gateway bounce, so enumerate them rather than naming the primary.
+    if len(hook_targets) > 1:
+        names = ", ".join(hook_targets)
+        ux.subhead(
+            f"{len(hook_targets)} hook connectors ({names}): enforcement via native "
+            f"lifecycle surfaces on the sidecar API port. No proxy listener — each talks directly "
+            f"to its native upstream."
+        )
+    elif len(hook_targets) == 1:
+        hook_connector = hook_targets[0]
+        surface = "custom policy API" if hook_connector == "omnigent" else "hook bus"
+        ux.subhead(
+            f"{hook_connector} connector: enforcement via {surface} on the sidecar API port. "
+            f"No proxy listener — {hook_connector} talks directly to its native upstream."
+        )
+
+    proxy_targets = [
+        name
+        for name in restart_targets
+        if name in _PROXY_BACKED_CONNECTORS and name != "openclaw"
+    ]
+    if len(proxy_targets) > 1:
+        ux.subhead(
+            f"{len(proxy_targets)} proxy connectors ({', '.join(proxy_targets)}): "
+            "traffic will route through defenseclaw-gateway proxy."
+        )
+    elif len(proxy_targets) == 1:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
         # message without the separate openclaw-gateway restart step.
-        ux.subhead(f"{connector} connector: traffic will route through defenseclaw-gateway proxy.")
-    elif connector in _HOOK_ENFORCED_CONNECTORS:
-        # No proxy listener binds for hook-only connectors — the agent
-        # talks directly to its native upstream and DefenseClaw
-        # observes/enforces via the hook bus on the sidecar API port.
-        surface = "custom policy API" if connector == "omnigent" else "hook bus"
         ux.subhead(
-            f"{connector} connector: enforcement via {surface} on the sidecar API port. "
-            f"No proxy listener — {connector} talks directly to its native upstream."
+            f"{proxy_targets[0]} connector: traffic will route through "
+            "defenseclaw-gateway proxy."
         )
 
     click.echo()
@@ -8456,7 +8684,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
 
     cmd = ["defenseclaw-gateway", "restart"] if was_running else ["defenseclaw-gateway", "start"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+        )
         if result.returncode == 0:
             click.echo(" ✓")
             return True
@@ -8471,8 +8704,145 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         click.echo("    Build with: make gateway")
         return False
     except subprocess.TimeoutExpired:
-        click.echo(" ✗ (timed out)")
+        # A freshly installed Windows executable can spend appreciable time in
+        # OS trust/AV inspection before the Go launcher creates its detached
+        # daemon.  The launcher may therefore cross this outer Python timeout
+        # even though the managed gateway reaches READY immediately afterward.
+        # Reconcile once through the real authenticated/ownership-aware status
+        # command instead of reporting a false failure.  If an initial start
+        # is still unhealthy, issue a bounded managed stop so a late detached
+        # child cannot outlive the failed setup command.  On restart, preserve
+        # the pre-existing generation rather than stopping an otherwise healthy
+        # service whose replacement outcome is uncertain.
+        status = _gateway_lifecycle_status()
+        if status:
+            click.echo(" ✓ (ready after launcher timeout)")
+            return True
+        if not was_running:
+            _cleanup_timed_out_gateway_start()
+        click.echo(" ✗ (timed out; final status is not healthy)")
         return False
+
+
+def _restart_defense_gateway_native(data_dir: str, *, start_if_stopped: bool = True) -> bool:
+    """Reload the gateway with the bounded native process-tree runner.
+
+    Local Splunk's Windows transaction cannot use the legacy ``subprocess.run``
+    lifecycle boundary: a timed-out launcher must be contained and reaped as a
+    tree before rollback proceeds. The gateway daemon deliberately requests
+    Windows Job breakaway only after it has established its PID-owned managed
+    lifecycle, so successful starts survive closing the command Job Object.
+    """
+
+    from defenseclaw.observability.local_stack import CommandRunner, LocalStackError
+
+    try:
+        ctx = click.get_current_context(silent=True)
+    except RuntimeError:
+        ctx = None
+    if ctx is not None:
+        ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+
+    executable = shutil.which("defenseclaw-gateway")
+    if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+        click.echo("  defenseclaw-gateway: native executable not found.")
+        return False
+
+    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_alive = _is_pid_alive(pid_file)
+    if pid_alive and not _gateway_pid_file_identifies_gateway(pid_file):
+        click.echo("  defenseclaw-gateway: live gateway.pid did not verify as DefenseClaw gateway.")
+        return False
+    was_running = pid_alive
+    if not was_running and not start_if_stopped:
+        return True
+
+    action = "restart" if was_running else "start"
+    runner = CommandRunner()
+    click.echo(f"  defenseclaw-gateway: {'restarting' if was_running else 'starting'}...", nl=False)
+    try:
+        result = runner.run(
+            [str(Path(executable).resolve()), action],
+            timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+        )
+    except LocalStackError:
+        if _native_gateway_lifecycle_status(runner, executable):
+            click.echo(" ✓ (ready after launcher timeout)")
+            return True
+        if not was_running:
+            _native_gateway_lifecycle_stop(runner, executable)
+        click.echo(" ✗ (timed out; final status is not healthy)")
+        return False
+    if result.returncode == 0:
+        click.echo(" ✓")
+        return True
+    click.echo(" ✗")
+    return False
+
+
+def _native_gateway_lifecycle_status(runner, executable: str) -> bool:
+    from defenseclaw.observability.local_stack import LocalStackError
+
+    try:
+        result = runner.run(
+            [str(Path(executable).resolve()), "status"],
+            timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
+        )
+    except LocalStackError:
+        return False
+    return result.returncode == 0
+
+
+def _native_gateway_lifecycle_stop(runner, executable: str) -> bool:
+    from defenseclaw.observability.local_stack import LocalStackError
+
+    try:
+        result = runner.run(
+            [str(Path(executable).resolve()), "stop"],
+            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+    except LocalStackError:
+        return False
+    return result.returncode == 0
+
+
+def _stop_defense_gateway_native(data_dir: str) -> bool:
+    from defenseclaw.observability.local_stack import CommandRunner
+
+    executable = shutil.which("defenseclaw-gateway")
+    if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+        return False
+    if not _native_gateway_lifecycle_stop(CommandRunner(), executable):
+        return False
+    return not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+
+
+def _gateway_lifecycle_status() -> bool:
+    try:
+        result = subprocess.run(
+            ["defenseclaw-gateway", "status"],
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _cleanup_timed_out_gateway_start() -> None:
+    try:
+        subprocess.run(
+            ["defenseclaw-gateway", "stop"],
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # The setup command already reports failure.  Cleanup is best effort;
+        # the Go daemon's PID/identity checks prevent this from targeting an
+        # unrelated process.
+        return
 
 
 @setup.result_callback()
@@ -8686,6 +9056,12 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 _SPLUNK_BRIDGE_ENV_REL = os.path.join("splunk-bridge", "env", ".env")
 
 
+def _native_windows_local_splunk() -> bool:
+    """Select the native controller only on Windows; POSIX keeps its bridge."""
+
+    return platform_support.host_os() == "windows"
+
+
 @click.group("splunk", invoke_without_command=True)
 @click.pass_context
 @click.option(
@@ -8743,7 +9119,11 @@ _SPLUNK_BRIDGE_ENV_REL = os.path.join("splunk-bridge", "env", ".env")
     "--accept-splunk-license", is_flag=True, help="Acknowledge the Splunk General Terms for local Splunk enablement"
 )
 @click.option("--skip-test", is_flag=True, help="Skip the live HEC probe after remote Splunk Enterprise setup")
-@click.option("--show-credentials", is_flag=True, help="Show Splunk Web login credentials")
+@click.option(
+    "--show-credentials",
+    is_flag=True,
+    help="Show the generated HEC token and runtime-only Splunk bootstrap secret",
+)
 @click.option(
     "--refresh-bundle/--no-refresh-bundle",
     "refresh_bundle",
@@ -8807,6 +9187,13 @@ def setup_splunk(
     if ctx.invoked_subcommand is not None:
         return
 
+    # Gate every explicit local route before AppContext access, executable
+    # lookup, prompts, token generation, bundle refresh, or config writes.
+    # Remote O11y/HEC routes deliberately remain available on Windows.
+    local_route_requested = enable_logs or s3_export
+    if local_route_requested and not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
+
     app = ctx.find_object(AppContext)
     if app is None:
         raise click.ClickException("App context unavailable")
@@ -8847,7 +9234,10 @@ def setup_splunk(
     did_logs = False
     did_enterprise = False
 
-    if enable_o11y:
+    def configure_o11y() -> None:
+        nonlocal did_o11y
+        if not enable_o11y:
+            return
         _setup_o11y(
             app,
             realm or "us1",
@@ -8860,7 +9250,10 @@ def setup_splunk(
         )
         did_o11y = True
 
-    if enable_logs:
+    def configure_logs() -> None:
+        nonlocal did_logs
+        if not enable_logs:
+            return
         did_logs = _setup_logs(
             app,
             non_interactive=non_interactive,
@@ -8875,7 +9268,10 @@ def setup_splunk(
             refresh_bundle=refresh_bundle,
         )
 
-    if enable_enterprise:
+    def configure_enterprise() -> None:
+        nonlocal did_enterprise
+        if not enable_enterprise:
+            return
         _setup_enterprise(
             app,
             hec_endpoint=hec_endpoint,
@@ -8887,6 +9283,114 @@ def setup_splunk(
             skip_test=skip_test,
         )
         did_enterprise = True
+
+    native_combined = _native_windows_local_splunk() and enable_logs and (enable_o11y or enable_enterprise)
+    if native_combined:
+        # Resolve every interactive/flag prerequisite and prove the entire
+        # native Local Splunk environment before the first remote-pipeline
+        # config write. Local Splunk runs last so its gateway reload activates
+        # the complete combined generation exactly once.
+        if enable_o11y:
+            resolved_access_token = access_token or os.environ.get("SPLUNK_ACCESS_TOKEN", "")
+            if not resolved_access_token and non_interactive:
+                click.echo("  error: --access-token required (or set SPLUNK_ACCESS_TOKEN env var)", err=True)
+                raise SystemExit(1)
+            if not resolved_access_token:
+                resolved_access_token = _prompt_splunk_token(None)
+            if not resolved_access_token:
+                click.echo("  error: access token is required for Splunk O11y", err=True)
+                raise SystemExit(1)
+            access_token = resolved_access_token
+        if enable_enterprise:
+            resolved_hec_endpoint = (hec_endpoint or "").strip()
+            if not resolved_hec_endpoint and non_interactive:
+                click.echo(
+                    "  error: --hec-endpoint is required with --enterprise --non-interactive",
+                    err=True,
+                )
+                raise SystemExit(1)
+            if not resolved_hec_endpoint:
+                resolved_hec_endpoint = click.prompt(
+                    "  HEC endpoint",
+                    default="https://splunk.example.com:8088/services/collector/event",
+                )
+            resolved_hec_token = hec_token or os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+            if not resolved_hec_token and non_interactive:
+                click.echo(
+                    "  error: --hec-token required (or set DEFENSECLAW_SPLUNK_HEC_TOKEN env var)",
+                    err=True,
+                )
+                raise SystemExit(1)
+            if not resolved_hec_token:
+                resolved_hec_token = _prompt_splunk_hec_token(None)
+            if not resolved_hec_token:
+                click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
+                raise SystemExit(1)
+            hec_endpoint = resolved_hec_endpoint
+            hec_token = resolved_hec_token
+        if not _ensure_splunk_license_acceptance(
+            accept_splunk_license=accept_splunk_license,
+            non_interactive=non_interactive,
+        ):
+            return
+        accept_splunk_license = True
+        if s3_export and not (s3_bucket or os.environ.get("S3_BUCKET")):
+            click.echo("  error: --s3-bucket is required with --s3-export (or set S3_BUCKET)", err=True)
+            raise SystemExit(1)
+        from defenseclaw.observability.local_splunk import preflight_native_local_splunk_setup
+        from defenseclaw.observability.local_stack import LocalStackError
+
+        try:
+            preflight_native_local_splunk_setup(
+                app.cfg.data_dir,
+                license_accepted=True,
+                require_s3=s3_export,
+            )
+        except LocalStackError as exc:
+            raise click.ClickException(f"Local Splunk preflight failed: {exc}") from exc
+
+        config_path = str(config_path_for_data_dir(app.cfg.data_dir))
+        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+        config_snapshot = _snapshot_regular_file(config_path, what="DefenseClaw config")
+        dotenv_snapshot = _snapshot_dotenv(dotenv_path)
+        setattr(app, _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR, config_snapshot)
+        setattr(app, _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR, dotenv_snapshot)
+        try:
+            configure_o11y()
+            configure_enterprise()
+            configure_logs()
+        except BaseException as exc:
+            rollback_errors: list[str] = []
+            try:
+                _restore_regular_file_snapshot(
+                    config_path,
+                    config_snapshot[0],
+                    config_snapshot[1],
+                    what="DefenseClaw config",
+                )
+            except Exception as restore_exc:
+                rollback_errors.append(f"config restore: {restore_exc}")
+            try:
+                _restore_dotenv_snapshot(dotenv_path, dotenv_snapshot[0], dotenv_snapshot[1])
+            except Exception as restore_exc:
+                rollback_errors.append(f"credential restore: {restore_exc}")
+            try:
+                _reload_cfg_from_data_dir(app)
+            except Exception as reload_exc:
+                rollback_errors.append(f"config reload after restore: {reload_exc}")
+            if rollback_errors:
+                raise click.ClickException(
+                    "Combined Splunk setup failed and rollback was incomplete: " + "; ".join(rollback_errors)
+                ) from exc
+            raise
+        finally:
+            delattr(app, _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR)
+            delattr(app, _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR)
+    else:
+        # Preserve the established macOS/Linux and remote-only sequence.
+        configure_o11y()
+        configure_logs()
+        configure_enterprise()
 
     if not did_o11y and not did_logs and not did_enterprise:
         return
@@ -8948,9 +9452,12 @@ def _interactive_splunk_setup(
     click.echo("     No local infrastructure needed. Requires a Splunk O11y access token.")
     click.echo()
     click.echo("  2. Local Splunk (Logs)")
-    click.echo("     Spins up a local Splunk container via Docker in Free mode from day 1.")
-    click.echo("     Audit events are sent via HEC. Includes pre-built dashboards for DefenseClaw.")
-    click.echo("     Requires Docker.")
+    if local_shell_stacks_supported():
+        click.echo("     Spins up a local Splunk container via Docker in Free mode from day 1.")
+        click.echo("     Audit events are sent via HEC. Includes pre-built dashboards for DefenseClaw.")
+        click.echo("     Requires Docker.")
+    else:
+        click.echo(f"     {LOCAL_SHELL_STACKS_UNSUPPORTED_REASON}")
     click.echo()
     click.echo("  3. Splunk Enterprise (Remote HEC)")
     click.echo("     Sends audit events to an existing Splunk Enterprise HEC endpoint.")
@@ -8961,19 +9468,77 @@ def _interactive_splunk_setup(
     did_logs = False
     did_enterprise = False
 
-    if click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False):
-        _interactive_o11y(app, realm, access_token, app_name)
-        did_o11y = True
-        click.echo()
-        _interactive_o11y_dashboards(app)
-        click.echo()
+    if _native_windows_local_splunk():
+        enable_o11y = click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False)
+        enable_logs = local_shell_stacks_supported() and click.confirm(
+            "  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False
+        )
+        enable_enterprise = click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False)
+        combined = enable_logs and (enable_o11y or enable_enterprise)
+        config_path = str(config_path_for_data_dir(app.cfg.data_dir))
+        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+        config_snapshot = None
+        dotenv_snapshot = None
+        if combined:
+            config_snapshot = _snapshot_regular_file(config_path, what="DefenseClaw config")
+            dotenv_snapshot = _snapshot_dotenv(dotenv_path)
+            setattr(app, _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR, config_snapshot)
+            setattr(app, _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR, dotenv_snapshot)
+        try:
+            if enable_o11y:
+                _interactive_o11y(app, realm, access_token, app_name)
+                did_o11y = True
+                click.echo()
+                _interactive_o11y_dashboards(app)
+                click.echo()
+            # Native Local Splunk is intentionally last: its transactional
+            # gateway reload activates every selected pipeline in one runtime
+            # generation, and a failure restores the outer snapshots.
+            if enable_enterprise:
+                _interactive_enterprise(app, skip_test=skip_test)
+                did_enterprise = True
+            if enable_logs:
+                did_logs = _interactive_logs(app)
+        except BaseException as exc:
+            rollback_errors: list[str] = []
+            if combined and config_snapshot is not None and dotenv_snapshot is not None:
+                try:
+                    _restore_regular_file_snapshot(
+                        config_path,
+                        config_snapshot[0],
+                        config_snapshot[1],
+                        what="DefenseClaw config",
+                    )
+                    _restore_dotenv_snapshot(dotenv_path, dotenv_snapshot[0], dotenv_snapshot[1])
+                    _reload_cfg_from_data_dir(app)
+                except Exception as restore_exc:
+                    rollback_errors.append(str(restore_exc))
+            if rollback_errors:
+                raise click.ClickException(
+                    "Interactive Splunk setup failed and rollback was incomplete: " + "; ".join(rollback_errors)
+                ) from exc
+            raise
+        finally:
+            if combined:
+                delattr(app, _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR)
+                delattr(app, _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR)
+    else:
+        # Preserve the established macOS/Linux wizard sequence unchanged.
+        if click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False):
+            _interactive_o11y(app, realm, access_token, app_name)
+            did_o11y = True
+            click.echo()
+            _interactive_o11y_dashboards(app)
+            click.echo()
 
-    if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
-        did_logs = _interactive_logs(app)
+        if local_shell_stacks_supported() and click.confirm(
+            "  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False
+        ):
+            did_logs = _interactive_logs(app)
 
-    if click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False):
-        _interactive_enterprise(app, skip_test=skip_test)
-        did_enterprise = True
+        if click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False):
+            _interactive_enterprise(app, skip_test=skip_test)
+            did_enterprise = True
 
     if not did_o11y and not did_logs and not did_enterprise:
         click.echo()
@@ -9109,6 +9674,8 @@ def _prompt_splunk_hec_token(current: str | None) -> str:
 
 
 def _interactive_logs(app: AppContext) -> bool:
+    if not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     click.echo()
     click.echo("  Local Splunk")
     click.echo("  ────────────")
@@ -9118,9 +9685,10 @@ def _interactive_logs(app: AppContext) -> bool:
         click.echo("  Local Splunk enablement cancelled.")
         return False
 
-    ok, _reason = _preflight_docker()
-    if not ok:
-        return False
+    if not _native_windows_local_splunk():
+        ok, _reason = _preflight_docker()
+        if not ok:
+            return False
 
     index = click.prompt("  Index name", default="defenseclaw_local")
     source = click.prompt("  Source", default="defenseclaw")
@@ -9212,37 +9780,42 @@ def _setup_logs(
     aws_region: str | None = None,
     refresh_bundle: bool = True,
 ) -> bool:
+    if not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     if not _ensure_splunk_license_acceptance(
         accept_splunk_license=accept_splunk_license,
         non_interactive=non_interactive,
     ):
         return False
 
-    ok, reason = _preflight_docker()
-    if not ok:
-        if non_interactive:
-            # Map the pre-flight reason code to a one-line, accurate
-            # error so the operator does not have to re-read the
-            # checklist above. Historically this branch always said
-            # "Docker is required for --logs", which was misleading
-            # when the actual failure was a busy port.
-            detail = {
-                "docker_not_installed": "Docker is not installed",
-                "docker_daemon_not_running": "Docker daemon is not running",
-            }.get(reason)
-            if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
-                # reason looks like "port_8000_in_use"
-                port = reason.split("_", 2)[1]
-                detail = f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
-            if detail is None:
-                detail = "pre-flight checks failed (see messages above)"
-            click.echo(f"  error: {detail}", err=True)
-            raise SystemExit(1)
-        return False
-
     if s3_export and not (s3_bucket or os.environ.get("S3_BUCKET")):
         click.echo("  error: --s3-bucket is required with --s3-export (or set S3_BUCKET)", err=True)
         raise SystemExit(1)
+
+    if not _native_windows_local_splunk():
+        ok, reason = _preflight_docker()
+        if not ok:
+            if non_interactive:
+                # Map the pre-flight reason code to a one-line, accurate
+                # error so the operator does not have to re-read the
+                # checklist above. Historically this branch always said
+                # "Docker is required for --logs", which was misleading
+                # when the actual failure was a busy port.
+                detail = {
+                    "docker_not_installed": "Docker is not installed",
+                    "docker_daemon_not_running": "Docker daemon is not running",
+                }.get(reason)
+                if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
+                    # reason looks like "port_8000_in_use"
+                    port = reason.split("_", 2)[1]
+                    detail = (
+                        f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
+                    )
+                if detail is None:
+                    detail = "pre-flight checks failed (see messages above)"
+                click.echo(f"  error: {detail}", err=True)
+                raise SystemExit(1)
+            return False
 
     _apply_logs_config(
         app,
@@ -9420,6 +9993,20 @@ def _apply_logs_config(
     writer so it lands in ``audit_sinks[]`` in the same shape as any
     other HEC destination.
     """
+    if bootstrap_bridge and _native_windows_local_splunk():
+        _apply_native_windows_logs_config(
+            app,
+            index=index,
+            source=source,
+            sourcetype=sourcetype,
+            s3_export=s3_export,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+            aws_region=aws_region,
+            refresh_bundle=refresh_bundle,
+        )
+        return
+
     contract: dict[str, str] | None = None
     if bootstrap_bridge:
         contract = _bootstrap_bridge(
@@ -9465,6 +10052,141 @@ def _apply_logs_config(
         secret_value=hec_token or None,
     )
     _reload_cfg_from_data_dir(app)
+
+
+def _apply_native_windows_logs_config(
+    app: AppContext,
+    *,
+    index: str,
+    source: str,
+    sourcetype: str,
+    s3_export: bool,
+    s3_bucket: str | None,
+    s3_prefix: str | None,
+    aws_region: str | None,
+    refresh_bundle: bool,
+) -> None:
+    """Commit native Local Splunk, its sink, and gateway as one transaction."""
+
+    from defenseclaw.observability import apply_preset
+    from defenseclaw.observability.local_splunk import (
+        LOCAL_TOKEN_ENV,
+        NativeSplunkSetupTransaction,
+        start_native_local_splunk,
+    )
+    from defenseclaw.observability.local_stack import LocalStackError
+
+    config_path = str(config_path_for_data_dir(app.cfg.data_dir))
+    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+    config_snapshot = getattr(app, _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR, None)
+    if config_snapshot is None:
+        config_snapshot = _snapshot_regular_file(config_path, what="DefenseClaw config")
+    dotenv_snapshot = getattr(app, _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR, None)
+    if dotenv_snapshot is None:
+        dotenv_snapshot = _snapshot_dotenv(dotenv_path)
+    prior_token_present = LOCAL_TOKEN_ENV in os.environ
+    prior_token = os.environ.get(LOCAL_TOKEN_ENV)
+    pid_file = os.path.join(app.cfg.data_dir, "gateway.pid")
+    gateway_was_running = _is_pid_alive(pid_file) and _gateway_pid_file_identifies_gateway(pid_file)
+    transaction: NativeSplunkSetupTransaction | None = None
+    contract = None
+    config_mutated = False
+    click.echo("  Pre-flight checks:")
+    try:
+        transaction = start_native_local_splunk(
+            app.cfg.data_dir,
+            license_accepted=True,
+            index=index,
+            source=source,
+            sourcetype=sourcetype,
+            s3_export=s3_export,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+            aws_region=aws_region,
+            refresh_bundle=refresh_bundle,
+        )
+        contract = transaction.contract
+        click.echo("    Docker Desktop, Compose v2, Linux containers, assets, and ports... ok")
+
+        # Readiness is complete before the first DefenseClaw configuration
+        # byte or root dotenv secret is changed.
+        config_mutated = True
+        apply_preset(
+            "splunk-hec",
+            {
+                "host": "127.0.0.1",
+                "port": "8088",
+                "endpoint": contract.hec_url,
+                "index": contract.index,
+                "source": contract.source,
+                "sourcetype": contract.sourcetype,
+                "verify_tls": "false",
+            },
+            app.cfg.data_dir,
+            name="local-splunk",
+            enabled=True,
+            secret_value=contract.hec_token,
+            secret_env_name=LOCAL_TOKEN_ENV,
+        )
+        _reload_cfg_from_data_dir(app)
+
+        if not _restart_defense_gateway_native(app.cfg.data_dir, start_if_stopped=True):
+            raise LocalStackError("DefenseClaw gateway reload failed after Local Splunk configuration")
+        transaction.controller.emit_product_telemetry("integration_configured")
+        transaction.commit()
+    except BaseException as exc:
+        # Restore config and the shared dotenv before restoring the prior
+        # gateway generation so it can never observe the failed sink.
+        rollback_errors: list[str] = []
+        if config_mutated:
+            try:
+                _restore_regular_file_snapshot(
+                    config_path,
+                    config_snapshot[0],
+                    config_snapshot[1],
+                    what="DefenseClaw config",
+                )
+            except Exception as restore_exc:
+                rollback_errors.append(f"config restore: {restore_exc}")
+            try:
+                _restore_dotenv_snapshot(dotenv_path, dotenv_snapshot[0], dotenv_snapshot[1])
+            except Exception as restore_exc:
+                rollback_errors.append(f"credential restore: {restore_exc}")
+            if prior_token_present and prior_token is not None:
+                os.environ[LOCAL_TOKEN_ENV] = prior_token
+            else:
+                os.environ.pop(LOCAL_TOKEN_ENV, None)
+        if transaction is not None:
+            try:
+                transaction.rollback()
+            except Exception as rollback_exc:
+                rollback_errors.append(f"stack restore: {rollback_exc}")
+        if config_mutated:
+            try:
+                _reload_cfg_from_data_dir(app)
+            except Exception as reload_exc:
+                rollback_errors.append(f"config reload after restore: {reload_exc}")
+            if gateway_was_running:
+                if not _restart_defense_gateway_native(app.cfg.data_dir, start_if_stopped=True):
+                    rollback_errors.append("prior gateway generation did not restart")
+            elif _is_pid_alive(pid_file) and _gateway_pid_file_identifies_gateway(pid_file):
+                if not _stop_defense_gateway_native(app.cfg.data_dir):
+                    rollback_errors.append("gateway created by the failed attempt did not stop")
+        if rollback_errors:
+            raise click.ClickException(
+                "Local Splunk setup failed and rollback was incomplete: " + "; ".join(rollback_errors)
+            ) from exc
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        if isinstance(exc, click.ClickException):
+            raise
+        raise click.ClickException(f"Local Splunk setup failed: {exc}") from exc
+
+    click.echo("  Local Splunk is ready")
+    click.echo(f"    Web UI: {contract.splunk_web_url}")
+    click.echo("    License: Free")
+    click.echo("    Web authentication: disabled in Splunk Free mode")
+    click.echo("    HEC: ready (token stored securely)")
 
 
 def _apply_enterprise_config(
@@ -9657,6 +10379,8 @@ def _bootstrap_bridge(
     volumes survive ``down``, so user data is preserved) so the new
     bundle is what gets brought back up.
     """
+    if not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     env_file = _ensure_private_splunk_bridge_env(data_dir)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(data_dir, env_file=env_file)
@@ -9712,12 +10436,8 @@ def _bootstrap_bridge(
         click.echo(f"    Web UI: {web_url}")
         if str(contract.get("license_group", "")).lower() == "free":
             click.echo("    License: Free")
-        click.echo()
-        click.echo("  Splunk Web login:")
-        click.echo("    Username:  admin")
-        env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
-        click.echo(f"    Password:  (stored in {env_file})")
-        click.echo("    Note: Free mode may still show a login page — use these credentials")
+        click.echo("    Web authentication: disabled in Splunk Free mode")
+        click.echo("    HEC token and runtime bootstrap secret: stored securely")
         return contract
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 5 minutes")
@@ -9906,63 +10626,120 @@ def _disable_splunk(
     enterprise_only: bool,
     non_interactive: bool,
 ) -> None:
+    if logs_only and not local_shell_stacks_supported():
+        raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     disable_both = not o11y_only and not logs_only and not enterprise_only
+    manage_local = local_shell_stacks_supported()
 
     click.echo()
     click.echo("  Disabling Splunk integration...")
 
+    native_controller = None
+    native_was_running = False
+    native_s3_export = False
+    native_s3_overrides: dict[str, str] = {}
+    native_disable = _native_windows_local_splunk() and manage_local and (disable_both or logs_only)
+    config_snapshot: tuple[bool, bytes | None] | None = None
+    config_path = str(config_path_for_data_dir(app.cfg.data_dir))
+    if native_disable:
+        # Prove Docker, assets, volumes, ports, and exact Compose ownership
+        # before either configuration or runtime changes.
+        from defenseclaw.observability.local_splunk import prepare_native_local_splunk_stop
+        from defenseclaw.observability.local_stack import LocalStackError
+
+        try:
+            native_controller, native_was_running = prepare_native_local_splunk_stop(app.cfg.data_dir)
+            if native_controller is not None and native_was_running:
+                native_s3_export, native_s3_overrides = native_controller.s3_runtime_state()
+        except LocalStackError as exc:
+            raise click.ClickException(f"could not validate owned Local Splunk stack: {exc}") from exc
+        config_snapshot = _snapshot_regular_file(config_path, what="DefenseClaw config")
+
     from defenseclaw.observability import list_destinations, set_destination_enabled
 
-    dests = list_destinations(app.cfg.data_dir)
+    try:
+        dests = list_destinations(app.cfg.data_dir)
 
-    if disable_both or o11y_only:
-        # Disable only Splunk's named OTLP routes. The top-level otel.enabled
-        # flag is now a master switch shared with Galileo, local-observability,
-        # and other destinations, so toggling it here would cause collateral
-        # telemetry loss.
-        for destination in dests:
-            if destination.target != "otel" or destination.preset_id != "splunk-o11y":
-                continue
-            try:
-                set_destination_enabled(destination.name, False, app.cfg.data_dir)
-            except ValueError:
-                pass
-        click.echo("    Splunk O11y (OTLP): disabled")
+        if disable_both or o11y_only:
+            # Disable only Splunk's named OTLP routes. The top-level otel.enabled
+            # flag is a master switch shared with unrelated destinations.
+            for destination in dests:
+                if destination.target != "otel" or destination.preset_id != "splunk-o11y":
+                    continue
+                try:
+                    set_destination_enabled(destination.name, False, app.cfg.data_dir)
+                except ValueError:
+                    pass
+            click.echo("    Splunk O11y (OTLP): disabled")
 
-    if disable_both or logs_only or enterprise_only:
-        # Find splunk_hec audit sinks and flip enabled=false. The legacy
-        # Config.splunk dataclass hydrates from the first enabled one, so
-        # the gateway will see it as disabled on next load.
-        disabled_local = False
-        disabled_enterprise = False
-        for d in dests:
-            if d.kind == "splunk_hec" and d.enabled:
-                is_local = _is_local_splunk_destination(d)
+        if disable_both or logs_only or enterprise_only:
+            disabled_local = False
+            disabled_enterprise = False
+            for destination in dests:
+                if destination.kind != "splunk_hec" or not destination.enabled:
+                    continue
+                is_local = _is_local_splunk_destination(destination)
+                if is_local and not manage_local:
+                    continue
+                if is_local and _native_windows_local_splunk() and getattr(destination, "name", "") != "local-splunk":
+                    # Loopback alone is not ownership. Native disable manages
+                    # only the exact sink created by this controller.
+                    continue
                 if not disable_both:
                     if logs_only and not is_local:
                         continue
                     if enterprise_only and is_local:
                         continue
                 try:
-                    set_destination_enabled(d.name, False, app.cfg.data_dir)
+                    set_destination_enabled(destination.name, False, app.cfg.data_dir)
                     if is_local:
                         disabled_local = True
                     else:
                         disabled_enterprise = True
                 except ValueError:
                     continue
-        if disable_both or logs_only:
-            suffix = "" if disabled_local else " (no active local sinks found)"
-            click.echo(f"    Local Splunk (HEC): disabled{suffix}")
-        if disable_both or enterprise_only:
-            suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
-            click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
-        if disable_both or logs_only:
-            _stop_bridge(app.cfg.data_dir)
+            if (disable_both or logs_only) and manage_local:
+                suffix = "" if disabled_local else " (no active local sinks found)"
+                click.echo(f"    Local Splunk (HEC): disabled{suffix}")
+            if disable_both or enterprise_only:
+                suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
+                click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
 
-    # Refresh in-memory cfg so callers (and tests) see the YAML state
-    # the writer just produced.
-    _reload_cfg_from_data_dir(app)
+        _reload_cfg_from_data_dir(app)
+        if native_disable:
+            if native_controller is not None and native_was_running:
+                native_controller.down()
+        elif (disable_both or logs_only) and manage_local:
+            _stop_bridge(app.cfg.data_dir)
+    except BaseException as exc:
+        rollback_errors: list[str] = []
+        if config_snapshot is not None:
+            try:
+                _restore_regular_file_snapshot(
+                    config_path,
+                    config_snapshot[0],
+                    config_snapshot[1],
+                    what="DefenseClaw config",
+                )
+                _reload_cfg_from_data_dir(app)
+            except Exception as restore_exc:
+                rollback_errors.append(f"config restore: {restore_exc}")
+        if native_controller is not None and native_was_running:
+            try:
+                native_controller.up(
+                    s3_export=native_s3_export,
+                    overrides=native_s3_overrides,
+                    emit_startup_telemetry=False,
+                )
+            except Exception as restart_exc:
+                rollback_errors.append(f"stack restore: {restart_exc}")
+        if rollback_errors:
+            raise click.ClickException(
+                "Splunk disable failed and rollback was incomplete: " + "; ".join(rollback_errors)
+            ) from exc
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, click.ClickException)):
+            raise
+        raise click.ClickException(f"Splunk disable failed: {exc}") from exc
 
     click.echo("  Config saved")
     click.echo()
@@ -9979,6 +10756,21 @@ def _disable_splunk(
 
 
 def _stop_bridge(data_dir: str) -> None:
+    if not local_shell_stacks_supported():
+        return
+    if _native_windows_local_splunk():
+        from defenseclaw.observability.local_splunk import stop_native_local_splunk
+        from defenseclaw.observability.local_stack import LocalStackError
+
+        try:
+            stopped = stop_native_local_splunk(data_dir)
+        except LocalStackError as exc:
+            raise click.ClickException(f"could not stop owned Local Splunk stack: {exc}") from exc
+        if stopped:
+            click.echo("    Local Splunk container stopped (volumes preserved)")
+        else:
+            click.echo("    Local Splunk container was not running (volumes preserved)")
+        return
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
         return
@@ -10071,7 +10863,10 @@ def _print_splunk_status(app: AppContext) -> None:
     if sc.enabled:
         hec_label = "Local Splunk (HEC)" if _is_local_hec_endpoint(sc.hec_endpoint) else "Splunk Enterprise (HEC)"
         click.echo(f"  {hec_label}:")
-        click.echo("    Status:      enabled")
+        if _is_local_hec_endpoint(sc.hec_endpoint) and not local_shell_stacks_supported():
+            click.echo("    Status:      unsupported on native Windows")
+        else:
+            click.echo("    Status:      enabled")
         click.echo(f"    HEC:         {sc.hec_endpoint}")
         click.echo(f"    Index:       {sc.index}")
         click.echo(f"    Source:      {sc.source}")
@@ -10089,8 +10884,8 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: boo
     click.echo("       defenseclaw-gateway restart")
     if did_logs:
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
-        click.echo("       Log in with admin / the password from setup output above.")
-        click.echo("       To view credentials later: defenseclaw setup splunk --show-credentials")
+        click.echo("       Web authentication is disabled in Splunk Free mode.")
+        click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
     if did_enterprise:
         step = "3" if did_logs else "2"
@@ -10124,30 +10919,38 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: boo
 
 
 def _show_splunk_credentials(data_dir: str) -> None:
-    """Display Splunk Web login credentials from the bridge .env file."""
+    """Explicitly display generated HEC and runtime-only bootstrap secrets."""
     env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
-    password = None
-    if os.path.isfile(env_file):
-        try:
-            with open(env_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("SPLUNK_PASSWORD="):
-                        password = line.split("=", 1)[1]
-                        break
-        except OSError:
-            pass
+    values: dict[str, str] = {}
+    try:
+        if _native_windows_local_splunk():
+            from defenseclaw.observability.local_splunk import (
+                load_native_local_splunk_credentials,
+            )
 
-    if not password:
+            values = load_native_local_splunk_credentials(data_dir)
+        elif os.path.isfile(env_file):
+            reject_symlink(env_file, what="Splunk bridge env file")
+            values = _load_dotenv(env_file)
+    except (OSError, ValueError, RuntimeError):
+        values = {}
+
+    password = values.get("SPLUNK_PASSWORD", "")
+    hec_token = values.get("DEFENSECLAW_HEC_TOKEN", "")
+    if not password and not hec_token:
         click.echo("  Splunk credentials not found.")
         click.echo(f"  Expected env file: {env_file}")
         click.echo("  Run 'defenseclaw setup splunk --logs' to start local Splunk.")
         return
 
     click.echo()
-    click.echo("  Splunk Web Credentials")
-    click.echo("  ──────────────────────")
+    click.echo("  Local Splunk Generated Secrets")
+    click.echo("  ──────────────────────────────")
     click.echo("    URL:       http://127.0.0.1:8000")
-    click.echo("    Username:  admin")
-    click.echo(f"    Password:  {password}")
+    click.echo("    Web auth:  disabled in Splunk Free mode (no login credentials)")
+    if hec_token:
+        click.echo(f"    HEC token: {hec_token}")
+    if password:
+        click.echo(f"    Runtime bootstrap secret: {password}")
+        click.echo("    Note: this secret is required by the container at startup; it is not a Web login.")
     click.echo()

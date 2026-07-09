@@ -63,7 +63,7 @@ defenseclaw_harden_env
 
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
-# response-layer / transport-layer split rationale.
+# response-layer and transport-layer rationale.
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 # Bail early on missing token: see codex-hook.sh +
@@ -102,9 +102,8 @@ fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
 # FAIL_MODE was already set above (before the missing-token branch).
-# Response-layer failures (4xx, bad JSON, missing action) respect
-# FAIL_MODE; transport-layer failures (gateway unreachable / 5xx)
-# always allow unless DEFENSECLAW_STRICT_AVAILABILITY=1.
+# Response-layer and transport-layer failures both respect FAIL_MODE;
+# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 
 fail_unreachable() {
   defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
@@ -166,9 +165,13 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+case "$ACTION" in
+  allow|block|confirm) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
 
 # Anthropic's Claude Code hook protocol — like Codex's — is strictly
 # EITHER structured JSON on stdout with exit 0 (Claude parses the

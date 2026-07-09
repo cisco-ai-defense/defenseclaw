@@ -28,6 +28,8 @@ from unittest.mock import MagicMock, patch
 from defenseclaw import skill_list
 from defenseclaw.config import ClawConfig, Config
 
+from tests.environment import requires_symlink_privilege
+
 
 def _make_cfg(tmp: str, connector: str = "openclaw") -> Config:
     ddir = os.path.join(tmp, ".defenseclaw")
@@ -205,6 +207,7 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
             rows = skill_list.list_skills(cfg)
         self.assertEqual(rows, [])
 
+    @requires_symlink_privilege
     def test_f0281_symlinked_marker_does_not_leak_secret(self):
         """F-0281: a malicious skill dir whose SKILL.md is a symlink to an
         arbitrary operator-readable file must NOT leak that file's first

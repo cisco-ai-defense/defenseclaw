@@ -2160,13 +2160,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookAPIToken:       setupTokens.hookToken,
 		HookAPITokenScoped: setupTokens.hookTokenScoped,
 		WorkspaceDir:       workspaceDir,
-		// HookFailMode is the operator-chosen response-layer fail mode
-		// for every generated hook (see GuardrailConfig.HookFailMode
-		// for the contract). Routed via EffectiveHookFailMode so the
-		// default "open" is applied uniformly when the field is unset
-		// — matches the user-friendly default in defaultsFor() and
-		// avoids a partial install accidentally going fail-closed.
-		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
+		// Resolve the response-layer fail mode for this connector, including
+		// manual and application-protection overrides plus observe/action
+		// compatibility semantics. The hook-writing boundary normalizes an
+		// unexpected empty value to the secure "closed" default.
+		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
@@ -3311,6 +3309,14 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	}
 }
 
+// RequiresFleetGateway reports whether the configured topology depends on the
+// OpenClaw fleet WebSocket subsystem. Keep external health/readiness consumers
+// on this predicate so they cannot drift from the sidecar's actual topology
+// decision (including the explicit gateway.fleet_mode override).
+func RequiresFleetGateway(cfg *config.Config) bool {
+	return gatewayShouldConnectForConfiguredConnector(cfg)
+}
+
 // isLoopbackGatewayHost reports whether host points at the local
 // machine. Treats empty / "localhost" / any 127.0.0.0/8 IPv4 / ::1
 // IPv6 as loopback. 0.0.0.0 (bind-all) is intentionally NOT loopback
@@ -3551,6 +3557,11 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	defer func() {
+		if err := aiDiscovery.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] close AI discovery store: %v\n", err)
+		}
+	}()
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
 		"mode":                      s.currentConfig().AIDiscovery.Mode,
 		"scan_interval_min":         s.currentConfig().AIDiscovery.ScanIntervalMin,
@@ -3590,6 +3601,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 				"result":          report.Summary.Result,
 			})
 		case <-ctx.Done():
+			<-errCh
 			s.health.SetAIDiscovery(StateStopped, "", nil)
 			return ctx.Err()
 		}
@@ -3785,6 +3797,7 @@ func (s *Sidecar) reportTelemetryHealth() {
 				"preset":   destination.Preset,
 				"enabled":  destination.Enabled,
 				"scope":    "process",
+				"protocol": destination.Protocol,
 				"endpoint": netguard.EndpointForDisplay(destination.Endpoint),
 				"signals":  strings.Join(signals, ", "),
 			}

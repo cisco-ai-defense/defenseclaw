@@ -13,10 +13,13 @@ import time
 
 if os.name == "posix":
     import pty
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from defenseclaw.gateway import resolve_gateway_binary
+
+_CREATE_SUSPENDED = 0x00000004
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,13 @@ class CommandEvent:
     text: str = ""
     exit_code: int | None = None
     duration: float = 0.0
+    cancelled: bool = False
+
+
+class ProcessTree(Protocol):
+    async def cancel(self, process: asyncio.subprocess.Process, grace: float, force: float) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class CommandAlreadyRunningError(RuntimeError):
@@ -39,30 +49,52 @@ class CommandExecutor:
     full interactive escape hatch can be added without touching panels.
     """
 
-    def __init__(self, *, use_pty: bool | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        use_pty: bool | None = None,
+        cancel_grace: float = 0.5,
+        cancel_force: float = 2.0,
+        process_tree_factory: Callable[[int], ProcessTree | None] | None = None,
+    ) -> None:
         self._process: asyncio.subprocess.Process | None = None
+        self._process_tree: ProcessTree | None = None
         self._master_fd: int | None = None
         self._cancelled = False
+        self._cancel_lock = asyncio.Lock()
+        self._cancel_grace = cancel_grace
+        self._cancel_force = cancel_force
+        self._process_tree_factory = process_tree_factory or _windows_process_tree
         if use_pty and os.name != "posix":
             # The 'pty' module is POSIX-only and is not imported elsewhere;
             # fail fast with a clear message instead of a NameError deep in
             # _run_pty when a caller forces PTY mode on Windows.
-            raise ValueError(
-                "PTY execution (use_pty=True) is only supported on POSIX platforms"
-            )
+            raise ValueError("PTY execution (use_pty=True) is only supported on POSIX platforms")
         self.use_pty = os.name == "posix" if use_pty is None else use_pty
 
     @property
     def is_running(self) -> bool:
         return self._process is not None
 
-    async def cancel(self) -> None:
-        process = self._process
-        if process is None:
-            return
-        self._cancelled = True
-        if process.returncode is None:
+    async def cancel(self) -> bool:
+        async with self._cancel_lock:
+            process = self._process
+            if process is None or process.returncode is not None or self._cancelled:
+                return False
+            self._cancelled = True
+            if process.stdin is not None:
+                with contextlib.suppress(OSError):
+                    process.stdin.close()
+            if self._process_tree is not None:
+                await self._process_tree.cancel(process, self._cancel_grace, self._cancel_force)
+                return True
             process.send_signal(signal.SIGINT)
+            try:
+                await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_grace)
+            except TimeoutError:
+                process.kill()
+                await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_force)
+            return True
 
     def write_stdin(self, text: str) -> None:
         """Forward user keystrokes to an interactive command PTY/stdin."""
@@ -122,7 +154,7 @@ class CommandExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=child_env,
-                **captured_subprocess_kwargs(),
+                **managed_subprocess_kwargs(),
             )
         except OSError as exc:
             yield CommandEvent("output", f"Failed to start: {exc}")
@@ -130,6 +162,17 @@ class CommandExecutor:
             return
 
         self._process = process
+        try:
+            self._process_tree = self._process_tree_factory(process.pid)
+            if os.name == "nt" and self._process_tree is None:
+                raise OSError("Windows process tree setup returned no job object")
+        except OSError as exc:
+            process.kill()
+            await process.wait()
+            self._process = None
+            yield CommandEvent("output", f"Failed to secure process tree: {exc}")
+            yield CommandEvent("done", exit_code=1, duration=time.monotonic() - started)
+            return
         if stdin_input is not None and process.stdin is not None:
             with contextlib.suppress(OSError):
                 process.stdin.write(stdin_input.encode())
@@ -143,12 +186,16 @@ class CommandExecutor:
                 yield CommandEvent("output", line.decode(errors="replace").rstrip("\n"))
             exit_code = await process.wait()
         finally:
-            self._process = None
+            async with self._cancel_lock:
+                self._process = None
+                if self._process_tree is not None:
+                    self._process_tree.close()
+                    self._process_tree = None
 
         duration = time.monotonic() - started
-        if self._cancelled and exit_code == 0:
+        if self._cancelled:
             exit_code = 130
-        yield CommandEvent("done", exit_code=exit_code, duration=duration)
+        yield CommandEvent("done", exit_code=exit_code, duration=duration, cancelled=self._cancelled)
 
     async def _run_pty(
         self,
@@ -196,15 +243,24 @@ class CommandExecutor:
                     yield CommandEvent("output", text)
             exit_code = await process.wait()
         finally:
-            self._process = None
-            self._master_fd = None
-            with contextlib.suppress(OSError):
-                os.close(master_fd)
+            async with self._cancel_lock:
+                self._process = None
+                self._master_fd = None
+                with contextlib.suppress(OSError):
+                    os.close(master_fd)
 
         duration = time.monotonic() - started
-        if self._cancelled and exit_code == 0:
+        if self._cancelled:
             exit_code = 130
-        yield CommandEvent("done", exit_code=exit_code, duration=duration)
+        yield CommandEvent("done", exit_code=exit_code, duration=duration, cancelled=self._cancelled)
+
+
+def _windows_process_tree(pid: int) -> ProcessTree | None:
+    if os.name != "nt":
+        return None
+    from defenseclaw.tui.windows_process import WindowsJob
+
+    return WindowsJob(pid)
 
 
 def resolve_subprocess_argv(binary: str, args: tuple[str, ...]) -> tuple[str, ...]:
@@ -242,6 +298,21 @@ def captured_subprocess_kwargs() -> dict[str, int]:
     if os.name != "nt":
         return {}
     return {"creationflags": subprocess.CREATE_NO_WINDOW}
+
+
+def managed_subprocess_kwargs() -> dict[str, int]:
+    """Return flags for a command that will immediately enter a Job Object.
+
+    Suspending Windows commands closes the launch-to-assignment race: no child
+    code can create an escaping descendant before :class:`WindowsJob` owns and
+    resumes the root process. Other TUI subprocess call sites use
+    :func:`captured_subprocess_kwargs` and are never suspended.
+    """
+
+    kwargs = captured_subprocess_kwargs()
+    if os.name == "nt":
+        kwargs["creationflags"] |= _CREATE_SUSPENDED
+    return kwargs
 
 
 def _split_terminal_chunk(text: str) -> tuple[str, ...]:

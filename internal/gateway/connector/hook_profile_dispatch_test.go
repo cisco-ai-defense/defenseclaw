@@ -287,6 +287,63 @@ func TestCodexProfileRespond_Parity(t *testing.T) {
 	}
 }
 
+func TestCursorProfileRespondAlwaysEmitsValidJSON(t *testing.T) {
+	cases := []struct {
+		name     string
+		event    string
+		action   string
+		reason   string
+		expected map[string]interface{}
+	}{
+		{
+			name:     "prompt allow",
+			event:    "beforeSubmitPrompt",
+			action:   "allow",
+			expected: map[string]interface{}{"continue": true},
+		},
+		{
+			name:   "prompt block",
+			event:  "beforeSubmitPrompt",
+			action: "block",
+			reason: "prompt denied",
+			expected: map[string]interface{}{
+				"continue": false, "user_message": "prompt denied",
+			},
+		},
+		{
+			name:     "shell allow",
+			event:    "beforeShellExecution",
+			action:   "allow",
+			expected: map[string]interface{}{"continue": true, "permission": "allow"},
+		},
+		{
+			name:     "lifecycle allow",
+			event:    "sessionStart",
+			action:   "allow",
+			expected: map[string]interface{}{"continue": true},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := hookOnlyProfileRespond(HookRespondInput{
+				Req: HookProfileRequest{
+					ConnectorName: "cursor",
+					HookEventName: tc.event,
+				},
+				Action: tc.action,
+				Reason: tc.reason,
+			})
+			if out.FieldName != "hook_output" {
+				t.Fatalf("FieldName=%q want hook_output", out.FieldName)
+			}
+			if !reflect.DeepEqual(out.Output, tc.expected) {
+				t.Errorf("Output mismatch\n got: %#v\nwant: %#v", out.Output, tc.expected)
+			}
+		})
+	}
+}
+
 // TestClaudeCodeProfileRespond_Parity is the claudecode-side mirror
 // of TestCodexProfileRespond_Parity. Covers the "confirm on PreToolUse
 // becomes permissionDecision=ask" and "deny on PermissionRequest"
@@ -577,13 +634,11 @@ func TestHermesProfileRespond_Parity(t *testing.T) {
 	}
 }
 
-// TestCursorProfileRespond_AlwaysEmitsEnvelope pins the cursor branch
-// of hookOnlyProfileRespond. Cursor's hook script is fail-closed on
-// empty stdout — a hook that returns nothing gets treated as a hook
-// failure and blocks the tool call. That means every code path in the
-// cursor case must produce a non-nil Output map, including the plain
-// allow case where earlier versions left it nil and every benign
-// prompt in Cursor would fail-close.
+// TestCursorProfileRespond_AlwaysEmitsEnvelope pins the permission-style
+// cursor branch of hookOnlyProfileRespond. Cursor's hook script is fail-closed
+// on empty stdout, so every code path must produce a non-nil Output map. The
+// separate TestCursorProfileRespondAlwaysEmitsValidJSON covers the narrower
+// beforeSubmitPrompt and lifecycle schemas.
 func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -670,7 +725,7 @@ func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
 			out := hookOnlyProfileRespond(HookRespondInput{
 				Req: HookProfileRequest{
 					ConnectorName: "cursor",
-					HookEventName: "beforeSubmitPrompt",
+					HookEventName: "beforeShellExecution",
 				},
 				Action:            tc.action,
 				RawAction:         tc.rawAction,

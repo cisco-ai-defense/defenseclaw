@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -112,8 +113,32 @@ func sidecarHealthURL(c *config.Config) string {
 	if c == nil {
 		c = config.DefaultConfig()
 	}
-	bind := gatewayBindHost(c)
-	return fmt.Sprintf("http://%s:%d/health", bind, c.Gateway.APIPort)
+	return "http://" + net.JoinHostPort(gatewayClientHost(c), strconv.Itoa(c.Gateway.APIPort)) + "/health"
+}
+
+func gatewayClientHost(c *config.Config) string {
+	bind := strings.Trim(strings.TrimSpace(gatewayBindHost(c)), "[]")
+	switch bind {
+	case "", "*", "0.0.0.0":
+		return "127.0.0.1"
+	case "::":
+		return "::1"
+	default:
+		if ip := net.ParseIP(bind); ip != nil && ip.IsUnspecified() {
+			if ip.To4() != nil {
+				return "127.0.0.1"
+			}
+			return "::1"
+		}
+		return bind
+	}
+}
+
+func sidecarStatusURL(c *config.Config) string {
+	if c == nil {
+		c = config.DefaultConfig()
+	}
+	return "http://" + net.JoinHostPort(gatewayClientHost(c), strconv.Itoa(c.Gateway.APIPort)) + "/status"
 }
 
 // fetchSidecarHealth reads one complete, bounded health document. Keeping the
@@ -171,7 +196,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	fmt.Println()
 
 	bind := gatewayBindHost(cfg)
-	if modes := fetchConnectorModes(client, bind, cfg.Gateway.APIPort); len(modes) > 0 {
+	if modes := fetchConnectorModes(client, cfg); len(modes) > 0 {
 		printConnectorModes(modes)
 	}
 
@@ -476,8 +501,8 @@ type connectorModeSummary struct {
 // connector) and falls back to the singular connector_mode field for older
 // sidecars that predate the roster — so a single-connector install and an
 // N-connector install both yield a non-empty slice rendered the same way.
-func fetchConnectorModes(client *http.Client, bind string, port int) []connectorModeSummary {
-	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
+func fetchConnectorModes(client *http.Client, c *config.Config) []connectorModeSummary {
+	addr := sidecarStatusURL(c)
 	req, err := http.NewRequest(http.MethodGet, addr, nil)
 	if err != nil {
 		return nil
@@ -493,8 +518,8 @@ func fetchConnectorModes(client *http.Client, bind string, port int) []connector
 	// token cannot be resolved, fall back to the previous
 	// best-effort behaviour rather than error out -- the rest of
 	// `defenseclaw status` is still useful without this section.
-	if cfg != nil {
-		if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+	if c != nil {
+		if token := strings.TrimSpace(c.Gateway.ResolvedToken()); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("X-DefenseClaw-Token", token)
 		}

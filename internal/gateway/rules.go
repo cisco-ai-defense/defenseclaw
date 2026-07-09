@@ -588,8 +588,12 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 // shared core of ScanAllRules / ScanAllRulesForConnector — the only
 // difference between those entry points is which category set they select.
 func scanRuleCategories(cats []ruleCategory, text string, toolName string) []RuleFinding {
-	var findings []RuleFinding
+	findings := windowsCommandFindings(text, toolName)
 	seen := make(map[string]bool)
+	for i := range findings {
+		findings[i] = adjustConfidence(toolName, findings[i])
+		seen[findings[i].RuleID] = true
+	}
 
 	// Scan raw text first
 	for _, cat := range cats {

@@ -21,17 +21,26 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
-import tempfile
 
 
 def grant_everyone(path: str | os.PathLike[str], perm: str = "F") -> None:
     """Grant the well-known Everyone SID broad access for negative-path tests."""
+    ace = f"*S-1-1-0:{perm}" if os.path.isfile(path) else f"*S-1-1-0:(OI)(CI){perm}"
     subprocess.run(
-        ["icacls", os.fspath(path), "/grant", f"*S-1-1-0:(OI)(CI){perm}"],
+        ["icacls", os.fspath(path), "/grant", ace],
         check=True,
         capture_output=True,
         text=True,
     )
+
+
+def set_known_windows_directory_acl(path: str | os.PathLike[str], *, everyone_write: bool = False) -> None:
+    """Replace inheritance with a deterministic disposable-directory DACL."""
+    from defenseclaw.file_permissions import _set_windows_owner_only_acl
+
+    _set_windows_owner_only_acl(os.fspath(path), set_owner=True)
+    if everyone_write:
+        grant_everyone(path)
 
 
 def assert_owner_only_file(path: str | os.PathLike[str]) -> None:
@@ -41,16 +50,40 @@ def assert_owner_only_file(path: str | os.PathLike[str]) -> None:
         assert mode == 0o600, f"expected 0600, got {oct(mode)}"
         return
 
-    with tempfile.TemporaryDirectory(prefix="defenseclaw-acl-test-") as tmp:
-        saved_acl = os.path.join(tmp, "acl.txt")
-        subprocess.run(
-            ["icacls", os.fspath(path), "/save", saved_acl],
-            check=True,
-            capture_output=True,
-        )
-        with open(saved_acl, encoding="utf-16-le") as f:
-            lines = f.read().splitlines()
+    from defenseclaw.file_permissions import _windows_acl_snapshot, windows_acl_write_error
 
-    # /save emits stable SDDL even when account names and status messages are
-    # localized. This is exactly one protected Owner Rights full-control ACE.
-    assert lines[-1] == "D:P(A;;FA;;;OW)", lines
+    problem = windows_acl_write_error(path)
+    assert problem is None, problem
+    owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    assert null_dacl is False
+    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    writable_sids = {
+        sid
+        for permissions, access_mode, _inheritance, sid in entries
+        if access_mode in (1, 2) and permissions & write_mask
+    }
+    assert "S-1-5-18" in writable_sids
+    assert owner_sid in writable_sids or "S-1-3-4" in writable_sids
+
+
+def assert_owner_only_directory(path: str | os.PathLike[str]) -> None:
+    """Assert POSIX 0700 or the equivalent protected Windows DACL."""
+    if os.name != "nt":
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o700, f"expected 0700, got {oct(mode)}"
+        return
+
+    assert_owner_only_file(path)
+    from defenseclaw.file_permissions import _windows_acl_snapshot, _windows_current_user_sid
+
+    current_sid = _windows_current_user_sid()
+    trusted = {"S-1-3-4", "S-1-5-18", current_sid}
+    _owner_sid, _null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or permissions == 0:
+            continue
+        if sid in trusted:
+            continue
+        if sid == "S-1-3-0" and inheritance & 0x08:
+            continue
+        raise AssertionError(f"directory ACL grants access to untrusted SID {sid or '<unknown>'}")

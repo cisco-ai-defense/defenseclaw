@@ -28,7 +28,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.scanner.plugin_scanner.helpers import collect_files
 from defenseclaw.scanner.plugin_scanner.scanner import _load_manifest, scan_plugin
 
+from tests.environment import requires_symlink_privilege
 
+
+@requires_symlink_privilege
 class TestCollectFilesSymlinks(unittest.TestCase):
     """Symlinks that escape the scan root must be skipped."""
 
@@ -416,6 +419,7 @@ class TestNoManifestStillScans(unittest.TestCase):
         self.assertIn("JSON-URL-HTTP", rule_ids)
 
 
+@requires_symlink_privilege
 class TestCollectFilesSymlinkedFiles(unittest.TestCase):
     """A symlinked file pointing outside the scan root must also be caught."""
 

@@ -97,6 +97,15 @@ def _inventory_payload() -> dict[str, object]:
                 "vector_enabled": False,
             }
         ],
+        "errors": [],
+        "limitations": [
+            {
+                "connector": "codex",
+                "category": "tools",
+                "status": "unsupported",
+                "reason": "tool registry is owned by each plugin's manifest",
+            }
+        ],
         "summary": {
             "total_items": 10,
             "skills": {"count": 3, "eligible": 2},
@@ -105,6 +114,8 @@ def _inventory_payload() -> dict[str, object]:
             "agents": {"count": 1},
             "model_providers": {"count": 1},
             "memory": {"count": 1},
+            "errors": 0,
+            "limitations": 1,
             "policy_skills": {"blocked": 1, "allowed": 1, "warning": 1},
             "policy_plugins": {"blocked": 1, "clean": 1},
             "scan_skills": {"scanned": 2, "unscanned": 1, "total_findings": 3},
@@ -194,6 +205,13 @@ def test_inventory_apply_json_summary_source_and_load_errors() -> None:
     assert summary.version == "1"
     assert summary.generated_at == "2026-05-20T12:00:00Z"
     assert summary.scan_skill_coverage["total_findings"] == "3"
+    assert summary.errors == "0"
+    assert summary.limitations == "1"
+    rows = dict(panel.summary_table_rows())
+    assert "Errors" not in rows
+    assert rows["Unsupported capabilities"] == "1 (informational)"
+    assert panel.inventory is not None
+    assert panel.inventory.limitations[0].status == "unsupported"
 
     error_panel = InventoryPanelModel()
     error_panel.apply_loaded(None, RuntimeError("boom"))
@@ -202,6 +220,23 @@ def test_inventory_apply_json_summary_source_and_load_errors() -> None:
 
     with pytest.raises(ValueError, match="parse inventory json"):
         InventorySnapshot.from_json("{not-json")
+
+
+def test_inventory_mixed_failure_and_limitations_remain_independent() -> None:
+    payload = _inventory_payload()
+    payload["errors"] = [{"command": "codex:skills", "error": "permission denied"}]
+    summary = payload["summary"]
+    assert isinstance(summary, dict)
+    summary["errors"] = 1
+
+    panel = InventoryPanelModel()
+    panel.apply_json(json.dumps(payload))
+
+    rows = dict(panel.summary_table_rows())
+    assert rows["Errors"] == "1"
+    assert rows["Unsupported capabilities"] == "1 (informational)"
+    assert panel.loaded is True
+    assert panel.message == ""
 
 
 def test_inventory_skill_and_plugin_filters_clamp_cursor_and_detail() -> None:

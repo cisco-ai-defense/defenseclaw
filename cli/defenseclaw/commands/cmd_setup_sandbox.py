@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import posixpath
 import shlex
 import shutil
 import stat
@@ -16,6 +17,7 @@ from defenseclaw.commands.cmd_init_sandbox import (
     _ensure_sudo_cache,
     _fix_data_dir_ownership,
     _needs_sudo,
+    _require_sandbox_platform,
     _sudo_prefix,
     _sudo_write,
 )
@@ -163,7 +165,7 @@ def _sandbox_framework_roots(cfg, sandbox_home: str) -> list[str]:
     """
     connector = _resolve_active_connector(cfg)
     if connector == "openclaw":
-        return [os.path.join(sandbox_home, ".openclaw")]
+        return [posixpath.join(sandbox_home, ".openclaw")]
     # Non-OpenClaw connectors should never reach this code path — see
     # _validate_sandbox_connector above. Returning [] keeps the
     # iteration safe if a caller bypasses validation.
@@ -255,7 +257,7 @@ def setup_sandbox(
       defenseclaw sandbox setup --policy strict --no-auto-pair
       defenseclaw sandbox setup --disable
     """
-    import platform
+    _require_sandbox_platform()
 
     from defenseclaw.commands.cmd_setup import (
         _mask,
@@ -285,10 +287,6 @@ def setup_sandbox(
         _ensure_sudo_cache()
         _disable_sandbox(app)
         return
-
-    if platform.system() != "Linux":
-        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
-        raise SystemExit(1)
 
     # S4.5 — sandbox mode is OpenClaw-only today.
     #
@@ -1740,7 +1738,7 @@ def _generate_run_sandbox_script(data_dir: str, host_ip: str, cfg) -> None:
     # ``$SANDBOX_HOME/.openclaw`` instead. When nothing is pinned we fall
     # back to only the sandbox's own .openclaw — never root's.
     sandbox_home = cfg.openshell.effective_sandbox_home()
-    sandbox_oc_home = os.path.join(sandbox_home, ".openclaw")
+    sandbox_oc_home = posixpath.join(sandbox_home, ".openclaw")
     pinned_oc_home = (cfg.claw.openclaw_home_original or "").strip()
     acl_fix_targets: list[str] = []
     if pinned_oc_home:

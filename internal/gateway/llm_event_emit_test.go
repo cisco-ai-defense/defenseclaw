@@ -150,7 +150,7 @@ func TestHookPhaseSequenceIsOrderedAndDirected(t *testing.T) {
 	planning.LifecycleState = "active"
 	planning.Phase = "planning"
 	planning = api.enrichHookPhase(planning)
-	if planning.Sequence != 1 || planning.PreviousPhase != "unknown" {
+	if planning.Sequence != 1 || planning.PreviousPhase != "" {
 		t.Fatalf("first phase = %+v", planning)
 	}
 	tool := base
@@ -168,6 +168,83 @@ func TestHookPhaseSequenceIsOrderedAndDirected(t *testing.T) {
 	responding = api.enrichHookPhase(responding)
 	if responding.Sequence != 3 || responding.PreviousPhase != "tool" {
 		t.Fatalf("third phase = %+v", responding)
+	}
+}
+
+func TestHookPhaseSequenceNormalizesAliasesAndToleratesDuplicateOutOfOrderEvents(t *testing.T) {
+	t.Parallel()
+	api := &APIServer{}
+	base := llmEventMeta{
+		Source: "claudecode", SessionID: "phase-edge-session", AgentID: "phase-edge-agent",
+		LifecycleID: "phase-edge-lifecycle", ExecutionID: "phase-edge-execution",
+	}
+
+	first := base
+	first.Phase = " ToOl "
+	first = api.enrichHookPhase(first)
+	if first.Phase != "tool" || first.PreviousPhase != "" || first.Sequence != 1 {
+		t.Fatalf("first mixed-case phase = %+v", first)
+	}
+
+	duplicate := base
+	duplicate.Phase = "tool_call"
+	duplicate = api.enrichHookPhase(duplicate)
+	if duplicate.Phase != "tool" || duplicate.PreviousPhase != "tool" || duplicate.Sequence != 2 {
+		t.Fatalf("duplicate phase = %+v", duplicate)
+	}
+
+	outOfOrder := base
+	outOfOrder.Phase = "Plan"
+	outOfOrder = api.enrichHookPhase(outOfOrder)
+	if outOfOrder.Phase != "planning" || outOfOrder.PreviousPhase != "tool" || outOfOrder.Sequence != 3 {
+		t.Fatalf("out-of-order phase = %+v", outOfOrder)
+	}
+
+	unknown := base
+	unknown.Phase = "future-phase"
+	unknown = api.enrichHookPhase(unknown)
+	if unknown.Phase != "future-phase" || unknown.PreviousPhase != "planning" || unknown.Sequence != 4 {
+		t.Fatalf("unknown current phase must remain fail-closed = %+v", unknown)
+	}
+
+	afterUnknown := base
+	afterUnknown.Phase = "response"
+	afterUnknown = api.enrichHookPhase(afterUnknown)
+	if afterUnknown.Phase != "responding" || afterUnknown.PreviousPhase != "" || afterUnknown.Sequence != 5 {
+		t.Fatalf("unsupported previous phase must be omitted = %+v", afterUnknown)
+	}
+}
+
+func TestHookPhaseSnapshotSurvivesSessionExecutionRotationWithoutOTel(t *testing.T) {
+	t.Parallel()
+	api := &APIServer{}
+	payload := map[string]interface{}{
+		"hook_event_name": "SessionStart",
+		"session_id":      "rotated-session",
+		"agent_id":        "rotated-agent",
+	}
+	started := applyHookEventMeta(
+		hookLLMEventMeta("codex", "rotated-session", "", "", "codex", "rotated-agent", "", "codex", payload),
+		"SessionStart",
+		payload,
+	)
+	started = api.beginHookExecution(started)
+	started = api.enrichHookPhase(started)
+
+	// Finalization reconstructs metadata from the request and does not know the
+	// random execution ID minted by beginHookExecution. The phase snapshot must
+	// still recover it without relying on an OTel session trace.
+	reconstructed := applyHookEventMeta(
+		hookLLMEventMeta("codex", "rotated-session", "", "", "codex", "rotated-agent", "", "codex", payload),
+		"SessionStart",
+		payload,
+	)
+	snapshot, ok := api.hookPhaseSnapshot(reconstructed)
+	if !ok {
+		t.Fatal("rotated session phase snapshot not found")
+	}
+	if snapshot.ExecutionID != started.ExecutionID || snapshot.Phase != "session" || snapshot.PreviousPhase != "" || snapshot.Sequence != 1 {
+		t.Fatalf("rotated session snapshot=%+v want execution=%q phase=session previous omitted sequence=1", snapshot, started.ExecutionID)
 	}
 }
 

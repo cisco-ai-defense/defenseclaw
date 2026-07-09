@@ -39,16 +39,46 @@ import requests
 PLUGIN_MUTATION_TIMEOUT = 90
 
 
+def gateway_api_client_host(cfg: Any) -> str:
+    """Return a connectable host for the configured sidecar API bind.
+
+    Wildcard addresses are valid listeners but invalid/ambiguous client
+    destinations. The sidecar is local management infrastructure, so normalize
+    them to loopback while preserving explicit non-wildcard API binds.
+    """
+    gateway = getattr(cfg, "gateway", None)
+    bind = str(getattr(gateway, "api_bind", "") or "").strip()
+    if bind in {"", "0.0.0.0", "::", "[::]", "*"}:
+        return "127.0.0.1"
+    return bind
+
+
+def _url_host(host: str) -> str:
+    """Bracket a bare IPv6 literal for use in an HTTP authority."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 class OrchestratorClient:
-    def __init__(self, host: str = "127.0.0.1", port: int = 18970, timeout: int = 5,
-                 token: str = "", plugin_timeout: int | None = None) -> None:
-        self.base_url = f"http://{host}:{port}"
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 18970,
+        timeout: int = 5,
+        token: str = "",
+        plugin_timeout: int | None = None,
+    ) -> None:
+        self.base_url = f"http://{_url_host(host)}:{port}"
         self.timeout = timeout
         self.plugin_timeout = max(timeout, plugin_timeout or PLUGIN_MUTATION_TIMEOUT)
         self._session = requests.Session()
         self._session.headers["X-DefenseClaw-Client"] = "python-cli"
         if token:
             self._session.headers["Authorization"] = f"Bearer {token}"
+            # Legacy proxy callers use this header. Sending it on provider
+            # management requests keeps both compatible surfaces aligned.
+            self._session.headers["X-DC-Auth"] = f"Bearer {token}"
 
     def health(self) -> dict[str, Any]:
         resp = self._session.get(f"{self.base_url}/health", timeout=self.timeout)
@@ -59,6 +89,26 @@ class OrchestratorClient:
         resp = self._session.get(f"{self.base_url}/status", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
+
+    def provider_registry(self) -> dict[str, Any]:
+        resp = self._session.get(f"{self.base_url}/v1/config/providers", timeout=self.timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or not isinstance(data.get("providers"), list):
+            raise ValueError("sidecar returned a malformed provider registry")
+        return data
+
+    def reload_provider_registry(self) -> dict[str, Any]:
+        resp = self._session.post(
+            f"{self.base_url}/v1/config/providers/reload",
+            json={},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            raise ValueError("sidecar returned a malformed provider reload response")
+        return data
 
     def disable_skill(self, skill_key: str) -> dict[str, Any]:
         resp = self._session.post(
@@ -163,9 +213,7 @@ class OrchestratorClient:
         a true "what SDKs and versions are on this fleet" table without
         re-implementing the join.
         """
-        resp = self._session.get(
-            f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout
-        )
+        resp = self._session.get(f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
@@ -187,10 +235,7 @@ class OrchestratorClient:
         slash inside a scoped npm name like ``@anthropic-ai/sdk``
         survives the split and the lookup hits the right row.
         """
-        url = (
-            f"{self.base_url}/api/v1/ai-usage/components/"
-            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
-        )
+        url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
         resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
@@ -203,10 +248,7 @@ class OrchestratorClient:
         ``ecosystem`` and ``name`` are URL-encoded with ``safe=""``
         for the same reason as ``ai_usage_component_locations``.
         """
-        url = (
-            f"{self.base_url}/api/v1/ai-usage/components/"
-            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
-        )
+        url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
         resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()

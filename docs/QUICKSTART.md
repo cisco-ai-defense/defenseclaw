@@ -2,6 +2,11 @@
 
 Get DefenseClaw running in under 5 minutes.
 
+This walkthrough uses the OpenClaw proxy path on macOS or Linux. For native
+Windows, where DefenseClaw uses agent hooks and does not support the OpenClaw
+proxy, follow the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
+instead.
+
 ## 1. Setup
 
 ### Install OpenClaw

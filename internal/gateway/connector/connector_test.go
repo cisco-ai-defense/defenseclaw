@@ -36,10 +36,25 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/pelletier/go-toml/v2"
 )
 
 var testStderrMu sync.Mutex
+
+func requirePOSIXHookScripts(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook/shim scripts are not used by native Windows connectors; native helper coverage remains active")
+	}
+}
+
+func requireZeptoClawHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw is unsupported on native Windows; platform rejection coverage remains active")
+	}
+}
 
 // --- Helper tests ---
 
@@ -1628,7 +1643,7 @@ func TestClaudeCode_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) 
 	if err != nil {
 		t.Fatalf("disabled hook missing after teardown: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Fatalf("disabled hook is not executable: mode %v", info.Mode())
 	}
 
@@ -1842,7 +1857,7 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			if err != nil {
 				t.Fatalf("tombstone missing after Teardown — cached host PIDs would hit exit-127: %v", err)
 			}
-			if info.Mode()&0o111 == 0 {
+			if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 				t.Errorf("tombstone is not executable: mode %v — cached PIDs would still hit a fork/exec failure", info.Mode())
 			}
 
@@ -2394,16 +2409,10 @@ env_key = "OPENAI_API_KEY"
 		t.Fatalf("Setup: %v", err)
 	}
 
-	info, err := os.Stat(configPath)
-	if err != nil {
-		t.Fatalf("stat config.toml: %v", err)
-	}
 	// Mask off the file-type bits — only the permission bits matter
 	// here. We assert exactly 0o600: any group/world bit means a
 	// shared-host user can read provider env-var names + base URLs.
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("config.toml mode = %#o, want 0o600", mode)
-	}
+	testenv.AssertPrivateFile(t, configPath)
 }
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
@@ -3270,7 +3279,7 @@ func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("disabled hook missing after teardown: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Fatalf("disabled hook is not executable: mode %v", info.Mode())
 	}
 
@@ -3796,6 +3805,7 @@ func TestZeptoClaw_Route_SkipsEntriesWithNoAPIKey(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
+	requireZeptoClawHost(t)
 	// On every sidecar boot, Setup runs. If it overwrites the backup each
 	// time, the second boot captures the already-patched api_base (the
 	// proxy URL) as the "original", losing the user's real upstream. The
@@ -3841,7 +3851,7 @@ func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
 	}
 }
 
-func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
+func TestZeptoClaw_Setup_UsesRuntimeFailModeForSharedHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -3872,12 +3882,103 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read inspect-tool.sh: %v", err)
 	}
-	if !strings.Contains(string(body), `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`) {
-		t.Fatalf("inspect-tool.sh did not render closed fail mode:\n%s", string(body))
+	if !strings.Contains(string(body), `defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR"`) {
+		t.Fatalf("inspect-tool.sh does not resolve fail mode at runtime:\n%s", string(body))
+	}
+	opts.HookFailMode = "open"
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("open-mode Setup: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "hooks", "inspect-tool.sh"))
+	if err != nil {
+		t.Fatalf("read open-mode inspect-tool.sh: %v", err)
+	}
+	if !bytes.Equal(after, body) {
+		t.Fatal("shared inspect hook changed when one connector changed fail mode")
+	}
+}
+
+func TestSharedInspectHookResolvesSingleConnectorRuntimeState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	for _, tc := range []struct {
+		mode     string
+		wantCode int
+	}{
+		{mode: "open", wantCode: 0},
+		{mode: "closed", wantCode: 2},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			type requestHeaders struct {
+				connector     string
+				authorization string
+			}
+			headers := make(chan requestHeaders, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				headers <- requestHeaders{
+					connector:     r.Header.Get("X-DefenseClaw-Connector"),
+					authorization: r.Header.Get("Authorization"),
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte("not-json"))
+			}))
+			defer srv.Close()
+			dir := t.TempDir()
+			hookDir := filepath.Join(dir, "hooks")
+			opts := SetupOpts{
+				DataDir:            dir,
+				APIAddr:            strings.TrimPrefix(srv.URL, "http://"),
+				HookFailMode:       tc.mode,
+				HookAPIToken:       "scoped-runtime-fixture",
+				HookAPITokenScoped: true,
+			}
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewZeptoClawConnector()); err != nil {
+				t.Fatalf("write shared hooks: %v", err)
+			}
+			// The parser-independent flat record must remain authoritative even
+			// when persistent/transient lock files and unrelated prefix matches
+			// are present. Those files must not become phantom connectors.
+			if err := os.WriteFile(filepath.Join(hookDir, ".hookcfg.lock"), nil, 0o600); err != nil {
+				t.Fatalf("write lock fixture: %v", err)
+			}
+			if err := os.WriteFile(
+				filepath.Join(hookDir, ".hookcfg.unrelated"),
+				[]byte("DEFENSECLAW_CONNECTOR=someone-else\nDEFENSECLAW_FAIL_MODE=closed\n"),
+				0o600,
+			); err != nil {
+				t.Fatalf("write unrelated sidecar fixture: %v", err)
+			}
+			cmd := exec.Command("bash", filepath.Join(hookDir, "inspect-request.sh"))
+			cmd.Stdin = strings.NewReader(`{"content":"hello"}`)
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + dir,
+				"DEFENSECLAW_HOME=" + dir,
+			}
+			err := cmd.Run()
+			code := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("run shared hook: %v", err)
+			}
+			if code != tc.wantCode {
+				t.Fatalf("shared hook exit=%d want %d", code, tc.wantCode)
+			}
+			got := <-headers
+			if got.connector != "zeptoclaw" {
+				t.Fatalf("connector header=%q", got.connector)
+			}
+			if got.authorization != "Bearer scoped-runtime-fixture" {
+				t.Fatalf("authorization header did not use scoped runtime token")
+			}
+		})
 	}
 }
 
 func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
+	requireZeptoClawHost(t)
 	// After Setup(), the connector must retain the user's provider table
 	// in memory so Route() can look up upstreams. Otherwise we'd have to
 	// re-read the (already-patched) config file on every request.
@@ -3932,6 +4033,7 @@ func TestResolveSubprocessPolicy(t *testing.T) {
 // --- Subprocess enforcement tests ---
 
 func TestWriteShimScripts(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	dir := t.TempDir()
 	if err := WriteShimScripts(dir, "127.0.0.1:18970"); err != nil {
 		t.Fatalf("WriteShimScripts failed: %v", err)
@@ -3959,6 +4061,7 @@ func TestWriteShimScripts(t *testing.T) {
 }
 
 func TestWriteShimScripts_ContentHasAPIAddr(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
 	if err := WriteShimScripts(dir, addr); err != nil {
@@ -3981,6 +4084,7 @@ func TestWriteShimScripts_ContentHasAPIAddr(t *testing.T) {
 }
 
 func TestWriteHookScript(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	dir := t.TempDir()
 	if err := WriteHookScript(dir, "127.0.0.1:18970"); err != nil {
 		t.Fatalf("WriteHookScript failed: %v", err)
@@ -4013,6 +4117,7 @@ func TestWriteHookScript_ContentHasAPIAddr(t *testing.T) {
 }
 
 func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
 	if err := WriteAllHookScripts(dir, addr); err != nil {
@@ -4081,11 +4186,11 @@ func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read generic hook %s: %v", name, err)
 		}
-		if !strings.Contains(string(body), ".hook-openclaw.token") {
-			t.Errorf("generic hook %s does not reference connector-scoped token sidecar", name)
+		if strings.Contains(string(body), ".hook-openclaw.token") || strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
+			t.Errorf("generic hook %s embeds OpenClaw-specific runtime state", name)
 		}
-		if !strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
-			t.Errorf("generic hook %s does not bind scoped token to OpenClaw", name)
+		if !strings.Contains(string(body), "defenseclaw_shared_hook_token_file") || !strings.Contains(string(body), "RUNTIME_CONNECTOR") {
+			t.Errorf("generic hook %s does not resolve connector state at runtime", name)
 		}
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
@@ -4109,6 +4214,7 @@ func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 }
 
 func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	// The claude-code hook posts to /api/v1/claude-code/hook, which the API
 	// server's auth middleware guards with a bearer token. Without the
 	// header the request is 401'd, the hook script fails-open, and no
@@ -4127,6 +4233,7 @@ func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
 }
 
 func TestWriteHookScriptsWithToken_EmptyTokenOmitsHeader(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	// Operators who never set DEFENSECLAW_GATEWAY_TOKEN rely on the
 	// loopback fallback; emitting an empty Authorization header would
 	// make the API middleware reject with "invalid_token" instead of
@@ -4144,6 +4251,7 @@ func TestWriteHookScriptsWithToken_EmptyTokenOmitsHeader(t *testing.T) {
 }
 
 func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	// If the operator rotates DEFENSECLAW_GATEWAY_TOKEN without
 	// regenerating hook scripts, the env var must win so the hook keeps
 	// working across rotations. ${DEFENSECLAW_GATEWAY_TOKEN:-<baked>} in
@@ -4161,6 +4269,7 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 }
 
 func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	dir := t.TempDir()
 	if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "scoped-token", NewCodexConnector()); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
@@ -4177,6 +4286,7 @@ func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
 }
 
 func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	for _, tc := range []struct {
 		name   string
 		mutate func(string) error
@@ -4442,6 +4552,7 @@ func TestWriteSandboxPolicy(t *testing.T) {
 }
 
 func TestTeardownSubprocessEnforcement(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	dir := t.TempDir()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
 
@@ -4945,11 +5056,7 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
 	}
-	if info, err := os.Stat(settingsPath); err != nil {
-		t.Fatalf("stat settings.json: %v", err)
-	} else if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("settings.json mode = %#o, want 0600 because OTel headers include the gateway token", mode)
-	}
+	testenv.AssertPrivateFile(t, settingsPath)
 }
 
 func TestClaudeCode_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
@@ -5211,6 +5318,7 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
+	requireZeptoClawHost(t)
 	dir := t.TempDir()
 
 	configDir := filepath.Join(dir, "zeptoclaw-config")
@@ -5285,6 +5393,7 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_PreservesExistingHooks(t *testing.T) {
+	requireZeptoClawHost(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
 	// ZeptoClaw's real hooks schema: before_tool/after_tool are arrays.
@@ -5386,6 +5495,7 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
+	requireZeptoClawHost(t)
 	// Regression test: before the fix, Setup wrote config["hooks"] as
 	// {before_tool: <string path>, ...}, which ZeptoClaw rejected with
 	// "expected a sequence" because its HooksConfig defines before_tool as
@@ -5488,19 +5598,10 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailOpenOnUnreachable_Default asserts the post-PR
-// behavior: when the gateway is unreachable (transport failure), the
-// hook ALWAYS allows the agent to proceed by default — regardless of
-// FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
-// Operators who want strict availability must opt in explicitly via
-// DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
-//
-// NOTE on fail_mode in the failure log: this is metadata recording
-// the configured response-layer fail mode at write time, not the
-// transport-layer behavior under test. Post-, the safer default
-// for response-layer failures is "closed", so the metadata reflects
-// that. The transport-layer fail-open behavior remains unchanged.
-func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
+// TestHookScript_FailClosedOnUnreachable_Default asserts that the secure
+// low-level default applies consistently to transport and response failures.
+// Existing observe-only installs explicitly resolve "open" before setup.
+func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5523,8 +5624,10 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("hook error = %v, want fail-closed exit 2", err)
 	}
 
 	// Even though the hook allowed, a structured failure record must
@@ -5541,10 +5644,6 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		// The response-layer default is "closed", so the failure log
-		// metadata reflects that. The functional invariant under test
-		// (hook exits 0 / allows agent on transport failure) is
-		// unchanged — that is the `category=transport` dimension above.
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
@@ -5597,10 +5696,8 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 // TestHookScript_FailClosedOnUnreachable_StrictAvailability covers
 // the operator opt-in for strict availability: when
 // DEFENSECLAW_STRICT_AVAILABILITY=1 is set, the hook MUST exit 2 on
-// transport failures even though the response-layer FAIL_MODE
-// default is "open". This is the escape hatch for sites that prefer
-// to take the agent down rather than miss policy enforcement during
-// a gateway outage.
+// transport failures independently of the configured fail mode. This is the
+// force-closed escape hatch for sites that require strict availability.
 //
 // Also pins the operator-facing stderr contract: the verb the hook
 // prints MUST match what it actually does on exit. The pre-fix code
@@ -5724,12 +5821,8 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 }
 
 // TestHookScript_FailOpen_Override covers the legacy operator
-// override: DEFENSECLAW_FAIL_MODE=open forces the response-layer
-// handler to allow even if the baked-in template default was
-// "closed". Transport failures are NOT routed through this — they
-// have their own DEFENSECLAW_STRICT_AVAILABILITY toggle — but
-// response-layer failures (which won't fire here against an
-// unreachable gateway) would respect this override.
+// override: DEFENSECLAW_FAIL_MODE=open allows both response and transport
+// failures even if the baked-in template default was "closed".
 func TestHookScript_FailOpen_Override(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5756,7 +5849,7 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 //
 // Contract:
 //   - Explicit "closed" stays closed when the connector supports it.
-//   - Empty / invalid HookFailMode normalizes to "open".
+//   - Empty / invalid HookFailMode normalizes to the secure "closed" default.
 func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5891,6 +5984,19 @@ func TestManagedEnterpriseHookIgnoresUserControlledHomeAndDisableSentinel(t *tes
 	if !strings.Contains(rendered, "DEFENSECLAW_MANAGED_HOOK=1") {
 		t.Fatal("managed hook does not force fail-closed transport and missing-token behavior")
 	}
+	sharedBody, err := os.ReadFile(filepath.Join(dir, "inspect-request.sh"))
+	if err != nil {
+		t.Fatalf("read managed shared hook: %v", err)
+	}
+	shared := string(sharedBody)
+	if strings.Contains(shared, `DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"`) ||
+		strings.Contains(shared, `[ -f "${DEFENSECLAW_HOME}/.disabled" ]`) {
+		t.Fatal("managed shared hook retained a user-controlled home or disable sentinel")
+	}
+	if !strings.Contains(shared, `DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"`) ||
+		!strings.Contains(shared, "DEFENSECLAW_MANAGED_HOOK=1") {
+		t.Fatal("managed shared hook did not retain enterprise hardening")
+	}
 }
 
 func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
@@ -5924,7 +6030,44 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	}
 }
 
-func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
+func TestManagedEnterpriseSharedHookIgnoresFailModeEnvOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{
+		DataDir:            dir,
+		APIAddr:            strings.TrimPrefix(srv.URL, "http://"),
+		HookFailMode:       "closed",
+		HookAPIToken:       "managed-scoped-fixture",
+		HookAPITokenScoped: true,
+		ManagedEnterprise:  true,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewZeptoClawConnector()); err != nil {
+		t.Fatalf("write managed shared hooks: %v", err)
+	}
+
+	cmd := exec.Command("bash", filepath.Join(hookDir, "inspect-request.sh"))
+	cmd.Stdin = strings.NewReader(`{"content":"hello"}`)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"DEFENSECLAW_FAIL_MODE=open",
+	}
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("managed shared hook error = %v, want fail-closed exit 2", err)
+	}
+}
+
+func TestCodexHookScript_FailClosed_DefaultWithoutResolvedObserveMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5944,8 +6087,10 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("observability Codex hook should fail-open by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("Codex hook error = %v, want fail-closed exit 2", err)
 	}
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
 	if err != nil {
@@ -5961,10 +6106,6 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		// Response-layer default is "closed" — transport-layer
-		// fail-open behavior under test here is unchanged (the hook
-		// still exits 0 and the agent still proceeds when the gateway
-		// is unreachable).
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
@@ -6305,6 +6446,7 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_EmptyProviders_Fails(t *testing.T) {
+	requireZeptoClawHost(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
 	os.WriteFile(configPath, []byte(`{}`), 0o644)
@@ -6564,6 +6706,16 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		out = append(out, vendor)
 		return out
 	}
+	withVendors := func(vendors ...string) []string {
+		out := make([]string, 0, len(generic)+len(vendors))
+		out = append(out, generic...)
+		out = append(out, vendors...)
+		return out
+	}
+	cursorScripts := withVendor("cursor-hook.sh")
+	if runtime.GOOS == "windows" {
+		cursorScripts = withVendors("cursor-hook.sh", "cursor-hook.ps1")
+	}
 
 	cases := []struct {
 		ctor func() Connector
@@ -6575,7 +6727,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
 		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
-		{func() Connector { return NewCursorConnector() }, "cursor", withVendor("cursor-hook.sh")},
+		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
 		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
 		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
@@ -6867,6 +7019,10 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - openclaw   owns no vendor template (fetch-interceptor plugin)
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
+	cursorScripts := []string{"cursor-hook.sh"}
+	if runtime.GOOS == "windows" {
+		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
+	}
 	cases := []struct {
 		name string
 		ctor func() Connector
@@ -6875,7 +7031,7 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
-		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, cursorScripts},
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
@@ -7004,6 +7160,7 @@ func TestWriteHookScriptsForConnectorObject_HonoursInterface(t *testing.T) {
 // ${DEFENSECLAW_HOME}/hook-tmp.<PID>) on a long-running host
 // accumulates orphans forever.
 func TestHardening_SweepStaleHookDirs(t *testing.T) {
+	requirePOSIXHookScripts(t)
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
@@ -7301,7 +7458,7 @@ func TestZeptoClawConfigPath_ZEPTOCLAW_HOME(t *testing.T) {
 
 	t.Run("falls back to HOME/.zeptoclaw when ZEPTOCLAW_HOME unset", func(t *testing.T) {
 		t.Setenv("ZEPTOCLAW_HOME", "")
-		t.Setenv("HOME", "/home/testuser")
+		testenv.SetHome(t, "/home/testuser")
 		got := zeptoClawConfigPath()
 		want := filepath.Join("/home/testuser", ".zeptoclaw", "config.json")
 		if got != want {
@@ -7331,7 +7488,7 @@ func TestZeptoClawHomeDir(t *testing.T) {
 
 	t.Run("falls back to HOME/.zeptoclaw", func(t *testing.T) {
 		t.Setenv("ZEPTOCLAW_HOME", "")
-		t.Setenv("HOME", "/home/testuser")
+		testenv.SetHome(t, "/home/testuser")
 		got := zeptoClawHomeDir()
 		want := filepath.Join("/home/testuser", ".zeptoclaw")
 		if got != want {

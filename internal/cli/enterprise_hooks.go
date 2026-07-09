@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +52,12 @@ var (
 	enterpriseHookJSON          bool
 	enterpriseHookWatchInterval time.Duration
 	enterpriseHookWatchDebounce time.Duration
+
+	enterpriseHooksRuntimeGOOS          = func() string { return runtime.GOOS }
+	enterpriseHooksRootPersistentPreRun = rootPersistentPreRunE
+	enterpriseHooksInstallRunE          = runEnterpriseHooksInstall
+	enterpriseHooksReconcileRunE        = runEnterpriseHooksReconcile
+	enterpriseHooksWatchRunE            = runEnterpriseHooksWatch
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
@@ -69,6 +76,15 @@ standard users.`,
 var enterpriseHooksCmd = &cobra.Command{
 	Use:   "hooks",
 	Short: "Install and repair per-user hook connectors",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if enterpriseHooksRuntimeGOOS() == "windows" {
+			return fmt.Errorf("enterprise hooks are unsupported on native Windows")
+		}
+		// Cobra runs only the nearest persistent pre-run hook. Chain the root
+		// initializer explicitly so supported hosts retain config, audit, and
+		// authorization initialization before any enterprise hook operation.
+		return enterpriseHooksRootPersistentPreRun(cmd, args)
+	},
 }
 
 var enterpriseHooksInstallCmd = &cobra.Command{
@@ -82,7 +98,9 @@ Instead, run this command as an administrator for each protected user, or from
 a systemd timer/MDM guardian. First-time installs require the agent's native
 hook config file to already exist, so broad process discovery cannot create a
 new app profile from scratch.`,
-	RunE: runEnterpriseHooksInstall,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksInstallRunE(cmd, args)
+	},
 }
 
 var enterpriseHooksReconcileCmd = &cobra.Command{
@@ -94,7 +112,9 @@ The manifest is the enterprise guardian's allow-list. It prevents a privileged
 repair job from scanning every home directory or writing into service accounts
 by accident. Each enabled target is installed or repaired independently; the
 command reports every result and exits non-zero when any target fails.`,
-	RunE: runEnterpriseHooksReconcile,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksReconcileRunE(cmd, args)
+	},
 }
 
 var enterpriseHooksWatchCmd = &cobra.Command{
@@ -106,7 +126,9 @@ tamper events through the hardened enterprise hook installer.
 This command is intended for a root-owned system service. It watches only
 directories derived from the administrator-owned manifest and keeps the
 periodic reconcile interval as a backstop for missed filesystem events.`,
-	RunE: runEnterpriseHooksWatch,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksWatchRunE(cmd, args)
+	},
 }
 
 func init() {

@@ -29,12 +29,10 @@ func otlpOpenNoFollow() int {
 	return 0
 }
 
-// otlpValidatePerm is a no-op on Windows. Go synthesizes FileMode permission
-// bits from the read-only attribute (a writable file reports 0666, never
-// 0600), so the Unix 0600 check would reject every legitimately created token.
-// Access control on Windows is governed by ACLs, not POSIX mode bits.
-func otlpValidatePerm(_ string, _ os.FileInfo) error {
-	return nil
+// otlpValidatePerm enforces the native Windows owner/DACL and reparse-point
+// contract instead of interpreting synthesized POSIX mode bits.
+func otlpValidatePerm(path string, _ os.FileInfo) error {
+	return hookAPIValidateWindowsPathElement(path, false, false)
 }
 
 // otlpValidateOwner is a no-op on Windows. File ownership uses ACLs and

@@ -14,61 +14,86 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build darwin || linux
-
 package notify
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
 
-func TestSendDoesNotPanic(t *testing.T) {
-	// Send may or may not succeed depending on OS capabilities,
-	// but it must never panic.
-	err := Send("Test", "test message")
-	_ = err // OK to fail (e.g. no display server in CI)
-}
-
-func TestSendNotificationDoesNotPanic(t *testing.T) {
-	err := SendNotification(Notification{
-		Title:    "Test",
-		Subtitle: "subtitle",
-		Body:     "body",
-	})
-	_ = err // OK to fail in CI without a display server
-}
-
-func TestFallbackWriter(t *testing.T) {
-	var buf bytes.Buffer
-	old := fallbackWriter
-	fallbackWriter = &buf
-	defer func() { fallbackWriter = old }()
-
-	err := Send("", "")
-	if err != nil && !strings.Contains(buf.String(), "[defenseclaw]") {
-		t.Fatalf("expected fallback line when send fails, got buf=%q err=%v", buf.String(), err)
+func TestDesktopCapabilityForGOOS(t *testing.T) {
+	tests := []struct {
+		goos      string
+		supported bool
+		provider  string
+	}{
+		{goos: "darwin", supported: true, provider: "osascript"},
+		{goos: "linux", supported: true, provider: "notify-send"},
+		{goos: "windows", supported: false},
+		{goos: "plan9", supported: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.goos, func(t *testing.T) {
+			got := DesktopCapabilityForGOOS(tc.goos)
+			if got.Supported != tc.supported || got.Provider != tc.provider {
+				t.Fatalf("DesktopCapabilityForGOOS(%q) = %#v", tc.goos, got)
+			}
+			if !got.Supported && got.UnsupportedReason == "" {
+				t.Fatal("unsupported capability must explain why")
+			}
+		})
 	}
 }
 
-func TestFallbackIncludesSubtitle(t *testing.T) {
+func TestUnsupportedPlatformSkipsNativeSenderAndLabelsTerminalFallback(t *testing.T) {
 	var buf bytes.Buffer
 	old := fallbackWriter
 	fallbackWriter = &buf
 	defer func() { fallbackWriter = old }()
 
-	err := SendNotification(Notification{
+	called := false
+	err := sendNotification(
+		Notification{Title: "DefenseClaw", Subtitle: "guardrail · HIGH", Body: "阻止 <redacted>"},
+		DesktopCapabilityForGOOS("windows"),
+		func(Notification) error {
+			called = true
+			return nil
+		},
+	)
+	if !errors.Is(err, ErrDesktopUnsupported) {
+		t.Fatalf("error = %v, want ErrDesktopUnsupported", err)
+	}
+	if called {
+		t.Fatal("unsupported Windows capability invoked native sender")
+	}
+	got := buf.String()
+	for _, want := range []string{"[defenseclaw terminal fallback]", "guardrail · HIGH", "阻止 <redacted>"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("fallback %q does not contain %q", got, want)
+		}
+	}
+}
+
+func TestSupportedPlatformFailureLabelsTerminalFallback(t *testing.T) {
+	var buf bytes.Buffer
+	old := fallbackWriter
+	fallbackWriter = &buf
+	defer func() { fallbackWriter = old }()
+
+	err := sendNotification(Notification{
 		Title:    "DefenseClaw",
 		Subtitle: "guardrail · HIGH",
 		Body:     "blocked tool call",
+	}, DesktopCapabilityForGOOS("linux"), func(Notification) error {
+		return errors.New("display server missing")
 	})
 	if err == nil {
-		// Send succeeded (e.g. display server present); nothing more
-		// to assert — the platform path took ownership of delivery.
-		return
+		t.Fatal("expected sender failure")
 	}
-	if !strings.Contains(buf.String(), "guardrail · HIGH") {
-		t.Fatalf("expected subtitle in fallback line, got %q", buf.String())
+	if got := buf.String(); !strings.Contains(got, "[defenseclaw terminal fallback]") ||
+		!strings.Contains(got, "guardrail · HIGH") {
+		t.Fatalf("expected labelled fallback with subtitle, got %q", got)
 	}
 }

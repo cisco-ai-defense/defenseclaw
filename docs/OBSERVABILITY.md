@@ -926,16 +926,19 @@ defenseclaw setup local-observability down     # stop (volumes preserved)
 defenseclaw setup local-observability reset    # stop + wipe data volumes
 ```
 
-Manual compose access (no CLI side-effects on `config.yaml`) still
-works for CI / scripted environments:
+Use the existing CLI with `--no-config` for CI / scripted environments that
+must not modify `config.yaml`:
 
-```bash
-cd bundles/local_observability_stack
-./bin/openclaw-observability-bridge up         # or ./run.sh up (compat shim)
-eval "$(./bin/openclaw-observability-bridge env)"
-go run ./cmd/defenseclaw
-./bin/openclaw-observability-bridge down
+```powershell
+defenseclaw setup local-observability up --no-config
+defenseclaw setup local-observability env --json
+defenseclaw setup local-observability down
 ```
+
+The controller is shared by native Windows, macOS, and Linux. The certified
+Windows configuration is x64 Docker Desktop running Linux containers through
+Hyper-V on Windows Pro, Enterprise, or Education; WSL-only/per-user Docker
+Desktop installations are outside the no-WSL certification.
 
 The provisioned dashboards pull straight from the live Prometheus
 metric names the sidecar already emits: `defenseclaw_gateway_verdicts`,
