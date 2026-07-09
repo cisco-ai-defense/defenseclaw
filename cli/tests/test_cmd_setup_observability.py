@@ -191,7 +191,7 @@ class TestObservabilityWizard(unittest.TestCase):
     def test_empty_judge_selection_skips_judge_model_prompt(self):
         app, gc = _make_app("codex")
 
-        with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False]), \
+        with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False, True]), \
              patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
              patch(
                  "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",

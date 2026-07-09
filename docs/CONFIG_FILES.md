@@ -547,13 +547,15 @@ all local regex contributions; `hybrid` adds managed rules after local rules.
 All modes retain local judges, suppressions, sensitive tools, HILT, connector
 topology, and failure settings.
 
-`api_key_env` names a bucket-scoped, database-managed Agent Control member key,
+`api_key_env` names the single active key for a bucket-scoped, database-managed
+Agent Control member,
 not the unscoped bootstrap administrator key. Store it with
 `defenseclaw keys set AGENT_CONTROL_API_KEY`; the default interactive form uses
 a hidden prompt and does not put the value in the command line. The same member
-key authenticates the SDK and read-only Agent Control UI. Its grants limit the
+key authenticates the SDK and read-only Agent Control UI. User-level grants limit the
 rule buckets returned to DefenseClaw and the member-owned execution history
-visible in Monitor; it cannot mutate controls.
+visible in Monitor; it cannot mutate controls. Rotating the credential keeps
+those grants and the user's history intact.
 
 `stricter` keeps whichever local/remote threshold activates earlier and the
 stricter Cisco trust level. `remote` uses the remote threshold/trust values
@@ -562,26 +564,29 @@ strategy, and the local policy baseline remain local in both modes.
 
 `observability.enabled` asynchronously reports final block decisions caused by
 Agent Control-managed rule IDs through the SDK's control-event sink. The
-synchronizer tails the protected
-`<data_dir>/agent-control/gateway-events-unredacted.jsonl` spool. It sends
-control identity, decision, correlation, rule IDs, severity, direction,
-latency, exact blocked prompt, raw request body, and enforcement reason by
-default. Content fields are capped at 64 KiB. Disable observability to keep
-Agent Control policy distribution one-way. The setting does not affect local
-enforcement.
+synchronizer sends control identity, decision, correlation, rule IDs, severity,
+direction, and latency. With `include_content: true`, content follows the global
+privacy setting: the standard redacted gateway stream is used while
+`privacy.disable_redaction: false`; exact blocked prompts, raw request bodies,
+and enforcement reasons come from the protected
+`<data_dir>/agent-control/gateway-events-unredacted.jsonl` spool only while
+`privacy.disable_redaction: true`. Content fields are capped at 64 KiB. Disable
+observability to keep Agent Control policy distribution one-way. The setting
+does not affect local enforcement.
 
 Set `observability.include_content: false` to export decision/correlation
 metadata only. In that mode the synchronizer tails the standard
-`<data_dir>/gateway.jsonl`, whose content follows the global redaction setting.
-The Agent Control raw spool is a scoped exception;
-all other sinks keep the normal global behavior: redacted when
-`privacy.disable_redaction: false`, unredacted when it is `true`. Confirm
+`<data_dir>/gateway.jsonl` and omits content regardless of its redaction state.
+When `observability.include_content: true`, Agent Control follows the same
+global behavior as other sinks: content is redacted when
+`privacy.disable_redaction: false` and exact when it is `true`. Confirm
 self-hosted or Cisco Cloud Control authorization, data residency, access,
 retention, and deletion requirements before enabling production traffic.
-Changes to `agent_control.enabled`, `observability.enabled`, or
-`observability.include_content` require restarting both the gateway and the
-synchronizer because the private writer and selected source are process-scoped.
-Exact-content mode also requires both processes to run under the same OS
+Changes to `agent_control.enabled`, `observability.enabled`,
+`observability.include_content`, or `privacy.disable_redaction` require
+restarting both the gateway and the synchronizer because the selected event
+source is process-scoped. Exact-content
+mode also requires both processes to run under the same OS
 identity so the synchronizer can read the intentionally private `0700`/`0600`
 spool. The packaged systemd services use `defenseclaw` for both; the Cisco
 Secure Client launchd jobs both use the default root identity.

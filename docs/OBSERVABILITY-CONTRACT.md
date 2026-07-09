@@ -161,41 +161,46 @@ Agent Control lifecycle actions: `agent-control-sync`, `agent-control-publish`, 
 ### Agent Control enforcement visibility
 
 When `agent_control.observability.enabled` is true, the separate Python watcher
-tails new records from the private Agent Control event spool and maps only `verdict.stage=final` plus
+tails new records from the source selected by DefenseClaw's global privacy
+setting and maps only `verdict.stage=final` plus
 `verdict.action=block` records whose `rule_ids` belong to an effective
 `defenseclaw.rule_pack` control. The free-form verdict reason is never parsed
 to derive rule identity. Each matching control produces an Agent Control
 `ControlExecutionEvent` with `action=deny`, a deterministic execution ID, the
 control ID/name, trace correlation, rule IDs, severity, direction, and latency.
-The event includes exact blocked prompt, raw request body, and the
-operator-facing verdict reason by default. Each content field is bounded to
-64 KiB. The cursor is persisted in
+With `include_content: true`, the event contains redacted fields while global
+redaction is on and exact blocked prompt, raw request body, and operator-facing
+reason only while global redaction is explicitly off. With `include_content:
+false`, those content fields are omitted. Each content field is bounded to 64
+KiB. The cursor is persisted in
 `<data_dir>/agent-control/state.json`; first start begins at end-of-file, and
 stable execution IDs make crash/retry replays idempotent at the Agent Control
 store.
 
-The gateway writes raw events only to
+Only the global-unredacted/content-enabled branch writes raw events to
 `<data_dir>/agent-control/gateway-events-unredacted.jsonl`, beneath a `0700`
 directory and a `0600` file, with bounded rotation and seven-day retention.
 No audit, OTLP, webhook, Splunk, stderr, or normal gateway JSONL fanout is
-attached to this writer. Those sinks continue to follow the standard global
-contract: `privacy.disable_redaction: false` redacts them and `true` leaves
-them unredacted.
+attached to this private writer. Every sink follows the standard global
+contract: `privacy.disable_redaction: false` redacts content and `true` leaves
+it unredacted.
 
-The Agent Control private lane is intentionally unredacted whenever
-`agent_control.observability.include_content` is true; the global redaction
-switch continues to govern all standard sinks. A database-managed member API
-key may ingest and view executions only for its granted rule buckets, and
+The Agent Control lane follows the same global redaction switch as every other
+sink. With `include_content: true`, exact content is sent only when
+`privacy.disable_redaction: true`; otherwise content is redacted. A
+database-managed member API key may ingest and view executions only for its
+user's granted rule buckets, and
 Monitor further filters exact-content history by the member that ingested it.
 Sharing a bucket grant does not expose one member's blocked prompts to another.
+Credential rotation preserves both the user-level grants and Monitor history.
 The environment-provisioned bootstrap administrator key is unscoped; it is for
 administration and must not be installed on DefenseClaw endpoints.
 
 Set `agent_control.observability.include_content: false` to use the standard
 `<data_dir>/gateway.jsonl` source (which follows global redaction) and omit
-content/reason fields from the SDK event. Agent Control Monitor labels content-bearing events
-`UNREDACTED` and opens the latest span with trace, span, request, rule, input,
-reason, and raw-body details.
+content/reason fields from the SDK event. Agent Control Monitor labels events
+`Exact content`, `Redacted by DefenseClaw`, or `Metadata only` and opens the
+latest span with the details allowed by that privacy state.
 
 This export is asynchronous and outside the enforcement path. SDK, network, or
 event-log failures never change a DefenseClaw decision. `defenseclaw

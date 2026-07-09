@@ -32,9 +32,10 @@ The integration consumes the target-effective control snapshot cached by the
 Agent Control SDK, translates matching configurations, publishes deterministic
 local artifacts, and requests local activation. Its asynchronous visibility
 path reports final blocks for Agent Control-managed rule IDs through the SDK
-control-event sink. Exact blocked input, raw request body, and enforcement
-reason are included by default so Agent Control Monitor can display the
-complete denied span; endpoints can opt out to metadata-only delivery.
+control-event sink. Content follows DefenseClaw's global privacy setting: exact
+blocked input, raw request body, and enforcement reason are included only when
+content export is enabled and global redaction is explicitly disabled;
+otherwise Monitor receives redacted content or metadata only.
 
 The security boundary is:
 
@@ -809,7 +810,7 @@ agent_control:
 
   observability:
     enabled: true          # async final managed blocks
-    include_content: true  # exact blocked content; false is metadata-only
+    include_content: true  # content follows global redaction; false is metadata-only
 ```
 
 Validation rejects:
@@ -827,9 +828,9 @@ Validation rejects:
 - managed paths outside the DefenseClaw data root in managed mode;
 - credential values under the `agent_control` block.
 
-Changes to the integration enablement or observability content mode are
-gateway-and-synchronizer-restart-required because the protected raw writer and
-selected source are process-scoped.
+Changes to the integration enablement, observability content mode, or
+`privacy.disable_redaction` are gateway-and-synchronizer-restart-required
+because the protected raw writer and selected source are process-scoped.
 
 ### 11.2 CLI surface
 
@@ -944,10 +945,11 @@ settings, and failure behavior remain local in both modes.
 
 ### 14.3 Least privilege and privacy
 
-- Use database-managed member credentials scoped to the endpoint's assigned
-  rule buckets. The same key authenticates the SDK and read-only UI.
-- Reserve the unscoped environment bootstrap administrator key for user, key,
-  grant, and control administration; never deploy it to an endpoint.
+- Use database-managed member credentials scoped by user-owned rule-bucket
+  assignments. Each user has one active key for both the SDK and read-only UI;
+  rotation preserves assignments and history.
+- Reserve the unscoped environment bootstrap administrator key for user,
+  credential, user-grant, and control administration; never deploy it to an endpoint.
 - Filter member Monitor history by both granted controls and the member that
   ingested the event, so a shared bucket grant does not expose exact prompts
   across members.
@@ -955,16 +957,15 @@ settings, and failure behavior remain local in both modes.
 - Hash the installation/target ID in persisted status and telemetry.
 - Redact authorization headers, API keys, raw target IDs, full policies, and
   regex content from exceptions and logs.
-- Send control identity, deny decision, correlation IDs, matching rule IDs,
-  severity, direction, latency, exact unredacted blocked input, raw request
-  body, and enforcement reason to the Agent Control event sink by default.
-- Keep the raw source local-only at
+- Always send control identity, deny decision, correlation IDs, matching rule
+  IDs, severity, direction, and latency. Send exact blocked input, raw request
+  body, and enforcement reason only when `include_content=true` and
+  `privacy.disable_redaction=true`; otherwise send redacted or no content.
+- In exact mode, keep the raw source local-only at
   `<data_dir>/agent-control/gateway-events-unredacted.jsonl`, with `0700`
   parent permissions, `0600` file permissions, size rotation, and seven-day
   retention. Do not attach any ordinary sink fanout to this writer.
-- Treat the Agent Control content lane as a deliberate scoped exception to the
-  global redaction switch whenever `include_content=true`.
-- Let every other sink keep standard global behavior: redacted while
+- Apply standard global behavior to Agent Control and every other sink: redacted while
   `privacy.disable_redaction=false`, unredacted when an operator sets it true.
 - Support `agent_control.observability.include_content=false` as the explicit
   metadata-only opt-out, using the standard gateway JSONL source and its global
@@ -1031,10 +1032,12 @@ or unmapped records. SDK rejection leaves the cursor before the source record
 for retry. All visibility failures are fail-open with respect to local
 enforcement.
 
-Default exact-content delivery keeps a bounded in-memory map of recent `llm_prompt`
-records keyed by request ID. On the matching final managed block it adds the
-unredacted prompt, raw request body, and enforcement reason to event metadata,
-with each string capped at 64 KiB and a truncation marker. The Agent Control
+When content export is enabled and global redaction is off, exact-content
+delivery keeps a bounded in-memory map of recent `llm_prompt` records keyed by
+request ID. On the matching final managed block it adds the unredacted prompt,
+raw request body, and enforcement reason to event metadata, with each string
+capped at 64 KiB and a truncation marker. Otherwise the watcher uses redacted
+content or metadata only. The Agent Control
 Monitor recent-executions panel
 opens the newest event and renders trace, span, request, rule, decision,
 duration, content, reason, and raw body. React text escaping remains mandatory;
@@ -1128,7 +1131,7 @@ dependency order, not separately exposed product phases.
 ### 17.5 Enforcement visibility and scoped access
 
 - Correlate final native block verdicts to effective Agent Control rule
-  controls and include exact unredacted blocked content by default.
+  controls and apply the global privacy setting to exported content.
 - Emit deterministic SDK control events outside the request path, stamped with
   authenticated member provenance on ingest.
 - Enforce bucket grants and read-only control access for database-managed
@@ -1190,8 +1193,8 @@ Cover:
 - Every regex source preserving suppressions, judge prompts, sensitive tools,
   HILT, and connector configuration.
 - Final managed block becoming an idempotent Agent Control `deny` event with
-  exact unredacted blocked input, raw request body, and verdict reason by
-  default, plus a metadata-only opt-out.
+  exact blocked input/body/reason only when content export is enabled and
+  global redaction is off, plus redacted and metadata-only coverage.
 - Two members granted the same control seeing only their own execution content;
   member keys being unable to mutate controls; bootstrap admin access remaining
   unscoped.
@@ -1202,8 +1205,9 @@ Cover:
 ### 18.4 End-to-end scenario
 
 1. Start Agent Control and DefenseClaw locally.
-2. Authenticate with the bootstrap administrator key, create a member and key,
-   and assign the intended DefenseClaw buckets to that key.
+2. Authenticate with the bootstrap administrator key, create a member (which
+   atomically issues its first key), and assign the intended DefenseClaw
+   buckets to that user.
 3. Use that member key for the `defenseclaw-policy-sync` SDK session and bind a
    valid control to a stable installation target.
 4. Start the synchronizer and verify the cached control is projected.
@@ -1213,8 +1217,9 @@ Cover:
 8. Disable/unbind the control and verify local policy is restored.
 9. Supply an invalid candidate and verify LKG remains active.
 10. Log in with the same member key and verify Monitor shows the enabled
-    bucket's `deny` event with exact content and DefenseClaw request/trace
-    correlation while the Controls surface remains read-only.
+    bucket's `deny` event with DefenseClaw request/trace correlation and the
+    content permitted by the global redaction setting while Controls remains
+    read-only.
 11. Use a second member with the same bucket grant and verify it cannot see the
     first member's execution content.
 12. Stop Agent Control and verify DefenseClaw enforcement continues while the

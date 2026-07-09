@@ -1054,7 +1054,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
         dotenv_path = os.path.join(self.tmp_dir, ".env")
         original_dotenv = Path(dotenv_path).read_bytes()
-        env_name = "DEFENSECLAW_CANCELLED_AGENT_CONTROL_KEY"
+        env_name = "TEST_CANCELLED_AGENT_CONTROL_KEY"
         original_env = os.environ.pop(env_name, None)
         user_input = "\n".join(
             [

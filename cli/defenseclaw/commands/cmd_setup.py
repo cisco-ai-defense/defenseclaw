@@ -3546,7 +3546,9 @@ def _remove_agent_control_overlay(app: AppContext) -> None:
 
 def _select_local_regex_source(app: AppContext, gc) -> None:
     gc.regex_source = "local"
-    settings = app.cfg.agent_control
+    settings = getattr(app.cfg, "agent_control", None)
+    if settings is None:
+        return
     settings.enabled = False
     settings.rule_pack.enabled = False
     _remove_agent_control_overlay(app)
@@ -3604,7 +3606,8 @@ def _prompt_regex_policy_source(
     click.echo("        " + ux.dim("The last-known-good managed policy remains active if connectivity fails."))
     click.echo("    " + ux.bold("[3] Hybrid"))
     click.echo("        " + ux.dim("Keep local regex rules and add Agent Control rules."))
-    current = gc.regex_source if gc.regex_source in _REGEX_SOURCE_LABELS else "local"
+    configured_source = getattr(gc, "regex_source", "local")
+    current = configured_source if configured_source in _REGEX_SOURCE_LABELS else "local"
     default = {"local": "1", "agent_control": "2", "hybrid": "3"}[current]
     choice = click.prompt("  Select policy source", type=click.Choice(["1", "2", "3"]), default=default)
     source = {"1": "local", "2": "agent_control", "3": "hybrid"}[choice]

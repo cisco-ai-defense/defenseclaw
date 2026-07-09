@@ -94,29 +94,32 @@ Start with the official [Agent Control quickstart](https://docs.agentcontrol.dev
 
 Bootstrap Agent Control with an environment-provisioned administrator key,
 then use **Access management** in the Agent Control UI to create a DefenseClaw
-member user and API key. Assign only the DefenseClaw rule buckets and optional
-OPA control that key may receive. The generated secret is shown once.
+member user. Creating the user atomically issues its first API key; assign only
+the DefenseClaw rule buckets and optional OPA control that user may receive.
+The generated secret is shown once and is the same credential used by the UI
+and DefenseClaw SDK.
 
 The two credential classes are intentionally different:
 
 | Credential | Scope and capabilities |
 | --- | --- |
-| Bootstrap administrator key | Unscoped break-glass/bootstrap access. Creates users and keys, assigns bucket grants, and edits controls. Do not deploy it to DefenseClaw. |
-| Database-managed member key | Limited to its assigned rule buckets. The same key authenticates the DefenseClaw SDK and the Agent Control UI. It can read its effective controls and its own execution history, but cannot create, edit, delete, enable, or disable rules. |
+| Bootstrap administrator key | Unscoped break-glass/bootstrap access. Creates users, rotates or revokes their keys, assigns user-level bucket grants, and edits controls. Do not deploy it to DefenseClaw. |
+| Database-managed member key | One active key per user, limited to that user's assigned rule buckets. The same key authenticates the DefenseClaw SDK and Agent Control UI. It can read effective controls and user-owned execution history, but cannot create, edit, delete, enable, or disable rules. |
 
 Execution history is member-owned as well as bucket-filtered. Two members with
 a grant to the same bucket do not gain access to each other's exact blocked
 content.
 
-![Agent Control administrator view for creating users and API keys](/images/agent-control/access-management-scoped-keys.png)
+![Agent Control administrator view for creating a user and its first API key](/images/agent-control/access-management-scoped-keys.png)
 
-Each credential is assigned independently. This local integration run grants
-the imported DefenseClaw buckets to both the UI/demo key and the separate
-runtime key without exposing either secret after its one-time display:
+Rule assignments and Monitor history belong to the user, not the credential.
+Rotating the user's key immediately revokes the old secret while preserving
+both. The UI offers **Issue**, **Rotate**, and **Revoke** and never offers
+"create another key":
 
-![Agent Control access management showing bucket-scoped DefenseClaw API keys](/images/agent-control/access-management-bucket-grants.png)
+![Agent Control access management showing user-owned DefenseClaw bucket assignments](/images/agent-control/access-management-bucket-grants.png)
 
-Store the runtime key through DefenseClaw's protected credential flow:
+Store the user's active key through DefenseClaw's protected credential flow:
 
 ```bash
 defenseclaw keys set AGENT_CONTROL_API_KEY
@@ -308,9 +311,9 @@ uv run python scripts/import_agent_control_buckets.py \
 ```
 
 In Agent Control, open **Access management**, create a member such as
-`defenseclaw-demo`, issue a key, and assign the imported DefenseClaw buckets to
-that key. The secret appears once. Save it through the hidden prompt, then
-select managed regex:
+`defenseclaw-demo`, copy the automatically issued key, and assign the imported
+DefenseClaw buckets to that user. The secret appears once. Save it through the
+hidden prompt, then select managed regex:
 
 ```bash
 defenseclaw keys set AGENT_CONTROL_API_KEY
