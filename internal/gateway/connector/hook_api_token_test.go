@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func assertHookAPITokenRejectedByEnsureAndLoad(t *testing.T, want string, fixture func(*testing.T) string) {
@@ -157,7 +159,7 @@ func TestLoadHookAPITokensValidatesExistingFiles(t *testing.T) {
 }
 
 func TestConnectorHookWriterPreservesScopedAPITokenFormat(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
 	token, err := EnsureHookAPIToken(dataDir, "codex")
 	if err != nil {
 		t.Fatalf("EnsureHookAPIToken: %v", err)

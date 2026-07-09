@@ -2,11 +2,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import plistlib
 import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -173,6 +175,7 @@ def test_release_archives_ship_enterprise_packaging_assets():
     assert "README*" in archive_files
 
 
+@pytest.mark.skipif(os.name == "nt", reason="launchd installer POSIX ownership and executable-bit contract")
 def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     installer = ROOT / "packaging" / "launchd" / "install-enterprise.sh"
 

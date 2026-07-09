@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 from defenseclaw.platform_support import (
-    WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
 )
 
@@ -99,6 +98,7 @@ def _transaction_functions() -> str:
             "Test-ManagedFileRenameRoundTrip",
             "New-PairedInstallBackup",
             "Restore-PairedInstallBackup",
+            "Set-ManagedPathProtection",
             "Replace-ManagedInstallFile",
             "Invoke-PairedInstallTransaction",
         )
@@ -114,10 +114,10 @@ def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     assert "& uv venv" not in text
     assert "& uv pip install" not in text
     assert 'Invoke-Uv -Arguments @("python", "install", "3.12")' in text
-    assert 'Invoke-Uv -Arguments @("venv", $TargetVenv, "--python", "3.12", "--quiet")' in text
+    assert 'Invoke-Uv -Arguments @("venv", $TargetVenv' in text
     assert (
-        '"venv", $TargetVenv, "--python", "3.12", '
-        '"--allow-existing", "--quiet")' in text
+        '"venv", $TargetVenv, "--python", "3.12", "--allow-existing", "--quiet"'
+        in text
     )
     assert 'Invoke-Uv -Arguments @("venv", $Venv, "--clear"' not in text
     assert '"pip", "install", "--python", $venvPython, "--quiet"' in text
@@ -134,6 +134,12 @@ def test_cli_smoke_precedes_launcher_publication() -> None:
     assert 'set `"PYTHONHOME=`"' in text
     assert "setlocal" in text
     assert "endlocal & exit /b %defenseclawExit%" in text
+    managed_environment = text.split("function Test-ManagedEnvironment", 1)[1].split(
+        "function Assert-ManagedDirectoryPath", 1
+    )[0]
+    assert "from defenseclaw.tui.app import DefenseClawTUI" in managed_environment
+    assert "app.run_test(size=(80, 24))" in managed_environment
+    assert managed_environment.index("uv pip check") < managed_environment.index("app.run_test")
 
 
 def test_release_staging_precedes_gateway_stop_and_mutation() -> None:
@@ -152,15 +158,33 @@ def test_release_staging_precedes_gateway_stop_and_mutation() -> None:
     assert "@(Get-Command defenseclaw -CommandType Application -ErrorAction Stop)[0]" in text
 
 
+def test_installer_protects_managed_windows_paths_and_replacements() -> None:
+    text = INSTALL_PS1.read_text()
+    main = text.split("function Main", 1)[1]
+    replacement = text.split("function Replace-ManagedInstallFile", 1)[1].split(
+        "function Test-PairedInstalledState", 1
+    )[0]
+
+    assert "function Set-ManagedPathProtection" in text
+    assert main.index("Set-ManagedPathProtection -Path $DefenseClawHome") < main.index(
+        "Invoke-PairedInstallTransaction"
+    )
+    assert main.index(
+        "Set-ManagedPathProtection -Path (Split-Path -Parent $InstallDir)"
+    ) < main.index("Invoke-PairedInstallTransaction")
+    assert main.index("Set-ManagedPathProtection -Path $InstallDir") < main.index(
+        "Invoke-PairedInstallTransaction"
+    )
+    assert "Set-ManagedPathProtection -Path $Target" in replacement
+
+
 def test_windows_installer_offers_only_native_connector_surface() -> None:
     text = INSTALL_PS1.read_text()
 
     choices_block = text.split("$ConnectorChoices = @(", 1)[1].split(")", 1)[0]
     choices = set(re.findall(r'"([a-z]+)"', choices_block))
-    assert choices == WINDOWS_SUPPORTED_CONNECTORS | WINDOWS_PREVIEW_CONNECTORS | {"none"}
-
-    assert "Hermes native hooks (preview)" in text
-    assert "Cursor IDE native hooks (CLI remains WSL-only)" in text
+    assert choices == WINDOWS_SUPPORTED_CONNECTORS | {"none"}
+    assert "Windows ARM64 is not certified" in text
     assert "function Install-OpenClaw" not in text
 
 
@@ -361,6 +385,30 @@ def test_same_version_reinstall_repairs_managed_venv_and_ignores_checkout_python
             return 0
         """
     )
+    tui_source = textwrap.dedent(
+        """
+        class _Pilot:
+            async def pause(self):
+                return None
+
+
+        class _RunTest:
+            async def __aenter__(self):
+                return _Pilot()
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+
+        class DefenseClawTUI:
+            def __init__(self, *, data_dir):
+                self.data_dir = data_dir
+
+            def run_test(self, *, size):
+                assert size == (80, 24)
+                return _RunTest()
+        """
+    )
     cli_wheel = _fixture_wheel(
         fixtures,
         "defenseclaw",
@@ -368,6 +416,8 @@ def test_same_version_reinstall_repairs_managed_venv_and_ignores_checkout_python
         {
             "defenseclaw/__init__.py": "__version__ = '1.0.0'\n",
             "defenseclaw/cli.py": cli_source,
+            "defenseclaw/tui/__init__.py": "",
+            "defenseclaw/tui/app.py": tui_source,
         },
         dependencies=("dc-certifi-fixture==1.0.0",),
         scripts={
@@ -578,6 +628,222 @@ Install-Cli
     distribution_lines = distributions.stdout.splitlines()
     assert distribution_lines[0] == "1.0.0"
     assert len(distribution_lines) == 1 or distribution_lines[1] == ""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell and uv")
+def test_existing_textual7_scanner_graph_is_repaired_before_launcher_publication(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe")
+    uv = shutil.which("uv.exe") or shutil.which("uv")
+    if not powershell or not uv:
+        pytest.skip("Windows PowerShell and uv are required")
+
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    _fixture_wheel(old, "textual", "7.5.0", {"textual/__init__.py": "__version__ = '7.5.0'\n"})
+    _fixture_wheel(new, "textual", "8.2.8", {"textual/__init__.py": "__version__ = '8.2.8'\n"})
+    _fixture_wheel(
+        old,
+        "cisco-ai-skill-scanner",
+        "2.0.11",
+        {"skill_scanner/__init__.py": "def main():\n    return 0\n"},
+        dependencies=("textual>=7,<8",),
+        scripts={"skill-scanner": "skill_scanner:main"},
+    )
+    _fixture_wheel(
+        new,
+        "cisco-ai-skill-scanner",
+        "2.0.4",
+        {"skill_scanner/__init__.py": "def main():\n    return 0\n"},
+        dependencies=("textual>=1",),
+        scripts={"skill-scanner": "skill_scanner:main"},
+    )
+
+    cli_source = textwrap.dedent(
+        """
+        import shutil
+        import sys
+        from pathlib import Path
+
+        def scanner():
+            return 0
+
+        def main():
+            if "--version" in sys.argv:
+                print("defenseclaw 1.0.0")
+                return 0
+            if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+                scripts = Path(sys.executable).resolve().parent
+                return 0 if all(shutil.which(name, path=str(scripts)) for name in ("skill-scanner", "mcp-scanner")) else 5
+            return 0
+        """
+    )
+    tui_source = textwrap.dedent(
+        """
+        class _Pilot:
+            async def pause(self):
+                return None
+        class _RunTest:
+            async def __aenter__(self):
+                return _Pilot()
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+        class DefenseClawTUI:
+            def __init__(self, *, data_dir):
+                self.data_dir = data_dir
+            def run_test(self, *, size):
+                return _RunTest()
+        """
+    )
+    package_files = {
+        "defenseclaw/__init__.py": "__version__ = '1.0.0'\n",
+        "defenseclaw/cli.py": cli_source,
+        "defenseclaw/tui/__init__.py": "",
+        "defenseclaw/tui/app.py": tui_source,
+    }
+    old_cli = _fixture_wheel(
+        old,
+        "defenseclaw",
+        "0.9.0",
+        package_files,
+        dependencies=("textual==7.5.0", "cisco-ai-skill-scanner==2.0.11"),
+        scripts={
+            "defenseclaw": "defenseclaw.cli:main",
+            "mcp-scanner": "defenseclaw.cli:scanner",
+        },
+    )
+    _fixture_wheel(
+        new,
+        "defenseclaw",
+        "1.0.0",
+        package_files,
+        dependencies=("textual>=8.2.8,<9", "cisco-ai-skill-scanner==2.0.4"),
+        scripts={
+            "defenseclaw": "defenseclaw.cli:main",
+            "mcp-scanner": "defenseclaw.cli:scanner",
+        },
+    )
+
+    profile = tmp_path / "profile"
+    managed_home = profile / ".defenseclaw"
+    venv = managed_home / ".venv"
+    scripts = venv / "Scripts"
+    install_dir = profile / ".local" / "bin"
+    managed_home.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    clean_env = os.environ.copy()
+    clean_env.pop("PYTHONPATH", None)
+    clean_env.pop("PYTHONHOME", None)
+    subprocess.run(
+        [uv, "--no-config", "venv", str(venv), "--python", "3.12"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=clean_env,
+    )
+    subprocess.run(
+        [
+            uv,
+            "--no-config",
+            "pip",
+            "install",
+            "--python",
+            str(scripts / "python.exe"),
+            "--no-index",
+            "--find-links",
+            str(old),
+            str(old_cli),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=clean_env,
+    )
+
+    functions = "".join(
+        _extract_powershell_function(name)
+        for name in (
+            "Invoke-Uv",
+            "Invoke-ManagedCommand",
+            "Test-ManagedCli",
+            "Test-ManagedEnvironment",
+            "Assert-ManagedDirectoryPath",
+            "Remove-ManagedDirectory",
+            "Install-ManagedWheel",
+            "Invoke-ManagedVenvRebuild",
+            "Publish-CliLauncher",
+            "Install-Cli",
+        )
+    )
+    command = (
+        functions
+        + rf"""
+$ErrorActionPreference = 'Stop'
+$Local = '{_ps_quote(new)}'
+$Venv = '{_ps_quote(venv)}'
+$InstallDir = '{_ps_quote(install_dir)}'
+function Write-Step {{ param([string]$Msg) }}
+function Write-Info {{ param([string]$Msg) }}
+function Write-Ok {{ param([string]$Msg) }}
+function Write-Warn2 {{ param([string]$Msg) }}
+function Die {{ param([string]$Msg) throw $Msg }}
+Install-Cli
+"""
+    )
+    install_env = clean_env.copy()
+    install_env.update(
+        {
+            "USERPROFILE": str(profile),
+            "DEFENSECLAW_HOME": str(managed_home),
+            "PYTHONPATH": str(tmp_path / "hostile-checkout"),
+            "UV_FIND_LINKS": str(new),
+            "UV_NO_INDEX": "1",
+        }
+    )
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=install_env,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    versions = subprocess.run(
+        [
+            scripts / "python.exe",
+            "-I",
+            "-c",
+            (
+                "import importlib.metadata as m; "
+                "print(m.version('defenseclaw'), m.version('textual'), "
+                "m.version('cisco-ai-skill-scanner'))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=clean_env,
+    )
+    assert versions.returncode == 0, versions.stderr
+    assert versions.stdout.strip() == "1.0.0 8.2.8 2.0.4"
+    assert (install_dir / "defenseclaw.cmd").is_file()
+    check = subprocess.run(
+        [uv, "--no-config", "pip", "check", "--python", str(scripts / "python.exe")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=clean_env,
+    )
+    assert check.returncode == 0, check.stderr
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
@@ -1050,6 +1316,7 @@ def test_existing_managed_file_is_atomically_replaced_without_residue(tmp_path: 
     command = (
         _extract_powershell_function("Test-StagedReleaseFile")
         + _extract_powershell_function("Assert-ManagedInstallFile")
+        + _extract_powershell_function("Set-ManagedPathProtection")
         + _extract_powershell_function("Replace-ManagedInstallFile")
         + rf"""
 $ErrorActionPreference = 'Stop'

@@ -1,4 +1,6 @@
 graft cli
+graft bundles/local_observability_stack
+graft bundles/splunk_local_bridge
 recursive-exclude cli __pycache__ *
 recursive-exclude cli *.py[cod]
 prune .venv

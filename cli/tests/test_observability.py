@@ -43,11 +43,13 @@ import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import defenseclaw.commands.cmd_setup_observability as observability_module
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup_observability import observability as observability_cmd
 from defenseclaw.context import AppContext
 from defenseclaw.observability import (
     PRESETS,
+    Destination,
     apply_preset,
     list_destinations,
     migrate_flat_otel,
@@ -58,6 +60,31 @@ from defenseclaw.observability import (
 )
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.presets import Preset
+from defenseclaw.tui.panels.setup import OBSERVABILITY_PRESETS
+
+
+def test_destination_header_aligns_with_unsupported_rows(capsys) -> None:
+    destination = Destination(
+        name="fixture",
+        target="otel",
+        kind="otel",
+        enabled=False,
+        preset_id="fixture-preset",
+        endpoint="https://example.invalid/otlp",
+        protocol="grpc",
+        signals={"traces": True, "metrics": False, "logs": False},
+    )
+    with (
+        patch.object(observability_module, "_destination_platform_status", return_value="unsupported"),
+        patch.object(observability_module.ux, "bold", side_effect=lambda value: value),
+    ):
+        observability_module._print_destination_header()
+        observability_module._print_destination_row(destination)
+
+    header, _separator, row = capsys.readouterr().out.splitlines()
+    assert header.index("PROTOCOL") == row.index("grpc")
+    assert header.index("SIGNALS") == row.index("traces")
+    assert header.index("PRESET") == row.index("fixture-preset")
 
 # ---------------------------------------------------------------------------
 # flat OTel migration
@@ -271,21 +298,9 @@ class PresetRegistryTests(unittest.TestCase):
                     self.assertIn(preset.sink_kind, ("splunk_hec", "otlp_logs", "http_jsonl"))
 
     def test_tui_preset_list_matches_python(self) -> None:
-        """Guardrail: TUI's observabilityPresets slice must mirror
-        ``preset_choices()`` ordering. The TUI is a separate Go codebase
-        so we grep its source rather than import it.
-        """
-        go_file = os.path.join(os.path.dirname(__file__), "..", "..", "internal", "tui", "setup.go")
-        if not os.path.exists(go_file):
-            self.skipTest(f"{go_file} not found; running outside repo")
-        with open(go_file) as f:
-            source = f.read()
-        for pid in self.EXPECTED_PRESET_IDS:
-            self.assertIn(
-                f'"{pid}"',
-                source,
-                f"preset id '{pid}' missing from internal/tui/setup.go — observabilityPresets drifted from presets.py",
-            )
+        """The current Python TUI preset menu must mirror the registry."""
+        tui_ids = tuple(preset_id for preset_id, _label in OBSERVABILITY_PRESETS)
+        self.assertEqual(tui_ids, tuple(preset_choices()))
 
 
 # ---------------------------------------------------------------------------
@@ -884,6 +899,30 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         self.assertNotIn("verify_tls", hec)
         self.assertEqual(_read_dotenv(tmp).get("DEFENSECLAW_SPLUNK_HEC_TOKEN"), "hec-token")
 
+    def test_http_jsonl_uses_destination_token_env_override(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        preset = Preset(
+            id="authenticated-webhook",
+            display_name="Authenticated webhook",
+            target="audit_sinks",
+            description="test preset",
+            sink_kind="http_jsonl",
+            token_env="DEFAULT_WEBHOOK_TOKEN",
+            prompts=(("url", "https://example.test/events", "url", ""),),
+        )
+        with patch.dict(PRESETS, {preset.id: preset}):
+            apply_preset(
+                preset.id,
+                {"url": "https://example.test/events"},
+                tmp,
+                secret_value="override-secret",
+                secret_env_name="DESTINATION_WEBHOOK_TOKEN",
+            )
+
+        sink = _read_yaml(tmp)["audit_sinks"][0]["http_jsonl"]
+        self.assertEqual(sink["bearer_env"], "DESTINATION_WEBHOOK_TOKEN")
+        self.assertEqual(_read_dotenv(tmp)["DESTINATION_WEBHOOK_TOKEN"], "override-secret")
+
     def test_set_destination_enabled_roundtrip(self) -> None:
         _, tmp = _make_tmp_ctx()
         apply_preset(
@@ -1125,24 +1164,32 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertNotIn("Disable redaction?", result.output)
 
     def test_add_splunk_hec_then_disable(self) -> None:
-        r1 = self._invoke(
-            [
-                "add",
-                "splunk-hec",
-                "--non-interactive",
-                "--host",
-                "localhost",
-                "--port",
-                "8088",
-                "--token",
-                "hec-token",
-                "--name",
-                "splunk-hec-local",
-            ]
-        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
+            return_value=True,
+        ):
+            r1 = self._invoke(
+                [
+                    "add",
+                    "splunk-hec",
+                    "--non-interactive",
+                    "--host",
+                    "localhost",
+                    "--port",
+                    "8088",
+                    "--token",
+                    "hec-token",
+                    "--name",
+                    "splunk-hec-local",
+                ]
+            )
         self.assertEqual(r1.exit_code, 0, r1.output)
 
-        r2 = self._invoke(["disable", "splunk-hec-local"])
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
+            return_value=True,
+        ):
+            r2 = self._invoke(["disable", "splunk-hec-local"])
         self.assertEqual(r2.exit_code, 0, r2.output)
 
         dests = list_destinations(self.tmp)

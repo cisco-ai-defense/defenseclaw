@@ -6,10 +6,17 @@ keywords:
   - DefenseClaw Grafana
   - DefenseClaw OTel
   - Loki Tempo Prometheus
-  - openclaw-observability-bridge
+  - native Windows Docker Desktop observability
 ---
 
 `defenseclaw setup local-observability` brings up a full local OpenTelemetry stack and wires the gateway to it in one shot. It's what the project itself uses for development, demos, and rule-pack tuning.
+
+<Callout type="info">The shared Python/Compose controller supports macOS,
+Linux, and native Windows x64. The certified Windows path runs the CLI from
+PowerShell or cmd and requires Docker Desktop Linux containers through the
+Hyper-V backend on Windows Pro, Enterprise, or Education. WSL commands are not
+used; per-user and WSL-only Docker Desktop installations are outside this
+no-WSL certification.</Callout>
 
 <Video
   src="local-observability"
@@ -28,7 +35,7 @@ The stack runs from `bundles/local_observability_stack/docker-compose.yml`:
 | `tempo` | Trace store (per-decision spans) | `3200` |
 | `grafana` | UI with seeded DefenseClaw dashboards | `3000` |
 
-All five run under one Compose project (`defenseclaw-local-observability`). They share a Docker network and the bundled Grafana datasources point at each container by service name.
+All five run under one Compose project (`defenseclaw-observability`). They share a Docker network and the bundled Grafana datasources point at each container by service name.
 
 ## Bring it up
 
@@ -36,14 +43,17 @@ All five run under one Compose project (`defenseclaw-local-observability`). They
   <Step>
     **Start the stack.**
 
-    ```bash
+    ```powershell
     defenseclaw setup local-observability up
     ```
 
-    The `openclaw-observability-bridge` binary (shipped in `bundles/local_observability_stack/bin/`) drives Compose, waits for healthchecks, and writes the OTLP endpoint into `~/.defenseclaw/config.yaml` under `otel:`.
+    The packaged Python controller invokes Docker Compose with an explicit
+    project directory, Compose file, and project name, then verifies OTLP,
+    Grafana, Prometheus, Tempo, and Loki readiness before the CLI enables the
+    local destination in `config.yaml`.
   </Step>
   <Step>
-    **Open Grafana.** [http://localhost:3000](http://localhost:3000) — anonymous viewer access is enabled by default for the demo dashboards. Sign in as `admin/admin` to edit.
+    **Open Grafana.** [http://localhost:3000](http://localhost:3000) — the loopback-only developer stack provisions anonymous Admin access and disables the login form.
   </Step>
   <Step>
     **Generate traffic.** Run any DefenseClaw-managed agent, or send a synthetic event to every configured sink:
@@ -260,9 +270,9 @@ See [Splunk integration](/docs/observability/splunk) for the dashboards we ship 
     Run `defenseclaw setup local-observability up` again so the host-mounted dashboards and collector config are refreshed from the bundle, then send a synthetic event with `defenseclaw setup observability test local-observability` and check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most remaining "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
   </Accordion>
   <Accordion title="Port already in use">
-    Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.
+    Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, and Prometheus 9090 are pinned to loopback. Compose fails truthfully if a foreign process owns a port. DefenseClaw never deletes a foreign same-name container; resolve the reported collision and re-run `up`.
   </Accordion>
   <Accordion title="Reverting config.yaml">
-    `down` does not unwrite the `otel:` block. To fully detach the gateway, re-run `setup local-observability up --no-config` and then manually clear the block, or restore from `~/.defenseclaw/config.yaml.bak.<timestamp>` (created on every modification).
+    `down` preserves config by default. Run `defenseclaw setup local-observability down --disable-config` to stop the stack and disable its local OTel destination and matching audit sink.
   </Accordion>
 </Accordions>

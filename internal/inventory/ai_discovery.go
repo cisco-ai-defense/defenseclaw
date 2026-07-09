@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -600,6 +601,17 @@ func (s *ContinuousDiscoveryService) InventoryStore() *InventoryStore {
 	return s.invStore
 }
 
+// Close releases the optional SQLite history store. Callers that construct a
+// service outside the sidecar lifecycle must call Close before removing its
+// data directory, especially on Windows where open databases cannot be
+// unlinked.
+func (s *ContinuousDiscoveryService) Close() error {
+	if s == nil || s.invStore == nil {
+		return nil
+	}
+	return s.invStore.Close()
+}
+
 // ConfidenceParams returns the policy + tunables the engine uses
 // when scoring components. Gateway handlers call ComputeComponentConfidence
 // with this value to get scores for the live snapshot.
@@ -959,7 +971,10 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		}
 	}
 
-	_ = s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current})
+	if err := s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current}); err != nil {
+		stats.Errors++
+		stats.DetectorErrors["state_store"] = err.Error()
+	}
 
 	summary := AIDiscoverySummary{
 		ScanID:            scanID,
@@ -2928,32 +2943,12 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		}
 		state.Signals[fp] = stored
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".ai_discovery_state.*.tmp")
+	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	enc := json.NewEncoder(tmp)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(state); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
+	payload = append(payload, '\n')
+	return safefile.WritePrivate(s.path, payload)
 }
 
 // processNames is kept for backward compatibility with existing
@@ -3175,13 +3170,13 @@ func projectRootForManifest(path string) string {
 			// Project root is the dir CONTAINING `.cargo` --
 			// for `~/.cargo/registry/...` that's the user's
 			// home, the natural attribution for global crates.
-			return strings.Join(parts[:i-1], "/")
+			return filepath.FromSlash(strings.Join(parts[:i-1], "/"))
 		}
 		if seg == "cache" && i > 0 && strings.ToLower(parts[i-1]) == ".yarn" {
-			return strings.Join(parts[:i-1], "/")
+			return filepath.FromSlash(strings.Join(parts[:i-1], "/"))
 		}
 		if cacheSegments[seg] {
-			return strings.Join(parts[:i], "/")
+			return filepath.FromSlash(strings.Join(parts[:i], "/"))
 		}
 	}
 	return dir

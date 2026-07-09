@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // writePathTokenFile is a tiny helper that mirrors what
@@ -30,7 +31,7 @@ func writePathTokenFile(t *testing.T, dataDir string, scope connector.OTLPPathTo
 	if err != nil {
 		t.Fatalf("OTLPPathTokenFilePath: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+	if err := safefile.WritePrivate(path, []byte(token+"\n")); err != nil {
 		t.Fatalf("write token file: %v", err)
 	}
 	return path

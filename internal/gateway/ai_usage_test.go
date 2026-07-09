@@ -46,12 +46,14 @@ func TestHandleAIUsageDisabled(t *testing.T) {
 
 func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
-	api.SetAIDiscoveryService(inventory.NewContinuousDiscoveryServiceWithOptions(
+	svc := inventory.NewContinuousDiscoveryServiceWithOptions(
 		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir(), EmitOTel: false},
 		nil,
 		nil,
 		nil,
-	))
+	)
+	t.Cleanup(func() { _ = svc.Close() })
+	api.SetAIDiscoveryService(svc)
 	body := `{
 	  "summary": {"scan_id":"scan-1"},
 	  "signals": [{"category":"ai_cli","state":"new","basenames":["/tmp/raw"]}]
@@ -102,6 +104,7 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 		nil,
 		nil,
 	)
+	t.Cleanup(func() { _ = svc.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

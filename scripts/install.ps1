@@ -30,7 +30,7 @@
       * <home>\.local\bin\defenseclaw.cmd          (CLI shim)
 
     and adds that bin dir to the user PATH. Only Python + uv are required; no Go,
-    Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
+    Node.js, or git. Connector-specific wiring (Codex CLI or Claude Code) is done
     by the cross-platform CLI via `defenseclaw init` / `quickstart`.
 
     Layout matches scripts/install.sh and `defenseclaw upgrade`: binaries land in
@@ -60,6 +60,7 @@ param(
     [string]$QuickstartMode = "",
     [switch]$Quickstart,
     [switch]$NoOpenclaw,
+    [switch]$NoPersistPath,
     [switch]$Yes,
     [switch]$Help
 )
@@ -85,20 +86,11 @@ $Venv = Join-Path $DefenseClawHome ".venv"
 # `defenseclaw upgrade` (which replaces the gateway there). The venv stays under
 # DEFENSECLAW_HOME so a custom home still relocates the heavy CLI environment.
 $InstallDir = Join-Path $env:USERPROFILE ".local\bin"
-# Native-Windows release surface. Keep this in sync with
-# cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT. Hermes is
-# intentionally selectable but labelled preview; proxy/WSL-only connectors are
-# rejected by this installer.
+# Certified native-Windows x64 release surface. Keep this in sync with
+# cli/defenseclaw/platform_support.py WINDOWS_SUPPORTED_CONNECTORS.
 $ConnectorChoices = @(
     "codex",
     "claudecode",
-    "hermes",
-    "cursor",
-    "windsurf",
-    "geminicli",
-    "copilot",
-    "antigravity",
-    "opencode",
     "none"
 )
 $HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
@@ -111,6 +103,51 @@ function Write-Warn2 { param([string]$Msg) Write-Host "  ! $Msg" -ForegroundColo
 function Write-Err2  { param([string]$Msg) Write-Host "  x $Msg" -ForegroundColor Red }
 function Write-Step  { param([string]$Msg) Write-Host "`n--- $Msg" -ForegroundColor Cyan }
 function Die         { param([string]$Msg) throw $Msg }
+
+function Set-ManagedPathProtection {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to protect managed reparse path: $Path"
+    }
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.User) { throw "Current Windows identity has no user SID" }
+    $system = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+    if ($item.PSIsContainer) {
+        $security = [System.Security.AccessControl.DirectorySecurity]::new()
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else {
+        $security = [System.Security.AccessControl.FileSecurity]::new()
+    }
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($identity.User, $system)) {
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+    if ($null -ne $item.PSObject.Methods["SetAccessControl"]) {
+        $item.SetAccessControl($security)
+    } elseif ($item.PSIsContainer) {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl(
+            [System.IO.DirectoryInfo]$item,
+            [System.Security.AccessControl.DirectorySecurity]$security
+        )
+    } else {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl(
+            [System.IO.FileInfo]$item,
+            [System.Security.AccessControl.FileSecurity]$security
+        )
+    }
+}
 
 function Show-Help {
     @"
@@ -132,6 +169,7 @@ Options:
   -Local <dir>         Install from a local dist directory instead of downloading
   -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install
   -QuickstartMode <m>  Pass --mode m to quickstart (observe|action)
+  -NoPersistPath       Add the install directory only to this process PATH
   -Yes                 Skip confirmation prompts (for CI/automation)
   -Help                Show this help
 
@@ -311,6 +349,33 @@ if problems:
         throw "Managed distribution integrity validation failed: $detail"
     }
 
+    # Import and mount the installed TUI under Python isolated mode. This is
+    # deliberately stronger than importing defenseclaw.tui: production mount
+    # exercises Textual 8-only tab/theme behavior and catches a resolver that
+    # silently retained the old Textual 7 graph. A bounded run_test session
+    # avoids publishing a launcher for an environment that crashes on launch.
+    $tuiSmokeCode = @'
+import asyncio
+import tempfile
+
+from defenseclaw.tui.app import DefenseClawTUI
+
+
+async def smoke() -> None:
+    with tempfile.TemporaryDirectory(prefix='defenseclaw-tui-smoke-') as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+
+asyncio.run(smoke())
+'@
+    $tuiResult = Invoke-ManagedCommand -Executable $venvPython -Arguments @("-I", "-c", $tuiSmokeCode)
+    if ($tuiResult.ExitCode -ne 0) {
+        $detail = ($tuiResult.Output | Select-Object -First 8) -join " | "
+        throw "Managed TUI launch validation failed (exit $($tuiResult.ExitCode)): $detail"
+    }
+
     $doctorResult = Invoke-ManagedCommand -Executable $cliExe -Arguments @("doctor", "--help")
     if ($doctorResult.ExitCode -ne 0) {
         $detail = ($doctorResult.Output | Select-Object -First 5) -join " | "
@@ -396,7 +461,9 @@ function Install-ManagedWheel {
 
     $venvExit = Invoke-Uv -Arguments @("venv", $TargetVenv, "--python", "3.12", "--quiet")
     if ($venvExit -ne 0) {
-        $venvExit = Invoke-Uv -Arguments @("venv", $TargetVenv, "--python", "3.12", "--allow-existing", "--quiet") `
+        $venvExit = Invoke-Uv -Arguments @(
+            "venv", $TargetVenv, "--python", "3.12", "--allow-existing", "--quiet"
+        ) `
             -ShowFailureOutput
         if ($venvExit -ne 0) { throw "Failed to create Python virtual environment at $TargetVenv" }
     }
@@ -565,8 +632,8 @@ function Get-Arch {
     $raw = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     switch ($raw.ToUpper()) {
         "AMD64" { $arch = "amd64" }
-        "ARM64" { $arch = "arm64" }
-        "X86"   { Die "32-bit Windows is not supported (need amd64 or arm64)." }
+        "ARM64" { Die "Windows ARM64 is not certified for this release; use certified Windows x64 (amd64)." }
+        "X86"   { Die "32-bit Windows is not supported (need x64/amd64)." }
         default { Die "Unsupported architecture: $raw" }
     }
     Write-Ok "Windows ($arch)"
@@ -1241,6 +1308,7 @@ public static class DefenseClawWindowsFile {
         } else {
             [System.IO.File]::Move($temporary, $Target)
         }
+        Set-ManagedPathProtection -Path $Target
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
@@ -1423,7 +1491,7 @@ function Select-Connector {
     if ($Yes) { $script:PickedConnector = "none"; return }
 
     Write-Step "Pick agent connector"
-    Write-Info "DefenseClaw can guard several agent frameworks. Pick one to integrate now;"
+    Write-Info "DefenseClaw certifies two connectors on native Windows x64. Pick one to integrate now;"
     Write-Info "you can switch later with 'defenseclaw init --connector <name>'."
     Write-Host ""
     $i = 1
@@ -1431,13 +1499,6 @@ function Select-Connector {
         switch ($v) {
             "codex"       { Write-Host "    $i) codex       - Codex CLI native hooks" }
             "claudecode"  { Write-Host "    $i) claudecode  - Claude Code native hooks" }
-            "cursor"      { Write-Host "    $i) cursor      - Cursor IDE native hooks (CLI remains WSL-only)" }
-            "windsurf"    { Write-Host "    $i) windsurf    - Windsurf native hooks" }
-            "geminicli"   { Write-Host "    $i) geminicli   - Gemini CLI native hooks" }
-            "copilot"     { Write-Host "    $i) copilot     - GitHub Copilot native hooks" }
-            "antigravity" { Write-Host "    $i) antigravity - Antigravity native hooks" }
-            "opencode"    { Write-Host "    $i) opencode    - OpenCode native JavaScript bridge" }
-            "hermes"      { Write-Host "    $i) hermes      - Hermes native hooks (preview)" }
             "none"        { Write-Host "    $i) none        - install gateway/CLI only; pick later" }
         }
         $i++
@@ -1481,17 +1542,19 @@ function Invoke-Quickstart {
 # ── PATH configuration ────────────────────────────────────────────────────────
 
 function Add-ToPath {
-    # Persist InstallDir on the user PATH (idempotent) and add it to this
-    # process so quickstart and `defenseclaw-gateway` resolve immediately.
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $userPath) { $userPath = "" }
-    $entries = $userPath -split ';' | Where-Object { $_ -ne "" }
-    if ($entries -notcontains $InstallDir) {
-        $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        Write-Step "PATH updated"
-        Write-Info "Added $InstallDir to your user PATH."
-        Write-Info "Open a new terminal for it to take effect."
+    # Persist InstallDir on the user PATH unless automation opted out, and add
+    # it to this process so quickstart and the gateway resolve immediately.
+    if (-not $NoPersistPath) {
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if (-not $userPath) { $userPath = "" }
+        $entries = $userPath -split ';' | Where-Object { $_ -ne "" }
+        if ($entries -notcontains $InstallDir) {
+            $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+            [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+            Write-Step "PATH updated"
+            Write-Info "Added $InstallDir to your user PATH."
+            Write-Info "Open a new terminal for it to take effect."
+        }
     }
     if (($env:PATH -split ';') -notcontains $InstallDir) {
         $env:PATH = "$InstallDir;$env:PATH"
@@ -1555,6 +1618,9 @@ function Main {
     try {
         New-Item -ItemType Directory -Force -Path $DefenseClawHome | Out-Null
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        Set-ManagedPathProtection -Path $DefenseClawHome
+        Set-ManagedPathProtection -Path (Split-Path -Parent $InstallDir)
+        Set-ManagedPathProtection -Path $InstallDir
         Invoke-PairedInstallTransaction -Artifacts $artifacts
     } finally {
         if ($null -ne $artifacts -and (Test-Path -LiteralPath $artifacts.Root)) {

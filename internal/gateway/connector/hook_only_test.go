@@ -28,6 +28,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
@@ -306,7 +308,7 @@ func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	workspace := filepath.Join(dir, "repo")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	conn := NewAntigravityConnector()
 	opts := SetupOpts{
@@ -745,6 +747,9 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 }
 
 func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenHands requires WSL and is unsupported on native Windows; platform rejection coverage remains active")
+	}
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, ".openhands", "hooks.json")
 	prev := OpenHandsHooksPathOverride
@@ -1026,7 +1031,7 @@ func TestOpenHandsWorkspaceRootFallsBackToHomeWhenDaemonCwdIsDataDir(t *testing.
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	prevHooks := OpenHandsHooksPathOverride
 	prevWorkspace := OpenHandsWorkspaceDirOverride
@@ -1060,7 +1065,7 @@ func TestCopilotSetupDefaultsToGlobalWhenDaemonCwdIsDataDir(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	prevHooks := CopilotHooksPathOverride
 	prevWorkspace := CopilotWorkspaceDirOverride

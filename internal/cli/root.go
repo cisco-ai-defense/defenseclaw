@@ -27,7 +27,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -52,6 +54,12 @@ func SetBuildInfo(commit, date string) {
 }
 
 func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	// A Windows daemon may explicitly break away from the TUI's Job Object.
+	// Claim its strong PID identity before any fallible/slow initialization so
+	// an abruptly cancelled launcher cannot leave an unmanaged live sidecar.
+	if err := daemon.RegisterCurrentProcess(); err != nil {
+		return err
+	}
 	// Load the data-dir .env BEFORE config.Load() so that
 	// token_env-style references in audit_sinks (e.g.
 	// SplunkHECSinkConfig.TokenEnv → os.Getenv) can resolve against
@@ -77,6 +85,11 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	applyPrivacyConfig(cfg)
 	version.SetBinaryVersion(appVersion)
 
+	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
+		if err := safefile.ProtectDirectory(auditDir); err != nil {
+			return fmt.Errorf("failed to prepare audit store directory: %w", err)
+		}
+	}
 	auditStore, err = audit.NewStore(cfg.AuditDB)
 	if err != nil {
 		return fmt.Errorf("failed to open audit store: %w", err)

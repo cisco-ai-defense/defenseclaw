@@ -77,7 +77,8 @@ def test_overview_standalone_hint_and_notices() -> None:
 
     model.set_health(HealthSnapshot(gateway=SubsystemHealth(state="reconnecting")))
     notices = model.build_notices()
-    assert any(notice.level == "error" and "Gateway is offline" in notice.message for notice in notices)
+    assert not any("Gateway is offline" in notice.message for notice in notices)
+    assert any(notice.level == "info" and "Gateway is starting" in notice.message for notice in notices)
 
 
 def test_overview_mode_key_is_modal_owned_not_fake_command() -> None:
@@ -155,7 +156,15 @@ def test_overview_telemetry_detail_lists_named_destinations() -> None:
     assert cards["telemetry"].detail == "2 destinations: local-observability, Galileo (100.0% delivered)"
 
 
-def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
+def test_overview_observability_rows_combine_otel_and_audit_sinks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.tui.services.overview_state.local_observability_stack_supported",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "defenseclaw.tui.services.overview_state.local_splunk_stack_supported",
+        lambda: True,
+    )
     model = _model()
     model.set_health(
         HealthSnapshot(
@@ -223,6 +232,34 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
     assert "user:secret" not in repr(rows)
     assert "api_key=secret" not in repr(rows)
     assert "token=secret" not in repr(rows)
+
+
+def test_enterprise_splunk_sink_is_not_gated_as_local(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.tui.services.overview_state.local_splunk_stack_supported",
+        lambda: False,
+    )
+    model = _model()
+    model.set_health(
+        HealthSnapshot(
+            sinks=SubsystemHealth(
+                state="running",
+                details={
+                    "sinks": [
+                        {
+                            "name": "enterprise-splunk",
+                            "preset_id": "splunk-enterprise",
+                            "kind": "splunk_hec",
+                            "enabled": True,
+                            "endpoint": "https://127.0.0.1:8088/services/collector/event",
+                        }
+                    ]
+                },
+            )
+        )
+    )
+
+    assert model.observability_destination_rows()[0].state == "enabled"
 
 
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:

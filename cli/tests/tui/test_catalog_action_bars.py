@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import pytest
 from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.services.catalog_state import SkillRow
 from textual.containers import Horizontal
 from textual.widgets import Button, Input
 
@@ -246,11 +247,11 @@ async def test_skills_reveal_button_focuses_registries_panel(monkeypatch) -> Non
         await pilot.pause()
         app.action_switch_panel("skills")
         await pilot.pause()
-        # Skip the test if the user has no skills loaded — the click
-        # only does anything when there's a selected row, and we'd
-        # rather skip than fake catalog-loading machinery here.
-        if app.skills_model.selected() is None:
-            pytest.skip("no skills loaded in the test environment")
+        app.workers.cancel_all()
+        app.skills_model.apply_loaded(
+            [SkillRow(name="fixture-skill", status="active", registry_source="fixture-registry")]
+        )
+        app._sync_catalog_controls("skills")  # noqa: SLF001
         app._handle_catalog_control("skills", "skills-reveal")  # noqa: SLF001
         await pilot.pause()
         assert app.active_panel == "registries"

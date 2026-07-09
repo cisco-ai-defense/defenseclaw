@@ -17,8 +17,10 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +34,152 @@ func setHookBinaryOverride(t *testing.T, path string) {
 	prev := defenseclawHookBinaryOverride
 	defenseclawHookBinaryOverride = path
 	t.Cleanup(func() { defenseclawHookBinaryOverride = prev })
+}
+
+func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.FailModes["claudecode"] != "closed" || state.FailModes["codex"] != "open" {
+		t.Fatalf("mixed fail modes not preserved: %#v", state.FailModes)
+	}
+}
+
+func TestWindowsHookConfigSidecarMigratesLegacyScalar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	legacy := []byte("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\nDEFENSECLAW_FAIL_MODE=open\n")
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("legacy sidecar was not migrated to v2: %v", err)
+	}
+	if state.Version != 2 || state.FailModes["claudecode"] != "closed" {
+		t.Fatalf("migrated state = %#v", state)
+	}
+	if state.LegacyMode != "open" {
+		t.Fatalf("legacy fallback was not retained for unmigrated connector peers: %#v", state)
+	}
+}
+
+func TestHookConfigSidecarClearRemovesOnlySelectedConnector(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearHookConfigSidecarEntry(dir, "claudecode"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.FailModes["claudecode"]; ok {
+		t.Fatalf("selected connector survived clear: %#v", state.FailModes)
+	}
+	if state.FailModes["codex"] != "open" {
+		t.Fatalf("peer connector changed during clear: %#v", state.FailModes)
+	}
+	if _, err := os.Stat(filepath.Join(dir, hookConfigSidecarName+".claudecode")); !os.IsNotExist(err) {
+		t.Fatalf("selected flat runtime record survived clear: %v", err)
+	}
+	peer, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName+".codex"))
+	if err != nil || !strings.Contains(string(peer), "DEFENSECLAW_FAIL_MODE=open") {
+		t.Fatalf("peer flat runtime record changed: err=%v body=%q", err, peer)
+	}
+}
+
+func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	before := []byte(`{"version":2,"fail_modes":`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err == nil {
+		t.Fatal("malformed peer runtime state was overwritten")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("failed sidecar write changed malformed peer state")
+	}
+}
+
+func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	jsonPath := filepath.Join(dir, hookConfigSidecarName)
+	flatPath := filepath.Join(dir, hookConfigSidecarName+".claudecode")
+	jsonBefore, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatBefore, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	failSecond := func(path string, data []byte, mode os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return errors.New("injected flat sidecar failure")
+		}
+		return atomicWriteFile(path, data, mode)
+	}
+	if err := writeHookConfigSidecarUsing(
+		dir,
+		"127.0.0.1:18970",
+		"claudecode",
+		"closed",
+		false,
+		failSecond,
+	); err == nil {
+		t.Fatal("injected second-file failure was ignored")
+	}
+	jsonAfter, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatAfter, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(jsonAfter, jsonBefore) || !bytes.Equal(flatAfter, flatBefore) {
+		t.Fatal("second-file failure left JSON and flat runtime state changed")
+	}
 }
 
 func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
@@ -49,6 +197,26 @@ func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
 	notify := codexNativeNotifyCommand()
 	if len(notify) != 2 || !strings.EqualFold(filepath.Clean(notify[0]), filepath.Clean(want)) || notify[1] != "notify" {
 		t.Fatalf("codexNativeNotifyCommand() = %#v, want installed launcher + notify", notify)
+	}
+}
+
+func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows native launcher contract")
+	}
+	root := t.TempDir()
+	launcher := filepath.Join(root, windowsHookBinaryName)
+	if err := os.WriteFile(launcher, []byte("MZfixture-launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setHookBinaryOverride(t, launcher)
+	opts := SetupOpts{DataDir: filepath.Join(root, "data"), HookFailMode: "closed"}
+	entry := NewHookContractLockEntry(opts, NewClaudeCodeConnector(), "test")
+	if entry.HookScriptDigests[windowsHookBinaryName] == "" {
+		t.Fatalf("native launcher digest missing: %v", entry.HookScriptDigests)
+	}
+	if !stringInSlice(entry.Locations.HookScriptPaths, launcher) {
+		t.Fatalf("native launcher path missing: %v", entry.Locations.HookScriptPaths)
 	}
 }
 
@@ -508,16 +676,20 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read native hook config sidecar: %v", err)
 			}
-			if !strings.Contains(string(hookCfg), "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970") {
-				t.Errorf("hook config sidecar missing API address: %s", hookCfg)
+			var hookState hookConfigSidecar
+			if err := json.Unmarshal(hookCfg, &hookState); err != nil {
+				t.Fatalf("parse native hook config sidecar: %v", err)
+			}
+			if hookState.GatewayAddr != "127.0.0.1:18970" {
+				t.Errorf("hook config sidecar API address = %q", hookState.GatewayAddr)
 			}
 			wantFailMode := resolveHookFailMode(opts, tt.conn)
 			if hp, ok := tt.conn.(HookCapabilityProvider); ok &&
 				wantFailMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
 				wantFailMode = "open"
 			}
-			if !strings.Contains(string(hookCfg), "DEFENSECLAW_FAIL_MODE="+wantFailMode) {
-				t.Errorf("hook config sidecar fail mode = %q, want %q", hookCfg, wantFailMode)
+			if got := hookState.FailModes[connectorName]; got != wantFailMode {
+				t.Errorf("hook config sidecar fail mode = %q, want %q", got, wantFailMode)
 			}
 
 			if err := tt.conn.Teardown(context.Background(), opts); err != nil {

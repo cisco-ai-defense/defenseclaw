@@ -19,6 +19,12 @@ from typing import Any, Literal
 
 from defenseclaw.connector_paths import hermes_config_path, hermes_home
 from defenseclaw.observability.display import redact_endpoint_for_display
+from defenseclaw.platform_support import (
+    is_local_observability_stack_destination,
+    is_local_splunk_stack_destination,
+    local_observability_stack_supported,
+    local_splunk_stack_supported,
+)
 from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
 
@@ -368,6 +374,11 @@ class OverviewPanelModel:
         self.cfg = cfg
         self.version = version
         self.health: HealthSnapshot | None = None
+        # Availability of the sidecar management endpoint is deliberately
+        # tracked separately from ``health.gateway``.  That payload field is
+        # the optional OpenClaw fleet uplink and is ``disabled`` in healthy
+        # hook-only installs (including Windows); it is not daemon liveness.
+        self.gateway_probe: SubsystemHealth | None = None
         self.doctor: DoctorCache | None = None
         self.enforcement = EnforcementCounts()
         self.silent_bypass = 0
@@ -387,6 +398,25 @@ class OverviewPanelModel:
 
     def set_health(self, health: HealthSnapshot | None) -> None:
         self.health = health
+
+    def set_gateway_probe(self, state: str, detail: str = "") -> None:
+        """Record the latest authenticated sidecar API probe result."""
+
+        self.gateway_probe = SubsystemHealth(state=state, last_error=detail)
+
+    def gateway_availability(self) -> SubsystemHealth:
+        """Return sidecar availability, independent of the fleet uplink.
+
+        New polling code records an explicit authenticated API probe.  The
+        health-derived fallback keeps models/tests created without a live
+        poll compatible and treats ``gateway=disabled`` as the healthy final
+        state documented by the Go daemon readiness checks for hook-only
+        topology.
+        """
+
+        if self.gateway_probe is not None:
+            return self.gateway_probe
+        return gateway_availability_from_health(self.health)
 
     def set_doctor_cache(self, cache: DoctorCache | None) -> None:
         self.doctor = cache
@@ -415,7 +445,9 @@ class OverviewPanelModel:
     def build_notices(self, *, now: datetime | None = None) -> tuple[OverviewNotice, ...]:
         now = now or datetime.now(timezone.utc)
         notices: list[OverviewNotice] = []
-        gateway_broken = self.health is None or gateway_health_is_broken(self.health.gateway.state)
+        gateway_availability = self.gateway_availability()
+        gateway_state = gateway_availability.state.strip().lower()
+        gateway_broken = gateway_state in {"", "unknown", "offline", "stopped", "error", "failed"}
         gateway_standalone = self.health is not None and self.health.gateway.state.strip().lower() == "disabled"
         guardrail_off = self.cfg is None or not self.cfg.guardrail_enabled
 
@@ -427,7 +459,16 @@ class OverviewPanelModel:
                 )
             )
         if gateway_broken:
-            notices.append(OverviewNotice("error", 'Gateway is offline - press : then "start" to launch'))
+            if gateway_state in {"error", "failed"}:
+                detail = gateway_availability.last_error.strip()
+                suffix = f": {detail}" if detail else ""
+                notices.append(OverviewNotice("error", f"Gateway health check failed{suffix}"))
+            elif gateway_state == "unknown":
+                notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
+            else:
+                notices.append(OverviewNotice("error", 'Gateway is offline - press : then "start" to launch'))
+        elif gateway_state in {"starting", "reconnecting"}:
+            notices.append(OverviewNotice("info", "Gateway is starting - health checks will retry automatically"))
         elif gateway_standalone:
             hint = self.gateway_standalone_hint()
             if hint:
@@ -1018,6 +1059,12 @@ class OverviewPanelModel:
                 name = str(item["name"])
                 preset = str(item.get("preset", "") or "")
                 kind = preset or "otlp"
+                local_unsupported = (
+                    not local_observability_stack_supported()
+                    and is_local_observability_stack_destination(
+                        name=name, preset_id=preset, kind=kind
+                    )
+                )
                 signals = str(item.get("signals", "") or "none")
                 routing_label = ""
                 routing = item.get("routing")
@@ -1068,7 +1115,11 @@ class OverviewPanelModel:
                         target="otel",
                         scope=str(item.get("scope", "") or "process"),
                         kind=kind,
-                        state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        state=(
+                            "unsupported"
+                            if local_unsupported
+                            else "enabled" if bool(item.get("enabled", False)) else "disabled"
+                        ),
                         protocol=str(item.get("protocol", "") or "—"),
                         signals=signals,
                         endpoint=redact_endpoint_for_display(str(item.get("endpoint", "") or "—")),
@@ -1085,13 +1136,36 @@ class OverviewPanelModel:
                     str(item.get("endpoint") or item.get("url") or "—"),
                     hide_path=True,
                 )
+                raw_endpoint = str(item.get("endpoint") or item.get("url") or "")
+                local_unsupported = (
+                    (
+                        not local_observability_stack_supported()
+                        and is_local_observability_stack_destination(
+                            name=str(item.get("name", "")),
+                            kind=str(item.get("kind", "")),
+                            endpoint=raw_endpoint,
+                        )
+                    )
+                    or (
+                        not local_splunk_stack_supported()
+                        and is_local_splunk_stack_destination(
+                            kind=str(item.get("kind", "")),
+                            endpoint=raw_endpoint,
+                            preset_id=str(item.get("preset_id") or item.get("preset") or ""),
+                        )
+                    )
+                )
                 rows.append(
                     ObservabilityDestinationRow(
                         name=str(item["name"]),
                         target="audit_sinks",
                         scope=str(item.get("scope", "") or "global"),
                         kind=str(item.get("kind", "") or "unknown"),
-                        state="enabled" if bool(item.get("enabled", False)) else "disabled",
+                        state=(
+                            "unsupported"
+                            if local_unsupported
+                            else "enabled" if bool(item.get("enabled", False)) else "disabled"
+                        ),
                         protocol=str(item.get("protocol", "") or "—"),
                         signals="audit-events",
                         endpoint=str(endpoint),
@@ -1102,6 +1176,39 @@ class OverviewPanelModel:
 
 def gateway_health_is_broken(state: str) -> bool:
     return state.strip().lower() not in {"running", "disabled"}
+
+
+def gateway_availability_from_health(health: HealthSnapshot | None) -> SubsystemHealth:
+    """Derive daemon availability for callers without an explicit probe.
+
+    ``HealthSnapshot.gateway`` describes the optional fleet uplink.  A
+    successful ``/health`` response with that uplink disabled still proves
+    the local sidecar is online, which is the normal hook-only topology.
+    """
+
+    if health is None:
+        return SubsystemHealth(state="unknown")
+    api = health.api
+    api_state = api.state.strip().lower()
+    api_detail = api.last_error.strip() or string_detail(api.details, "summary")
+    if api_state in {"stopped", "offline", "down"}:
+        return SubsystemHealth(state="offline", last_error=api_detail)
+    if api_state in {"error", "failed"}:
+        return SubsystemHealth(state="error", last_error=api_detail)
+    if api_state in {"starting", "reconnecting"}:
+        return SubsystemHealth(state="starting", last_error=api_detail)
+    raw = health.gateway
+    state = raw.state.strip().lower()
+    detail = raw.last_error.strip() or string_detail(raw.details, "summary")
+    if state in {"running", "ready", "healthy", "ok", "active", "disabled"}:
+        return SubsystemHealth(state="running", last_error=detail)
+    if state in {"starting", "reconnecting"}:
+        return SubsystemHealth(state="starting", last_error=detail)
+    if state in {"stopped", "offline", "down"}:
+        return SubsystemHealth(state="offline", last_error=detail)
+    if state in {"error", "failed"}:
+        return SubsystemHealth(state="error", last_error=detail)
+    return SubsystemHealth(state="unknown", last_error=detail)
 
 
 def string_detail(details: dict[str, Any] | None, key: str) -> str:
@@ -1124,7 +1231,7 @@ def live_health_contradicts(check: DoctorCheck, health: HealthSnapshot | None) -
     if label == "guardrail proxy":
         return health.guardrail.state.lower() == "running"
     if label in {"openclaw gateway", "gateway"}:
-        return health.gateway.state.lower() == "running"
+        return gateway_availability_from_health(health).state == "running"
     if label.startswith("otel"):
         return health.telemetry.state.lower() == "running"
     return False

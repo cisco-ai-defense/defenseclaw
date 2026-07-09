@@ -409,7 +409,10 @@ func TestFetchConnectorModes_PrefersPluralFallsBackToSingular(t *testing.T) {
 		}))
 		defer srv.Close()
 		bind, port := splitHostPort(t, srv.URL)
-		modes := fetchConnectorModes(srv.Client(), bind, port)
+		cfg := config.DefaultConfig()
+		cfg.Gateway.APIBind = bind
+		cfg.Gateway.APIPort = port
+		modes := fetchConnectorModes(srv.Client(), cfg)
 		if len(modes) != 2 {
 			t.Fatalf("want 2 modes from plural field, got %d: %v", len(modes), modes)
 		}
@@ -421,9 +424,29 @@ func TestFetchConnectorModes_PrefersPluralFallsBackToSingular(t *testing.T) {
 		}))
 		defer srv.Close()
 		bind, port := splitHostPort(t, srv.URL)
-		modes := fetchConnectorModes(srv.Client(), bind, port)
+		cfg := config.DefaultConfig()
+		cfg.Gateway.APIBind = bind
+		cfg.Gateway.APIPort = port
+		modes := fetchConnectorModes(srv.Client(), cfg)
 		if len(modes) != 1 || modes[0].Connector != "codex" {
 			t.Fatalf("want 1 fallback mode for codex, got %v", modes)
 		}
 	})
+}
+
+func TestFetchConnectorModesNormalizesWildcardBind(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"connector_mode":{"connector":"codex","mode":"observability"}}`)
+	}))
+	defer srv.Close()
+	_, port := splitHostPort(t, srv.URL)
+	cfg := config.DefaultConfig()
+	cfg.Gateway.APIBind = "0.0.0.0"
+	cfg.Gateway.APIPort = port
+
+	modes := fetchConnectorModes(srv.Client(), cfg)
+
+	if len(modes) != 1 || modes[0].Connector != "codex" {
+		t.Fatalf("wildcard bind modes = %v, want codex", modes)
+	}
 }

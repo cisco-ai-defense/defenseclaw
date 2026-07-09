@@ -27,10 +27,45 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+
+def _make_dir_link_or_junction(link: Path, target: Path) -> None:
+    """Create a directory link, falling back to a junction on Windows."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+            raise
+        created = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    "New-Item -ItemType Junction -Path $env:DC_TEST_LINK "
+                    "-Target $env:DC_TEST_TARGET | Out-Null"
+                ),
+            ],
+            env={
+                **os.environ,
+                "DC_TEST_LINK": str(link),
+                "DC_TEST_TARGET": str(target),
+            },
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+        if created.returncode != 0:
+            raise AssertionError(created.stderr)
 
 
 class TestRsyncOverwrite(unittest.TestCase):
@@ -457,17 +492,122 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         outside = Path(self.tmp) / "outside.json"
         outside.write_text("keep me\n", encoding="utf-8")
         link = root / "external-link.json"
-        link.symlink_to(outside)
+        retired = ["../outside.json"]
+        symlink_created = False
+        try:
+            link.symlink_to(outside)
+            retired.append("external-link.json")
+            symlink_created = True
+        except OSError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+                raise
 
         removed, errors = _remove_retired_paths(
             root,
-            ("../outside.json", "external-link.json"),
+            tuple(retired),
         )
 
         self.assertEqual(removed, [])
-        self.assertEqual(len(errors), 2)
+        self.assertEqual(len(errors), len(retired))
         self.assertTrue(outside.exists())
-        self.assertTrue(link.is_symlink())
+        if symlink_created:
+            self.assertTrue(link.is_symlink())
+
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_refresh_rejects_destination_reparse_escape(
+        self, mock_bundle: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+        mock_bundle.return_value = Path(self.bundle)
+        refresh_local_observability_stack(self.tmp, refresh_config=True)
+        outside = Path(self.tmp) / "outside"
+        outside.mkdir()
+        marker = outside / "overview.json"
+        marker.write_text("outside unchanged\n", encoding="utf-8")
+        grafana = Path(self._dest()) / "grafana"
+        shutil.rmtree(grafana)
+        _make_dir_link_or_junction(grafana, outside)
+
+        result = refresh_local_observability_stack(self.tmp, refresh_config=True)
+
+        self.assertTrue(result.errors)
+        self.assertIn("escapes canonical bundle root", " ".join(result.errors))
+        self.assertEqual(marker.read_text(encoding="utf-8"), "outside unchanged\n")
+
+    @unittest.skipUnless(os.name == "nt", "Windows locked-file replacement semantics")
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_locked_file_is_reported_and_left_unchanged(
+        self, mock_bundle: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+        mock_bundle.return_value = Path(self.bundle)
+        refresh_local_observability_stack(self.tmp, refresh_config=True)
+        target = Path(self._dest()) / "docker-compose.yml"
+        original = target.read_bytes()
+        (Path(self.bundle) / "docker-compose.yml").write_bytes(b"# changed\r\n")
+        with target.open("rb"):
+            result = refresh_local_observability_stack(self.tmp, refresh_config=True)
+
+        self.assertTrue(result.errors)
+        self.assertEqual(target.read_bytes(), original)
+
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_unicode_path_and_crlf_are_copied_byte_exactly(
+        self, mock_bundle: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+        unicode_root = Path(self.tmp) / "Profile Ω with spaces"
+        unicode_root.mkdir()
+        compose = Path(self.bundle) / "docker-compose.yml"
+        compose.write_bytes(b"name: defenseclaw-observability\r\nservices: {}\r\n")
+        mock_bundle.return_value = Path(self.bundle)
+
+        result = refresh_local_observability_stack(
+            str(unicode_root), refresh_config=True
+        )
+
+        self.assertFalse(result.errors)
+        copied = unicode_root / "observability-stack" / "docker-compose.yml"
+        self.assertEqual(copied.read_bytes(), compose.read_bytes())
+
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_refresh_rejects_reparse_data_directory(
+        self, mock_bundle: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+        mock_bundle.return_value = Path(self.bundle)
+        actual = Path(self.tmp) / "actual-data"
+        actual.mkdir()
+        nominal = Path(self.tmp) / "linked-data"
+        _make_dir_link_or_junction(nominal, actual)
+
+        result = refresh_local_observability_stack(
+            str(nominal), refresh_config=True
+        )
+
+        self.assertTrue(result.errors)
+        self.assertIn("reparse/symlink", " ".join(result.errors))
+        self.assertFalse((actual / "observability-stack").exists())
+
+    def test_destination_guard_rejects_dangling_symlink_ancestor(self) -> None:
+        from defenseclaw.bundle_refresh import _assert_safe_bundle_destination
+
+        root = Path(self.tmp) / "guard-root"
+        root.mkdir()
+        dangling = root / "dangling"
+        try:
+            dangling.symlink_to(root / "missing", target_is_directory=True)
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                self.skipTest("creating dangling symlinks requires Windows privilege")
+            raise
+
+        with self.assertRaisesRegex(OSError, "reparse/symlink"):
+            _assert_safe_bundle_destination(root, dangling / "nested.json")
 
 
 class TestIsComposeProjectRunning(unittest.TestCase):

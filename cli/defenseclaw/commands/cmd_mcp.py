@@ -55,7 +55,39 @@ def _parse_args(raw: str) -> list[str]:
             if isinstance(parsed, list):
                 return [str(a) for a in parsed]
         except json.JSONDecodeError:
-            pass
+            # The managed Windows ``defenseclaw.cmd`` compatibility launcher
+            # is retained for cmd.exe.  When PowerShell invokes that batch
+            # file with a JSON value held in a variable, cmd.exe removes the
+            # JSON string delimiters before ``%*`` forwards the argument.  A
+            # valid value such as ["--from","C:\\\\path"] therefore arrives
+            # as [--from,C:\\\\path].  Recover that narrow, bracketed form so
+            # the connector stores the argv the operator supplied.  This is
+            # deliberately not shell evaluation: every item remains a
+            # literal subprocess argument.
+            if stripped.endswith("]"):
+                inner = stripped[1:-1]
+                recovered: list[str] = []
+                try:
+                    for item in inner.split(","):
+                        item = item.strip()
+                        if not item:
+                            continue
+                        # Decode only JSON backslash escaping left behind by
+                        # the stripped string delimiters.  A surviving quote
+                        # means the boundary is ambiguous and must fail closed.
+                        if '"' in item:
+                            raise ValueError
+                        decoded = json.loads(f'"{item}"')
+                        if not isinstance(decoded, str):
+                            raise ValueError
+                        recovered.append(decoded)
+                except (json.JSONDecodeError, ValueError):
+                    raise click.BadParameter(
+                        "malformed JSON array; pass a JSON string array or a "
+                        "comma-separated argument list",
+                        param_hint="--args",
+                    ) from None
+                return recovered
     return [a.strip() for a in raw.split(",") if a.strip()]
 
 
@@ -1241,7 +1273,6 @@ def scan(
             click.echo(f"error [{c}]: {exc.format_message()}", err=True)
     if errored:
         raise SystemExit(1)
-
 
 # ---------------------------------------------------------------------------
 # block / allow / unblock  (accept name or url)

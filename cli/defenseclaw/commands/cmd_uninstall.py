@@ -46,6 +46,10 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
+import tempfile
+import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +65,8 @@ from defenseclaw import ux
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
 _RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
+_WIN_SYNCHRONIZE = 0x00100000
+_WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "openclaw": (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),),
     "codex": (
@@ -102,6 +108,11 @@ class UninstallPlan:
     # Reset keeps the in-tree Windows runtime that is executing this command.
     # Full uninstall deliberately leaves this empty and removes everything.
     preserve_data_entries: tuple[str, ...] = ()
+    platform_name: str = ""
+    install_root: str = ""
+    managed_venv: str = ""
+    gateway_path: str = ""
+    binary_targets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,7 +132,14 @@ class ExecutionResult:
 
     @property
     def succeeded(self) -> bool:
-        return all(phase.status == "succeeded" for phase in self.phases)
+        return all(phase.status in {"succeeded", "scheduled"} for phase in self.phases)
+
+
+@dataclass(frozen=True)
+class _WindowsProcessWaiter:
+    label: str
+    pid: int
+    handle: int
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +285,11 @@ def _build_plan(
     revert_openclaw: bool,
     remove_plugin: bool,
     preserve_data_entries: tuple[str, ...] = (),
+    platform_name: str | None = None,
 ) -> UninstallPlan:
+    platform_name = platform_name or sys.platform
     data_dir = str(config_module.default_data_path())
+    install_root, binary_targets = _owned_binary_targets(platform_name)
 
     # Config identifies active connectors. If it is missing or unreadable,
     # only durable rollback markers may authorize connector teardown.
@@ -328,7 +349,41 @@ def _build_plan(
         connector=connector,
         connectors=connectors,
         preserve_data_entries=preserve_data_entries,
+        platform_name=platform_name,
+        install_root=install_root,
+        managed_venv=os.path.join(data_dir, ".venv"),
+        gateway_path=(
+            os.path.join(install_root, "defenseclaw-gateway.exe")
+            if platform_name == "win32"
+            else (shutil.which("defenseclaw-gateway") or os.path.join(install_root, "defenseclaw-gateway"))
+        ),
+        binary_targets=binary_targets,
     )
+
+
+def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
+    """Freeze the exact launcher paths owned by each supported installer."""
+    if platform_name == "win32":
+        home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+        install_root = os.path.abspath(os.path.join(home, ".local", "bin"))
+        names = (
+            "defenseclaw.cmd",
+            "defenseclaw-gateway.exe",
+            "defenseclaw-hook.exe",
+        )
+    else:
+        install_root = os.path.abspath(os.path.expanduser("~/.local/bin"))
+        names = (
+            "defenseclaw-gateway",
+            "defenseclaw",
+            "skill-scanner",
+            "skill-scanner-api",
+            "skill-scanner-pre-commit",
+            "mcp-scanner",
+            "mcp-scanner-api",
+            "litellm",
+        )
+    return install_root, tuple(os.path.join(install_root, name) for name in names)
 
 
 def _owned_openclaw_candidate(data_dir: str, default_candidate: str) -> tuple[str, bool]:
@@ -441,7 +496,8 @@ def _teardown_connectors(
             # validated centrally by _owned_openclaw_candidate().
             continue
         for marker in markers:
-            if os.path.isfile(os.path.join(data_dir, marker)):
+            marker_path = os.path.join(data_dir, marker)
+            if os.path.isfile(marker_path) and not _is_reparse_path(marker_path):
                 add(name)
                 break
 
@@ -478,6 +534,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     if plan.preserve_data_entries:
         click.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
     click.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
+    if plan.remove_binaries:
+        for target in plan.binary_targets:
+            click.echo(f"      {ux.dim('·')} {target}")
+    if _requires_deferred_cleanup(plan):
+        click.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
     click.echo()
 
 
@@ -502,8 +563,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             raise click.ClickException(f"{name} failed: {exc}") from exc
         phases.append(ExecutionPhaseResult(name, "succeeded"))
 
+    run_phase("plan validation", lambda: _validate_plan(plan))
     if plan.stop_gateway:
-        run_phase("gateway stop", _stop_gateway)
+        run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
     if plan.remove_plugin and "openclaw" in plan.connectors:
@@ -512,7 +574,20 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # scripts and config patches. This helper is idempotent and
         # reports "not installed" when OpenClaw was never used.
         run_phase("plugin removal", lambda: _remove_plugin(plan))
-    if plan.remove_data_dir:
+    deferred = _requires_deferred_cleanup(plan)
+    if deferred:
+        status: list[str] = []
+
+        def schedule() -> None:
+            status.append(_schedule_deferred_cleanup(plan))
+
+        run_phase("deferred cleanup", schedule)
+        phases[-1] = ExecutionPhaseResult(
+            "deferred cleanup",
+            "scheduled",
+            f"result: {status[0]}",
+        )
+    elif plan.remove_data_dir:
         run_phase(
             "data removal",
             lambda: _remove_data_dir(
@@ -520,8 +595,8 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
                 preserve_entries=plan.preserve_data_entries,
             ),
         )
-    if plan.remove_binaries:
-        run_phase("binary removal", _remove_binaries)
+    if plan.remove_binaries and not deferred:
+        run_phase("binary removal", lambda: _remove_binaries(plan))
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
@@ -536,12 +611,382 @@ def _render_execution_result(result: ExecutionResult) -> None:
         click.echo(f"  {phase.name}: {phase.status}{suffix}")
 
 
-def _stop_gateway() -> None:
-    gw = shutil.which("defenseclaw-gateway")
+def _normalized(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _validate_owned_root(path: str, label: str, *, reject_reparse: bool = True) -> str:
+    if not path or not os.path.isabs(path):
+        raise click.ClickException(f"refusing non-absolute {label}: {path}")
+    resolved = _normalized(path)
+    if resolved == os.path.normcase(str(Path(resolved).anchor)):
+        raise click.ClickException(f"refusing root-like {label}: {path}")
+    if reject_reparse and os.path.lexists(path) and _is_reparse_path(path):
+        raise click.ClickException(f"refusing symlink or reparse-point {label}: {path}")
+    return resolved
+
+
+def _validate_windows_ancestor_chain(path: str, label: str) -> None:
+    candidate = Path(os.path.abspath(path))
+    while str(candidate) != candidate.anchor:
+        if os.path.lexists(candidate) and _is_reparse_path(candidate):
+            raise click.ClickException(f"refusing reparse-point ancestor for {label}: {candidate}")
+        candidate = candidate.parent
+
+
+def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
+    """Require the installer-authored CLI shim before removing paired artifacts."""
+    existing = [path for path in plan.binary_targets if os.path.lexists(path)]
+    if not existing:
+        return
+    shim = os.path.join(plan.install_root, "defenseclaw.cmd")
+    if not os.path.isfile(shim) or _is_reparse_path(shim):
+        raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
+    try:
+        with open(shim, encoding="utf-8-sig", errors="strict") as stream:
+            contents = stream.read(16_385)
+    except (OSError, UnicodeError) as exc:
+        raise click.ClickException(f"could not verify Windows CLI shim ownership: {exc}") from exc
+    if len(contents) > 16_384:
+        raise click.ClickException("refusing oversized Windows CLI shim")
+    expected_cli = os.path.join(plan.managed_venv, "Scripts", "defenseclaw.exe")
+    expected_invocation = f'"{expected_cli}" %*'.lower()
+    if expected_invocation not in contents.lower():
+        raise click.ClickException("refusing Windows binary removal: CLI shim targets an unrelated runtime")
+
+
+def _validate_plan(plan: UninstallPlan) -> None:
+    """Validate every destructive root and exact artifact before mutation."""
+    if plan.remove_data_dir:
+        resolved_data = _validate_owned_root(plan.data_dir, "data path")
+        if plan.platform_name == "win32":
+            _validate_windows_ancestor_chain(plan.data_dir, "data path")
+        if plan.managed_venv and os.path.lexists(plan.managed_venv) and _is_reparse_path(plan.managed_venv):
+            raise click.ClickException(f"refusing symlink or reparse-point managed runtime: {plan.managed_venv}")
+        protected = {
+            os.path.normcase(os.path.realpath(os.path.expanduser("~"))),
+            os.path.normcase(str(Path(resolved_data).anchor)),
+            os.path.normcase(os.path.realpath("/")),
+        }
+        if os.path.normcase(os.path.realpath(plan.data_dir)) in protected:
+            raise click.ClickException(f"refusing protected data path: {plan.data_dir}")
+        ownership_markers = ("config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv")
+        if os.path.isdir(plan.data_dir) and not any(
+            os.path.exists(os.path.join(plan.data_dir, marker))
+            and not _is_reparse_path(os.path.join(plan.data_dir, marker))
+            for marker in ownership_markers
+        ):
+            raise click.ClickException(
+                f"refusing to remove {plan.data_dir}: path does not look like a DefenseClaw data directory"
+            )
+        if plan.install_root:
+            install_root_candidate = _normalized(plan.install_root)
+            try:
+                common = os.path.commonpath((resolved_data, install_root_candidate))
+                overlap = common in {resolved_data, install_root_candidate}
+            except ValueError:
+                overlap = False
+            if overlap:
+                raise click.ClickException("refusing overlapping data and binary install roots")
+
+    if plan.data_dir:
+        for markers in _CONNECTOR_BACKUP_MARKERS.values():
+            for marker in markers:
+                marker_path = os.path.join(plan.data_dir, marker)
+                if os.path.lexists(marker_path) and _is_reparse_path(marker_path):
+                    raise click.ClickException(f"refusing symlink or reparse-point connector backup: {marker_path}")
+
+    for path, label in (
+        (plan.openclaw_config_file if plan.revert_openclaw else "", "OpenClaw config"),
+        (plan.openclaw_home if plan.remove_plugin else "", "OpenClaw home"),
+    ):
+        if path and os.path.lexists(_expand(path)) and _is_reparse_path(_expand(path)):
+            raise click.ClickException(f"refusing symlink or reparse-point {label}: {path}")
+        if path and plan.platform_name == "win32":
+            _validate_windows_ancestor_chain(_expand(path), label)
+
+    if plan.remove_binaries:
+        install_root = _validate_owned_root(
+            plan.install_root,
+            "binary install root",
+            reject_reparse=plan.platform_name == "win32",
+        )
+        if plan.platform_name == "win32":
+            _validate_windows_ancestor_chain(plan.install_root, "binary install root")
+        allowed_names = (
+            {"defenseclaw.cmd", "defenseclaw-gateway.exe", "defenseclaw-hook.exe"}
+            if plan.platform_name == "win32"
+            else {
+                "defenseclaw-gateway",
+                "defenseclaw",
+                "skill-scanner",
+                "skill-scanner-api",
+                "skill-scanner-pre-commit",
+                "mcp-scanner",
+                "mcp-scanner-api",
+                "litellm",
+            }
+        )
+        for target in plan.binary_targets:
+            if (
+                _normalized(os.path.dirname(target)) != install_root
+                or os.path.basename(target).lower() not in allowed_names
+            ):
+                raise click.ClickException(f"refusing unowned binary target: {target}")
+            if plan.platform_name == "win32" and os.path.lexists(target) and _is_reparse_path(target):
+                raise click.ClickException(f"refusing symlink or reparse-point binary target: {target}")
+        if plan.platform_name == "win32":
+            _validate_windows_binary_ownership(plan)
+
+    if plan.gateway_path:
+        if plan.platform_name == "win32":
+            install_root = _validate_owned_root(plan.install_root, "binary install root")
+            _validate_windows_ancestor_chain(plan.install_root, "binary install root")
+            if (
+                _normalized(os.path.dirname(plan.gateway_path)) != install_root
+                or os.path.basename(plan.gateway_path).lower() != "defenseclaw-gateway.exe"
+            ):
+                raise click.ClickException(f"refusing unowned gateway target: {plan.gateway_path}")
+        elif not os.path.isabs(plan.gateway_path) or os.path.basename(plan.gateway_path) != "defenseclaw-gateway":
+            raise click.ClickException(f"refusing invalid gateway target: {plan.gateway_path}")
+
+
+def _requires_deferred_cleanup(plan: UninstallPlan) -> bool:
+    if (
+        plan.platform_name != "win32"
+        or not plan.remove_data_dir
+        or not plan.managed_venv
+        or ".venv" in plan.preserve_data_entries
+    ):
+        return False
+    executable = _normalized(sys.executable)
+    runtime = _normalized(plan.managed_venv)
+    try:
+        return os.path.commonpath((runtime, executable)) == runtime
+    except ValueError:
+        return False
+
+
+def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
+    """Start the validated standalone helper and wait for its ready signal."""
+    _validate_plan(plan)
+    base_python = os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or ""))
+    if (
+        not base_python
+        or not os.path.isfile(base_python)
+        or _is_reparse_path(base_python)
+        or _normalized(base_python).startswith(_normalized(plan.data_dir) + os.sep)
+    ):
+        raise click.ClickException("no trusted base Python is available for deferred cleanup")
+
+    token = uuid.uuid4().hex
+    helper_dir = tempfile.mkdtemp(prefix=f"defenseclaw-uninstall-{token}-")
+    helper_path = os.path.join(helper_dir, "windows_uninstall_helper.py")
+    manifest_path = os.path.join(helper_dir, "plan.json")
+    ready_path = os.path.join(helper_dir, "ready.json")
+    status_path = os.path.join(tempfile.gettempdir(), f"defenseclaw-uninstall-result-{token}.json")
+    source = os.path.join(os.path.dirname(__file__), "windows_uninstall_helper.py")
+    try:
+        shutil.copyfile(source, helper_path)
+        manifest = {
+            "parent_pid": os.getpid(),
+            # Windows venv launchers report the base interpreter as the live
+            # process image even though sys.executable names Scripts/python.exe.
+            "parent_executable": base_python,
+            "install_root": plan.install_root,
+            "data_dir": plan.data_dir,
+            "managed_venv": plan.managed_venv,
+            "protected_paths": [
+                os.path.realpath(os.path.expanduser("~")),
+                str(Path(os.path.abspath(plan.data_dir)).anchor),
+            ],
+            "binary_targets": list(plan.binary_targets) if plan.remove_binaries else [],
+            "remove_data_dir": plan.remove_data_dir,
+            "ready_path": ready_path,
+            "status_path": status_path,
+        }
+        with open(manifest_path, "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, sort_keys=True)
+        flags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+        process = subprocess.Popen(
+            [base_python, "-I", helper_path, manifest_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=flags,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if os.path.isfile(ready_path):
+                with open(ready_path, encoding="utf-8") as stream:
+                    ready = json.load(stream)
+                if ready.get("status") != "ready":
+                    raise click.ClickException(
+                        f"deferred cleanup helper rejected the plan: {ready.get('detail', 'unknown error')}"
+                    )
+                return status_path
+            if process.poll() is not None:
+                raise click.ClickException(f"deferred cleanup helper exited before ready (exit {process.returncode})")
+            time.sleep(0.05)
+        process.terminate()
+        raise click.ClickException("deferred cleanup helper did not become ready")
+    except Exception:
+        if not os.path.exists(ready_path):
+            shutil.rmtree(helper_dir, ignore_errors=True)
+        raise
+
+
+def _capture_managed_process(
+    pid_file: str,
+    expected_executable: str,
+    *,
+    label: str,
+) -> _WindowsProcessWaiter | None:
+    """Open an identity-bound Windows process handle from a safe PID record."""
+    import ctypes
+    from ctypes import wintypes
+
+    from defenseclaw.doctor_gateway import canonical_path, read_pid_record
+
+    record = read_pid_record(pid_file)
+    if record.status == "missing":
+        return None
+    if record.status != "ok":
+        raise click.ClickException(f"refusing unsafe {label} PID record: {record.reason}")
+    if not record.executable or canonical_path(record.executable) != canonical_path(expected_executable):
+        raise click.ClickException(f"refusing {label} PID record for an unowned executable")
+    identity = record.start_identity
+    if not identity:
+        raise click.ClickException(f"refusing {label} PID record without a start identity")
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = open_process(
+        _WIN_SYNCHRONIZE | _WIN_PROCESS_QUERY_LIMITED_INFORMATION,
+        False,
+        record.pid,
+    )
+    if not handle:
+        if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: process exited.
+            return None
+        raise click.ClickException(f"could not open identity-bound {label} process {record.pid}")
+    try:
+        query_image = kernel32.QueryFullProcessImageNameW
+        query_image.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        query_image.restype = wintypes.BOOL
+        size = wintypes.DWORD(32768)
+        image = ctypes.create_unicode_buffer(size.value)
+        if not query_image(handle, 0, image, ctypes.byref(size)):
+            raise click.ClickException(f"could not verify {label} executable identity")
+        if canonical_path(image.value) != canonical_path(expected_executable):
+            raise click.ClickException(f"refusing {label} PID reused by an unowned executable")
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+        get_times = kernel32.GetProcessTimes
+        get_times.argtypes = tuple([wintypes.HANDLE] + [ctypes.POINTER(FILETIME)] * 4)
+        get_times.restype = wintypes.BOOL
+        creation, exit_time, kernel_time, user_time = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+        if not get_times(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            raise click.ClickException(f"could not verify {label} start identity")
+        ticks_100ns = (creation.high << 32) | creation.low
+        unix_ns = (ticks_100ns - 116_444_736_000_000_000) * 100
+        if str(unix_ns) != identity:
+            raise click.ClickException(f"{label} PID start identity does not match")
+        return _WindowsProcessWaiter(label=label, pid=record.pid, handle=int(handle))
+    except Exception:
+        close_handle(handle)
+        raise
+
+
+def _capture_managed_processes(plan: UninstallPlan) -> list[_WindowsProcessWaiter]:
+    waiters: list[_WindowsProcessWaiter] = []
+    try:
+        for label, filename in (("watchdog", "watchdog.pid"), ("gateway", "gateway.pid")):
+            waiter = _capture_managed_process(
+                os.path.join(plan.data_dir, filename),
+                plan.gateway_path,
+                label=label,
+            )
+            if waiter is not None:
+                waiters.append(waiter)
+    except Exception:
+        _close_process_waiters(waiters)
+        raise
+    return waiters
+
+
+def _close_process_waiters(waiters: list[_WindowsProcessWaiter]) -> None:
+    if not waiters:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    for waiter in waiters:
+        close_handle(waiter.handle)
+
+
+def _wait_managed_processes(waiters: list[_WindowsProcessWaiter]) -> None:
+    if not waiters:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    wait = ctypes.WinDLL("kernel32", use_last_error=True).WaitForSingleObject
+    wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    wait.restype = wintypes.DWORD
+    for waiter in waiters:
+        if wait(waiter.handle, 15_000) != 0:
+            raise click.ClickException(f"identity-bound {waiter.label} process did not exit (PID {waiter.pid})")
+
+
+def _stop_gateway(plan: UninstallPlan | None = None) -> None:
+    gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
     if gw is None:
         ux.subhead("sidecar not on PATH — nothing to stop")
         return
+    waiters: list[_WindowsProcessWaiter] = []
     try:
+        if plan is not None and not os.path.isfile(gw):
+            ux.subhead("owned sidecar is not installed — nothing to stop")
+            return
+        if plan is not None and plan.platform_name == "win32":
+            waiters = _capture_managed_processes(plan)
+        watchdog = subprocess.run(
+            [gw, "watchdog", "stop"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        if watchdog.returncode != 0:
+            detail = (watchdog.stderr or watchdog.stdout or "unknown error").strip()
+            raise click.ClickException(f"could not stop watchdog: {detail}")
         proc = subprocess.run(
             [gw, "stop"],
             capture_output=True,
@@ -552,12 +997,17 @@ def _stop_gateway() -> None:
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "unknown error").strip()
             raise click.ClickException(f"could not stop sidecar: {detail}")
+        _wait_managed_processes(waiters)
+        _close_process_waiters(waiters)
+        waiters = []
         ux.ok("sidecar stopped")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
         raise click.ClickException(f"could not stop sidecar: {exc}") from exc
+    finally:
+        _close_process_waiters(waiters)
 
 
-def _gateway_supports_connector_teardown() -> bool:
+def _gateway_supports_connector_teardown(gateway_path: str | None = None) -> bool:
     """Return True iff the local ``defenseclaw-gateway`` exposes the
     ``connector teardown`` subcommand introduced in S7.2.
 
@@ -566,7 +1016,7 @@ def _gateway_supports_connector_teardown() -> bool:
     by asking for ``--help`` on the ``connector`` subcommand — which is
     a non-destructive probe — and checking exit code + output.
     """
-    gw = shutil.which("defenseclaw-gateway")
+    gw = gateway_path or shutil.which("defenseclaw-gateway")
     if gw is None:
         return False
     try:
@@ -596,10 +1046,15 @@ def _connector_teardown(plan: UninstallPlan) -> None:
     remediation pointing at the gateway upgrade path.
     """
     connectors = plan.connectors
-    gateway_supported = _gateway_supports_connector_teardown()
+    gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
     for name in connectors:
         if gateway_supported:
-            if _run_gateway_connector_teardown(name):
+            teardown_ok = (
+                _run_gateway_connector_teardown(name, plan=plan)
+                if plan.gateway_path
+                else _run_gateway_connector_teardown(name)
+            )
+            if teardown_ok:
                 continue
             ux.warn(f"gateway connector teardown for {name} reported errors — see output above")
             if name != "openclaw":
@@ -620,19 +1075,26 @@ def _connector_teardown(plan: UninstallPlan) -> None:
         )
 
 
-def _run_gateway_connector_teardown(connector: str) -> bool:
+def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | None = None) -> bool:
     """Invoke ``defenseclaw-gateway connector teardown --connector <name>``.
 
     Returns True on success (rc == 0), False on any error. stdout/stderr
     is forwarded to the operator so they can see exactly what each
     adapter restored.
     """
-    gw = shutil.which("defenseclaw-gateway")
+    gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
     if gw is None:
         return False
     try:
         proc = subprocess.run(
-            [gw, "connector", "teardown", "--connector", connector],
+            [
+                gw,
+                "connector",
+                "teardown",
+                "--connector",
+                connector,
+                *(["--data-dir", plan.data_dir] if plan is not None else []),
+            ],
             capture_output=True,
             encoding="utf-8",
             errors="replace",
@@ -648,6 +1110,29 @@ def _run_gateway_connector_teardown(connector: str) -> bool:
         for line in proc.stderr.splitlines():
             click.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
     if proc.returncode == 0:
+        verify_args = [
+            gw,
+            "connector",
+            "verify",
+            "--connector",
+            connector,
+            *(["--data-dir", plan.data_dir] if plan is not None else []),
+        ]
+        try:
+            verified = subprocess.run(
+                verify_args,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            ux.warn(f"gateway connector verification failed to launch: {exc}")
+            return False
+        if verified.returncode != 0:
+            detail = (verified.stderr or verified.stdout or "residual connector state").strip()
+            ux.warn(f"{connector} teardown verification failed: {detail}")
+            return False
         ux.ok(f"{connector} teardown via gateway sentinel")
         return True
     return False
@@ -678,9 +1163,11 @@ def _revert_openclaw_python(plan: UninstallPlan) -> None:
         if ok:
             ux.ok(f"removed DefenseClaw entries from {plan.openclaw_config_file}")
         else:
-            ux.warn(f"could not revert {plan.openclaw_config_file} (missing or malformed)")
+            raise click.ClickException(f"could not revert {plan.openclaw_config_file} (missing or malformed)")
     except Exception as exc:
-        ux.warn(f"openclaw.json revert failed: {exc}")
+        if isinstance(exc, click.ClickException):
+            raise
+        raise click.ClickException(f"openclaw.json revert failed: {exc}") from exc
 
 
 def _remove_plugin(plan: UninstallPlan) -> None:
@@ -694,7 +1181,7 @@ def _remove_plugin(plan: UninstallPlan) -> None:
     elif result == "":
         ux.subhead("plugin was not installed")
     else:
-        ux.warn("plugin uninstall failed (check permissions)")
+        raise click.ClickException("plugin uninstall failed (check permissions)")
 
 
 def _is_reparse_path(path: str | os.PathLike[str]) -> bool:
@@ -819,29 +1306,51 @@ def _remove_data_dir(
     ux.ok(f"removed {data_dir}")
 
 
-def _remove_binaries() -> None:
-    targets = [
-        os.path.expanduser("~/.local/bin/defenseclaw-gateway"),
-        os.path.expanduser("~/.local/bin/defenseclaw"),
-        # Scanner entry points symlinked by `make cli-install`. Keep
-        # this list in sync with the Makefile `cli-install` loop so a
-        # fresh install / uninstall round-trip leaves no orphan links.
-        os.path.expanduser("~/.local/bin/skill-scanner"),
-        os.path.expanduser("~/.local/bin/skill-scanner-api"),
-        os.path.expanduser("~/.local/bin/skill-scanner-pre-commit"),
-        os.path.expanduser("~/.local/bin/mcp-scanner"),
-        os.path.expanduser("~/.local/bin/mcp-scanner-api"),
-        os.path.expanduser("~/.local/bin/litellm"),
-    ]
+def _remove_binaries(plan: UninstallPlan | None = None) -> None:
+    if plan is None:
+        platform_name = sys.platform
+        install_root, targets = _owned_binary_targets(platform_name)
+        plan = UninstallPlan(
+            platform_name=platform_name,
+            install_root=install_root,
+            gateway_path=os.path.join(
+                install_root,
+                "defenseclaw-gateway.exe" if platform_name == "win32" else "defenseclaw-gateway",
+            ),
+            binary_targets=targets,
+            remove_binaries=True,
+        )
+    _validate_plan(plan)
+    failures: list[str] = []
+    targets = list(plan.binary_targets)
+    if plan.platform_name == "win32":
+        targets.sort(key=lambda path: os.path.basename(path).lower() == "defenseclaw.cmd")
     for path in targets:
         if not os.path.lexists(path):
             click.echo(f"  {ux.dim('·')} {path} not installed")
             continue
-        try:
-            os.unlink(path)
-            ux.ok(f"removed {path}")
-        except OSError as exc:
-            ux.warn(f"failed to remove {path}: {exc}")
+        last_error: OSError | None = None
+        attempts = 40 if plan.platform_name == "win32" else 1
+        for attempt in range(attempts):
+            try:
+                if plan.platform_name == "win32":
+                    _validate_plan(plan)
+                os.unlink(path)
+                ux.ok(f"removed {path}")
+                last_error = None
+                break
+            except FileNotFoundError:
+                last_error = None
+                break
+            except OSError as exc:
+                last_error = exc
+                if attempt + 1 < attempts:
+                    time.sleep(0.25)
+        if last_error is not None:
+            failures.append(f"{path}: {last_error}")
+
+    if failures:
+        raise OSError("; ".join(failures))
 
     # Clean up the pip-installed Python package symlink if operators
     # used ``pip install defenseclaw`` — we don't shell out to pip

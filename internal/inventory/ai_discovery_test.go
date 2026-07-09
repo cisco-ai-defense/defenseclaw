@@ -28,7 +28,16 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
+
+func newTestContinuousDiscoveryServiceWithOptions(t *testing.T, opts AIDiscoveryOptions, catalog []AISignature, otel *telemetry.Provider, events *gatewaylog.Writer) *ContinuousDiscoveryService {
+	t.Helper()
+	svc := NewContinuousDiscoveryServiceWithOptions(opts, catalog, otel, events)
+	t.Cleanup(func() { _ = svc.Close() })
+	return svc
+}
 
 func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	sigs, err := LoadAISignatures()
@@ -236,6 +245,7 @@ func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T)
 	if svc == nil {
 		t.Fatal("service nil")
 	}
+	t.Cleanup(func() { _ = svc.Close() })
 	var found bool
 	for _, sig := range svc.catalog {
 		found = found || sig.ID == "custom-sidecar-ai"
@@ -255,7 +265,7 @@ func TestContinuousDiscoveryDetectsEnhancedSignalsWithoutRawEvidence(t *testing.
 	mustWrite(t, filepath.Join(workspace, "package.json"), `{"dependencies":{"openai":"latest"}}`)
 	t.Setenv("OPENAI_API_KEY", "not-emitted")
 
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:                 true,
 		Mode:                    "enhanced",
 		ScanRoots:               []string{workspace},
@@ -300,7 +310,7 @@ detectors:
     presence_lr: 11
 `)
 
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:              true,
 		DataDir:              filepath.Join(tmp, "data"),
 		HomeDir:              filepath.Join(tmp, "home"),
@@ -377,7 +387,7 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 	historyPath := filepath.Join(home, ".zsh_history")
 	mustWrite(t, historyPath, "openai chat --model gpt-4\n")
 
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:             true,
 		Mode:                "enhanced",
 		IncludeShellHistory: true,
@@ -447,7 +457,7 @@ func TestContinuousDiscoveryFullScanEmitsGone(t *testing.T) {
 	dataDir := filepath.Join(tmp, "data")
 	cfgPath := filepath.Join(home, ".shadowai", "config.json")
 	mustWrite(t, cfgPath, "{}")
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:  true,
 		Mode:     "enhanced",
 		DataDir:  dataDir,
@@ -487,7 +497,7 @@ func TestContinuousDiscoveryDetectsLoopbackEndpointWithoutRawURL(t *testing.T) {
 	tmp := t.TempDir()
 	sig := testAISignature()
 	sig.LocalEndpoints = []string{server.URL + "/v1/models"}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:               true,
 		Mode:                  "enhanced",
 		IncludeNetworkDomains: true,
@@ -536,7 +546,7 @@ func TestDetectLocalEndpoints_PrefersHEADToAvoidTriggeringInference(t *testing.T
 	tmp := t.TempDir()
 	sig := testAISignature()
 	sig.LocalEndpoints = []string{server.URL + "/v1/models"}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:               true,
 		Mode:                  "enhanced",
 		IncludeNetworkDomains: true,
@@ -579,7 +589,7 @@ func TestDetectLocalEndpoints_FallsBackToGETWhenHEADUnsupported(t *testing.T) {
 	tmp := t.TempDir()
 	sig := testAISignature()
 	sig.LocalEndpoints = []string{server.URL + "/v1/models"}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:               true,
 		Mode:                  "enhanced",
 		IncludeNetworkDomains: true,
@@ -627,7 +637,7 @@ func TestDetectLocalEndpoints_SkipsPathsOutsideAllowList(t *testing.T) {
 		server.URL + "/v1/chat/completions", // NOT in safeLocalEndpointPaths
 		server.URL + "/admin/restart",       // NOT in safeLocalEndpointPaths
 	}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:               true,
 		Mode:                  "enhanced",
 		IncludeNetworkDomains: true,
@@ -665,7 +675,7 @@ func TestProcessNameMatchesShortNamesExactly(t *testing.T) {
 // telemetry / audit fanout runs.
 func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	tmp := t.TempDir()
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:  true,
 		Mode:     "enhanced",
 		DataDir:  filepath.Join(tmp, "data"),
@@ -702,7 +712,7 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 }
 
 func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled: true,
 		Mode:    "enhanced",
 		DataDir: t.TempDir(),
@@ -747,7 +757,7 @@ func TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary(t *testing.T
 	dataDir := filepath.Join(tmp, "data")
 	cfgPath := filepath.Join(home, ".shadowai", "config.json")
 	mustWrite(t, cfgPath, "{}")
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:  true,
 		Mode:     "enhanced",
 		DataDir:  dataDir,
@@ -1203,9 +1213,11 @@ func TestProjectRootForManifest_WalksPastDependencyCacheSegments(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := projectRootForManifest(tc.path)
-			if got != tc.want {
-				t.Fatalf("projectRootForManifest(%q) = %q; want %q", tc.path, got, tc.want)
+			path := filepath.FromSlash(tc.path)
+			want := filepath.FromSlash(tc.want)
+			got := projectRootForManifest(path)
+			if got != want {
+				t.Fatalf("projectRootForManifest(%q) = %q; want %q", path, got, want)
 			}
 		})
 	}
@@ -1237,7 +1249,7 @@ mainly_for_demo = "0.1"
 	if err != nil {
 		t.Fatalf("LoadAISignatures: %v", err)
 	}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:         true,
 		Mode:            "enhanced",
 		DataDir:         filepath.Join(tmp, "data"),
@@ -1316,7 +1328,7 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAISignatures: %v", err)
 	}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:         true,
 		Mode:            "enhanced",
 		DataDir:         filepath.Join(tmp, "data"),
@@ -1385,7 +1397,7 @@ func TestRunScan_SingleFlight(t *testing.T) {
 		t.Fatalf("mkdir home: %v", err)
 	}
 
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:         true,
 		Mode:            "enhanced",
 		DataDir:         dataDir,
@@ -1433,7 +1445,7 @@ func TestRunScan_RespectsCancelledContext(t *testing.T) {
 	_ = os.MkdirAll(dataDir, 0o700)
 	_ = os.MkdirAll(home, 0o700)
 
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+	svc := newTestContinuousDiscoveryServiceWithOptions(t, AIDiscoveryOptions{
 		Enabled:         true,
 		Mode:            "enhanced",
 		DataDir:         dataDir,

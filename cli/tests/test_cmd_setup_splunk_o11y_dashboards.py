@@ -25,9 +25,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (
     _api_url_from_ingest_endpoint,
     splunk_o11y_dashboards,
@@ -436,7 +440,19 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
         self.assertEqual(calls[4][1], "plan")
 
     def test_missing_token_reports_actionable_error(self) -> None:
-        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {}, clear=True):
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.dict(
+                os.environ,
+                {
+                    "SFX_AUTH_TOKEN": "",
+                    "SPLUNK_ACCESS_TOKEN": "",
+                    "SPLUNK_O11Y_TOKEN": "",
+                    "SPLUNK_REALM": "",
+                },
+                clear=False,
+            ),
+        ):
             result = CliRunner().invoke(
                 splunk_o11y_dashboards,
                 [

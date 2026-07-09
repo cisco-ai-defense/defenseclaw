@@ -116,9 +116,9 @@ defenseclaw init --enable-guardrail
 
 For platform-specific steps, see [docs/INSTALL.md](docs/INSTALL.md).
 
-On native Windows, use the PowerShell installer and hook-only connector path in
+On native Windows x64, use the PowerShell installer and hook-only connector path in
 the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/).
-WSL is not required or configured.
+WSL is unsupported. Codex CLI and Claude Code are the only certified Windows connectors.
 
 ---
 

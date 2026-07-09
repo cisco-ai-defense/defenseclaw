@@ -13,6 +13,7 @@ package gateway
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -231,6 +232,10 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     dedicated matrix rather than reusing the openclaw/zeptoclaw/
 //     claudecode/codex one above.
 func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
+	hermesSkillFragment := filepath.Join(".hermes", "skills")
+	if runtime.GOOS == "windows" {
+		hermesSkillFragment = filepath.Join("hermes", "skills")
+	}
 	cases := []struct {
 		name            string
 		ctor            func() connector.Connector
@@ -241,7 +246,7 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			name:            "hermes",
 			ctor:            func() connector.Connector { return connector.NewHermesConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".hermes", "skills"),
+			expectSkillFrag: hermesSkillFragment,
 		},
 		{
 			name:            "cursor",

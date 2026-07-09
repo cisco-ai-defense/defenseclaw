@@ -440,7 +440,8 @@ install_python_cli() {
     if [[ -n "${LOCAL_DIR}" ]]; then
         local whl
         whl="$(artifact_path "defenseclaw-*.whl")"
-        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${whl}" \
+        uv --no-config pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet \
+            --reinstall --no-cache --strict "${whl}" \
             || die "Failed to install CLI from wheel"
     else
         local whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
@@ -448,18 +449,33 @@ install_python_cli() {
         whl_url="$(artifact_path "${whl_name}")"
         tmp="$(mktemp -d)"
         fetch_artifact "${whl_url}" "${tmp}/${whl_name}"
-        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${tmp}/${whl_name}" \
+        uv --no-config pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet \
+            --reinstall --no-cache --strict "${tmp}/${whl_name}" \
             || die "Failed to install CLI from wheel"
         rm -rf "${tmp}"
     fi
 
-    mkdir -p "${INSTALL_DIR}"
-    ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
+    uv --no-config pip check --python "${DEFENSECLAW_VENV}/bin/python" \
+        || die "CLI dependency validation failed; launcher was not published"
+
+    "${DEFENSECLAW_VENV}/bin/python" -I -c '
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+asyncio.run(smoke())
+' || die "CLI TUI launch validation failed; launcher was not published"
 
     if "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null; then
+        mkdir -p "${INSTALL_DIR}"
+        ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
         ok "CLI installed"
     else
-        warn "CLI installed but verification failed — check dependencies"
+        die "CLI startup validation failed; launcher was not published"
     fi
 }
 

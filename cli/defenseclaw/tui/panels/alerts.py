@@ -289,9 +289,12 @@ class AlertsPanelModel:
                     _coerce_alert_event(event)
                     for event in reader(500)  # type: ignore[misc]
                 ]
-            except Exception:  # noqa: BLE001 - missing/partial audit DBs render empty alerts.
-                audit_events = []
-            if self.audit_events != audit_events:
+            except Exception:  # noqa: BLE001 - transient audit failures retain cached alerts.
+                # A transient SQLite lock or a writer racing this read must not
+                # blank a previously accurate queue. Keep the cached rows and
+                # retry on the next coalesced refresh.
+                audit_events = None
+            if audit_events is not None and self.audit_events != audit_events:
                 self.audit_events = audit_events
                 self._invalidate_row_caches()
         if self.data_dir is None:
@@ -543,7 +546,7 @@ class AlertsPanelModel:
             copied = self.copy_detail_text()
             if not copied:
                 return AlertPanelAction(True, hint="No alert detail to copy.")
-            return AlertPanelAction(True, hint="Alert detail copied.", copy_text=copied)
+            return AlertPanelAction(True, hint="Copied alert detail.", copy_text=copied)
         if key == "d":
             row = self.selected()
             if row is None or row.event.id.startswith("gw:"):

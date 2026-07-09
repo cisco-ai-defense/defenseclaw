@@ -49,6 +49,7 @@ from defenseclaw.webhooks import WebhookView
 from defenseclaw.webhooks.dispatch import _redact_payload_preview
 from defenseclaw.webhooks.writer import _write_yaml, redact_webhook_url
 
+from tests.environment import requires_symlink_privilege
 from tests.permissions import assert_owner_only_file
 
 
@@ -56,6 +57,7 @@ from tests.permissions import assert_owner_only_file
 # F-0041 — connector_paths._atomic_json_merge must not follow a symlinked
 # config path (else a planted .mcp.json symlink discloses its target).
 # ---------------------------------------------------------------------------
+@requires_symlink_privilege
 def test_f0041_atomic_json_merge_refuses_symlinked_config(tmp_path):
     secret = tmp_path / "operator_private.json"
     secret.write_text(json.dumps({"private_token": "F0041_LEAK"}), encoding="utf-8")
@@ -74,6 +76,7 @@ def test_f0041_atomic_json_merge_refuses_symlinked_config(tmp_path):
 # F-0402 — record_pristine_backup must reject a symlinked source instead of
 # copying the link target into the (discoverable) backup dir.
 # ---------------------------------------------------------------------------
+@requires_symlink_privilege
 def test_f0402_pristine_backup_rejects_symlinked_source(tmp_path):
     secret = tmp_path / "outside_secret.json"
     secret.write_text('{"aws_secret": "F0402_LEAK"}', encoding="utf-8")
@@ -99,6 +102,7 @@ def test_f0402_pristine_backup_rejects_symlinked_source(tmp_path):
 # F-0403 — _write_backup_index must not write through a predictable
 # "<index>.tmp" path that an attacker can pre-symlink.
 # ---------------------------------------------------------------------------
+@requires_symlink_privilege
 def test_f0403_backup_index_ignores_predictable_tmp_symlink(tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -121,6 +125,7 @@ def test_f0403_backup_index_ignores_predictable_tmp_symlink(tmp_path):
 # F-0404 — _backup must detect a *broken* symlink at "<path>.bak" (lexists)
 # and never write through it to the attacker-chosen target.
 # ---------------------------------------------------------------------------
+@requires_symlink_privilege
 def test_f0404_backup_does_not_write_through_broken_symlink(tmp_path):
     path = tmp_path / "config.json"
     path.write_text("REAL_CONFIG", encoding="utf-8")

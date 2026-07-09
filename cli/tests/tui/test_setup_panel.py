@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from defenseclaw.tui.panels.setup import (
     CONNECTORS,
     WIZARD_DESCRIPTIONS,
@@ -26,6 +28,7 @@ from defenseclaw.tui.panels.setup import (
     WizardGoal,
     _custom_providers_fields_for,
     _filter_fields_for_goal,
+    _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
     action_matrix_fields,
@@ -121,7 +124,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
 
 
 def test_notifications_fields_preserve_config_editor_catalog() -> None:
-    section = _section(build_setup_sections({}), "Notifications")
+    section = _section(build_setup_sections({}, os_name="linux"), "Notifications")
     fields = {field.key: field for field in section.fields}
 
     assert set(fields) >= {
@@ -138,6 +141,19 @@ def test_notifications_fields_preserve_config_editor_catalog() -> None:
     assert fields["notifications.enabled"].kind == "bool"
     assert fields["notifications.dedup_window"].hint
     assert fields["notifications.max_per_minute"].kind == "int"
+
+
+def test_windows_notifications_enabled_field_is_visible_but_read_only() -> None:
+    section = _section(
+        build_setup_sections({"notifications": {"enabled": True}}, os_name="windows"),
+        "Notifications",
+    )
+    fields = {field.key: field for field in section.fields if field.key}
+    enabled = fields["notifications.enabled"]
+    assert enabled.interactive is False
+    assert "unsupported" in enabled.label.lower()
+    assert "inactive" in enabled.hint.lower()
+    assert "unsupported" in section.summary.lower()
 
 
 def test_action_matrix_has_header_and_severity_triplets() -> None:
@@ -512,6 +528,247 @@ def test_guardrail_wizard_prefills_single_connector_and_passes_explicit_scope() 
     assert argv[argv.index("--connector") + 1] == "codex"
 
 
+def _codex_claude_guardrail_cfg() -> object:
+    from defenseclaw.config import Config, GuardrailConfig, HILTConfig, PerConnectorGuardrailConfig
+
+    cfg = Config(
+        guardrail=GuardrailConfig(
+            enabled=True,
+            mode="observe",
+            connector="codex",
+            connectors={
+                "codex": PerConnectorGuardrailConfig(
+                    mode="action",
+                    hilt=HILTConfig(enabled=True, min_severity="LOW"),
+                    rule_pack_dir="strict",
+                ),
+                "claudecode": PerConnectorGuardrailConfig(
+                    mode="observe",
+                    hilt=HILTConfig(enabled=False, min_severity="MEDIUM"),
+                    rule_pack_dir="permissive",
+                ),
+            },
+        )
+    )
+    cfg.claw.mode = "codex"
+    return cfg
+
+
+def _replace_live_guardrail_field(model: SetupPanelModel, label: str, value: str) -> None:
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    index = next(index for index, field in enumerate(model.form_fields) if field.label == label)
+    DefenseClawTUI._replace_setup_form_value(SimpleNamespace(setup_model=model), index, value)
+
+
+def test_connector_setup_codex_submits_its_effective_action_mode() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    cfg.guardrail.connector = "codex"
+    cfg.claw.mode = "codex"
+
+    for os_name in ("windows", "darwin", "linux"):
+        fields = connector_setup_wizard_fields(cfg, os_name=os_name)
+
+        assert wizard_field_value(fields, "Connector") == "codex"
+        assert wizard_field_value(fields, "Guardrail Mode") == "action"
+        assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
+            "setup",
+            "codex",
+            "--yes",
+            "--mode",
+            "action",
+        )
+
+
+def test_connector_setup_claude_code_submits_its_effective_observe_mode() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    cfg.guardrail.connector = "claudecode"
+    cfg.claw.mode = "claudecode"
+
+    for os_name in ("windows", "darwin", "linux"):
+        fields = connector_setup_wizard_fields(cfg, os_name=os_name)
+
+        assert wizard_field_value(fields, "Connector") == "claudecode"
+        assert wizard_field_value(fields, "Guardrail Mode") == "observe"
+        assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
+            "setup",
+            "claude-code",
+            "--yes",
+            "--mode",
+            "observe",
+        )
+
+
+def test_connector_setup_live_connector_change_rederives_mode_only() -> None:
+    model = SetupPanelModel(cfg=_codex_claude_guardrail_cfg(), os_name="windows")
+    model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
+    _replace_live_guardrail_field(model, "Restart Gateway", "no")
+
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "action"
+    _replace_live_guardrail_field(model, "Connector", "claudecode")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "observe"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+    _replace_live_guardrail_field(model, "Connector", "codex")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "action"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+    # Bare batch setup intentionally keeps the global mode default; switching
+    # back to single-connector setup re-derives Codex's effective override.
+    _replace_live_guardrail_field(model, "Action", "batch")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "observe"
+    _replace_live_guardrail_field(model, "Action", "setup")
+    assert wizard_field_value(model.form_fields, "Guardrail Mode") == "action"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+
+def _open_guardrail_mode_goal(cfg: object) -> SetupPanelModel:
+    model = SetupPanelModel(cfg=cfg)
+    assert model.open_goal_menu(SetupWizard.GUARDRAIL) is True
+    model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "mode")
+    model.select_active_goal()
+    assert {field.label for field in model.form_fields if field.kind != "section"} == {"Connector", "Mode"}
+    return model
+
+
+def test_guardrail_mode_goal_routes_claude_code_and_attributes_guardrail_status() -> None:
+    model = _open_guardrail_mode_goal(_codex_claude_guardrail_cfg())
+
+    _replace_live_guardrail_field(model, "Connector", "claudecode")
+    assert wizard_field_value(model.form_fields, "Mode") == "observe"
+    _replace_live_guardrail_field(model, "Mode", "action")
+
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields)
+    assert argv == ("setup", "claude-code", "--yes", "--mode", "action")
+    assert "--replace" not in argv
+    assert argv[:2] != ("setup", "guardrail")
+
+    action = model.submit_wizard_form()
+    assert action.intent is not None
+    assert action.intent.args == argv
+    assert action.intent.label == "setup Guardrail (claudecode)"
+    assert model.wizard_status[SetupWizard.GUARDRAIL] == "running..."
+
+    model.mark_wizard_complete(argv, success=True)
+    assert model.wizard_status[SetupWizard.GUARDRAIL] == "done"
+    assert SetupWizard.CONNECTOR_SETUP not in model.wizard_status
+
+
+def test_guardrail_mode_goal_routes_codex_symmetrically() -> None:
+    model = _open_guardrail_mode_goal(_codex_claude_guardrail_cfg())
+
+    _replace_live_guardrail_field(model, "Connector", "codex")
+    assert wizard_field_value(model.form_fields, "Mode") == "action"
+    _replace_live_guardrail_field(model, "Mode", "observe")
+
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields)
+    assert argv == ("setup", "codex", "--yes", "--mode", "observe")
+    assert "--replace" not in argv
+    assert argv[:2] != ("setup", "guardrail")
+
+
+def test_guardrail_live_connector_change_rederives_connector_scoped_settings() -> None:
+    model = SetupPanelModel(cfg=_codex_claude_guardrail_cfg())
+    model.open_wizard_form(SetupWizard.GUARDRAIL)
+
+    _replace_live_guardrail_field(model, "Connector", "claudecode")
+    assert wizard_field_value(model.form_fields, "Mode") == "observe"
+    assert wizard_field_value(model.form_fields, "Rule Pack") == "permissive"
+    assert wizard_field_value(model.form_fields, "Human Approval") == "no"
+    assert wizard_field_value(model.form_fields, "Approval Min Severity") == "MEDIUM"
+
+    _replace_live_guardrail_field(model, "Connector", "codex")
+    assert wizard_field_value(model.form_fields, "Mode") == "action"
+    assert wizard_field_value(model.form_fields, "Rule Pack") == "strict"
+    assert wizard_field_value(model.form_fields, "Human Approval") == "yes"
+    assert wizard_field_value(model.form_fields, "Approval Min Severity") == "LOW"
+
+
+def test_guardrail_scope_change_does_not_carry_disable_toggle() -> None:
+    model = SetupPanelModel(cfg=_codex_claude_guardrail_cfg())
+    model.open_wizard_form(SetupWizard.GUARDRAIL)
+
+    _replace_live_guardrail_field(model, "Disable Selected Connector", "yes")
+    _replace_live_guardrail_field(model, "Scope", "global-all-active")
+
+    assert wizard_field_value(model.form_fields, "Disable Guardrail Globally") == "no"
+    assert "--disable" not in build_wizard_args(
+        SetupWizard.GUARDRAIL, model.form_fields, model.config
+    )
+
+
+def test_guardrail_advanced_separates_connector_and_global_argv() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    connector_fields = guardrail_wizard_fields(cfg)
+
+    assert wizard_field_value(connector_fields, "Scope") == "selected-connector"
+    assert _wizard_options(connector_fields, "Connector") == ("", "claudecode", "codex")
+    assert "Global Settings (affects all active connectors)" not in {field.label for field in connector_fields}
+    connector_fields = _with_field(connector_fields, "Connector", "codex")
+    connector_argv = build_wizard_args(SetupWizard.GUARDRAIL, connector_fields, cfg)
+    assert _pair_after(connector_argv, "--connector") == "codex"
+    for global_flag in (
+        "--scanner-mode",
+        "--port",
+        "--cisco-endpoint",
+        "--cisco-api-key-env",
+        "--cisco-timeout-ms",
+        "--detection-strategy",
+        "--judge-model",
+        "--llm-role",
+        "--disable-redaction",
+        "--enable-redaction",
+    ):
+        assert global_flag not in connector_argv
+
+    scoped_disable = _with_field(connector_fields, "Disable Selected Connector", "yes")
+    scoped_disable = _with_field(scoped_disable, "Restart After", "no")
+    assert build_wizard_args(SetupWizard.GUARDRAIL, scoped_disable, cfg) == (
+        "guardrail",
+        "disable",
+        "--yes",
+        "--connector",
+        "codex",
+        "--no-restart",
+    )
+
+    global_fields = _guardrail_wizard_fields_for({"@Scope": "global-all-active"}, cfg)
+    labels = {field.label for field in global_fields}
+    assert "Connector" not in labels
+    assert "Global Settings (affects all active connectors)" in labels
+    global_disable = _with_field(global_fields, "Disable Guardrail Globally", "yes")
+    global_disable = _with_field(global_disable, "Restart After", "no")
+    assert build_wizard_args(SetupWizard.GUARDRAIL, global_disable, cfg) == (
+        "guardrail",
+        "disable",
+        "--yes",
+        "--no-restart",
+    )
+
+
+def test_guardrail_inactive_connector_is_unavailable_and_rejected_before_intent() -> None:
+    cfg = _codex_claude_guardrail_cfg()
+    before = deepcopy(cfg)
+    model = SetupPanelModel(cfg=cfg)
+    model.open_wizard_form(SetupWizard.GUARDRAIL)
+
+    connector = next(field for field in model.form_fields if field.label == "Connector")
+    assert connector.options == ("", "claudecode", "codex")
+    assert "cursor" not in connector.options
+
+    # Simulate a stale/injected form value, bypassing the choice widget.
+    model.form_fields = list(_with_field(model.form_fields, "Connector", "cursor"))
+    with pytest.raises(ValueError, match="not active"):
+        build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields, cfg)
+
+    action = model.submit_wizard_form()
+    assert action.intent is None
+    assert model.form_active is True
+    assert "not active" in model.form_error
+    assert SetupWizard.GUARDRAIL not in model.wizard_status
+    assert cfg == before
+
+
 def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
     fields = wizard_form_defs(SetupWizard.TRUSTED_PATHS)
     assert build_wizard_args(SetupWizard.TRUSTED_PATHS, fields) == ("setup", "trusted-paths", "list")
@@ -534,8 +791,14 @@ def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
 
 
 def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
-    fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
-    assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fields) == ("guardrail", "status")
+    global_fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
+    assert wizard_field_value(global_fields, "Scope") == "global-all-active"
+    assert "Connector" not in {field.label for field in global_fields}
+    assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, global_fields) == ("guardrail", "status")
+
+    cfg = {"guardrail": {"connectors": {"codex": {}, "hermes": {}}}}
+    fields = _guardrail_actions_wizard_fields({"@Scope": "selected-connector"}, cfg)
+    assert _wizard_options(fields, "Connector") == ("", "codex", "hermes")
 
     scoped_status = _with_field(fields, "Connector", "codex")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, scoped_status) == (
@@ -568,7 +831,7 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "hermes",
     )
 
-    hilt = _with_field(fields, "Action", "hilt")
+    hilt = _with_field(global_fields, "Action", "hilt")
     hilt = _with_field(hilt, "HITL State", "off")
     hilt = _with_field(hilt, "Approval Min Severity", "MEDIUM")
     hilt = _with_field(hilt, "Restart Gateway", "no")
@@ -583,19 +846,19 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
     )
 
     block = _with_field(fields, "Action", "block-message")
+    block = _with_field(block, "Connector", "hermes")
     assert missing_required_fields(SetupWizard.GUARDRAIL_ACTIONS, block) == ("Block Message or Clear Message",)
     block = _with_field(block, "Block Message", "Blocked by policy.")
-    block = _with_field(block, "Connector", "antigravity")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, block) == (
         "guardrail",
         "block-message",
         "Blocked by policy.",
         "--yes",
         "--connector",
-        "antigravity",
+        "hermes",
     )
 
-    clear = _with_field(fields, "Action", "block-message")
+    clear = _with_field(global_fields, "Action", "block-message")
     clear = _with_field(clear, "Clear Message", "yes")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, clear) == (
         "guardrail",
@@ -1061,7 +1324,7 @@ def test_webhook_wizard_enable_hmac_signing_gates_secret_env() -> None:
     assert "--secret-env" not in argv
 
 
-def test_splunk_wizard_pipeline_picker_maps_to_bool_flag_and_queues_dashboards() -> None:
+def test_splunk_wizard_pipeline_picker_maps_to_bool_flag_and_queues_dashboards(monkeypatch) -> None:
     """Splunk wizard now has a Pipeline picker (splunk-o11y / local-docker /
     enterprise / custom). The picker rewrites the pipeline bool flags so
     the operator only chooses one option in the guided form.
@@ -1076,6 +1339,7 @@ def test_splunk_wizard_pipeline_picker_maps_to_bool_flag_and_queues_dashboards()
         splunk_wizard_follow_up_intents,
     )
 
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     fields = wizard_form_defs(SetupWizard.SPLUNK)
     mode_field = next(field for field in fields if field.label == "Mode")
     assert tuple(mode_field.options) == SPLUNK_PIPELINE_OPTIONS
@@ -1738,13 +2002,13 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
     assert _pair_after(argv, "--judge-model") == "bedrock/us.anthropic.claude-sonnet-4-6"
 
 
-def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_auth_rows() -> None:
+def test_guardrail_wizard_exposes_scoped_block_message_and_scopes_bedrock_auth_rows() -> None:
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     flags = {f.flag for f in fields}
 
-    assert "Block Message" not in labels
-    assert "--block-message" not in flags
+    assert "Block Message" in labels
+    assert "--block-message" in flags
     assert "--judge-bedrock-auth-mode" in flags
     assert "--judge-bedrock-secret-key-env" not in flags
     assert "--judge-bedrock-profile-name" not in flags
@@ -2081,7 +2345,7 @@ def test_wizard_state_summary_llm_reports_main_and_judge() -> None:
     assert wizard_state_summary(SetupWizard.CREDENTIALS, None) == ""
 
 
-def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
+def test_every_goal_opens_and_emits_only_real_cli_options(monkeypatch) -> None:
     """Selecting any goal of any wizard must build a valid argv.
 
     The TUI shells out to ``defenseclaw setup ...``; an unknown flag would
@@ -2094,6 +2358,7 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
     from click.testing import CliRunner
     from defenseclaw.commands import cmd_setup
 
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     runner = CliRunner()
     cfg = _guardrail_on_cfg("openclaw")
     for wizard in SetupWizard:
@@ -2241,6 +2506,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
     assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
     assert fields["guardrail.connectors.codex.hilt.min_severity"].value == "LOW"
@@ -2251,6 +2517,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # hermes has no override → inherits the global effective values.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
     assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
     assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
     assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"
@@ -2300,10 +2567,20 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
     cfg = _multi_connector_cfg()
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "closed")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "closed"
-    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "open"
+    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "closed"
     # Anything that is not "closed" normalizes to "open".
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    state = SimpleNamespace(runtime="open", desired="closed")
+    monkeypatch.setattr("defenseclaw.fail_mode.resolve_connector_fail_mode", lambda *_args: state)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "open"
 
 
 def test_per_connector_block_message_writes_string() -> None:
@@ -2432,3 +2709,55 @@ def test_per_connector_asset_policy_field_writes_typed_override() -> None:
 
     apply_config_field(cfg, "asset_policy.connectors.hermes.mcp.registry_required", "")
     assert entry.mcp.registry_required is None
+
+
+def test_global_registry_required_field_reconciles_every_active_connector() -> None:
+    from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.asset_policy.skill.registry_required = False
+    cfg.asset_policy.connectors = {
+        "codex": PerConnectorAssetPolicy(
+            mode="action",
+            skill=PerConnectorAssetTypePolicy(
+                default="deny", registry_required=False, registry_empty_action="warn",
+            ),
+        ),
+        "hermes": PerConnectorAssetPolicy(
+            skill=PerConnectorAssetTypePolicy(registry_required=True),
+        ),
+    }
+
+    apply_config_field(cfg, "asset_policy.skill.registry_required", "true")
+
+    assert cfg.asset_policy.skill.registry_required is True
+    for connector in ("codex", "hermes"):
+        assert cfg.asset_policy.effective_asset_type_policy(connector, "skill").registry_required is True
+        assert cfg.asset_policy.connectors[connector].skill.registry_required is None
+    assert cfg.asset_policy.connectors["codex"].mode == "action"
+    assert cfg.asset_policy.connectors["codex"].skill.default == "deny"
+    assert cfg.asset_policy.connectors["codex"].skill.registry_empty_action == "warn"
+
+
+def test_scoped_registry_required_field_uses_same_resolver_without_peer_changes() -> None:
+    from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.asset_policy.mcp.registry_required = True
+    cfg.asset_policy.connectors = {
+        "codex": PerConnectorAssetPolicy(mcp=PerConnectorAssetTypePolicy(registry_required=True)),
+        "hermes": PerConnectorAssetPolicy(
+            mode="observe",
+            mcp=PerConnectorAssetTypePolicy(default="deny", registry_required=True),
+        ),
+    }
+
+    apply_config_field(cfg, "asset_policy.connectors.codex.mcp.registry_required", "false")
+
+    assert cfg.asset_policy.mcp.registry_required is True
+    assert cfg.asset_policy.connectors["codex"].mcp.registry_required is False
+    assert cfg.asset_policy.connectors["hermes"].mcp.registry_required is True
+    assert cfg.asset_policy.connectors["hermes"].mcp.default == "deny"
+    assert cfg.asset_policy.connectors["hermes"].mode == "observe"

@@ -535,6 +535,47 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotIn("openclaw.json", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_stdio_launcher_scan_scope_matrix(self, mock_scan):
+        """WIN-AUD-064: scoped and unscoped paths retain the stdio entry."""
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        def servers(connector=None):
+            command = "npx" if connector == "codex" else "uvx"
+            return [
+                MCPServerEntry(
+                    name="launcher-fixture",
+                    command=command,
+                    args=["fixture-package"],
+                    transport="stdio",
+                )
+            ]
+
+        self.app.cfg.mcp_servers = servers  # type: ignore[method-assign]
+        mock_scan.side_effect = lambda target, **_kwargs: ScanResult(
+            scanner="mcp-scanner",
+            target=target,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        for connector in ("codex", "claudecode"):
+            result = self.invoke(
+                ["scan", "launcher-fixture", "--connector", connector]
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+
+        unscoped = self.invoke(["scan", "launcher-fixture"])
+        self.assertEqual(unscoped.exit_code, 0, unscoped.output)
+
+        commands = [
+            call.kwargs["server_entry"].command
+            for call in mock_scan.call_args_list
+        ]
+        self.assertEqual(commands.count("npx"), 2)
+        self.assertEqual(commands.count("uvx"), 2)
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_bare_name_multi_owner_scans_all(self, mock_scan):
         # M3 (locked decision): a bare name owned by MULTIPLE active connectors
         # is scanned on each, labeled per connector.
@@ -637,6 +678,59 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         called = {c.kwargs.get("connector") for c in mock_set.call_args_list}
         self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_set_stdio_runs_install_time_scan_with_full_launcher_definition(
+        self, mock_admit, mock_scan, mock_set,
+    ):
+        """WIN-AUD-064: mcp set scans command, args, and env before writing."""
+        from defenseclaw.config import SeverityAction
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner",
+            target="launcher-fixture",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        def decide(_pe, *, scan_result=None, **_kwargs):
+            if scan_result is None:
+                return AdmissionDecision("scan", "scan required")
+            return AdmissionDecision(
+                "warning",
+                "within policy",
+                action=SeverityAction(install="allow"),
+            )
+
+        mock_admit.side_effect = decide
+        result = self.invoke(
+            [
+                "set",
+                "launcher-fixture",
+                "--command",
+                "uvx",
+                "--args",
+                '["--from", "fixture-package", "fixture-command"]',
+                "--env",
+                "MCP_FIXTURE_REQUIRED=present",
+                "--connector",
+                "codex",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        scan_entry = mock_scan.call_args.kwargs["server_entry"]
+        self.assertEqual(scan_entry.command, "uvx")
+        self.assertEqual(
+            scan_entry.args,
+            ["--from", "fixture-package", "fixture-command"],
+        )
+        self.assertEqual(scan_entry.env, {"MCP_FIXTURE_REQUIRED": "present"})
+        mock_set.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     def test_set_connector_flag_targets_one(self, mock_set):
@@ -1481,6 +1575,10 @@ class TestParseArgs(unittest.TestCase):
     def test_json_array_with_spaces(self):
         result = _parse_args('  ["-y", "my-server"]  ')
         self.assertEqual(result, ["-y", "my-server"])
+
+    def test_json_array_preserves_literal_comma(self):
+        result = _parse_args('["--message", "hello, world"]')
+        self.assertEqual(result, ["--message", "hello, world"])
 
     def test_invalid_json_falls_back_to_comma(self):
         result = _parse_args("[not-valid-json")
