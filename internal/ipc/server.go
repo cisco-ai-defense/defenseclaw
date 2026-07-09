@@ -161,6 +161,16 @@ func (s *Server) Run(ctx context.Context) error {
 		s.setHealth(gateway.StateError, wrapped.Error())
 		return wrapped
 	}
+	// MkdirAll respects the process umask (launchd sets 022 or
+	// stricter, so a mode-0750 request lands as 0700). Force the
+	// intended mode explicitly so the staff group actually gets its
+	// traverse bit. Also idempotent when the installer pre-created
+	// the dir with a laxer mode.
+	if err := os.Chmod(dir, dirMode); err != nil {
+		wrapped := fmt.Errorf("ipc: chmod %s: %w", dir, err)
+		s.setHealth(gateway.StateError, wrapped.Error())
+		return wrapped
+	}
 	// Best-effort chown to root:staff on darwin managed_enterprise.
 	// Fails silently on non-root dev runs; a real install runs as
 	// root and the chown succeeds. We rely on os.Chown returning
