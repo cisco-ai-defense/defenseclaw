@@ -190,19 +190,24 @@ class TestSingleTargetUX(_SkillScanUXBase):
         self.assertIn("blocked=0", result.output)
         self.assertIn("findings=1", result.output)
 
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
-    def test_action_policy_block_uses_blocked(self, mock_cls, _mock_info) -> None:
+    def test_action_policy_block_uses_blocked(
+        self, mock_cls, _mock_info, mock_sidecar,
+    ) -> None:
         self.app.cfg.skill_actions.high = SeverityAction(install="block")
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
         mock_cls.return_value = mock_scanner
+        mock_sidecar.return_value.disable_skill.return_value = {"status": "disabled"}
 
         result = self.invoke(["scan", "demo-skill", "--path", self.skill_dir, "--action"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[BLOCKED] demo-skill", result.output)
         self.assertIn("blocked=1", result.output)
         self.assertIn("findings=1", result.output)
+        mock_sidecar.return_value.disable_skill.assert_called_once_with("demo-skill")
 
 
 class TestSingleTargetJsonMode(_SkillScanUXBase):
@@ -414,7 +419,7 @@ class TestScanAllUX(_SkillScanUXBase):
         mock_cls.return_value = mock_scanner
 
         result = self.invoke(["scan", "--all"])
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         # alpha succeeded.
         self.assertIn("[ok] alpha", result.output)
         # beta errored — appears in the per-target line.
