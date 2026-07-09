@@ -331,9 +331,9 @@ defenseclaw setup guardrail \
   --agent-control-monitor-content
 ```
 
-Setup registers `defenseclaw-policy-sync`, fetches only the buckets granted to
-that key and bound to this installation, validates them, saves the initial
-last-known-good snapshot, and restarts the gateway.
+Setup registers the internal `defenseclaw-policy-sync` SDK identity, fetches
+only the buckets granted to that user and bound to this installation, validates
+them, saves the initial last-known-good snapshot, and restarts the gateway.
 
 Run synchronization, then submit this exact prompt through a connector protected by the DefenseClaw gateway:
 
@@ -354,7 +354,8 @@ defenseclaw agent-control status
 Wait for `status: active` and matching published/active rule digests. Replaying the identical prompt now matches `LOCAL-INJECTION-014` at CRITICAL severity, returns a DefenseClaw block response with `X-DefenseClaw-Blocked: true`, and does not contact the upstream model. CRITICAL is deliberate: DefenseClaw's prompt UX contract demotes HIGH prompt decisions to alerts, while CRITICAL findings remain hard blocks.
 
 Keep `sync --watch` running while replaying the blocked prompt and open the
-`defenseclaw-policy-sync` agent's **Monitor** tab. An administrator sees every
+top-level **Monitor** page. The internal synchronization identity is not shown
+in normal authenticated navigation. An administrator sees every
 enforcement action in the namespace. A member sees only actions owned by that
 member, even when another member has a grant to the same bucket. Both views
 show the decision, exact matched rule IDs, owning rule bucket, and correlation
@@ -367,10 +368,17 @@ bucket:
 
 ![Administrator Monitor view showing a DefenseClaw-redacted deny span with the matched rule and bucket](/images/agent-control/monitor-admin-redacted-span.png)
 
-For a trusted single-tenant recording, explicitly disable redaction before the request. The newest span then opens automatically and exposes the exact DefenseClaw trace, span, request, rule, duration, input, reason, and raw request body:
+For a trusted single-tenant recording, stop the foreground synchronizer,
+explicitly disable redaction, and relaunch it before the request. The redaction
+command restarts the gateway; restarting the synchronizer makes it select the
+protected exact-content spool. The newest span then opens automatically and
+exposes the exact DefenseClaw trace, span, request, rule, duration, input,
+reason, and raw request body:
 
 ```bash
+# Stop the existing `defenseclaw agent-control sync --watch` with Ctrl-C first.
 defenseclaw setup redaction off --yes
+defenseclaw agent-control sync --watch
 ```
 
 The same bucket-scoped member key used by the SDK can sign in to the UI. Its
@@ -379,10 +387,14 @@ sent while global redaction was disabled:
 
 ![Member Monitor view showing the exact unredacted prompt blocked by DefenseClaw and its matched rule ID](/images/agent-control/monitor-member-exact-span.png)
 
-Restore the safe default immediately after the trusted recording:
+Restore the safe default immediately after the trusted recording, then restart
+the foreground synchronizer again so it returns to the standard redacted
+gateway stream:
 
 ```bash
+# Stop the existing watcher with Ctrl-C first.
 defenseclaw setup redaction on
+defenseclaw agent-control sync --watch
 ```
 
 For broader validation, replay benign requests alongside synthetic attacks
