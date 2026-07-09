@@ -232,6 +232,7 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
+	Training              TrainingConfig              `mapstructure:"training"         yaml:"training,omitempty"`
 }
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
