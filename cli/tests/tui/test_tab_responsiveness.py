@@ -20,6 +20,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import defenseclaw.tui.app as app_module
 import pytest
 from defenseclaw.db import Store
 from defenseclaw.tui.app import DefenseClawTUI
@@ -253,6 +254,55 @@ async def test_rapid_switches_coalesce_state_persistence(
         assert saves == 0
         await _wait_until(lambda: saves == 1)
         assert app.state.active_panel == "overview"
+
+
+@pytest.mark.asyncio
+async def test_health_poll_overview_disk_refresh_does_not_block_tab_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = DefenseClawTUI(overview_model=_multi_connector_overview())
+    entered = threading.Event()
+    release = threading.Event()
+    original = app._build_overview_disk_refresh_snapshot  # noqa: SLF001
+
+    monkeypatch.setattr(
+        app_module,
+        "_fetch_gateway_health",
+        lambda _config: app_module.GatewayHealthResult("offline", "fixture"),
+    )
+    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_periodic_refresh", lambda: None)
+
+    def blocked_builder(detached: DefenseClawTUI, source: tuple[str, object | None]):
+        entered.set()
+        assert release.wait(5)
+        return original(detached, source)
+
+    monkeypatch.setattr(app, "_build_overview_disk_refresh_snapshot", blocked_builder)
+
+    async with app.run_test(size=(150, 44)):
+        def fail_sync_refresh() -> None:
+            raise AssertionError("disk refresh ran on the UI thread")
+
+        monkeypatch.setattr(app, "_refresh_overview_disk_models", fail_sync_refresh)
+        await app._poll_health()  # noqa: SLF001
+        await _wait_until(entered.is_set)
+
+        started = perf_counter()
+        app.action_switch_panel("alerts")
+        acknowledgement_ms = (perf_counter() - started) * 1_000
+
+        assert acknowledgement_ms < 150
+        assert app.active_panel == "alerts"
+        assert app.query_one("#tabs").active == "tab-alerts"
+
+        release.set()
+        await _wait_until(
+            lambda: not app._overview_disk_refresh_running  # noqa: SLF001
+            and "__overview_disk__" not in app._panel_render_workers,  # noqa: SLF001
+        )
 
 
 def test_overview_snapshot_queries_each_source_once() -> None:

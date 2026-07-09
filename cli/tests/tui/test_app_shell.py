@@ -1317,20 +1317,71 @@ async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> No
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("2")
-        await pilot.pause()
+        await _wait_for_panel_render(app, "alerts")
 
-        await pilot.click("#alerts-filter-high")
+        await _click_when_ready(pilot, "#alerts-filter-high")
         await pilot.pause()
 
         assert alerts.severity_filter == "HIGH"
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
-        await pilot.click("#alerts-dismiss-filtered")
+        await _click_when_ready(pilot, "#alerts-dismiss-filtered")
         await pilot.pause()
 
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
         assert "defenseclaw alerts dismiss --severity HIGH" in screen.preview.masked_display
+
+
+@pytest.mark.asyncio
+async def test_alerts_filter_click_after_ack_survives_deferred_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alerts = AlertsPanelModel()
+    alerts.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
+            AlertEvent(id="a2", severity="LOW", action="proxy", target="gateway"),
+        ]
+    )
+    app = DefenseClawTUI(alerts_model=alerts)
+    entered = threading.Event()
+    release = threading.Event()
+    original = app._build_panel_render_snapshot  # noqa: SLF001
+
+    def blocked_builder(detached: DefenseClawTUI, panel: str, generation: int):
+        if panel == "alerts":
+            entered.set()
+            assert release.wait(5)
+        return original(detached, panel, generation)
+
+    monkeypatch.setattr(app, "_build_panel_render_snapshot", blocked_builder)
+    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    monkeypatch.setattr(app, "_periodic_refresh", lambda: None)
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.press("2")
+        await _wait_for_background(
+            lambda: app.active_panel == "alerts"
+            and entered.is_set()
+            and not app.query_one("#alerts-controls").has_class("hidden")
+        )
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        assert await _click_when_ready(pilot, "#alerts-filter-high", timeout=1.0)
+        assert loop.time() - started < 0.5
+
+        assert alerts.severity_filter == "HIGH"
+        assert app.query_one("#panel-table", DataTable).row_count == 1
+
+        release.set()
+        await _wait_for_panel_render(app, "alerts")
+
+        assert alerts.severity_filter == "HIGH"
+        assert app.query_one("#panel-table", DataTable).row_count == 1
 
 
 @pytest.mark.asyncio
