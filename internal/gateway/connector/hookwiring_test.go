@@ -17,13 +17,21 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf16"
 )
 
 func setHookBinaryOverride(t *testing.T, path string) {
@@ -31,6 +39,175 @@ func setHookBinaryOverride(t *testing.T, path string) {
 	prev := defenseclawHookBinaryOverride
 	defenseclawHookBinaryOverride = path
 	t.Cleanup(func() { defenseclawHookBinaryOverride = prev })
+}
+
+func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string {
+	t.Helper()
+	parts := strings.Fields(command)
+	for i, part := range parts {
+		if strings.EqualFold(part, "-EncodedCommand") && i+1 < len(parts) {
+			data, err := base64.StdEncoding.DecodeString(parts[i+1])
+			if err != nil {
+				t.Fatalf("decode PowerShell encoded command: %v", err)
+			}
+			if len(data)%2 != 0 {
+				t.Fatalf("encoded PowerShell command has odd byte length: %d", len(data))
+			}
+			wide := make([]uint16, len(data)/2)
+			for j := range wide {
+				wide[j] = binary.LittleEndian.Uint16(data[j*2:])
+			}
+			return string(utf16.Decode(wide))
+		}
+	}
+	t.Fatalf("command has no -EncodedCommand token: %q", command)
+	return ""
+}
+
+func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.FailModes["claudecode"] != "closed" || state.FailModes["codex"] != "open" {
+		t.Fatalf("mixed fail modes not preserved: %#v", state.FailModes)
+	}
+}
+
+func TestWindowsHookConfigSidecarMigratesLegacyScalar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	legacy := []byte("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\nDEFENSECLAW_FAIL_MODE=open\n")
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("legacy sidecar was not migrated to v2: %v", err)
+	}
+	if state.Version != 2 || state.FailModes["claudecode"] != "closed" {
+		t.Fatalf("migrated state = %#v", state)
+	}
+	if state.LegacyMode != "open" {
+		t.Fatalf("legacy fallback was not retained for unmigrated connector peers: %#v", state)
+	}
+}
+
+func TestHookConfigSidecarClearRemovesOnlySelectedConnector(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearHookConfigSidecarEntry(dir, "claudecode"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.FailModes["claudecode"]; ok {
+		t.Fatalf("selected connector survived clear: %#v", state.FailModes)
+	}
+	if state.FailModes["codex"] != "open" {
+		t.Fatalf("peer connector changed during clear: %#v", state.FailModes)
+	}
+	if _, err := os.Stat(filepath.Join(dir, hookConfigSidecarName+".claudecode")); !os.IsNotExist(err) {
+		t.Fatalf("selected flat runtime record survived clear: %v", err)
+	}
+	peer, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName+".codex"))
+	if err != nil || !strings.Contains(string(peer), "DEFENSECLAW_FAIL_MODE=open") {
+		t.Fatalf("peer flat runtime record changed: err=%v body=%q", err, peer)
+	}
+}
+
+func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	before := []byte(`{"version":2,"fail_modes":`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err == nil {
+		t.Fatal("malformed peer runtime state was overwritten")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("failed sidecar write changed malformed peer state")
+	}
+}
+
+func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	jsonPath := filepath.Join(dir, hookConfigSidecarName)
+	flatPath := filepath.Join(dir, hookConfigSidecarName+".claudecode")
+	jsonBefore, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatBefore, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	failSecond := func(path string, data []byte, mode os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return errors.New("injected flat sidecar failure")
+		}
+		return atomicWriteFile(path, data, mode)
+	}
+	if err := writeHookConfigSidecarUsing(
+		dir,
+		"127.0.0.1:18970",
+		"claudecode",
+		"closed",
+		false,
+		failSecond,
+	); err == nil {
+		t.Fatal("injected second-file failure was ignored")
+	}
+	jsonAfter, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatAfter, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(jsonAfter, jsonBefore) || !bytes.Equal(flatAfter, flatBefore) {
+		t.Fatal("second-file failure left JSON and flat runtime state changed")
+	}
 }
 
 func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
@@ -52,8 +229,9 @@ func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
 }
 
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; Windows invokes the native Go `hook` subcommand instead of any Bash/.cmd
-// wrapper.
+// path; ordinary Windows connectors invoke the native Go `hook` subcommand
+// instead of any Bash/.cmd wrapper. Cursor and Antigravity have separately
+// tested Windows adapters because their client launch contracts are distinct.
 func TestHookInvocationCommand(t *testing.T) {
 	const unix = "/home/u/.defenseclaw/hooks/codex-hook.sh"
 	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
@@ -65,13 +243,13 @@ func TestHookInvocationCommand(t *testing.T) {
 		}
 	}
 
-	win := hookInvocationCommandFor("windows", "cursor", unix)
-	wantWin := `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector cursor`
+	win := hookInvocationCommandFor("windows", "claudecode", unix)
+	wantWin := `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector claudecode`
 	if win != wantWin {
 		t.Errorf("windows command = %q, want %q", win, wantWin)
 	}
-	if !strings.Contains(win, nativeHookFlag+"cursor") {
-		t.Errorf("windows command = %q, missing %q", win, nativeHookFlag+"cursor")
+	if !strings.Contains(win, nativeHookFlag+"claudecode") {
+		t.Errorf("windows command = %q, missing %q", win, nativeHookFlag+"claudecode")
 	}
 	if strings.Contains(win, ".sh") || strings.Contains(win, ".cmd") || strings.Contains(win, "bash") {
 		t.Errorf("windows command = %q should not reference a shell/script wrapper", win)
@@ -97,15 +275,24 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
 	}
 
-	// Antigravity's direct-exec parser does not dequote command paths. Use the
-	// installer-provided PATH entry so an install root containing spaces still
-	// works without quote characters becoming part of argv[0].
+	// Antigravity's direct-exec parser does not dequote command paths. Keep the
+	// visible command tokenizer-safe and put the absolute managed hook path in a
+	// PowerShell encoded command so install roots containing spaces still work.
 	agy := hookInvocationCommandFor("windows", "antigravity", unix)
-	if agy != `defenseclaw-hook.exe hook --connector antigravity` {
+	if !strings.HasPrefix(agy, windowsSystemPowerShellExe()+" -NoLogo -NoProfile -NonInteractive -EncodedCommand ") {
 		t.Errorf("antigravity command = %q", agy)
 	}
 	if strings.ContainsAny(agy, `"'`) {
 		t.Errorf("antigravity direct-exec command contains literal quotes: %q", agy)
+	}
+	if strings.Contains(agy, legacyAntigravityWindowsHookCommand()) {
+		t.Errorf("antigravity command still contains vulnerable bare launcher: %q", agy)
+	}
+	decoded := decodePowerShellEncodedCommandForTest(t, agy)
+	if !strings.Contains(decoded, powershellQuoteLiteral(windowsExe)) ||
+		!strings.Contains(decoded, nativeHookFlag+"antigravity") ||
+		!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
+		t.Errorf("antigravity encoded command lost managed launcher or hardening:\n%s", decoded)
 	}
 }
 
@@ -136,6 +323,89 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	if !strings.Contains(strings.ToLower(string(out)), "cmd.exe") {
 		t.Fatalf("Codex-style cmd.exe probe did not execute where.exe; output: %s", out)
 	}
+}
+
+func TestAntigravityWindowsHookCommandBypassesUntrustedCurrentDirectory(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Antigravity direct-exec exploit regression is Windows-specific")
+	}
+
+	root := t.TempDir()
+	managedDir := filepath.Join(root, "Managed Install With Spaces")
+	untrustedDir := filepath.Join(root, "Untrusted Workspace")
+	if err := os.MkdirAll(managedDir, 0o700); err != nil {
+		t.Fatalf("create managed dir: %v", err)
+	}
+	if err := os.MkdirAll(untrustedDir, 0o700); err != nil {
+		t.Fatalf("create untrusted dir: %v", err)
+	}
+	managedMarker := filepath.Join(root, "managed.txt")
+	fakeMarker := filepath.Join(root, "fake.txt")
+	managedHook := buildAntigravityProbeLauncher(t, managedDir, "managed", managedMarker, 0, true)
+	_ = buildAntigravityProbeLauncher(t, untrustedDir, "fake", fakeMarker, 42, false)
+	setHookBinaryOverride(t, managedHook)
+
+	command := hookInvocationCommandFor("windows", "antigravity", "")
+	argv := strings.Fields(command)
+	if len(argv) == 0 {
+		t.Fatalf("empty Antigravity command")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = untrustedDir
+	cmd.Env = append(os.Environ(), "PATH="+untrustedDir+";"+managedDir+";"+os.Getenv("PATH"))
+	cmd.Stdin = strings.NewReader(`{"hookEventName":"PreToolUse"}`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Antigravity direct-exec probe failed: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	if _, err := os.Stat(fakeMarker); !os.IsNotExist(err) {
+		t.Fatalf("untrusted current-directory launcher was executed; marker err=%v", err)
+	}
+	data, err := os.ReadFile(managedMarker)
+	if err != nil {
+		t.Fatalf("managed launcher marker missing: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	text := string(data)
+	if !strings.Contains(text, "managed") ||
+		!strings.Contains(text, "hook") ||
+		!strings.Contains(text, "--connector") ||
+		!strings.Contains(text, "antigravity") ||
+		!strings.Contains(text, `"hookEventName":"PreToolUse"`) {
+		t.Fatalf("managed launcher received wrong invocation: %q", text)
+	}
+}
+
+func buildAntigravityProbeLauncher(t *testing.T, dir, label, marker string, exitCode int, validate bool) string {
+	t.Helper()
+	source := filepath.Join(dir, label+"-hook-probe.go")
+	body := fmt.Sprintf(`package main
+
+import (
+	"io"
+	"os"
+	"strings"
+)
+
+func main() {
+	stdin, _ := io.ReadAll(os.Stdin)
+	_ = os.WriteFile(%q, []byte(%q+"\n"+strings.Join(os.Args, "\n")+"\n"+string(stdin)), 0o600)
+	if %t && (len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != "antigravity") {
+		os.Exit(7)
+	}
+	os.Exit(%d)
+}
+`, marker, label, validate, exitCode)
+	if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s probe source: %v", label, err)
+	}
+	exe := filepath.Join(dir, windowsHookBinaryName)
+	build := exec.Command("go", "build", "-o", exe, source)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build %s probe launcher: %v\n%s", label, err, output)
+	}
+	return exe
 }
 
 // TestShellWordPassesNativeCommandThrough ensures the bash-style quoter does not
@@ -320,11 +590,64 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			text := string(data)
 			connectorName := tt.conn.Name()
-			if !strings.Contains(text, windowsHookBinaryName) {
-				t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
-			}
-			if !strings.Contains(text, nativeHookFlag+connectorName) {
-				t.Errorf("config missing native connector command for %s:\n%s", connectorName, text)
+			if connectorName == "cursor" {
+				wantCommand := hookInvocationCommand(
+					"cursor",
+					filepath.Join(dataDir, "hooks", "cursor-hook.sh"),
+				)
+				encodedCommand, err := json.Marshal(wantCommand)
+				if err != nil {
+					t.Fatalf("encode Cursor Windows adapter command: %v", err)
+				}
+				if !strings.Contains(text, string(encodedCommand)) {
+					t.Errorf("config missing Cursor Windows adapter command %q:\n%s", wantCommand, text)
+				}
+				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "cursor-hook.ps1"))
+				if err != nil {
+					t.Fatalf("read Cursor Windows adapter: %v", err)
+				}
+				adapterText := string(adapter)
+				if !strings.Contains(adapterText, windowsHookBinaryName) ||
+					!strings.Contains(adapterText, "--input-file") {
+					t.Errorf("Cursor adapter does not invoke the native launcher through --input-file:\n%s", adapter)
+				}
+				for _, marker := range []string{
+					"$timeoutMs = 10000",
+					"WaitForExit($timeoutMs)",
+					"$process.Kill()",
+					`{"continue":true}`,
+					"could not remove temporary Cursor payload",
+				} {
+					if !strings.Contains(adapterText, marker) {
+						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
+					}
+				}
+			} else if connectorName == "antigravity" {
+				wantCommand := hookInvocationCommand(
+					"antigravity",
+					filepath.Join(dataDir, "hooks", "antigravity-hook.sh"),
+				)
+				encodedCommand, err := json.Marshal(wantCommand)
+				if err != nil {
+					t.Fatalf("encode Antigravity Windows command: %v", err)
+				}
+				if !strings.Contains(text, string(encodedCommand)) {
+					t.Errorf("config missing safe Antigravity command %q:\n%s", wantCommand, text)
+				}
+				if strings.Contains(text, legacyAntigravityWindowsHookCommand()) {
+					t.Errorf("config still contains legacy bare Antigravity launcher:\n%s", text)
+				}
+				decoded := decodePowerShellEncodedCommandForTest(t, wantCommand)
+				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
+					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
+				}
+			} else {
+				if !strings.Contains(text, windowsHookBinaryName) {
+					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
+				}
+				if !strings.Contains(text, nativeHookFlag+connectorName) {
+					t.Errorf("config missing native connector command for %s:\n%s", connectorName, text)
+				}
 			}
 			lower := strings.ToLower(text)
 			for _, forbidden := range []string{".sh", `"bash"`, "curl", "jq"} {
@@ -369,16 +692,20 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read native hook config sidecar: %v", err)
 			}
-			if !strings.Contains(string(hookCfg), "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970") {
-				t.Errorf("hook config sidecar missing API address: %s", hookCfg)
+			var runtimeState hookConfigSidecar
+			if err := json.Unmarshal(hookCfg, &runtimeState); err != nil {
+				t.Fatalf("parse native hook config sidecar: %v\n%s", err, hookCfg)
+			}
+			if runtimeState.GatewayAddr != "127.0.0.1:18970" {
+				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
 			wantFailMode := resolveHookFailMode(opts, tt.conn)
 			if hp, ok := tt.conn.(HookCapabilityProvider); ok &&
 				wantFailMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
 				wantFailMode = "open"
 			}
-			if !strings.Contains(string(hookCfg), "DEFENSECLAW_FAIL_MODE="+wantFailMode) {
-				t.Errorf("hook config sidecar fail mode = %q, want %q", hookCfg, wantFailMode)
+			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {
+				t.Errorf("hook config sidecar fail mode for %s = %q, want %q", connectorName, got, wantFailMode)
 			}
 
 			if err := tt.conn.Teardown(context.Background(), opts); err != nil {
