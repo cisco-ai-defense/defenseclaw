@@ -4,9 +4,9 @@
 
 set -eu
 
-ENV_FILE="/Library/Application Support/DefenseClaw/agent-control.env"
+ENV_FILE="/opt/cisco/secureclient/defenseclaw/etc/agent-control.env"
 ENV_DIR=${ENV_FILE%/*}
-DEFENSECLAW_BIN="/Library/DefenseClaw/bin/defenseclaw"
+DEFENSECLAW_BIN="/opt/cisco/secureclient/defenseclaw/bin/defenseclaw"
 
 fail() {
   printf 'defenseclaw agent-control launcher: %s\n' "$*" >&2

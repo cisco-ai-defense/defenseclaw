@@ -563,7 +563,8 @@ Changes to `agent_control.enabled`, `observability.enabled`, or
 synchronizer because the private writer and selected source are process-scoped.
 Exact-content mode also requires both processes to run under the same OS
 identity so the synchronizer can read the intentionally private `0700`/`0600`
-spool. The packaged services use the `defenseclaw` account for both.
+spool. The packaged systemd services use `defenseclaw` for both; the Cisco
+Secure Client launchd jobs both use the default root identity.
 
 Run `defenseclaw agent-control setup` instead of editing the target identity
 or managed overlay path manually.
@@ -573,7 +574,7 @@ Persistent service templates are provided at
 `packaging/launchd/com.defenseclaw.agent-control.plist`. The systemd unit
 requires `/etc/defenseclaw/agent-control.env`. On macOS, the LaunchDaemon uses
 the owner/mode-checking `defenseclaw-agent-control-launcher` and reads
-`/Library/Application Support/DefenseClaw/agent-control.env`. Both platforms
+`/opt/cisco/secureclient/defenseclaw/etc/agent-control.env`. Both platforms
 require the credential file to be a regular, single-link `root:defenseclaw`
 file with mode `0640`; the service refuses to start if validation fails. Both
 platforms also use the normal DefenseClaw data-directory `.env` loading. Keep Agent

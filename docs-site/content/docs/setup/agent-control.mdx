@@ -281,7 +281,7 @@ agent_control:
 Enabling the Agent Control integration creates a local-only raw spool at `<data_dir>/agent-control/gateway-events-unredacted.jsonl` with directory mode `0700`, file mode `0600`, size rotation, and seven-day retention. The synchronizer forwards only final blocks owned by effective Agent Control rule-pack controls. Before using self-hosted Agent Control or Cisco Cloud Control with production traffic, confirm authorization, data residency, access control, retention, and deletion requirements. Set `include_content: false` when exact content is not approved.
 </Callout>
 
-The `0700`/`0600` boundary intentionally requires the gateway writer and synchronizer reader to use the same OS account. The packaged systemd and launchd services both run as `defenseclaw`. Custom deployments must preserve that same-identity model; DefenseClaw does not weaken the spool permissions for cross-user sharing.
+The `0700`/`0600` boundary intentionally requires the gateway writer and synchronizer reader to use the same OS account. The packaged systemd services both use `defenseclaw`; the Cisco Secure Client launchd jobs both use the default root identity. Custom deployments must preserve that same-identity model; DefenseClaw does not weaken the spool permissions for cross-user sharing.
 
 <Callout type="info" title="Other DefenseClaw sinks keep the standard redaction behavior">
 The Agent Control private spool does not change global redaction. Audit storage, normal gateway JSONL, OTLP, webhooks, and Splunk are redacted while `privacy.disable_redaction: false`; they remain unredacted when the operator explicitly sets `privacy.disable_redaction: true`.
@@ -390,7 +390,7 @@ sudo install -o root -g defenseclaw -m 0640 /dev/null \
 Populate it from your secret manager with `AGENT_CONTROL_URL`, `AGENT_CONTROL_API_KEY`, optional `AGENT_CONTROL_API_KEY_HEADER`, and `DEFENSECLAW_GATEWAY_TOKEN`. Do not commit or print the file.
 
 <Callout type="warn" title="macOS uses a protected environment file">
-The packaged LaunchDaemon calls `defenseclaw-agent-control-launcher`, which reads the file once through a validated descriptor and requires a regular, single-link `root:defenseclaw` environment file with mode `0640`. Provision `/Library/Application Support/DefenseClaw/agent-control.env` through MDM or your enterprise secret manager before enabling the job. Do not place literal API keys in the plist or DefenseClaw YAML.
+The packaged LaunchDaemon calls `defenseclaw-agent-control-launcher`, which reads the file once through a validated descriptor and requires a regular, single-link `root:defenseclaw` environment file with mode `0640`. Provision `/opt/cisco/secureclient/defenseclaw/etc/agent-control.env` through MDM or your enterprise secret manager before enabling the job. Do not place literal API keys in the plist or DefenseClaw YAML.
 </Callout>
 
 ## Validate before binding production targets

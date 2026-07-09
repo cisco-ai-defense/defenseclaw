@@ -463,7 +463,11 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(plist["Label"], "com.defenseclaw.agent-control")
         self.assertEqual(
             plist["ProgramArguments"],
-            ["/Library/DefenseClaw/bin/defenseclaw-agent-control-launcher"],
+            ["/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-agent-control-launcher"],
+        )
+        self.assertNotIn("UserName", plist)
+        self.assertEqual(
+            plist["EnvironmentVariables"]["DEFENSECLAW_CONFIG"], "/opt/cisco/secureclient/defenseclaw/etc/config.yaml"
         )
         self.assertNotIn("AGENT_CONTROL_API_KEY", plist.get("EnvironmentVariables", {}))
 
@@ -477,7 +481,7 @@ class PackagingTests(unittest.TestCase):
 
         launcher = root / "packaging" / "launchd" / "defenseclaw-agent-control-launcher"
         launcher_text = launcher.read_text(encoding="utf-8")
-        self.assertIn("agent-control.env", launcher_text)
+        self.assertIn("/opt/cisco/secureclient/defenseclaw/etc/agent-control.env", launcher_text)
         self.assertIn("must be owned by root", launcher_text)
         self.assertIn("directory must be root:defenseclaw mode 0750", launcher_text)
         self.assertNotIn("AGENT_CONTROL_API_KEY=", launcher_text)

@@ -6,20 +6,18 @@
   <string>com.defenseclaw.agent-control</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/DefenseClaw/bin/defenseclaw-agent-control-launcher</string>
+    <string>/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-agent-control-launcher</string>
   </array>
-  <key>UserName</key>
-  <string>defenseclaw</string>
-  <key>GroupName</key>
-  <string>defenseclaw</string>
+  <!-- Match the managed gateway's root launchd identity so its private
+       0700/0600 Agent Control event spool is readable by this process. -->
   <key>WorkingDirectory</key>
-  <string>/Library/Application Support/DefenseClaw</string>
+  <string>/opt/cisco/secureclient/defenseclaw</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>DEFENSECLAW_HOME</key>
-    <string>/Library/Application Support/DefenseClaw</string>
+    <string>/opt/cisco/secureclient/defenseclaw</string>
     <key>DEFENSECLAW_CONFIG</key>
-    <string>/Library/Application Support/DefenseClaw/config.yaml</string>
+    <string>/opt/cisco/secureclient/defenseclaw/etc/config.yaml</string>
     <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
     <string>managed_enterprise</string>
   </dict>
@@ -35,8 +33,8 @@
   <key>Umask</key>
   <integer>63</integer>
   <key>StandardOutPath</key>
-  <string>/Library/Logs/DefenseClaw/agent-control.log</string>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/agent-control.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Logs/DefenseClaw/agent-control.err.log</string>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/agent-control.err.log</string>
 </dict>
 </plist>
