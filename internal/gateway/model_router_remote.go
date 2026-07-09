@@ -1,11 +1,4 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
 // SPDX-License-Identifier: Apache-2.0
 
 package gateway
@@ -21,18 +14,20 @@ import (
 	"time"
 )
 
-// RemoteRouterClient implements ModelRouter by calling the vLLM Semantic Router API.
+// RemoteRouterClient implements ModelRouter by calling the vLLM Semantic Router
+// classify/intent API. It gets a routing decision (which model to use) without
+// forwarding the request — DefenseClaw handles forwarding via Bifrost.
 type RemoteRouterClient struct {
 	endpoint string // e.g. "http://127.0.0.1:8080"
 	timeout  time.Duration
 	client   *http.Client
 }
 
-// NewRemoteRouterClient creates a client for the semantic router service.
+// NewRemoteRouterClient creates a client for the semantic router API server.
 func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
 	timeout := time.Duration(timeoutMs) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 50 * time.Millisecond
+		timeout = 100 * time.Millisecond
 	}
 	return &RemoteRouterClient{
 		endpoint: endpoint,
@@ -48,29 +43,39 @@ func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
 	}
 }
 
-// routeRequest is the JSON body sent to POST /v1/route.
-type routeRequest struct {
-	Messages []routeMessage `json:"messages"`
-	Model    string         `json:"model,omitempty"`
-	Stream   bool           `json:"stream,omitempty"`
+// classifyRequest is the JSON body sent to POST /api/v1/classify/intent.
+type classifyRequest struct {
+	Messages []classifyMessage  `json:"messages"`
+	Text     string             `json:"text,omitempty"`
+	Options  *classifyOptions   `json:"options,omitempty"`
 }
 
-type routeMessage struct {
+type classifyMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// routeResponse is the JSON body returned by POST /v1/route.
-type routeResponse struct {
-	Backend    string  `json:"backend"`
-	Model      string  `json:"model"`
-	Provider   string  `json:"provider"`
-	BaseURL    string  `json:"base_url"`
-	APIKey     string  `json:"api_key,omitempty"`
-	Algorithm  string  `json:"algorithm"`
-	Decision   string  `json:"decision"`
+type classifyOptions struct {
+	ReturnProbabilities bool `json:"return_probabilities,omitempty"`
+}
+
+// classifyResponse is the JSON body returned by POST /api/v1/classify/intent.
+type classifyResponse struct {
+	RecommendedModel string                 `json:"recommended_model"`
+	RoutingDecision  string                 `json:"routing_decision"`
+	Classification   classifyClassification `json:"classification"`
+	MatchedSignals   map[string]interface{} `json:"matched_signals"`
+	DecisionResult   classifyDecisionResult `json:"decision_result"`
+}
+
+type classifyClassification struct {
+	Category   string  `json:"category"`
 	Confidence float64 `json:"confidence"`
-	Reason     string  `json:"reason"`
+}
+
+type classifyDecisionResult struct {
+	DecisionName string  `json:"decision_name"`
+	Confidence   float64 `json:"confidence"`
 }
 
 func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput) *ModelRouterDecision {
@@ -78,15 +83,14 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 		return nil
 	}
 
-	msgs := make([]routeMessage, len(input.Messages))
+	msgs := make([]classifyMessage, len(input.Messages))
 	for i, m := range input.Messages {
-		msgs[i] = routeMessage{Role: m.Role, Content: m.Content}
+		msgs[i] = classifyMessage{Role: m.Role, Content: m.Content}
 	}
 
-	reqBody := routeRequest{
+	reqBody := classifyRequest{
 		Messages: msgs,
-		Model:    input.Model,
-		Stream:   input.Stream,
+		Options:  &classifyOptions{ReturnProbabilities: true},
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -98,7 +102,7 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.endpoint+"/v1/route", bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.endpoint+"/api/v1/classify/intent", bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] request build error: %v\n", err)
 		return nil
@@ -118,31 +122,24 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 		return nil
 	}
 
-	var routeResp routeResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&routeResp); err != nil {
+	var classResp classifyResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&classResp); err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] decode error: %v\n", err)
 		return nil
 	}
 
-	// Resolve API key from env if the SR returns an env var name
-	apiKey := routeResp.APIKey
-	if apiKey == "" && routeResp.Provider != "" {
-		// The actual key resolution happens later via Bifrost/provider pool
+	if classResp.RecommendedModel == "" {
+		return nil
 	}
 
-	reason := routeResp.Reason
-	if reason == "" {
-		reason = fmt.Sprintf("decision=%s backend=%s algorithm=%s", routeResp.Decision, routeResp.Backend, routeResp.Algorithm)
-	}
+	reason := fmt.Sprintf("decision=%s model=%s confidence=%.2f",
+		classResp.RoutingDecision, classResp.RecommendedModel, classResp.Classification.Confidence)
 
-	fmt.Fprintf(os.Stderr, "[routing] route: decision=%s → backend=%s model=%s/%s\n",
-		routeResp.Decision, routeResp.Backend, routeResp.Provider, routeResp.Model)
+	fmt.Fprintf(os.Stderr, "[routing] route: %s\n", reason)
 
 	return &ModelRouterDecision{
-		TargetURL: routeResp.BaseURL,
-		Model:     routeResp.Model,
-		APIKey:    apiKey,
-		Reason:    reason,
+		Model:  classResp.RecommendedModel,
+		Reason: reason,
 	}
 }
 

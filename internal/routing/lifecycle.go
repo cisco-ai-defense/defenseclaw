@@ -1,3 +1,6 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
 package routing
 
 import (
@@ -6,68 +9,78 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
 const (
-	defaultSRPort      = 8888
-	defaultSRDashboard = 8700
+	defaultSRPort    = 8888 // Envoy listener port (unused in our integration)
+	defaultSRAPIPort = 8080 // Router API server port (classify/intent, health)
+	srRouterImage    = "ghcr.io/vllm-project/semantic-router/vllm-sr:latest"
+	srContainerName  = "defenseclaw-semantic-router"
 )
 
-// Lifecycle manages the vllm-sr serve process.
+// Lifecycle manages the semantic router container.
+// We start ONLY the router container (not Envoy/dashboard/observability)
+// since DefenseClaw only needs the /api/v1/classify/intent endpoint.
 type Lifecycle struct {
 	configPath string
 	port       int
-	cmd        *exec.Cmd
-	cancel     context.CancelFunc
+	dataDir    string
 }
 
 type LifecycleConfig struct {
 	ConfigPath string
 	Port       int
+	DataDir    string
 }
 
 func NewLifecycle(cfg LifecycleConfig) *Lifecycle {
 	port := cfg.Port
 	if port == 0 {
-		port = defaultSRPort
+		port = defaultSRAPIPort
 	}
 	return &Lifecycle{
 		configPath: cfg.ConfigPath,
 		port:       port,
+		dataDir:    cfg.DataDir,
 	}
 }
 
-// Start launches `vllm-sr serve` with the generated config.
+// Start launches only the router container via Docker.
+// This gives us the /api/v1/classify/intent API without Envoy or extras.
 func (l *Lifecycle) Start(ctx context.Context) error {
-	procCtx, cancel := context.WithCancel(ctx)
-	l.cancel = cancel
+	// Stop any existing container
+	_ = exec.CommandContext(ctx, "docker", "rm", "-f", srContainerName).Run()
 
-	args := []string{"serve", "--config", l.configPath, "--minimal", "--image-pull-policy", "ifnotpresent"}
+	configDir := filepath.Dir(l.configPath)
+	configFile := filepath.Base(l.configPath)
 
-	l.cmd = exec.CommandContext(procCtx, srCLIName, args...)
-	l.cmd.Stdout = os.Stderr
-	l.cmd.Stderr = os.Stderr
-
-	if err := l.cmd.Start(); err != nil {
-		cancel()
-		return fmt.Errorf("routing: vllm-sr serve start failed: %w", err)
+	args := []string{
+		"run", "-d",
+		"--name", srContainerName,
+		"--network", "host",
+		"-v", fmt.Sprintf("%s:/app/config", configDir),
+		"-e", fmt.Sprintf("CONFIG_FILE=/app/config/%s", configFile),
+		"-p", fmt.Sprintf("%d:8080", l.port),
+		"-p", "9190:9190",
+		srRouterImage,
+		"/app/start-router.sh", fmt.Sprintf("/app/config/%s", configFile),
 	}
 
-	fmt.Fprintf(os.Stderr, "[routing] vllm-sr serve started (pid=%d, port=%d)\n", l.cmd.Process.Pid, l.port)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
 
-	// Background goroutine to wait for exit
-	go func() {
-		_ = l.cmd.Wait()
-		if procCtx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "[routing] vllm-sr serve exited unexpectedly\n")
-		}
-	}()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("routing: docker run router failed: %w", err)
+	}
 
+	fmt.Fprintf(os.Stderr, "[routing] router container started (port=%d, container=%s)\n", l.port, srContainerName)
 	return nil
 }
 
-// WaitForHealth polls the SR endpoint until it responds or timeout.
+// WaitForHealth polls the SR API endpoint until it responds or timeout.
 func (l *Lifecycle) WaitForHealth(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -85,31 +98,25 @@ func (l *Lifecycle) WaitForHealth(ctx context.Context, timeout time.Duration) er
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				fmt.Fprintf(os.Stderr, "[routing] vllm-sr healthy (port=%d)\n", l.port)
+				fmt.Fprintf(os.Stderr, "[routing] router healthy (port=%d)\n", l.port)
 				return nil
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("routing: vllm-sr health check timed out after %v", timeout)
+	return fmt.Errorf("routing: router health check timed out after %v", timeout)
 }
 
-// Stop gracefully stops vllm-sr serve.
+// Stop removes the router container.
 func (l *Lifecycle) Stop() error {
-	if l.cancel != nil {
-		l.cancel()
-	}
-
-	// Also call vllm-sr stop for clean Docker container teardown
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, srCLIName, "stop").Run()
-
-	fmt.Fprintf(os.Stderr, "[routing] vllm-sr stopped\n")
+	_ = exec.CommandContext(ctx, "docker", "rm", "-f", srContainerName).Run()
+	fmt.Fprintf(os.Stderr, "[routing] router container stopped\n")
 	return nil
 }
 
-// IsRunning checks if vllm-sr is serving.
+// IsRunning checks if the router container is healthy.
 func (l *Lifecycle) IsRunning() bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", l.port))
@@ -120,7 +127,7 @@ func (l *Lifecycle) IsRunning() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// Port returns the configured port.
+// Port returns the configured API port.
 func (l *Lifecycle) Port() int {
 	return l.port
 }
