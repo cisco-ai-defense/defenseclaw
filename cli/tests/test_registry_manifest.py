@@ -23,9 +23,11 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw.connector_paths import KNOWN_CONNECTORS as RUNTIME_CONNECTORS
 from defenseclaw.registries.manifest import (
     KNOWN_CONNECTORS,
     KNOWN_TRANSPORTS,
@@ -34,6 +36,9 @@ from defenseclaw.registries.manifest import (
     ManifestError,
     parse_manifest,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
+REGISTRY_SCHEMA = ROOT / "schemas" / "registry-manifest.schema.json"
 
 
 def _wrap(*entries):
@@ -424,30 +429,22 @@ class TestKnownConstants(unittest.TestCase):
             {"stdio", "http", "sse", "streamable-http", "websocket"},
         )
 
-    def test_known_connectors_match_schema(self):
-        # Manifest-side allow-list must include every connector the
-        # registry/schema layer can route entries into. Hook-only
-        # connectors (cursor, windsurf, geminicli, copilot, hermes)
-        # are first-class targets in the v1 schema and have shipped
-        # ``connector:`` values in published manifests, so they must
-        # be part of this set.
-        self.assertEqual(
-            KNOWN_CONNECTORS,
-            {
-                "openclaw",
-                "claudecode",
-                "codex",
-                "zeptoclaw",
-                "hermes",
-                "cursor",
-                "windsurf",
-                "geminicli",
-                "copilot",
-                "openhands",
-                "antigravity",
-                "opencode",
-            },
-        )
+    def test_known_connectors_match_runtime(self):
+        # Published manifests can route entries into any connector the
+        # runtime recognizes, including hook-backed connectors.
+        self.assertEqual(KNOWN_CONNECTORS, set(RUNTIME_CONNECTORS))
+
+    def test_schema_connector_enums_match_runtime(self):
+        doc = json.loads(REGISTRY_SCHEMA.read_text(encoding="utf-8"))
+        expected = set(RUNTIME_CONNECTORS) | {None}
+        enums = {
+            "default_connector": doc["properties"]["default_connector"]["enum"],
+            "skill.connector": doc["$defs"]["skill_entry"]["properties"]["connector"]["enum"],
+            "mcp.connector": doc["$defs"]["mcp_entry"]["properties"]["connector"]["enum"],
+        }
+        for field, values in enums.items():
+            with self.subTest(field=field):
+                self.assertEqual(set(values), expected)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,11 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 			output = map[string]interface{}{"context": in.AdditionalContext}
 		}
 	case "cursor":
+		// Cursor's hook script is fail-closed: an empty stdout is
+		// treated as a hook failure and blocks the tool call. Every
+		// code path in this case must therefore produce a non-nil
+		// Output map — including alert with no AdditionalContext,
+		// which must fall through to the plain allow envelope.
 		switch in.Action {
 		case "block":
 			output = map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
@@ -84,7 +89,11 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		case "alert":
 			if in.AdditionalContext != "" {
 				output = map[string]interface{}{"continue": true, "permission": "allow", "agent_message": in.AdditionalContext}
+			} else {
+				output = map[string]interface{}{"continue": true, "permission": "allow"}
 			}
+		default:
+			output = map[string]interface{}{"continue": true, "permission": "allow"}
 		}
 	case "windsurf":
 		if in.Action == "block" {

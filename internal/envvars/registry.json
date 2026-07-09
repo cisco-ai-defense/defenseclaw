@@ -228,6 +228,23 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
+      "category": "security_opt_out",
+      "purpose": "Allow ChatGPT Codex response-backend requests to bypass the guardrail proxy. Intended only as an explicit availability fallback when the Codex backend cannot operate through the proxy.",
+      "default": "unset (guardrail proxy enforced)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:258", "description": "Env-var name exported for the OpenClaw interceptor and tests"},
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:293", "description": "isCodexResponsesPassthroughEnabled gates the explicit unguarded passthrough path"},
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:902", "description": "Interceptor warning names the active unguarded bypass"}
+      ],
+      "since": "0.5.0",
+      "security_note": "Codex response guardrail enforcement — prevents model prompt/response traffic from silently bypassing observe/action policies unless the operator explicitly opts into an unguarded fallback.",
+      "replacement_hint": "Leave unset for normal guarded operation; use only while diagnosing proxy incompatibility."
+    },
+    {
       "name": "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
       "category": "security_opt_out",
       "purpose": "Force the AWS HTTP/1 shim to install even on non-Bedrock setups. Counterpart to DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM; only one should be set at a time.",
@@ -615,6 +632,20 @@
       ],
       "since": "0.8.0",
       "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks."
+    },
+    {
+      "name": "DEFENSECLAW_PLIST_SRC",
+      "category": "runtime_path",
+      "purpose": "Override the LaunchDaemon plist source file the macOS installer copies to /Library/LaunchDaemons. Precedence: --plist flag > this env var > plist next to install.sh > repo-tree plist. Intended for admin bootstrap scripts that ship a pre-modified plist alongside the DefenseClaw bundle.",
+      "default": "unset (installer picks plist alongside install.sh)",
+      "accepted_values": ["any-absolute-path-to-plist", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/macos/install.sh", "description": "macOS bundle installer plist resolution"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
     },
     {
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",

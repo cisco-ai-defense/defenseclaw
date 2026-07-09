@@ -577,6 +577,123 @@ func TestHermesProfileRespond_Parity(t *testing.T) {
 	}
 }
 
+// TestCursorProfileRespond_AlwaysEmitsEnvelope pins the cursor branch
+// of hookOnlyProfileRespond. Cursor's hook script is fail-closed on
+// empty stdout — a hook that returns nothing gets treated as a hook
+// failure and blocks the tool call. That means every code path in the
+// cursor case must produce a non-nil Output map, including the plain
+// allow case where earlier versions left it nil and every benign
+// prompt in Cursor would fail-close.
+func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
+	cases := []struct {
+		name       string
+		action     string
+		rawAction  string
+		reason     string
+		additional string
+		expected   map[string]interface{}
+	}{
+		{
+			name:      "block_renders_deny_permission",
+			action:    "block",
+			rawAction: "block",
+			reason:    "matched SEC-AWS-KEY",
+			expected: map[string]interface{}{
+				"continue":      true,
+				"permission":    "deny",
+				"user_message":  "matched SEC-AWS-KEY",
+				"agent_message": "matched SEC-AWS-KEY",
+			},
+		},
+		{
+			name:      "confirm_renders_ask_permission",
+			action:    "confirm",
+			rawAction: "confirm",
+			reason:    "shell command needs approval",
+			expected: map[string]interface{}{
+				"continue":      true,
+				"permission":    "ask",
+				"user_message":  "shell command needs approval",
+				"agent_message": "shell command needs approval",
+			},
+		},
+		{
+			name:       "alert_with_context_renders_allow_with_agent_message",
+			action:     "alert",
+			rawAction:  "alert",
+			additional: "DefenseClaw observed a HIGH cursor finding",
+			expected: map[string]interface{}{
+				"continue":      true,
+				"permission":    "allow",
+				"agent_message": "DefenseClaw observed a HIGH cursor finding",
+			},
+		},
+		{
+			// Regression guard: an alert with NO AdditionalContext used
+			// to fall through to a nil Output map, which produced an
+			// empty response body and tripped Cursor's failClosed=true.
+			// Must return the default allow envelope so the tool call
+			// proceeds and the finding still surfaces via the audit
+			// pipeline / other channels.
+			name:      "alert_without_context_falls_through_to_allow",
+			action:    "alert",
+			rawAction: "alert",
+			expected: map[string]interface{}{
+				"continue":   true,
+				"permission": "allow",
+			},
+		},
+		{
+			// Regression: plain allow used to leave Output nil, which
+			// produced an empty stdout in the hook script and tripped
+			// Cursor's failClosed=true guard. Must be a concrete allow.
+			name:      "allow_renders_explicit_allow_envelope",
+			action:    "allow",
+			rawAction: "allow",
+			expected: map[string]interface{}{
+				"continue":   true,
+				"permission": "allow",
+			},
+		},
+		{
+			name:      "empty_action_treated_as_allow",
+			action:    "",
+			rawAction: "",
+			expected: map[string]interface{}{
+				"continue":   true,
+				"permission": "allow",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := hookOnlyProfileRespond(HookRespondInput{
+				Req: HookProfileRequest{
+					ConnectorName: "cursor",
+					HookEventName: "beforeSubmitPrompt",
+				},
+				Action:            tc.action,
+				RawAction:         tc.rawAction,
+				Reason:            tc.reason,
+				AdditionalContext: tc.additional,
+				Caps: HookCapability{
+					CanBlock:     true,
+					CanAskNative: true,
+				},
+			})
+			if out.FieldName != "hook_output" {
+				t.Errorf("FieldName=%q want hook_output", out.FieldName)
+			}
+			if out.Output == nil {
+				t.Fatalf("cursor Respond must never return nil Output — Cursor fail-closes on empty stdout")
+			}
+			if !reflect.DeepEqual(out.Output, tc.expected) {
+				t.Errorf("Output mismatch\n got: %#v\nwant: %#v", out.Output, tc.expected)
+			}
+		})
+	}
+}
+
 // TestHermesProfileRespond_BlockDefaultReason asserts a hermes block
 // with an empty upstream reason still produces an actionable default
 // reason (rather than an empty string) on the wire.
