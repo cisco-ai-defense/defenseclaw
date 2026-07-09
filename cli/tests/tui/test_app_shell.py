@@ -25,6 +25,8 @@ from defenseclaw.models import Counts, Event
 from defenseclaw.tui.app import (
     _DEFENSECLAW_LOGO,
     DefenseClawTUI,
+    _agent_control_configuration_rows,
+    _agent_control_runtime_fields,
     _catalog_panel_invalidated_by_command,
     _enforcement_label,
     _event_histogram,
@@ -5439,6 +5441,78 @@ def test_overview_config_reads_scanner_overrides_from_active_policy(tmp_path) ->
     assert ("secrets", "HIGH", "file", "block") in overview.scanner_overrides
     assert ("secrets", "HIGH", "install", "warn") in overview.scanner_overrides
     assert "secrets" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
+
+
+def test_overview_shows_live_agent_control_policy_posture_without_key(tmp_path) -> None:
+    guardrail = _RosterGuardrail()
+    guardrail.regex_source = "agent_control"
+    cfg = _roster_config(lambda: ["codex"], guardrail)
+    cfg.data_dir = str(tmp_path)
+    cfg.policy_dir = str(tmp_path / "policies")
+    cfg.agent_control = SimpleNamespace(
+        enabled=True,
+        deployment="self_hosted",
+        server_url="http://127.0.0.1:8000",
+        installation_id="defenseclaw-laptop-01",
+        api_key_env="TOP_SECRET_API_KEY_ENV",
+        managed_dir="",
+        opa=SimpleNamespace(enabled=False, precedence="stricter"),
+        observability=SimpleNamespace(enabled=True, include_content=True),
+    )
+    state_dir = tmp_path / "agent-control"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "active",
+                "matching_controls": 12,
+                "observability_status": "watching",
+                "observability_sent_events": 22,
+                "observability_dropped_events": 0,
+            }
+        )
+    )
+
+    overview = _overview_config(cfg)
+    assert overview is not None
+    rows = dict(_agent_control_configuration_rows(overview))
+    assert rows["Regex source"] == "Agent Control managed"
+    assert rows["Agent Control"] == "active · 12 controls"
+    assert rows["Deployment"] == "Self-hosted"
+    assert rows["AC endpoint"] == "http://127.0.0.1:8000"
+    assert rows["Installation"] == "defenseclaw-laptop-01"
+    assert rows["OPA thresholds"] == "Local DefenseClaw"
+    assert rows["Monitor content"] == "redacted content"
+    assert rows["Monitor delivery"] == "watching · 22 sent"
+    rendered = "\n".join(f"{label}: {value}" for label, value in rows.items())
+    assert "TOP_SECRET_API_KEY_ENV" not in rendered
+
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "degraded",
+                "rule_pack_pending_restart": True,
+                "matching_controls": 11,
+            }
+        )
+    )
+    refreshed = _agent_control_runtime_fields(cfg)
+    assert refreshed["agent_control_sync_status"] == "degraded"
+    assert refreshed["agent_control_pending_restart"] is True
+
+
+def test_overview_labels_local_regex_without_agent_control() -> None:
+    rows = dict(
+        _agent_control_configuration_rows(
+            OverviewConfig(regex_source="local", agent_control_enabled=False)
+        )
+    )
+    assert rows == {
+        "Regex source": "Local DefenseClaw",
+        "Agent Control": "disabled",
+    }
 
 
 def test_overview_body_renders_scanner_override_summary() -> None:
