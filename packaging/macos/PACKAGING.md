@@ -36,7 +36,6 @@ Common flags:
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
 | `--disable-redaction` | on | Turn off audit/sink redaction |
-| `--service-user NAME` | `defenseclaw` | Service user; created via `dscl` if missing |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
 | `--skip-connector` | — | Gateway only; skip user-space hook wiring |
 | `--skip-launchd` | — | Install files without bootstrapping the daemon |
@@ -71,7 +70,7 @@ sudo chmod 0644 <path-to-plist>          # required for either tier
 
 ## 3. Uninstall
 
-Full wipe (system files, runtime state, service user, and DefenseClaw entries in per-user agent configs — non-DefenseClaw entries preserved):
+Full wipe (system files, runtime state, any legacy service-user records, and DefenseClaw entries in per-user agent configs — non-DefenseClaw entries preserved):
 
 ```sh
 sudo ./uninstall.sh --purge -y
@@ -87,10 +86,9 @@ Purge flags:
 
 | Flag | Purpose |
 | --- | --- |
-| `--purge` | Delete `/Library/Application Support/DefenseClaw`, `/Library/Logs/DefenseClaw`, `~/.defenseclaw/`, dscl records, and scrub `~/.codex/config.toml`, `~/.claude/settings.json`, `~/.cursor/hooks.json` |
+| `--purge` | Delete `/opt/cisco/secureclient/defenseclaw/` (runtime + config + audit DB), `/Library/Logs/Cisco/SecureClient/DefenseClaw/`, `~/.defenseclaw/`, legacy service-user dscl records from pre-root installs, and scrub `~/.codex/config.toml`, `~/.claude/settings.json`, `~/.cursor/hooks.json` |
 | `--keep-agent-configs` | With `--purge`, skip the agent-config scrub. Only safe if reinstalling immediately — otherwise dangling hook refs will fail-close every agent tool call. |
 | `--user USER` | Per-user cleanup target (default `$SUDO_USER`) |
-| `--service-user NAME` | Override service user to delete (default: read from installed plist) |
 | `-y, --yes` | Skip purge confirmation prompt |
 
 Full reference: `./uninstall.sh --help`.
@@ -135,4 +133,6 @@ Requires `sudo`. The installer:
 
 ### Runtime privileges
 
-The daemon runs as the unprivileged **`defenseclaw`** user (per plist `UserName` / `GroupName`), not as root.
+The daemon runs as **root** (uid 0). The plist deliberately omits `UserName` / `GroupName` so launchd defaults to root; the managed cloud auth provider requires root to read and re-perm its on-disk credential store. No dedicated service user is created. Every install-time chown of a DefenseClaw-owned path uses `root:wheel`.
+
+Upgrades from a pre-root install (which provisioned a `defenseclaw` service user via `dscl` / `sysadminctl`) are handled by `uninstall.sh --purge`, which sweeps the legacy uid/gid so a subsequent reinstall starts from a clean uid namespace.

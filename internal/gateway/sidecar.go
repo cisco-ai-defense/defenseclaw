@@ -1449,17 +1449,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 func (s *Sidecar) pickInspector(ctx context.Context, tel *telemetry.Provider) Inspector {
 	cfg := s.currentConfig()
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		prov, err := s.ensureCMIDProvider(ctx)
-		if err != nil {
-			EmitCiscoError(ctx, tel, gatewaylog.ErrCodeUpstreamError,
-				"managed_enterprise + managed cloud auth unavailable — remote inspection disabled: "+err.Error())
-			return nil
-		}
-		if managedC := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov); managedC != nil {
-			managedC.SetTelemetry(tel)
-			return managedC
-		}
-		return nil
+		return s.newManagedInspector(ctx, tel, "remote inspection disabled")
 	}
 	// Opensource path — unchanged from before the picker was added.
 	if c := NewCiscoInspectClient(&cfg.CiscoAIDefense, filepath.Join(cfg.DataDir, ".env")); c != nil {
@@ -1467,6 +1457,31 @@ func (s *Sidecar) pickInspector(ctx context.Context, tel *telemetry.Provider) In
 		return c
 	}
 	return nil
+}
+
+// newManagedInspector constructs the managed_enterprise Inspector:
+// ensure the cloud auth provider is available, then build a
+// CiscoDefenseClawInspectClient and wire telemetry. Returns nil (and
+// logs a Cisco error using siteLabel) when the provider or client
+// can't be constructed — callers rely on that nil to take the
+// fail-closed path (see pickInspector's caller contract at
+// [Sidecar.pickInspector] and the proxy-swap block in runGuardrail).
+// Both call sites always read a fresh cfg snapshot, so this helper does
+// too.
+func (s *Sidecar) newManagedInspector(ctx context.Context, tel *telemetry.Provider, siteLabel string) Inspector {
+	cfg := s.currentConfig()
+	prov, err := s.ensureCMIDProvider(ctx)
+	if err != nil {
+		EmitCiscoError(ctx, tel, gatewaylog.ErrCodeUpstreamError,
+			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+err.Error())
+		return nil
+	}
+	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
+	if m == nil {
+		return nil
+	}
+	m.SetTelemetry(tel)
+	return m
 }
 
 // ensureCMIDProvider lazily constructs the managed cloud auth provider
@@ -2384,15 +2399,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// Fail-closed: if the managed cloud auth provider can't
 		// initialize, remote inspection stays disabled entirely.
 		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
-			var managedInspector Inspector
-			if prov, provErr := s.ensureCMIDProvider(ctx); provErr != nil {
-				EmitCiscoError(ctx, tel, gatewaylog.ErrCodeUpstreamError,
-					"managed_enterprise + managed cloud auth unavailable — proxy remote inspection disabled: "+provErr.Error())
-			} else if m := NewCiscoDefenseClawInspectClient(&s.currentConfig().CiscoAIDefense, prov); m != nil {
-				m.SetTelemetry(tel)
-				managedInspector = m
-			}
-			proxy.SetManagedInspection(true, managedInspector)
+			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, tel, "proxy remote inspection disabled"))
 		}
 		// Start connector hook self-heal before the observability-only
 		// short-circuit below. Hook-native connectors (codex, claudecode,

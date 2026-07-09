@@ -157,7 +157,7 @@ Use a staged deployment rather than enabling action mode everywhere at once:
 
 - A supported DefenseClaw build and its matching packaging files.
 - Root or MDM access through a channel unavailable to the protected AI agent.
-- A dedicated non-login `defenseclaw` service identity.
+- A daemon identity for the gateway: on Linux, a dedicated non-login `defenseclaw` service user; on macOS, the LaunchDaemon runs as root (the managed cloud auth provider requires root to read its on-disk credential store).
 - An initialized native config for every protected user/connector.
 - A policy decision for response failure mode and availability behavior.
 - Central collection for service health, guardian failures, and audit events.

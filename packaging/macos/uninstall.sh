@@ -237,26 +237,36 @@ for plist in "${PLIST_DST}" "${LEGACY_PLIST_DST}"; do
 done
 
 # INSTALL_PREFIX is /opt/cisco/secureclient/defenseclaw/ — a
-# DefenseClaw-owned subtree. Deleting the whole tree is safe because
-# everything under it (bin/, etc/, runtime/, hook-guardian-state/)
-# belongs to us. LEGACY_INSTALL_PREFIX is /Library/DefenseClaw/ — also
-# entirely DefenseClaw-owned. Neither path ever contained any file we
-# did not create.
-for prefix in "${INSTALL_PREFIX}" "${LEGACY_INSTALL_PREFIX}"; do
-  if [[ -d "${prefix}" ]]; then
-    log "removing ${prefix}"
-    rm -rf "${prefix}"
+# DefenseClaw-owned subtree. Under the managed layout it holds bin/ AND
+# etc/ + runtime/ + hook-guardian-state/. The default (non-purge)
+# uninstall preserves runtime state so a reinstall keeps audit history
+# (see usage text above), so on the non-purge path only the binary
+# subtree is removed; the full tree drops on --purge.
+#
+# LEGACY_INSTALL_PREFIX is /Library/DefenseClaw/ — binary-only in the
+# old layout (runtime lived under LEGACY_SUPPORT_DIR), so it's safe to
+# remove wholesale in either mode.
+if [[ "${PURGE}" == "true" ]]; then
+  if [[ -d "${INSTALL_PREFIX}" ]]; then
+    log "removing ${INSTALL_PREFIX}"
+    rm -rf "${INSTALL_PREFIX}"
   fi
-done
+elif [[ -d "${INSTALL_PREFIX}/bin" ]]; then
+  log "removing ${INSTALL_PREFIX}/bin (runtime/config preserved for reinstall)"
+  rm -rf "${INSTALL_PREFIX}/bin"
+fi
+if [[ -d "${LEGACY_INSTALL_PREFIX}" ]]; then
+  log "removing ${LEGACY_INSTALL_PREFIX}"
+  rm -rf "${LEGACY_INSTALL_PREFIX}"
+fi
 
 # ---- runtime state ------------------------------------------------------
 
 if [[ "${PURGE}" == "true" ]]; then
-  # Purge managed-layout dirs: SUPPORT_DIR equals INSTALL_PREFIX under
-  # the new layout, and INSTALL_PREFIX was already deleted above. So
-  # we only need to sweep LOGS_DIR here. For legacy installs, both
-  # SUPPORT_DIR and LOGS_DIR are separate trees that still need
-  # explicit removal.
+  # SUPPORT_DIR equals INSTALL_PREFIX under the managed layout and was
+  # already removed above on --purge, so we only need to sweep LOGS_DIR
+  # here. For legacy installs, SUPPORT_DIR and LOGS_DIR are separate
+  # trees that still need explicit removal.
   for d in "${LOGS_DIR}" "${LEGACY_SUPPORT_DIR}" "${LEGACY_LOGS_DIR}"; do
     if [[ -d "${d}" ]]; then
       log "purging ${d}"

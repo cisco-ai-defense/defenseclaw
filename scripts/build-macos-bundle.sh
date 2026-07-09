@@ -50,7 +50,11 @@ BUNDLE_DIR="$4"
 DIST_DIR="$5"
 VERSION="$6"
 LDFLAGS="$7"
-TAGS="${8:-cmid}"
+# Use ${8-cmid} (no colon) so an intentionally empty override
+# (BUNDLE_TAGS="") is preserved — only truly-unset arg #8 defaults to
+# "cmid". The Makefile documents the empty override for local
+# packaging tests that don't have the private overlay handy.
+TAGS="${8-cmid}"
 CMID_OVERLAY="${9:-}"
 CMID_VERSION="${10:-}"
 
@@ -124,9 +128,12 @@ if [[ ",${TAGS}," == *",cmid,"* ]] && [[ -n "${CMID_OVERLAY}" ]]; then
   cp "${CLOUDREG_TARGET}"     "${OVERLAY_SNAPSHOT_DIR}/provider_cisco.go"
   cp "${REPO_ROOT}/go.mod"    "${OVERLAY_SNAPSHOT_DIR}/go.mod"
   cp "${REPO_ROOT}/go.sum"    "${OVERLAY_SNAPSHOT_DIR}/go.sum"
+  # Flip OVERLAY_APPLIED BEFORE the swap: a mid-write `cp` failure past
+  # this point corrupts CLOUDREG_TARGET, and we still want the trap to
+  # restore it from the snapshot.
+  OVERLAY_APPLIED=1
   echo "==> applying cloudreg overlay: ${OVERLAY_ABS}"
   cp "${OVERLAY_ABS}" "${CLOUDREG_TARGET}"
-  OVERLAY_APPLIED=1
   echo "==> pinning managed cloud auth module @${CMID_VERSION}"
   ( cd "${REPO_ROOT}" && go get "github.com/cisco-aispg/ai-common/cmid@${CMID_VERSION}" )
 fi

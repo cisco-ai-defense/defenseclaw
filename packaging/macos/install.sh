@@ -335,12 +335,17 @@ unset _lbl_plist _lbl _plist
 # ---- gateway file install ----------------------------------------------
 
 log "installing binary -> ${GATEWAY_BIN}"
-# Ensure every ancestor of INSTALL_PREFIX exists. `install -d` is
-# idempotent so the pre-existing tree on a managed host is a no-op;
-# on a DefenseClaw-only test host with no ancestors yet, it creates
-# them.
-install -d -o root -g wheel -m 0755 /opt/cisco
-install -d -o root -g wheel -m 0755 /opt/cisco/secureclient
+# Ensure every ancestor of INSTALL_PREFIX exists. macOS `install -d`
+# reapplies owner/mode to existing directories, so we must not run it
+# against /opt/cisco or /opt/cisco/secureclient when those paths are
+# already present — they may be shared with other Cisco software whose
+# permissions we shouldn't touch. Create them with `mkdir -p` only when
+# absent; unconditionally create + own only the DefenseClaw subtree.
+for parent in /opt/cisco /opt/cisco/secureclient; do
+  if [[ ! -d "${parent}" ]]; then
+    install -d -o root -g wheel -m 0755 "${parent}"
+  fi
+done
 install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}"
 install -d -o root -g wheel -m 0755 "${INSTALL_PREFIX}/bin"
 install    -o root -g wheel -m 0755 "${BINARY_SRC}" "${GATEWAY_BIN}"
@@ -361,10 +366,16 @@ GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
 install -d -o root -g wheel -m 0755 "${CONFIG_DIR}"
 install -d -o root -g wheel -m 0750 "${RUNTIME_DIR}"
 install -d -o root -g wheel -m 0750 "${GUARDIAN_AUTH_DIR}"
-# LOGS_DIR — create the /Library/Logs/Cisco/ and SecureClient/
-# ancestors idempotently.
-install -d -o root -g wheel -m 0755 /Library/Logs/Cisco
-install -d -o root -g wheel -m 0755 /Library/Logs/Cisco/SecureClient
+# LOGS_DIR — the /Library/Logs/Cisco/ and SecureClient/ ancestors may
+# be pre-existing and shared with other Cisco software. Same reasoning
+# as /opt/cisco above: only create them (with our default perms) when
+# absent, and unconditionally create + own only our leaf DefenseClaw/
+# directory.
+for parent in /Library/Logs/Cisco /Library/Logs/Cisco/SecureClient; do
+  if [[ ! -d "${parent}" ]]; then
+    install -d -o root -g wheel -m 0755 "${parent}"
+  fi
+done
 install -d -o root -g wheel -m 0750 "${LOGS_DIR}"
 
 CONFIG_PATH="${CONFIG_DIR}/config.yaml"
