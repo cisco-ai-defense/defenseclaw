@@ -150,7 +150,7 @@ from defenseclaw.tui.services.read_repository import (
     TUIReadSnapshot,
 )
 from defenseclaw.tui.services.setup_state import validate_config_field
-from defenseclaw.tui.services.tui_state import TUIStateStore
+from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.hint_bar import HintBar
@@ -282,6 +282,7 @@ class _OverviewRenderSnapshot:
     skill_scanner_available: bool
     audit_version: object | None
     hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
+    last_good_hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
 
 
 @dataclass(frozen=True)
@@ -932,6 +933,9 @@ class DefenseClawTUI(App[None]):
         self._overview_connector_rows_render_cache: list[ConnectorOverviewRow] | None = None
         self._overview_session_enforcement_counts_render_cache: EnforcementCounts | None = None
         self._connector_hook_event_stats_cache: dict[str, dict[str, Any]] | None = None
+        self._connector_hook_event_stats_last_good: dict[str, dict[str, Any]] | None = None
+        self._connector_hook_event_stats_version: object | None = None
+        self._connector_hook_event_stats_attempted_version: object | None = None
         self._connector_hook_event_stats_loaded_at: float = 0.0
         self._overview_audit_version_cache: object | None = None
         self._overview_last_render_scroll_y: float | None = None
@@ -950,6 +954,7 @@ class DefenseClawTUI(App[None]):
         self._panel_render_queued: dict[str, int] = {}
         self._panel_render_running: set[str] = set()
         self._panel_render_pending: dict[str, tuple[int, DefenseClawTUI, tuple[str, object | None]]] = {}
+        self._panel_passive_refresh_pending: set[str] = set()
         self._panel_render_workers: dict[str, Any] = {}
         self._panel_content_cache: dict[str, _PanelRenderSnapshot] = {}
         self._overview_render_snapshot: _OverviewRenderSnapshot | None = None
@@ -963,6 +968,9 @@ class DefenseClawTUI(App[None]):
         # unread/active-panel state synchronous, then debounce only the disk
         # flush; on_unmount performs the crash-safe final attempt.
         self._state_save_token = 0
+        self._state_save_running = False
+        self._state_save_pending = False
+        self._state_save_worker: Any | None = None
         # Set while ``_render_panel_table`` programmatically restores the
         # DataTable cursor. Textual fires ``RowHighlighted`` for that move just
         # like a real keypress, and the handler would call the model's
@@ -1540,12 +1548,19 @@ class DefenseClawTUI(App[None]):
         self._panel_render_generation += 1
         self._panel_render_queued.clear()
         self._panel_render_pending.clear()
+        self._panel_passive_refresh_pending.clear()
         for worker in tuple(self._panel_render_workers.values()):
             try:
                 worker.cancel()
             except Exception:  # noqa: BLE001 - teardown is best-effort.
                 pass
         await self.executor.cancel()
+        state_worker = self._state_save_worker
+        if state_worker is not None:
+            try:
+                await state_worker.wait()
+            except Exception:  # noqa: BLE001 - final synchronous save remains authoritative.
+                pass
         # Best-effort final flush of session state so the next launch
         # keeps palette MRU, theme, filters, and per-panel cursors.
         try:
@@ -1940,6 +1955,7 @@ class DefenseClawTUI(App[None]):
         if panel not in PANEL_NAMES:
             visible = self._visible_panels()
             panel = visible[0] if visible else "overview"
+        self._panel_passive_refresh_pending.clear()
         self.active_panel = panel
         self.help_open = False
         if self.status_text.startswith("backend=textual  panel="):
@@ -2003,18 +2019,57 @@ class DefenseClawTUI(App[None]):
         def save_if_current() -> None:
             if token != self._state_save_token or getattr(self, "_app_shutting_down", False):
                 return
+            if self._state_save_running:
+                self._state_save_pending = True
+                return
+            state_snapshot = copy.deepcopy(self.state_store.state)
+            store_snapshot = copy.copy(self.state_store)
+            self._state_save_running = True
             try:
-                self.state_store.save()
-            except Exception:  # noqa: BLE001 - session persistence is cosmetic.
-                pass
+                self._state_save_worker = self.run_worker(
+                    self._run_state_save(store_snapshot, state_snapshot, token),
+                    name=f"state-save-{token}",
+                    group="state-save",
+                    exclusive=False,
+                    thread=False,
+                    exit_on_error=False,
+                )
+            except Exception:  # noqa: BLE001 - direct tests may lack a worker loop.
+                self._state_save_running = False
+                try:
+                    store_snapshot.save(state_snapshot)
+                except Exception:  # noqa: BLE001 - session persistence is cosmetic.
+                    pass
 
         if not self.is_running:
-            save_if_current()
+            if token == self._state_save_token:
+                try:
+                    self.state_store.save()
+                except Exception:  # noqa: BLE001 - session persistence is cosmetic.
+                    pass
             return
         try:
             self.set_timer(delay, save_if_current)
         except Exception:  # noqa: BLE001 - outside a running app, save synchronously.
             save_if_current()
+
+    async def _run_state_save(
+        self,
+        store_snapshot: TUIStateStore,
+        state_snapshot: TUIState,
+        token: int,
+    ) -> None:
+        """Persist one immutable cosmetic state generation off the UI loop."""
+
+        try:
+            await asyncio.to_thread(store_snapshot.save, state_snapshot)
+        finally:
+            self._state_save_running = False
+            self._state_save_worker = None
+            pending = self._state_save_pending or token != self._state_save_token
+            self._state_save_pending = False
+            if pending and not getattr(self, "_app_shutting_down", False):
+                self._schedule_state_save(delay=0.01)
 
     def _acknowledge_panel_switch(self, panel: str) -> None:
         """Paint only the tab, visibility, and already-cached panel content."""
@@ -2208,7 +2263,7 @@ class DefenseClawTUI(App[None]):
             if isinstance(snapshot, _OverviewRenderSnapshot):
                 self._apply_overview_render_snapshot(snapshot)
             else:
-                self._apply_panel_render_snapshot(snapshot)
+                await self._apply_panel_render_snapshot(snapshot)
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - a panel must degrade, never WorkerFailed.
@@ -2229,9 +2284,17 @@ class DefenseClawTUI(App[None]):
                     relaunch_scheduled = True
             if not relaunch_scheduled:
                 self._panel_render_pending.pop(panel, None)
+                # A passive tick that overlaps a coherent sample is satisfied
+                # by allowing that sample to become visible. The unchanged
+                # two-second cadence will take the next sample; immediately
+                # launching another here recreates a permanent render loop when
+                # preparation itself approaches the polling interval.
+                self._panel_passive_refresh_pending.discard(panel)
+            else:
+                self._panel_passive_refresh_pending.discard(panel)
 
     def _detached_render_context(self, panel: str) -> DefenseClawTUI:
-        """Copy render inputs so worker computation cannot race live mutation."""
+        """Freeze render inputs without traversing large collections on the UI loop."""
 
         detached = copy.copy(self)
         detached.active_panel = panel
@@ -2242,36 +2305,28 @@ class DefenseClawTUI(App[None]):
         detached._chip_click_segments = []
         detached._enforcement_inventory_requested = True
 
-        overview = OverviewPanelModel(copy.deepcopy(self.overview_model.cfg), version=self.overview_model.version)
-        overview.set_health(copy.deepcopy(self.overview_model.health))
-        overview.set_doctor_cache(copy.deepcopy(self.overview_model.doctor))
-        overview.set_enforcement_counts(self.overview_model.enforcement)
-        overview.set_silent_bypass_count(self.overview_model.silent_bypass)
-        overview.set_ai_usage(copy.deepcopy(self.overview_model.ai_usage))
-        overview.set_skill_scanner_available(self.overview_model.skill_scanner_available)
-        detached.overview_model = overview
+        # Model refreshes replace their large row lists rather than mutating
+        # them. A shallow model copy therefore retains one coherent old list
+        # while the live model may move on. Copy only the small sets/maps that
+        # keyboard and mouse handlers mutate in place; expensive row projection
+        # and tuple construction happens later in the worker thread.
+        detached.overview_model = copy.copy(self.overview_model)
 
         alerts = copy.copy(self.alerts_model)
         alerts.store = None
-        alerts.audit_events = list(self.alerts_model.audit_events)
-        alerts.scan_blocks = list(self.alerts_model.scan_blocks)
-        alerts.egress_events = list(self.alerts_model.egress_events)
         alerts.expanded = set(self.alerts_model.expanded)
         alerts.selected_ids = set(self.alerts_model.selected_ids)
-        alerts.filtered = list(self.alerts_model.filtered)
+        if self.alerts_model._severity_counts_cache is not None:
+            alerts._severity_counts_cache = dict(self.alerts_model._severity_counts_cache)
         detached.alerts_model = alerts
 
         audit = copy.copy(self.audit_model)
         audit.store = None
-        audit.items = list(self.audit_model.items)
-        audit.filtered = list(self.audit_model.filtered)
         detached.audit_model = audit
 
         logs = copy.copy(self.logs_model)
-        logs.lines = {source: list(rows) for source, rows in self.logs_model.lines.items()}
+        logs.lines = dict(self.logs_model.lines)
         logs.error_messages = dict(self.logs_model.error_messages)
-        logs.verdict_rows = list(self.logs_model.verdict_rows)
-        logs.otel_rows = list(self.logs_model.otel_rows)
         logs.cursor = dict(self.logs_model.cursor)
         logs.cursor_moved = dict(self.logs_model.cursor_moved)
         logs.scroll = dict(self.logs_model.scroll)
@@ -2281,12 +2336,38 @@ class DefenseClawTUI(App[None]):
         detached.logs_model = logs
 
         detached.inventory_model = copy.copy(self.inventory_model)
-        detached._connector_hook_event_stats_cache = None
-        detached._connector_hook_event_stats_loaded_at = 0.0
-        detached._overview_audit_version_cache = None
+        audit_version = self._current_audit_data_version()
+        detached._connector_hook_event_stats_cache = (
+            copy.deepcopy(self._connector_hook_event_stats_cache)
+            if audit_version is not None
+            else None
+        )
+        detached._connector_hook_event_stats_last_good = copy.deepcopy(
+            self._connector_hook_event_stats_last_good
+        )
+        detached._connector_hook_event_stats_version = self._connector_hook_event_stats_version
+        detached._connector_hook_event_stats_loaded_at = (
+            self._connector_hook_event_stats_loaded_at if audit_version is not None else 0.0
+        )
+        detached._worker_audit_version_override = audit_version
+        detached._overview_audit_version_cache = self._overview_audit_version_cache
         detached._overview_connector_rows_signature_cache = None
         detached._overview_live_data_signature_cache = None
         return detached
+
+    def _current_audit_data_version(self) -> object | None:
+        """Return the persistent reader's cheap cross-process change token."""
+
+        store = getattr(self.audit_model, "store", None) or getattr(
+            self.alerts_model, "store", None
+        )
+        loader = getattr(store, "audit_data_version", None)
+        if not callable(loader):
+            return None
+        try:
+            return loader()
+        except Exception:  # noqa: BLE001 - an unavailable token only disables reuse.
+            return None
 
     def _worker_audit_store_source(self) -> tuple[str, object | None]:
         """Describe a worker-safe audit reader without sharing sqlite handles."""
@@ -2358,7 +2439,7 @@ class DefenseClawTUI(App[None]):
                 live_data_signature=live_signature,
                 scope_text=scope_text,
                 skill_scanner_available=detached.overview_model.skill_scanner_available,
-                audit_version=detached._overview_audit_version_cache,
+                audit_version=detached._connector_hook_event_stats_version,
                 hook_stats=tuple(
                     (
                         connector,
@@ -2371,6 +2452,18 @@ class DefenseClawTUI(App[None]):
                         detached._connector_hook_event_stats_cache or {}
                     ).items()
                 ),
+                last_good_hook_stats=tuple(
+                    (
+                        connector,
+                        int(values.get("calls", 0)),
+                        int(values.get("blocks", 0)),
+                        int(values.get("alerts", 0)),
+                        values.get("newest"),
+                    )
+                    for connector, values in (
+                        detached._connector_hook_event_stats_last_good or {}
+                    ).items()
+                ),
             )
         finally:
             if worker_store is not None:
@@ -2378,6 +2471,54 @@ class DefenseClawTUI(App[None]):
                     worker_store.close()
                 except Exception:  # noqa: BLE001 - reader teardown is best-effort.
                     pass
+
+    def _capture_current_overview_snapshot(
+        self,
+        renderable: RenderableType,
+        body_signature: tuple[object, ...],
+        connector_signature: tuple[object, ...],
+        live_signature: tuple[object, ...],
+    ) -> _OverviewRenderSnapshot:
+        """Retain the already-rendered Overview as the immediate return frame."""
+
+        return _OverviewRenderSnapshot(
+            generation=self._panel_render_generation,
+            body_text=self.body_text,
+            body_renderable=renderable,
+            metrics=self._overview_metric_data(),
+            connector_rows=tuple(self._overview_connector_rows()),
+            enforcement=self._overview_session_enforcement_counts(),
+            body_signature=body_signature,
+            connector_rows_signature=connector_signature,
+            live_data_signature=live_signature,
+            scope_text=self._overview_connector_scope_text().strip(),
+            skill_scanner_available=self.overview_model.skill_scanner_available,
+            audit_version=self._connector_hook_event_stats_version,
+            hook_stats=tuple(
+                (
+                    connector,
+                    int(values.get("calls", 0)),
+                    int(values.get("blocks", 0)),
+                    int(values.get("alerts", 0)),
+                    values.get("newest"),
+                )
+                for connector, values in (
+                    self._connector_hook_event_stats_cache or {}
+                ).items()
+            ),
+            last_good_hook_stats=tuple(
+                (
+                    connector,
+                    int(values.get("calls", 0)),
+                    int(values.get("blocks", 0)),
+                    int(values.get("alerts", 0)),
+                    values.get("newest"),
+                )
+                for connector, values in (
+                    self._connector_hook_event_stats_last_good or {}
+                ).items()
+            ),
+        )
 
     @staticmethod
     def _build_panel_render_snapshot(
@@ -2400,7 +2541,7 @@ class DefenseClawTUI(App[None]):
             chip_click_segments=tuple(detached._chip_click_segments),
         )
 
-    def _apply_panel_render_snapshot(self, snapshot: _PanelRenderSnapshot) -> None:
+    async def _apply_panel_render_snapshot(self, snapshot: _PanelRenderSnapshot) -> None:
         """Apply a prepared signal panel generation on Textual's UI thread."""
 
         if (
@@ -2425,7 +2566,21 @@ class DefenseClawTUI(App[None]):
             self._table_rows = snapshot.table_rows
             self._render_native_widgets()
             self._render_panel_controls()
-            self._render_panel_table()
+        finally:
+            # Input handlers must be able to invalidate this generation while
+            # a large immutable row snapshot is yielding between batches.
+            self._applying_panel_snapshot = False
+
+        if not await self._render_panel_table_responsive(snapshot):
+            return
+        if (
+            snapshot.generation != self._panel_render_generation
+            or snapshot.panel != self.active_panel
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        self._applying_panel_snapshot = True
+        try:
             self._apply_detail_text(snapshot.detail_text)
             self._render_command_strip()
             self._set_status(self.status_text or self._status_text())
@@ -2465,6 +2620,7 @@ class DefenseClawTUI(App[None]):
             self._overview_live_data_signature_cache = snapshot.live_data_signature
             self._overview_last_render_scroll_y = current_scroll_y
             self._overview_audit_version_cache = snapshot.audit_version
+            self._connector_hook_event_stats_version = snapshot.audit_version
             self._connector_hook_event_stats_cache = {
                 connector: {
                     "calls": calls,
@@ -2473,6 +2629,15 @@ class DefenseClawTUI(App[None]):
                     "newest": newest,
                 }
                 for connector, calls, blocks, alerts, newest in snapshot.hook_stats
+            }
+            self._connector_hook_event_stats_last_good = {
+                connector: {
+                    "calls": calls,
+                    "blocks": blocks,
+                    "alerts": alerts,
+                    "newest": newest,
+                }
+                for connector, calls, blocks, alerts, newest in snapshot.last_good_hook_stats
             }
             self._connector_hook_event_stats_loaded_at = monotonic()
             self.overview_model.set_skill_scanner_available(snapshot.skill_scanner_available)
@@ -3390,6 +3555,12 @@ class DefenseClawTUI(App[None]):
                     self._table_columns = ()
                     self._table_rows = ()
                     self._render_native_widgets()
+                    self._overview_render_snapshot = self._capture_current_overview_snapshot(
+                        renderable,
+                        body_signature,
+                        connector_rows_signature,
+                        live_data_signature,
+                    )
         else:
             text = self._body_text()
             # Skip the layout-triggering ``Static.update`` when the body
@@ -5204,6 +5375,7 @@ class DefenseClawTUI(App[None]):
         previous_metrics_cache = self._overview_metric_data_render_cache
         previous_rows_cache = self._overview_connector_rows_render_cache
         previous_counts_cache = self._overview_session_enforcement_counts_render_cache
+        previous_stats_attempt = self._connector_hook_event_stats_attempted_version
         self._connector_hook_event_cache_enabled = True
         self._recent_connector_hook_events_cache = None
         self._recent_connector_hook_scope_cache = {}
@@ -5213,6 +5385,7 @@ class DefenseClawTUI(App[None]):
         self._overview_metric_data_render_cache = None
         self._overview_connector_rows_render_cache = None
         self._overview_session_enforcement_counts_render_cache = None
+        self._connector_hook_event_stats_attempted_version = None
         try:
             yield
         finally:
@@ -5225,6 +5398,7 @@ class DefenseClawTUI(App[None]):
             self._overview_metric_data_render_cache = previous_metrics_cache
             self._overview_connector_rows_render_cache = previous_rows_cache
             self._overview_session_enforcement_counts_render_cache = previous_counts_cache
+            self._connector_hook_event_stats_attempted_version = previous_stats_attempt
 
     def _connector_health_for_metric(self, connector: str, *, use_single: bool) -> Any | None:
         """Live health row for a metric's connector scope."""
@@ -5446,14 +5620,51 @@ class DefenseClawTUI(App[None]):
         """
 
         stats_ttl_seconds = 1.5
-        if (
-            self._connector_hook_event_stats_cache is not None
-            and monotonic() - self._connector_hook_event_stats_loaded_at < stats_ttl_seconds
-        ):
-            return self._connector_hook_event_stats_cache
         stats: dict[str, dict[str, Any]] = {}
+        aggregate_failed = False
+        snapshot_rows = None
         if self._read_snapshot is not None:
-            for row in self._read_snapshot.connector_hook_stats:
+            current_version: object | None = self._read_snapshot.data_version
+            snapshot_rows = self._read_snapshot.connector_hook_stats
+            loader = None
+        elif self._read_repository is None:
+            store = getattr(self.audit_model, "store", None) if self.audit_model is not None else None
+            loader = getattr(store, "connector_hook_event_stats", None)
+            version_loader = getattr(store, "audit_data_version", None)
+            if hasattr(self, "_worker_audit_version_override"):
+                current_version = self._worker_audit_version_override
+            elif callable(version_loader):
+                try:
+                    current_version = version_loader()
+                except Exception:  # noqa: BLE001 - an unavailable token only disables reuse.
+                    current_version = None
+            else:
+                current_version = None
+        else:
+            # The repository owns the SQLite connection. Until its first
+            # immutable snapshot arrives, fall back to recent in-memory rows.
+            loader = None
+            current_version = None
+
+        cached = self._connector_hook_event_stats_cache
+        if cached is not None:
+            if (
+                current_version is not None
+                and current_version
+                in (
+                    self._connector_hook_event_stats_version,
+                    self._connector_hook_event_stats_attempted_version,
+                )
+            ):
+                return cached
+            if (
+                current_version is None
+                and monotonic() - self._connector_hook_event_stats_loaded_at < stats_ttl_seconds
+            ):
+                return cached
+
+        if snapshot_rows is not None:
+            for row in snapshot_rows:
                 calls = _coerce_nonnegative_int(row.calls)
                 stats[row.connector] = {
                     "calls": calls,
@@ -5461,26 +5672,13 @@ class DefenseClawTUI(App[None]):
                     "alerts": min(_coerce_nonnegative_int(row.alerts), calls),
                     "newest": _parse_timestamp(row.newest),
                 }
-            loader = None
-        elif self._read_repository is None:
-            store = getattr(self.audit_model, "store", None) if self.audit_model is not None else None
-            loader = getattr(store, "connector_hook_event_stats", None)
-        else:
-            loader = None
         if callable(loader):
-            version_loader = getattr(store, "audit_data_version", None)
-            if callable(version_loader):
-                try:
-                    # Capture the version before the aggregate. If a writer
-                    # commits during the query, the next poll observes another
-                    # change instead of treating a stale snapshot as current.
-                    self._overview_audit_version_cache = version_loader()
-                except Exception:  # noqa: BLE001 - version checks are an optimization.
-                    self._overview_audit_version_cache = None
+            self._connector_hook_event_stats_attempted_version = current_version
             try:
                 raw_stats = loader() or {}
-            except Exception:  # noqa: BLE001 - fall back to the recent in-memory window.
+            except Exception:  # noqa: BLE001 - preserve authoritative last-good totals.
                 raw_stats = {}
+                aggregate_failed = True
             for raw_connector, raw in raw_stats.items():
                 connector = str(raw_connector or "").strip().lower()
                 if not connector or not isinstance(raw, dict):
@@ -5497,6 +5695,8 @@ class DefenseClawTUI(App[None]):
                     "alerts": alerts,
                     "newest": _parse_timestamp(raw.get("newest")),
                 }
+        if aggregate_failed and self._connector_hook_event_stats_last_good is not None:
+            stats = copy.deepcopy(self._connector_hook_event_stats_last_good)
         if not stats:
             for event in self._recent_connector_hook_events():
                 connector = self._event_connector(event) or "__unattributed__"
@@ -5515,6 +5715,13 @@ class DefenseClawTUI(App[None]):
                     newest = entry.get("newest")
                     if newest is None or ts > newest:
                         entry["newest"] = ts
+        if (snapshot_rows is not None or callable(loader)) and not aggregate_failed:
+            # The source version is captured before the aggregate. A writer
+            # racing this query therefore forces one more exact sample on the
+            # next tick instead of allowing a possibly older result to latch.
+            self._connector_hook_event_stats_last_good = copy.deepcopy(stats)
+            self._connector_hook_event_stats_version = current_version
+            self._overview_audit_version_cache = current_version
         self._connector_hook_event_stats_cache = stats
         self._connector_hook_event_stats_loaded_at = monotonic()
         return stats
@@ -6064,10 +6271,21 @@ class DefenseClawTUI(App[None]):
         latest immutable panel snapshot, and older work is discarded here.
         """
 
-        del reason  # Reserved for diagnostics without coupling callers to logs.
         if getattr(self, "_app_shutting_down", False):
             return self._panel_render_generation
         panel = self.active_panel
+        passive = reason in {
+            "overview-sample",
+            "periodic-audit",
+            "signal-data",
+        }
+        if passive and (
+            panel in self._panel_render_queued
+            or panel in self._panel_render_running
+            or panel in self._panel_render_pending
+        ):
+            self._panel_passive_refresh_pending.add(panel)
+            return self._panel_render_generation
         self._panel_render_generation += 1
         generation = self._panel_render_generation
         self._queue_deferred_panel_render(panel, generation)
@@ -6081,6 +6299,7 @@ class DefenseClawTUI(App[None]):
         self._panel_render_generation += 1
         self._panel_render_queued.pop(panel, None)
         self._panel_render_pending.pop(panel, None)
+        self._panel_passive_refresh_pending.discard(panel)
 
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
         """Resolve a click on the ``#body`` Static to a connector chip action.
@@ -8405,6 +8624,110 @@ class DefenseClawTUI(App[None]):
                 self._position_panel_table_cursor(table, cursor_row)
         self._last_table_signature = signature
 
+    async def _render_panel_table_responsive(self, snapshot: _PanelRenderSnapshot) -> bool:
+        """Apply a large immutable table snapshot without starving input."""
+
+        if (
+            snapshot.generation != self._panel_render_generation
+            or snapshot.panel != self.active_panel
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return False
+        table = self.query_one("#panel-table", DataTable)
+        columns = snapshot.table_columns
+        rows = snapshot.table_rows
+        if not columns:
+            self._render_panel_table()
+            return True
+
+        cursor_row = self._active_table_cursor() if rows else -1
+        signature = (
+            snapshot.panel,
+            columns,
+            rows,
+            cursor_row,
+            False,
+        )
+        previous = self._last_table_signature
+        if signature == previous:
+            table.remove_class("hidden")
+            return True
+
+        if previous is not None and (
+            signature[0],
+            signature[1],
+            signature[2],
+            signature[4],
+        ) == (
+            previous[0],
+            previous[1],
+            previous[2],
+            previous[4],
+        ):
+            with self._programmatic_table_update():
+                self._position_panel_table_cursor(table, cursor_row)
+            self._last_table_signature = signature
+            return True
+
+        same_table_shape = previous is not None and (
+            signature[0],
+            signature[1],
+            signature[4],
+        ) == (
+            previous[0],
+            previous[1],
+            previous[4],
+        )
+        if same_table_shape:
+            with self._programmatic_table_update():
+                delta_applied = self._update_panel_table_delta(table, previous[2], rows)
+                if delta_applied:
+                    table.remove_class("hidden")
+                    self._position_panel_table_cursor(table, cursor_row)
+            if delta_applied:
+                self._last_table_signature = signature
+                return True
+
+        if len(rows) <= 128 and table.row_count <= 128:
+            self._render_panel_table()
+            return True
+
+        # A canceled partial commit has no valid signature. Keep it hidden and
+        # bulk-clear its internal maps once; row-by-row teardown is quadratic
+        # in Textual and was itself a major Windows stall source.
+        self._last_table_signature = None
+        with self._programmatic_table_update():
+            table.add_class("hidden")
+            table.clear(columns=True)
+            self._rendered_table_row_keys.clear()
+            table.add_columns(*columns)
+
+        batch_size = 16
+        for start in range(0, len(rows), batch_size):
+            if (
+                snapshot.generation != self._panel_render_generation
+                or snapshot.panel != self.active_panel
+                or getattr(self, "_app_shutting_down", False)
+            ):
+                return False
+            with self._programmatic_table_update():
+                for row in rows[start : start + batch_size]:
+                    self._append_panel_table_row(table, row, columns=columns)
+            await asyncio.sleep(0)
+
+        if (
+            snapshot.generation != self._panel_render_generation
+            or snapshot.panel != self.active_panel
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return False
+        with self._programmatic_table_update():
+            table.remove_class("hidden")
+            if rows:
+                self._position_panel_table_cursor(table, cursor_row)
+        self._last_table_signature = signature
+        return True
+
     @contextmanager
     def _programmatic_table_update(self) -> Iterator[None]:
         """Suppress model cursor writes during passive table mutations."""
@@ -8433,10 +8756,17 @@ class DefenseClawTUI(App[None]):
         elif self.focused is None:
             table.focus()
 
-    def _append_panel_table_row(self, table: DataTable[Any], row: tuple[str, ...]) -> None:
+    def _append_panel_table_row(
+        self,
+        table: DataTable[Any],
+        row: tuple[str, ...],
+        *,
+        columns: tuple[str, ...] | None = None,
+    ) -> None:
+        active_columns = columns or self._table_columns
         cells = (
             _styled_cell(column, value)
-            for column, value in zip(self._table_columns, row, strict=True)
+            for column, value in zip(active_columns, row, strict=True)
         )
         key = f"panel-row-{self._next_table_row_key}"
         self._next_table_row_key += 1
@@ -8459,6 +8789,7 @@ class DefenseClawTUI(App[None]):
             return False
 
         max_delta = 256
+        max_removals = 16
         remove_front = 0
         keep = 0
 
@@ -8469,7 +8800,7 @@ class DefenseClawTUI(App[None]):
             # Sliding capped tail: find the old suffix that became the new
             # prefix. Limit the search to a small batch; larger rewrites are
             # cheaper and safer through DataTable.clear().
-            search_limit = min(len(old_rows), max_delta)
+            search_limit = min(len(old_rows), max_removals)
             first = next_rows[0]
             for candidate in range(1, search_limit + 1):
                 if candidate >= len(old_rows) or old_rows[candidate] != first:
@@ -8477,7 +8808,10 @@ class DefenseClawTUI(App[None]):
                 candidate_keep = min(len(old_rows) - candidate, len(next_rows))
                 additions = len(next_rows) - candidate_keep
                 trailing_removals = len(old_rows) - candidate - candidate_keep
-                if candidate + trailing_removals + additions > max_delta:
+                if (
+                    candidate + trailing_removals > max_removals
+                    or candidate + trailing_removals + additions > max_delta
+                ):
                     continue
                 if old_rows[candidate : candidate + candidate_keep] == next_rows[:candidate_keep]:
                     remove_front = candidate
@@ -8492,7 +8826,8 @@ class DefenseClawTUI(App[None]):
                 if old_row != new_row:
                     break
                 prefix += 1
-            if (len(old_rows) - prefix) + (len(next_rows) - prefix) <= max_delta:
+            removals = len(old_rows) - prefix
+            if removals <= max_removals and removals + (len(next_rows) - prefix) <= max_delta:
                 keep = prefix
             else:
                 return False
@@ -9925,6 +10260,8 @@ class DefenseClawTUI(App[None]):
             else:
                 self.tools_model.store = new_store
             self._connector_hook_event_stats_cache = None
+            self._connector_hook_event_stats_last_good = None
+            self._connector_hook_event_stats_version = None
             self._connector_hook_event_stats_loaded_at = 0.0
             self._overview_audit_version_cache = None
 
