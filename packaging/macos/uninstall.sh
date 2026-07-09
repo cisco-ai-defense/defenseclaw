@@ -108,10 +108,19 @@ while [[ $# -gt 0 ]]; do
     # (with a deprecation warning) for backward compat with legacy MDM
     # / release automation that still passes it — the legacy user is
     # already swept unconditionally via SERVICE_USER_KNOWN below, so
-    # the flag's value is redundant but not harmful.
+    # the flag's value is redundant but not harmful. Advance by 2 only
+    # when a value actually follows and isn't the next flag; otherwise
+    # advance by 1. Blindly calling `shift 2` would either fail under
+    # `set -e` when --service-user is the last token or silently
+    # swallow the next option.
     --service-user)
       warn "--service-user is deprecated and ignored; legacy 'defenseclaw' user is swept automatically on --purge"
-      shift 2;;
+      if [[ $# -ge 2 && "$2" != -* ]]; then
+        shift 2
+      else
+        shift
+      fi
+      ;;
     *) die "unknown flag: $1 (try --help)";;
   esac
 done
