@@ -93,7 +93,6 @@ func newIPCHarness(t *testing.T) (*grpc.ClientConn, *gateway.SidecarHealth, *aud
 	fullCfg := &config.Config{
 		DataDir: dataDir,
 		Managed: config.ManagedIPCConfig{
-			Enabled:    true,
 			SocketPath: sockPath,
 			SocketMode: "0600",
 		},
@@ -324,7 +323,6 @@ func TestIPC_ShutdownRemovesSocket(t *testing.T) {
 	cfg := &config.Config{
 		DataDir: dataDir,
 		Managed: config.ManagedIPCConfig{
-			Enabled:    true,
 			SocketPath: sockPath,
 			SocketMode: "0600",
 		},
