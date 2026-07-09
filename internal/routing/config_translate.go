@@ -1,17 +1,4 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
 // SPDX-License-Identifier: Apache-2.0
 
 package routing
@@ -24,16 +11,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SRConfig is the semantic router's native configuration format.
-// DefenseClaw generates this from its own RoutingConfig.
+// SRConfig is the vLLM Semantic Router v0.3 canonical configuration format.
 type SRConfig struct {
-	Server     SRServerConfig      `yaml:"server"`
-	Listeners  []SRListenerConfig  `yaml:"listeners"`
-	Models     []SRModelConfig     `yaml:"models"`
-	Signals    SRSignalsConfig     `yaml:"signals"`
-	Decisions  []SRDecisionConfig  `yaml:"decisions"`
-	Embedding  *SREmbeddingConfig  `yaml:"embedding,omitempty"`
-	Classifier *SRClassifierConfig `yaml:"classifier,omitempty"`
+	Version   string                    `yaml:"version"`
+	Listeners []SRListenerConfig        `yaml:"listeners"`
+	Providers map[string]SRProviderCfg  `yaml:"providers"`
+	Routing   SRRoutingConfig           `yaml:"routing"`
+	Global    map[string]interface{}    `yaml:"global,omitempty"`
 }
 
 type SRListenerConfig struct {
@@ -43,20 +27,18 @@ type SRListenerConfig struct {
 	Timeout string `yaml:"timeout,omitempty"`
 }
 
-type SRServerConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
-}
-
-type SRModelConfig struct {
-	Name            string   `yaml:"name"`
+type SRProviderCfg struct {
 	Provider        string   `yaml:"provider"`
 	Model           string   `yaml:"model"`
 	BaseURL         string   `yaml:"base_url,omitempty"`
 	APIKeyEnv       string   `yaml:"api_key_env,omitempty"`
 	Capabilities    []string `yaml:"capabilities,omitempty"`
 	CostPer1kTokens float64  `yaml:"cost_per_1k_tokens,omitempty"`
-	Weight          int      `yaml:"weight,omitempty"`
+}
+
+type SRRoutingConfig struct {
+	Signals   SRSignalsConfig    `yaml:"signals,omitempty"`
+	Decisions []SRDecisionConfig `yaml:"decisions,omitempty"`
 }
 
 type SRSignalsConfig struct {
@@ -83,29 +65,32 @@ type SRContextLength struct {
 }
 
 type SRDecisionConfig struct {
-	Name       string        `yaml:"name"`
-	Priority   int           `yaml:"priority"`
+	Name        string        `yaml:"name"`
+	Description string        `yaml:"description"`
+	Priority    int           `yaml:"priority"`
+	Rules       SRRules       `yaml:"rules"`
+	ModelRefs   []SRModelRef  `yaml:"modelRefs"`
+	Algorithm   *SRAlgorithm  `yaml:"algorithm,omitempty"`
+}
+
+type SRRules struct {
+	Operator   string        `yaml:"operator"`
 	Conditions []SRCondition `yaml:"conditions,omitempty"`
-	Operator   string        `yaml:"operator,omitempty"`
-	ModelRefs  []string      `yaml:"model_refs"`
-	Algorithm  string        `yaml:"algorithm,omitempty"`
 }
 
 type SRCondition struct {
-	Signal        string  `yaml:"signal"`
+	Type          string  `yaml:"type"`
+	Name          string  `yaml:"name"`
 	MinConfidence float64 `yaml:"min_confidence,omitempty"`
 	Value         string  `yaml:"value,omitempty"`
 }
 
-type SREmbeddingConfig struct {
-	Provider string `yaml:"provider"`
-	BaseURL  string `yaml:"base_url"`
-	Model    string `yaml:"model"`
+type SRModelRef struct {
+	Model string `yaml:"model"`
 }
 
-type SRClassifierConfig struct {
-	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
+type SRAlgorithm struct {
+	Name string `yaml:"name,omitempty"`
 }
 
 // TranslateInput mirrors the fields needed from config.RoutingConfig
@@ -164,8 +149,7 @@ type TranslateCondition struct {
 	Value         string
 }
 
-// TranslateAndWrite converts a TranslateInput to SRConfig and writes it to dir/config.yaml.
-// Returns the path written.
+// TranslateAndWrite converts a TranslateInput to the v0.3 SR config and writes it.
 func TranslateAndWrite(input TranslateInput, dir string) (string, error) {
 	cfg := Translate(input)
 
@@ -190,7 +174,7 @@ func TranslateAndWrite(input TranslateInput, dir string) (string, error) {
 	return path, nil
 }
 
-// Translate converts TranslateInput to the SR native config structure.
+// Translate converts TranslateInput to the canonical v0.3 SR config.
 func Translate(input TranslateInput) *SRConfig {
 	port := input.Port
 	if port == 0 {
@@ -198,7 +182,7 @@ func Translate(input TranslateInput) *SRConfig {
 	}
 
 	cfg := &SRConfig{
-		Server: SRServerConfig{Host: "127.0.0.1", Port: port},
+		Version: "v0.3",
 		Listeners: []SRListenerConfig{
 			{
 				Name:    fmt.Sprintf("http-%d", port),
@@ -207,74 +191,74 @@ func Translate(input TranslateInput) *SRConfig {
 				Timeout: "300s",
 			},
 		},
+		Providers: make(map[string]SRProviderCfg),
 	}
 
-	// Models
+	// Providers (models as named map entries)
 	for _, m := range input.Models {
-		cfg.Models = append(cfg.Models, SRModelConfig{
-			Name:            m.Name,
+		cfg.Providers[m.Name] = SRProviderCfg{
 			Provider:        m.Provider,
 			Model:           m.Model,
 			BaseURL:         m.BaseURL,
 			APIKeyEnv:       m.APIKeyEnv,
 			Capabilities:    m.Capabilities,
 			CostPer1kTokens: m.CostPer1kTokens,
-			Weight:          m.Weight,
-		})
+		}
 	}
 
-	// Signals
+	// Routing signals
 	for _, k := range input.Signals.Keywords {
-		cfg.Signals.Keywords = append(cfg.Signals.Keywords, SRKeywordSignal{
+		cfg.Routing.Signals.Keywords = append(cfg.Routing.Signals.Keywords, SRKeywordSignal{
 			Name:     k.Name,
 			Keywords: k.Keywords,
 			Operator: k.Operator,
 		})
 	}
 	if input.Signals.EmbeddingEnabled {
-		cfg.Signals.Embedding = &SRSignalToggle{Enabled: true, Threshold: input.Signals.EmbeddingThreshold}
+		cfg.Routing.Signals.Embedding = &SRSignalToggle{Enabled: true, Threshold: input.Signals.EmbeddingThreshold}
 	}
 	if input.Signals.DomainEnabled {
-		cfg.Signals.Domain = &SRSignalToggle{Enabled: true}
+		cfg.Routing.Signals.Domain = &SRSignalToggle{Enabled: true}
 	}
 	if input.Signals.ComplexityEnabled {
-		cfg.Signals.Complexity = &SRSignalToggle{Enabled: true}
+		cfg.Routing.Signals.Complexity = &SRSignalToggle{Enabled: true}
 	}
 	if len(input.Signals.ContextThresholds) > 0 {
-		cfg.Signals.ContextLength = &SRContextLength{Thresholds: input.Signals.ContextThresholds}
+		cfg.Routing.Signals.ContextLength = &SRContextLength{Thresholds: input.Signals.ContextThresholds}
 	}
 
-	// Decisions
+	// Routing decisions
 	for _, d := range input.Decisions {
-		dec := SRDecisionConfig{
-			Name:      d.Name,
-			Priority:  d.Priority,
-			Operator:  d.Operator,
-			ModelRefs: d.ModelRefs,
-			Algorithm: d.Algorithm,
+		op := d.Operator
+		if op == "" {
+			op = "AND"
 		}
+		rules := SRRules{Operator: op}
 		for _, c := range d.Conditions {
-			dec.Conditions = append(dec.Conditions, SRCondition{
-				Signal:        c.Signal,
+			rules.Conditions = append(rules.Conditions, SRCondition{
+				Type:          "keyword",
+				Name:          c.Signal,
 				MinConfidence: c.MinConfidence,
 				Value:         c.Value,
 			})
 		}
-		cfg.Decisions = append(cfg.Decisions, dec)
-	}
 
-	// Embedding
-	if input.EmbeddingBaseURL != "" && input.EmbeddingModel != "" {
-		cfg.Embedding = &SREmbeddingConfig{
-			Provider: input.EmbeddingProvider,
-			BaseURL:  input.EmbeddingBaseURL,
-			Model:    input.EmbeddingModel,
+		var modelRefs []SRModelRef
+		for _, ref := range d.ModelRefs {
+			modelRefs = append(modelRefs, SRModelRef{Model: ref})
 		}
-	}
 
-	// Classifier
-	if input.LLMBaseURL != "" && input.LLMModel != "" {
-		cfg.Classifier = &SRClassifierConfig{BaseURL: input.LLMBaseURL, Model: input.LLMModel}
+		dec := SRDecisionConfig{
+			Name:        d.Name,
+			Description: fmt.Sprintf("Route to %s", d.Name),
+			Priority:    d.Priority,
+			Rules:       rules,
+			ModelRefs:   modelRefs,
+		}
+		if d.Algorithm != "" {
+			dec.Algorithm = &SRAlgorithm{Name: d.Algorithm}
+		}
+		cfg.Routing.Decisions = append(cfg.Routing.Decisions, dec)
 	}
 
 	return cfg
