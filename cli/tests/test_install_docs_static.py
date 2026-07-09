@@ -47,7 +47,13 @@ DOC_INSTALL_COMMANDS = {
         'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector none',
         'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --no-openclaw',
     ),
-    "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES,
+    "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES
+    + (
+        ".\\DefenseClawSetup-x64.exe",
+        ".\\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1",
+        "after download it does not require Python, `uv`, Go, Node.js, Git, or a",
+        "PowerShell installation command.",
+    ),
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
         f"VERSION={CURRENT_RELEASE}",
         'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',

@@ -23,6 +23,7 @@ param(
     [string]$OutRoot = $DistRoot,
     [string]$Version = "",
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-windows-installer-build"),
+    [ValidateSet('oss', 'managed-enterprise')][string]$DistributionFlavor = 'oss',
     [switch]$SkipSigning
 )
 
@@ -91,6 +92,35 @@ function Get-ProjectVersion {
         throw "Could not resolve project version from pyproject.toml"
     }
     return $Matches[1]
+}
+
+function Get-GitSourceCommit([string]$RepositoryRoot) {
+    $git = (Get-Command 'git.exe' -ErrorAction Stop).Source
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $git
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @('-C', $RepositoryRoot, 'rev-parse', '--verify', 'HEAD')) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "Could not resolve the installer source commit: $($stderr.Trim())"
+        }
+    } finally {
+        $process.Dispose()
+    }
+    $commit = $stdout.Trim().ToLowerInvariant()
+    if ($commit -notmatch '^[0-9a-f]{40}$') {
+        throw "Git returned an invalid installer source commit: $commit"
+    }
+    return $commit
 }
 
 function Copy-RequiredFile([string]$Source, [string]$Destination) {
@@ -218,6 +248,13 @@ if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.In
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
+
+if ($DistributionFlavor -eq 'managed-enterprise') {
+    throw @'
+The public Windows installer builder cannot produce a managed-enterprise artifact. A managed Windows release requires the private CMID provider overlay, its pinned private module version, and authorized dependency credentials; only the macOS bundle pipeline currently implements that overlay contract. Refusing to compile the public cmid-tagged stub.
+'@
+}
+$sourceCommit = Get-GitSourceCommit $repoRoot
 
 $dist = Resolve-FullPath $DistRoot
 $out = Resolve-FullPath $OutRoot
@@ -403,6 +440,8 @@ foreach ($file in Get-ChildItem -LiteralPath $payload -File | Sort-Object Name) 
 $manifest = [ordered]@{
     schema_version = 1
     version = $Version
+    source_commit = $sourceCommit
+    distribution_flavor = $DistributionFlavor
     python_version = $PythonVersion
     gateway_archive = (Split-Path -Leaf $gatewayZip)
     wheel = (Split-Path -Leaf $wheel)
@@ -449,6 +488,8 @@ $provenance = [ordered]@{
     schema_version = 1
     artifact = (Split-Path -Leaf $setupPath)
     version = $Version
+    source_commit = $sourceCommit
+    distribution_flavor = $DistributionFlavor
     built_at_utc = [DateTime]::UtcNow.ToString("o")
     unsigned = -not $signed
     inputs = [ordered]@{
