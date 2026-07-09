@@ -63,6 +63,42 @@ function Protect-TestDirectory([string]$Path) {
     [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
 }
 
+function Get-ProcessTreeSnapshot([int]$RootProcessId) {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Select-Object ProcessId, ParentProcessId, CreationDate, ExecutablePath)
+    $descendants = @()
+    $frontier = @($RootProcessId)
+    while ($frontier.Count -gt 0) {
+        $children = @($processes | Where-Object {
+            [int]$_.ParentProcessId -in $frontier -and [int]$_.ProcessId -ne $RootProcessId
+        })
+        $descendants += $children
+        $frontier = @($children | ForEach-Object { [int]$_.ProcessId })
+    }
+    return $descendants
+}
+
+function Test-SameProcessIdentity($RecordedProcess) {
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$RecordedProcess.ProcessId)" -ErrorAction SilentlyContinue
+    if ($null -eq $current) { return $false }
+    return [string]$current.CreationDate -eq [string]$RecordedProcess.CreationDate -and
+        [string]$current.ExecutablePath -eq [string]$RecordedProcess.ExecutablePath
+}
+
+function Wait-ProcessTreeExit([object[]]$Descendants, [int]$TimeoutMilliseconds = 5000) {
+    if (@($Descendants).Count -eq 0) { return }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        $alive = @($Descendants | Where-Object { Test-SameProcessIdentity $_ })
+        if ($alive.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    foreach ($process in @($Descendants | Where-Object { Test-SameProcessIdentity $_ })) {
+        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-NativeProcess {
     [CmdletBinding()]
     param(
@@ -93,8 +129,10 @@ function Invoke-NativeProcess {
     }
     $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
     if ($timedOut) {
+        $descendants = @(Get-ProcessTreeSnapshot $process.Id)
         try { $process.Kill($true) } catch { Write-Warning (Protect-LogText $_.Exception.Message) }
         $process.WaitForExit()
+        Wait-ProcessTreeExit $descendants
     }
     $stdout = Protect-LogText $stdoutTask.GetAwaiter().GetResult()
     $stderr = Protect-LogText $stderrTask.GetAwaiter().GetResult()
@@ -612,7 +650,21 @@ function Assert-TimeoutHandling {
     $childPidPath = Join-Path $timeoutRoot 'child.pid'
     if (-not (Test-Path -LiteralPath $childPidPath -PathType Leaf)) { throw 'timeout contract child did not start' }
     $childPid = [int][IO.File]::ReadAllText($childPidPath)
-    if ($null -ne (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) { throw 'timeout contract left its child process running' }
+    $child = Get-CimInstance Win32_Process -Filter "ProcessId = $childPid" -ErrorAction SilentlyContinue
+    if ($null -ne $child) {
+        $commandLine = if ($child.CommandLine) { $child.CommandLine } else { '' }
+        $isTimeoutChild = $commandLine.IndexOf($mock, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $commandLine.IndexOf($timeoutRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $commandLine.IndexOf('-Action', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $commandLine.IndexOf('child', [StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($isTimeoutChild) {
+            throw ("timeout contract left its child process running: pid={0} parent={1} image={2} started={3}" -f
+                $child.ProcessId,
+                $child.ParentProcessId,
+                (Protect-LogText $child.ExecutablePath),
+                $child.CreationDate)
+        }
+    }
     Remove-Item -LiteralPath $timeoutRoot -Recurse -Force -ErrorAction SilentlyContinue
     Write-Result timeout-handling pass 'bounded failure killed the process tree'
 }
