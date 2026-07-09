@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
@@ -54,6 +56,13 @@ type Server struct {
 
 	socketPath string
 	socketMode os.FileMode
+
+	// staffGID is the gid of the macOS "staff" group used to narrow
+	// the socket ownership in managed_enterprise. Resolved once in
+	// NewServer via user.LookupGroup so dev machines that don't
+	// have the group can still boot (staffGID stays 0 and the chown
+	// path is skipped). On real macOS every host has staff.
+	staffGID uint32
 }
 
 // NewServer prepares the IPC server. It does not touch the filesystem
@@ -84,6 +93,17 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		return nil, err
 	}
 
+	// Best-effort staff GID lookup for macOS managed_enterprise
+	// socket ownership. On non-macOS or when the group is missing
+	// we leave the gid at 0 and skip the chown; the rest of the
+	// server continues normally.
+	var staffGID uint32
+	if g, err := user.LookupGroup("staff"); err == nil {
+		if gid, convErr := strconv.ParseUint(g.Gid, 10, 32); convErr == nil {
+			staffGID = uint32(gid)
+		}
+	}
+
 	bcast := newBroadcast()
 	svc := &service{
 		health:     opts.Health,
@@ -107,6 +127,7 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		opts:       opts,
 		bcast:      bcast,
 		svc:        svc,
+		staffGID:   staffGID,
 		socketPath: sockPath,
 		socketMode: sockMode,
 	}, nil
@@ -125,31 +146,32 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.setHealth(gateway.StateStarting, "")
 
-	// Managed_enterprise requires a peer-cred allowlist when the
-	// resolved socket mode is world-writable — otherwise any local
-	// user could connect. Refuse to boot rather than fail-open.
-	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) &&
-		s.socketMode&0o066 != 0 &&
-		len(s.opts.Config.Managed.AllowedUIDs) == 0 {
-		err := fmt.Errorf("ipc: managed_enterprise + socket_mode %#o requires managed.allowed_uids", s.socketMode)
-		s.setHealth(gateway.StateError, err.Error())
-		return err
-	}
-
 	// Directory permissions track the socket's principal-visibility
-	// contract: managed_enterprise wants cross-user traverse (0755
-	// so AVC can connect(2) from a different UID); everything else
-	// keeps the parent owner-only (0700). The installer creates
-	// this dir in prod; this MkdirAll is the dev/test fallback.
+	// contract: managed_enterprise creates the parent as root:staff
+	// 0750 (traverse for the console user via the staff group;
+	// installer normally creates this, we MkdirAll as fallback).
+	// Everything else keeps the parent owner-only.
 	dir := filepath.Dir(s.socketPath)
 	dirMode := os.FileMode(0o700)
 	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) {
-		dirMode = 0o755
+		dirMode = 0o750
 	}
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		wrapped := fmt.Errorf("ipc: mkdir %s: %w", dir, err)
 		s.setHealth(gateway.StateError, wrapped.Error())
 		return wrapped
+	}
+	// Best-effort chown to root:staff on darwin managed_enterprise.
+	// Fails silently on non-root dev runs; a real install runs as
+	// root and the chown succeeds. We rely on os.Chown returning
+	// EPERM for the unprivileged case and only treat other errors
+	// as fatal.
+	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
+		if err := os.Chown(dir, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
+			wrapped := fmt.Errorf("ipc: chown %s to root:staff: %w", dir, err)
+			s.setHealth(gateway.StateError, wrapped.Error())
+			return wrapped
+		}
 	}
 
 	// Best-effort remove of a stale socket file from a previous run.
@@ -173,14 +195,35 @@ func (s *Server) Run(ctx context.Context) error {
 		s.setHealth(gateway.StateError, wrapped.Error())
 		return wrapped
 	}
+	// Chown the socket itself to root:staff in managed_enterprise so
+	// the group-based fs filter is real. Same permission-error
+	// tolerance as the dir chown above.
+	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
+		if err := os.Chown(s.socketPath, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
+			_ = inner.Close()
+			wrapped := fmt.Errorf("ipc: chown %s to root:staff: %w", s.socketPath, err)
+			s.setHealth(gateway.StateError, wrapped.Error())
+			return wrapped
+		}
+	}
 
-	lis := newValidatingListener(inner, s.opts.Config.Managed.AllowedUIDs, s.logReject)
+	lis := newCodesignValidatingListener(inner,
+		s.opts.Config.Managed.AllowedTeamIDs,
+		s.opts.Config.Managed.AllowedSigningIDs,
+		s.logReject)
 
 	s.grpcSrv = grpc.NewServer()
 	pb.RegisterDefenseClawSecureClientServiceServer(s.grpcSrv, s.svc)
 
-	s.opts.Logf("listening on %s (mode=%#o allowed_uids=%v version=%s)",
-		s.socketPath, s.socketMode, s.opts.Config.Managed.AllowedUIDs, s.opts.Version)
+	codesignState := "disabled"
+	if len(s.opts.Config.Managed.AllowedTeamIDs) > 0 || len(s.opts.Config.Managed.AllowedSigningIDs) > 0 {
+		codesignState = "enabled"
+	}
+	s.opts.Logf("listening on %s (mode=%#o codesign_peer_auth=%s team_ids=%v signing_ids=%v version=%s)",
+		s.socketPath, s.socketMode, codesignState,
+		s.opts.Config.Managed.AllowedTeamIDs,
+		s.opts.Config.Managed.AllowedSigningIDs,
+		s.opts.Version)
 	s.setHealth(gateway.StateRunning, "")
 
 	serveErrCh := make(chan error, 1)
@@ -244,9 +287,10 @@ func (s *Server) setHealth(state gateway.SubsystemState, lastErr string) {
 		return
 	}
 	details := map[string]interface{}{
-		"socket_path":  s.socketPath,
-		"socket_mode":  fmt.Sprintf("%#o", s.socketMode),
-		"allowed_uids": s.opts.Config.Managed.AllowedUIDs,
+		"socket_path":         s.socketPath,
+		"socket_mode":         fmt.Sprintf("%#o", s.socketMode),
+		"allowed_team_ids":    s.opts.Config.Managed.AllowedTeamIDs,
+		"allowed_signing_ids": s.opts.Config.Managed.AllowedSigningIDs,
 	}
 	s.opts.Health.SetManaged(state, lastErr, details)
 }

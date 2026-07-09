@@ -21,9 +21,11 @@ import (
 // reference the type unconditionally. On Windows the fields stay
 // zero because peer-credential-over-UDS is not supported.
 type peerIdentity struct {
-	PID int32
-	UID uint32
-	GID uint32
+	PID       int32
+	UID       uint32
+	GID       uint32
+	TeamID    string
+	SigningID string
 }
 
 // extractPeerIdentity is a stub — the UDS gRPC server is not
@@ -34,8 +36,8 @@ func extractPeerIdentity(c net.Conn) (peerIdentity, error) {
 	return peerIdentity{}, fmt.Errorf("ipc: peer identity: unsupported on windows")
 }
 
-// newValidatingListener is a stub — always returns the inner
-// listener. The Server refuses to start on Windows regardless.
-func newValidatingListener(inner net.Listener, allowedUIDs []int, logReject func(peerIdentity, string)) net.Listener {
+// newCodesignValidatingListener is a stub — always returns the
+// inner listener. The Server refuses to start on Windows regardless.
+func newCodesignValidatingListener(inner net.Listener, teamIDs, signingIDs []string, logReject func(peerIdentity, string)) net.Listener {
 	return inner
 }

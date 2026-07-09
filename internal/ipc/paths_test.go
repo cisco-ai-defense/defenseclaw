@@ -112,9 +112,9 @@ func TestResolveSocketMode(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "empty mode + managed_enterprise → 0666",
+			name: "empty mode + managed_enterprise → 0660 (root:staff)",
 			cfg:  &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise},
-			want: 0o666,
+			want: 0o660,
 		},
 		{
 			name: "empty mode + unmanaged → 0600",
@@ -138,12 +138,12 @@ func TestResolveSocketMode(t *testing.T) {
 			want: 0o660,
 		},
 		{
-			name: "explicit 0666 valid in managed_enterprise",
+			name: "explicit 0666 rejected in managed_enterprise (ceiling is 0660)",
 			cfg: &config.Config{
 				DeploymentMode: managed.DeploymentModeManagedEnterprise,
 				Managed:        config.ManagedIPCConfig{SocketMode: "0666"},
 			},
-			want: 0o666,
+			wantErr: true,
 		},
 		{
 			name: "explicit 0666 rejected in unmanaged",

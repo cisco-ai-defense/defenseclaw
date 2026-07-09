@@ -34,12 +34,15 @@ const SocketFileName = "defenseclaw_ipc.sock"
 // where the operator needs to point clients at a scratch socket.
 const SocketEnvVar = "DEFENSECLAW_IPC_SOCKET"
 
-// Default mode ceilings by deployment. Managed enterprise expects a
-// world-writable socket gated by peer-cred allowlist; unmanaged/dev
-// keeps the socket owner-only because daemon and client are the same
-// principal.
+// Default mode ceilings by deployment. Managed enterprise keeps the
+// socket at group-writable-only (root:staff 0660 on macOS, chown
+// applied at bind time in internal/ipc/server.go). Unmanaged/dev
+// stays owner-only because daemon and client run as the same
+// principal. The managed_enterprise ceiling is 0660 — anything
+// wider is refused at server start so an operator override cannot
+// re-open the world-writable path.
 const (
-	defaultManagedSocketMode   os.FileMode = 0o666
+	defaultManagedSocketMode   os.FileMode = 0o660
 	defaultUnmanagedSocketMode os.FileMode = 0o600
 )
 
