@@ -238,16 +238,16 @@ type Config struct {
 // Kept in config package to avoid circular imports; the gateway adapter
 // converts to routing.RoutingConfig at boot.
 type RoutingConfig struct {
-	Enabled       bool                        `mapstructure:"enabled"       yaml:"enabled"`
-	Version       string                      `mapstructure:"version"       yaml:"version,omitempty"`
-	Port          int                         `mapstructure:"port"          yaml:"port,omitempty"`
-	Algorithm     string                      `mapstructure:"algorithm"     yaml:"algorithm,omitempty"`
-	Remote        RoutingRemoteConfig         `mapstructure:"remote"        yaml:"remote,omitempty"`
-	Embedding     RoutingEmbeddingConfig      `mapstructure:"embedding"     yaml:"embedding,omitempty"`
-	LLMClassifier RoutingLLMClassifierConfig  `mapstructure:"llm_classifier" yaml:"llm_classifier,omitempty"`
-	Models        []RoutingModelBackend       `mapstructure:"models"        yaml:"models,omitempty"`
-	Signals       RoutingSignalConfig         `mapstructure:"signals"       yaml:"signals,omitempty"`
-	Decisions     []RoutingDecisionRule       `mapstructure:"decisions"     yaml:"decisions,omitempty"`
+	Enabled       bool                       `mapstructure:"enabled"       yaml:"enabled"`
+	Version       string                     `mapstructure:"version"       yaml:"version,omitempty"`
+	Port          int                        `mapstructure:"port"          yaml:"port,omitempty"`
+	Algorithm     string                     `mapstructure:"algorithm"     yaml:"algorithm,omitempty"`
+	Remote        RoutingRemoteConfig        `mapstructure:"remote"        yaml:"remote,omitempty"`
+	Embedding     RoutingEmbeddingConfig     `mapstructure:"embedding"     yaml:"embedding,omitempty"`
+	LLMClassifier RoutingLLMClassifierConfig `mapstructure:"llm_classifier" yaml:"llm_classifier,omitempty"`
+	Models        []RoutingModelBackend      `mapstructure:"models"        yaml:"models,omitempty"`
+	Signals       RoutingSignalConfig        `mapstructure:"signals"       yaml:"signals,omitempty"`
+	Decisions     []RoutingDecisionRule      `mapstructure:"decisions"     yaml:"decisions,omitempty"`
 }
 
 type RoutingModelBackend struct {
@@ -262,11 +262,11 @@ type RoutingModelBackend struct {
 }
 
 type RoutingSignalConfig struct {
-	Keywords      []RoutingKeywordSignal      `mapstructure:"keywords"       yaml:"keywords,omitempty"`
-	Embedding     RoutingEmbeddingSignalCfg   `mapstructure:"embedding"      yaml:"embedding,omitempty"`
-	Domain        RoutingDomainSignalCfg      `mapstructure:"domain"         yaml:"domain,omitempty"`
-	Complexity    RoutingComplexitySignalCfg  `mapstructure:"complexity"     yaml:"complexity,omitempty"`
-	ContextLength RoutingContextLengthCfg     `mapstructure:"context_length" yaml:"context_length,omitempty"`
+	Keywords      []RoutingKeywordSignal     `mapstructure:"keywords"       yaml:"keywords,omitempty"`
+	Embedding     RoutingEmbeddingSignalCfg  `mapstructure:"embedding"      yaml:"embedding,omitempty"`
+	Domain        RoutingDomainSignalCfg     `mapstructure:"domain"         yaml:"domain,omitempty"`
+	Complexity    RoutingComplexitySignalCfg `mapstructure:"complexity"     yaml:"complexity,omitempty"`
+	ContextLength RoutingContextLengthCfg    `mapstructure:"context_length" yaml:"context_length,omitempty"`
 }
 
 type RoutingKeywordSignal struct {

@@ -91,13 +91,13 @@ func TestTranslate_MultipleProviders(t *testing.T) {
 
 func TestTranslate_SignalsUnderRouting(t *testing.T) {
 	input := TranslateInput{
-		Port: 8888,
+		Port:   8888,
 		Models: []TranslateModel{{Name: "m1", Provider: "x", Model: "x"}},
 		Signals: TranslateSignals{
-			Keywords:         []TranslateKeyword{{Name: "test", Keywords: []string{"hello"}}},
-			EmbeddingEnabled: true,
+			Keywords:           []TranslateKeyword{{Name: "test", Keywords: []string{"hello"}}},
+			EmbeddingEnabled:   true,
 			EmbeddingThreshold: 0.75,
-			DomainEnabled:    true,
+			DomainEnabled:      true,
 		},
 	}
 	cfg := Translate(input)
@@ -112,8 +112,8 @@ func TestTranslate_SignalsUnderRouting(t *testing.T) {
 func TestTranslateAndWrite_WritesFile(t *testing.T) {
 	dir := t.TempDir()
 	input := TranslateInput{
-		Port:   8888,
-		Models: []TranslateModel{{Name: "m1", Provider: "ollama", Model: "x"}},
+		Port:      8888,
+		Models:    []TranslateModel{{Name: "m1", Provider: "ollama", Model: "x"}},
 		Decisions: []TranslateDecision{{Name: "d1", Priority: 10, ModelRefs: []string{"m1"}}},
 	}
 

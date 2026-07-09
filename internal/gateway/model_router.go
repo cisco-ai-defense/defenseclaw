@@ -72,11 +72,13 @@ func (p *GuardrailProxy) SetModelRouter(mr ModelRouter) {
 
 // globalModelRouter holds a model router registered before the proxy is
 // constructed. NewGuardrailProxy picks it up automatically.
+// Safe without synchronization: written once during startup (before serving)
+// and read-only thereafter.
 var globalModelRouter ModelRouter
 
 // RegisterModelRouter registers a model router globally. The proxy picks
-// it up during construction (NewGuardrailProxy). This allows enterprise
-// main.go to register routing before the CLI starts the sidecar.
+// it up during construction (NewGuardrailProxy). Must be called during
+// startup before the proxy begins serving requests.
 func RegisterModelRouter(mr ModelRouter) {
 	globalModelRouter = mr
 }

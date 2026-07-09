@@ -3031,7 +3031,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/routing/") {
+		if strings.HasPrefix(r.URL.Path, "/routing/") && connector.IsLoopback(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -3190,7 +3190,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/routing/") {
+		if strings.HasPrefix(r.URL.Path, "/routing/") && connector.IsLoopback(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

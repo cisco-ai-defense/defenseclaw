@@ -692,6 +692,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		result, err := routing.StartManagedRouter(runCtx, orchCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] startup failed: %v (routing disabled)\n", err)
+			emitError(runCtx, "routing", "init-failed", "semantic router disabled", err)
 		} else if result != nil {
 			timeoutMs := orchCfg.TimeoutMs
 			if timeoutMs == 0 {

@@ -4967,7 +4967,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
     )
 
 
-def _merge_routing(raw: dict[str, Any] | None) -> "RoutingConfig":
+def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
     """Build a :class:`RoutingConfig` from the YAML ``routing:`` block."""
     if not isinstance(raw, dict):
         return RoutingConfig()

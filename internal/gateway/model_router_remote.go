@@ -45,9 +45,9 @@ func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
 
 // classifyRequest is the JSON body sent to POST /api/v1/classify/intent.
 type classifyRequest struct {
-	Messages []classifyMessage  `json:"messages"`
-	Text     string             `json:"text,omitempty"`
-	Options  *classifyOptions   `json:"options,omitempty"`
+	Messages []classifyMessage `json:"messages"`
+	Text     string            `json:"text,omitempty"`
+	Options  *classifyOptions  `json:"options,omitempty"`
 }
 
 type classifyMessage struct {

@@ -62,7 +62,7 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 
 	decision := mr.Route(r.Context(), input)
 	if decision == nil {
-		writeJSONError(w, http.StatusOK, "no routing decision (fallback)")
+		writeJSONError(w, http.StatusServiceUnavailable, "no routing decision (fallback)")
 		return
 	}
 
@@ -107,7 +107,8 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 
 	resp, err := http.DefaultClient.Do(upReq)
 	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		fmt.Fprintf(os.Stderr, "[api] routed chat upstream error: %v\n", err)
+		writeJSONError(w, http.StatusBadGateway, "upstream request failed")
 		return
 	}
 	defer resp.Body.Close()
@@ -116,6 +117,25 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 	w.Header().Set("X-Semantic-Router", "routed")
 	w.Header().Set("X-Semantic-Router-Reason", decision.Reason)
 	w.WriteHeader(resp.StatusCode)
+
+	if req.Stream {
+		flusher, _ := w.(http.Flusher)
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}
 	_, _ = io.Copy(w, resp.Body)
 }
 

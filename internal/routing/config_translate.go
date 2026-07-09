@@ -13,11 +13,11 @@ import (
 
 // SRConfig is the vLLM Semantic Router v0.3 canonical configuration format.
 type SRConfig struct {
-	Version   string                    `yaml:"version"`
-	Listeners []SRListenerConfig        `yaml:"listeners"`
-	Providers map[string]SRProviderCfg  `yaml:"providers"`
-	Routing   SRRoutingConfig           `yaml:"routing"`
-	Global    map[string]interface{}    `yaml:"global,omitempty"`
+	Version   string                   `yaml:"version"`
+	Listeners []SRListenerConfig       `yaml:"listeners"`
+	Providers map[string]SRProviderCfg `yaml:"providers"`
+	Routing   SRRoutingConfig          `yaml:"routing"`
+	Global    map[string]interface{}   `yaml:"global,omitempty"`
 }
 
 type SRListenerConfig struct {
@@ -65,12 +65,12 @@ type SRContextLength struct {
 }
 
 type SRDecisionConfig struct {
-	Name        string        `yaml:"name"`
-	Description string        `yaml:"description"`
-	Priority    int           `yaml:"priority"`
-	Rules       SRRules       `yaml:"rules"`
-	ModelRefs   []SRModelRef  `yaml:"modelRefs"`
-	Algorithm   *SRAlgorithm  `yaml:"algorithm,omitempty"`
+	Name        string       `yaml:"name"`
+	Description string       `yaml:"description"`
+	Priority    int          `yaml:"priority"`
+	Rules       SRRules      `yaml:"rules"`
+	ModelRefs   []SRModelRef `yaml:"modelRefs"`
+	Algorithm   *SRAlgorithm `yaml:"algorithm,omitempty"`
 }
 
 type SRRules struct {
