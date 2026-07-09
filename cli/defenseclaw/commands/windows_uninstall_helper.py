@@ -22,6 +22,7 @@ _ALLOWED_BINARIES = {
     "defenseclaw-hook.exe",
 }
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
+_LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
 
 
 def _kernel32():
@@ -205,6 +206,15 @@ def main() -> int:
         kernel32 = _kernel32()
         if kernel32.WaitForSingleObject(handle, 120_000) != 0:
             raise TimeoutError("uninstall parent did not exit within 120 seconds")
+
+        # The managed Python process can be running beneath defenseclaw.cmd.
+        # Its exit wakes this detached helper before cmd.exe has necessarily
+        # resumed the batch file to capture the exit code and return. Deleting
+        # that live shim immediately races cmd.exe and intermittently changes a
+        # successful uninstall into "The batch file cannot be found"/exit 1.
+        # Leave a bounded unwind window before removing launcher files; all
+        # paths are revalidated again below before any deletion occurs.
+        time.sleep(_LAUNCHER_UNWIND_GRACE_SECONDS)
 
         _, data_dir, targets = _validate_plan(plan)
         for target in targets:
