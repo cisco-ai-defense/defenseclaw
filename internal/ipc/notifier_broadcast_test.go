@@ -5,6 +5,7 @@
 package ipc
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -142,6 +143,62 @@ func TestBroadcastDropsSlowSubscriber(t *testing.T) {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("publish blocked on full subscriber buffer — must be non-blocking")
+	}
+}
+
+// TestBroadcastStampsIdAndSequence asserts every published record
+// receives a fresh id and a monotonically increasing sequence, and
+// that retained records replayed to a late subscriber carry the
+// SAME id + sequence as the original live publish so consumers can
+// dedup replay against records they already saw.
+func TestBroadcastStampsIdAndSequence(t *testing.T) {
+	b := newBroadcast()
+	// Deterministic id allocator so we can assert exact values.
+	var idCounter int
+	b.idFn = func() string {
+		idCounter++
+		return "id-" + strconv.Itoa(idCounter)
+	}
+
+	live, cancelLive := b.subscribe()
+	defer cancelLive()
+
+	b.publish(rec("first", pb.NotificationPresentation_NOTIFICATION_PRESENTATION_HISTORY))
+	b.publish(rec("second", pb.NotificationPresentation_NOTIFICATION_PRESENTATION_TRANSIENT_AND_HISTORY))
+	b.publish(rec("third", pb.NotificationPresentation_NOTIFICATION_PRESENTATION_HISTORY))
+
+	got := drain(t, live, 3, time.Second)
+	if len(got) != 3 {
+		t.Fatalf("live subscriber got %d records, want 3", len(got))
+	}
+	for i, r := range got {
+		wantSeq := uint64(i + 1)
+		wantID := "id-" + strconv.Itoa(i+1)
+		if r.Sequence != wantSeq {
+			t.Errorf("live[%d].Sequence = %d, want %d", i, r.Sequence, wantSeq)
+		}
+		if r.NotificationId != wantID {
+			t.Errorf("live[%d].NotificationId = %q, want %q", i, r.NotificationId, wantID)
+		}
+	}
+
+	// Late subscriber must receive retained replay with the SAME
+	// ids and sequences. The dedup contract depends on this.
+	late, cancelLate := b.subscribe()
+	defer cancelLate()
+	replay := drain(t, late, 3, 500*time.Millisecond)
+	if len(replay) != 3 {
+		t.Fatalf("late subscriber got %d replayed records, want 3", len(replay))
+	}
+	for i, r := range replay {
+		wantSeq := uint64(i + 1)
+		wantID := "id-" + strconv.Itoa(i+1)
+		if r.Sequence != wantSeq {
+			t.Errorf("replay[%d].Sequence = %d, want %d", i, r.Sequence, wantSeq)
+		}
+		if r.NotificationId != wantID {
+			t.Errorf("replay[%d].NotificationId = %q, want %q", i, r.NotificationId, wantID)
+		}
 	}
 }
 

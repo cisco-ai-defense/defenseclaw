@@ -298,6 +298,12 @@ func TestIPC_WatchNotifications(t *testing.T) {
 	if rec.SchemaVersion != 1 {
 		t.Errorf("schema version = %d, want 1", rec.SchemaVersion)
 	}
+	if rec.NotificationId == "" {
+		t.Errorf("notification_id is empty; every record must carry a stable id")
+	}
+	if rec.Sequence == 0 {
+		t.Errorf("sequence is 0; per-process sequence must start at 1")
+	}
 }
 
 // TestIPC_ShutdownRemovesSocket asserts clean shutdown removes the

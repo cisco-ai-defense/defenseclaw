@@ -570,7 +570,22 @@ type NotificationRecord struct {
 	// User-visible notification body. Must be safe for display and must not
 	// contain secrets, credentials, tokens, raw prompts, raw policy bodies, or
 	// sensitive payloads.
-	Body          string `protobuf:"bytes,5,opt,name=body,proto3" json:"body,omitempty"`
+	Body string `protobuf:"bytes,5,opt,name=body,proto3" json:"body,omitempty"`
+	// Stable identifier for this notification. Unique within one
+	// DefenseClaw process lifetime (a fresh UUID is minted per
+	// record); NOT persistent across process restarts. Consumers use
+	// this to deduplicate retained records replayed after reconnect
+	// against records they have already seen. Non-empty for every
+	// record.
+	NotificationId string `protobuf:"bytes,6,opt,name=notification_id,json=notificationId,proto3" json:"notification_id,omitempty"`
+	// Monotonically increasing per-process sequence number. Starts
+	// at 1 for the first record published in a given process lifetime
+	// and increments by 1 for every subsequent record. Resets to 1
+	// on process restart. Consumers can drop records whose sequence
+	// is not greater than the highest sequence they have already
+	// processed within the same process lifetime; combine with
+	// notification_id when reconnecting to a restarted server.
+	Sequence      uint64 `protobuf:"varint,7,opt,name=sequence,proto3" json:"sequence,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -640,6 +655,20 @@ func (x *NotificationRecord) GetBody() string {
 	return ""
 }
 
+func (x *NotificationRecord) GetNotificationId() string {
+	if x != nil {
+		return x.NotificationId
+	}
+	return ""
+}
+
+func (x *NotificationRecord) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
 var File_secureclient_proto protoreflect.FileDescriptor
 
 const file_secureclient_proto_rawDesc = "" +
@@ -664,13 +693,15 @@ const file_secureclient_proto_rawDesc = "" +
 	"\x13blocked_mcp_servers\x18\a \x01(\x04R\x11blockedMcpServers\x12.\n" +
 	"\x13allowed_mcp_servers\x18\b \x01(\x04R\x11allowedMcpServers\"O\n" +
 	"\x19WatchNotificationsRequest\x122\n" +
-	"\x15client_schema_version\x18\x01 \x01(\rR\x13clientSchemaVersion\"\x8f\x02\n" +
+	"\x15client_schema_version\x18\x01 \x01(\rR\x13clientSchemaVersion\"\xd4\x02\n" +
 	"\x12NotificationRecord\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12M\n" +
 	"\bseverity\x18\x02 \x01(\x0e21.defenseclaw.secureclient.v1.NotificationSeverityR\bseverity\x12Y\n" +
 	"\fpresentation\x18\x03 \x01(\x0e25.defenseclaw.secureclient.v1.NotificationPresentationR\fpresentation\x12\x14\n" +
 	"\x05title\x18\x04 \x01(\tR\x05title\x12\x12\n" +
-	"\x04body\x18\x05 \x01(\tR\x04body*\x94\x02\n" +
+	"\x04body\x18\x05 \x01(\tR\x04body\x12'\n" +
+	"\x0fnotification_id\x18\x06 \x01(\tR\x0enotificationId\x12\x1a\n" +
+	"\bsequence\x18\a \x01(\x04R\bsequence*\x94\x02\n" +
 	"\x13ServiceAvailability\x12$\n" +
 	" SERVICE_AVAILABILITY_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dSERVICE_AVAILABILITY_STARTING\x10\x01\x12\x1e\n" +

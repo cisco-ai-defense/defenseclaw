@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	pb "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1"
 )
 
@@ -38,12 +40,28 @@ type retainedRecord struct {
 // Subscribers receive live records on a bounded buffered channel and
 // (at subscribe time) a replay of retained HISTORY records. Slow
 // subscribers are dropped, never blocked.
+//
+// Every record fanned out from here is stamped with:
+//   - a fresh per-process UUID in NotificationRecord.notification_id
+//   - a monotonically increasing sequence in NotificationRecord.sequence
+//
+// so reconnecting clients can dedup replayed retained records against
+// records they have already seen within the same process lifetime.
+// Stamping is done under b.mu at publish time so the retained ring
+// and live subscribers observe the same identifiers.
 type broadcast struct {
 	nowFn func() time.Time
+	// idFn mints per-record identifiers; production wiring uses
+	// uuid.NewString. Tests replace it to keep assertions
+	// deterministic without touching the production allocator.
+	idFn func() string
 
 	mu          sync.Mutex
 	subscribers []*subscriber
 	retained    []retainedRecord
+	// nextSeq is the next value to stamp on NotificationRecord.sequence.
+	// Starts at 1 and increments under b.mu.
+	nextSeq uint64
 }
 
 type subscriber struct {
@@ -51,7 +69,11 @@ type subscriber struct {
 }
 
 func newBroadcast() *broadcast {
-	return &broadcast{nowFn: time.Now}
+	return &broadcast{
+		nowFn:   time.Now,
+		idFn:    uuid.NewString,
+		nextSeq: 1,
+	}
 }
 
 // subscribe returns a channel that receives live NotificationRecords,
@@ -133,6 +155,15 @@ func (b *broadcast) publish(rec *pb.NotificationRecord) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.evictExpiredLocked()
+
+	// Stamp identity + sequence under the lock so the retained ring
+	// and every live subscriber see the same values. notification_id
+	// and sequence take precedence over anything the caller pre-set —
+	// the broadcast is the single source of truth for both.
+	rec.NotificationId = b.idFn()
+	rec.Sequence = b.nextSeq
+	b.nextSeq++
+
 	if isRetained(rec.Presentation) {
 		b.retained = append(b.retained, retainedRecord{record: rec, receipts: b.nowFn()})
 		if len(b.retained) > notifierRetentionMax {

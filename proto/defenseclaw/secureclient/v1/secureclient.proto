@@ -112,6 +112,23 @@ message NotificationRecord {
   // contain secrets, credentials, tokens, raw prompts, raw policy bodies, or
   // sensitive payloads.
   string body = 5;
+
+  // Stable identifier for this notification. Unique within one
+  // DefenseClaw process lifetime (a fresh UUID is minted per
+  // record); NOT persistent across process restarts. Consumers use
+  // this to deduplicate retained records replayed after reconnect
+  // against records they have already seen. Non-empty for every
+  // record.
+  string notification_id = 6;
+
+  // Monotonically increasing per-process sequence number. Starts
+  // at 1 for the first record published in a given process lifetime
+  // and increments by 1 for every subsequent record. Resets to 1
+  // on process restart. Consumers can drop records whose sequence
+  // is not greater than the highest sequence they have already
+  // processed within the same process lifetime; combine with
+  // notification_id when reconnecting to a restarted server.
+  uint64 sequence = 7;
 }
 
 enum NotificationSeverity {
