@@ -142,6 +142,38 @@ func (c *RulePackCache) LoadWithOverlays(baseDir string, overlayDirs []string) (
 	return rp, nil
 }
 
+// LoadForRegexSource caches the effective source-aware rule pack. Local and
+// hybrid retain their existing cache paths; agent_control gets a source-tagged
+// key because its pack keeps local non-regex assets but excludes local rules.
+func (c *RulePackCache) LoadForRegexSource(baseDir string, overlayDirs []string, source string) (*RulePack, error) {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" || source == RegexSourceLocal {
+		return c.Load(baseDir), nil
+	}
+	if source == RegexSourceHybrid {
+		return c.LoadWithOverlays(baseDir, overlayDirs)
+	}
+
+	key := source + "\x00" + overlayCacheKey(baseDir, overlayDirs)
+	c.overlayMu.RLock()
+	rp, ok := c.overlayPacks[key]
+	c.overlayMu.RUnlock()
+	if ok {
+		return rp, nil
+	}
+	c.overlayMu.Lock()
+	defer c.overlayMu.Unlock()
+	if rp, ok := c.overlayPacks[key]; ok {
+		return rp, nil
+	}
+	rp, err := LoadRulePackForRegexSource(baseDir, overlayDirs, source)
+	if err != nil {
+		return nil, err
+	}
+	c.overlayPacks[key] = rp
+	return rp, nil
+}
+
 // normalizeRulePackDir canonicalizes a rule-pack directory into a stable
 // cache key. The empty string (embedded defaults) is preserved exactly to
 // match LoadRulePack's special-casing; any non-empty path is cleaned so that

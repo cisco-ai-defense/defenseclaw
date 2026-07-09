@@ -35,13 +35,16 @@ import (
 )
 
 const (
-	maxManagedOverlayBytes = 1024 * 1024
-	maxManagedOverlayRules = 1000
-	maxManagedRuleIDRunes  = 128
-	maxManagedTitleRunes   = 256
-	maxManagedPatternRunes = 2048
-	maxManagedTags         = 32
-	maxManagedTagRunes     = 128
+	maxManagedOverlayBytes  = 1024 * 1024
+	maxManagedOverlayRules  = 1000
+	maxManagedRuleIDRunes   = 128
+	maxManagedTitleRunes    = 256
+	maxManagedPatternRunes  = 2048
+	maxManagedTags          = 32
+	maxManagedTagRunes      = 128
+	RegexSourceLocal        = "local"
+	RegexSourceAgentControl = "agent_control"
+	RegexSourceHybrid       = "hybrid"
 )
 
 // ManagedRulePackStatus identifies the exact Agent Control rule artifact
@@ -49,6 +52,7 @@ const (
 type ManagedRulePackStatus struct {
 	Present        bool   `json:"present"`
 	ArtifactDigest string `json:"artifact_digest,omitempty"`
+	RegexSource    string `json:"regex_source"`
 }
 
 // AgentControlRulePackStatus returns the digest of the configured
@@ -84,6 +88,84 @@ func AgentControlRulePackStatus(overlayDirs []string) (ManagedRulePackStatus, er
 		Present:        true,
 		ArtifactDigest: "sha256:" + hex.EncodeToString(sum[:]),
 	}, nil
+}
+
+// LoadRulePackForRegexSource builds the effective rule pack for one runtime
+// regex authority while keeping non-regex assets local in every mode.
+//
+//   - local:         local/compiled rules only; managed overlays are ignored
+//   - hybrid:        local/compiled rules plus strict managed overlays
+//   - agent_control: Agent Control rules only; local rule files and local
+//     pattern lists are removed, while judges, suppressions,
+//     and sensitive-tool settings remain from the local pack
+func LoadRulePackForRegexSource(baseDir string, overlayDirs []string, source string) (*RulePack, error) {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "", RegexSourceLocal:
+		return LoadRulePack(baseDir), nil
+	case RegexSourceHybrid:
+		return LoadRulePackWithOverlays(baseDir, overlayDirs)
+	case RegexSourceAgentControl:
+		return loadAgentControlOnlyRulePack(baseDir, overlayDirs)
+	default:
+		return nil, fmt.Errorf("guardrail: regex source must be local, agent_control, or hybrid")
+	}
+}
+
+func loadAgentControlOnlyRulePack(baseDir string, overlayDirs []string) (*RulePack, error) {
+	localAssets := LoadRulePack(baseDir)
+	result := *localAssets
+	result.RuleFiles = nil
+	result.LocalPatterns = nil
+
+	var managedDir string
+	for _, rawDir := range overlayDirs {
+		dir := strings.TrimSpace(rawDir)
+		if dir == "" {
+			return nil, fmt.Errorf("guardrail: rule-pack overlay directory cannot be empty")
+		}
+		candidate := filepath.Join(dir, "rules", "agent-control.yaml")
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("guardrail: inspect managed Agent Control rule artifact: %w", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("guardrail: managed Agent Control rule artifact must be a regular file: %s", candidate)
+		}
+		if managedDir != "" {
+			return nil, fmt.Errorf("guardrail: reserved category agent-control may appear only once across managed overlays")
+		}
+		managedDir = dir
+	}
+	// A successful empty central snapshot intentionally yields zero regex
+	// rules in managed mode. Connectivity failures never remove the active
+	// artifact, so absence here is not used as an outage fallback signal.
+	if managedDir == "" {
+		return &result, nil
+	}
+
+	managed, err := LoadRulePackWithOverlays("", []string{managedDir})
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range managed.RuleFiles {
+		if file == nil {
+			continue
+		}
+		if file.Category != "agent-control" {
+			return nil, fmt.Errorf(
+				"guardrail: agent_control regex source accepts only the reserved agent-control rule file, found category %q",
+				file.Category,
+			)
+		}
+		result.RuleFiles = append(result.RuleFiles, file)
+	}
+	if len(result.RuleFiles) != 1 {
+		return nil, fmt.Errorf("guardrail: agent_control regex source requires exactly one reserved agent-control rule file")
+	}
+	return &result, nil
 }
 
 // LoadRulePackWithOverlays loads the operator-selected base pack with its

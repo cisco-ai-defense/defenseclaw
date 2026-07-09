@@ -239,9 +239,12 @@ type Config struct {
 // and validation remain strict while the Python service owns the SDK session.
 type AgentControlConfig struct {
 	Enabled             bool                            `mapstructure:"enabled"                yaml:"enabled"`
+	Deployment          string                          `mapstructure:"deployment"             yaml:"deployment"`
+	ServerURL           string                          `mapstructure:"server_url"             yaml:"server_url"`
+	InstallationID      string                          `mapstructure:"installation_id"        yaml:"installation_id"`
+	APIKeyEnv           string                          `mapstructure:"api_key_env"            yaml:"api_key_env"`
 	AgentName           string                          `mapstructure:"agent_name"             yaml:"agent_name"`
 	TargetType          string                          `mapstructure:"target_type"            yaml:"target_type"`
-	TargetID            string                          `mapstructure:"target_id"              yaml:"target_id"`
 	RefreshSeconds      int                             `mapstructure:"refresh_seconds"         yaml:"refresh_seconds"`
 	CachePollSeconds    int                             `mapstructure:"cache_poll_seconds"      yaml:"cache_poll_seconds"`
 	InitRetryMaxSeconds int                             `mapstructure:"init_retry_max_seconds" yaml:"init_retry_max_seconds"`
@@ -278,11 +281,20 @@ func (c *AgentControlConfig) Validate() error {
 	if c.TargetType != "defenseclaw.installation" {
 		return fmt.Errorf("target_type must be defenseclaw.installation")
 	}
-	if c.Enabled && strings.TrimSpace(c.TargetID) == "" {
-		return fmt.Errorf("target_id is required when enabled")
+	if c.Enabled && c.Deployment != "cisco_cloud" && c.Deployment != "self_hosted" {
+		return fmt.Errorf("deployment must be cisco_cloud or self_hosted when enabled")
 	}
-	if len(c.TargetID) > 255 {
-		return fmt.Errorf("target_id cannot exceed 255 characters")
+	if c.Enabled && strings.TrimSpace(c.ServerURL) == "" {
+		return fmt.Errorf("server_url is required when enabled")
+	}
+	if c.Enabled && strings.TrimSpace(c.InstallationID) == "" {
+		return fmt.Errorf("installation_id is required when enabled")
+	}
+	if len(c.InstallationID) > 255 {
+		return fmt.Errorf("installation_id cannot exceed 255 characters")
+	}
+	if c.Enabled && strings.TrimSpace(c.APIKeyEnv) == "" {
+		return fmt.Errorf("api_key_env is required when enabled")
 	}
 	if c.RefreshSeconds <= 0 || c.CachePollSeconds <= 0 || c.InitRetryMaxSeconds <= 0 {
 		return fmt.Errorf("refresh_seconds, cache_poll_seconds, and init_retry_max_seconds must be positive")
@@ -1406,13 +1418,17 @@ type GuardrailConfig struct {
 	// upstream model name the client will see rewritten onto outgoing
 	// requests (Bifrost model-routing). It is orthogonal to the
 	// LLM block.
-	OriginalModel       string      `mapstructure:"original_model"       yaml:"original_model,omitempty"`
-	BlockMessage        string      `mapstructure:"block_message"        yaml:"block_message"`
-	StreamBufferBytes   int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
-	RulePackDir         string      `mapstructure:"rule_pack_dir"          yaml:"rule_pack_dir"`
-	RulePackOverlayDirs []string    `mapstructure:"rule_pack_overlay_dirs" yaml:"rule_pack_overlay_dirs,omitempty"`
-	Judge               JudgeConfig `mapstructure:"judge"                yaml:"judge"`
-	HILT                HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	OriginalModel       string   `mapstructure:"original_model"       yaml:"original_model,omitempty"`
+	BlockMessage        string   `mapstructure:"block_message"        yaml:"block_message"`
+	StreamBufferBytes   int      `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	RulePackDir         string   `mapstructure:"rule_pack_dir" yaml:"rule_pack_dir"`
+	RulePackOverlayDirs []string `mapstructure:"rule_pack_overlay_dirs" yaml:"rule_pack_overlay_dirs,omitempty"`
+	// RegexSource chooses whether detection rules come from the local pack,
+	// the Agent Control managed snapshot, or both. Non-regex rule-pack assets
+	// remain local for all three values.
+	RegexSource string      `mapstructure:"regex_source" yaml:"regex_source"`
+	Judge       JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+	HILT        HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
 	// Detection strategy: "regex_only", "regex_judge" (default), "judge_first".
 	// Per-direction overrides take precedence over the global setting.
@@ -1715,6 +1731,22 @@ func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
 	return g.RulePackDir
 }
 
+const (
+	RegexSourceLocal        = "local"
+	RegexSourceAgentControl = "agent_control"
+	RegexSourceHybrid       = "hybrid"
+)
+
+// EffectiveRegexSource returns the configured regex policy authority. The
+// empty value is treated as local for zero-value configs used by embedders and
+// tests; normal config loads receive the explicit local default from Viper.
+func (g *GuardrailConfig) EffectiveRegexSource() string {
+	if g == nil || strings.TrimSpace(g.RegexSource) == "" {
+		return RegexSourceLocal
+	}
+	return strings.ToLower(strings.TrimSpace(g.RegexSource))
+}
+
 // Validate checks per-connector guardrail VALUE invariants only — the
 // NEW guardrail.connectors map. For each override it inspects enum
 // values (mode, hook_fail_mode, hilt.min_severity) and rejects empty
@@ -1727,6 +1759,11 @@ func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
 func (g *GuardrailConfig) Validate() error {
 	if g == nil {
 		return nil
+	}
+	switch g.EffectiveRegexSource() {
+	case RegexSourceLocal, RegexSourceAgentControl, RegexSourceHybrid:
+	default:
+		return fmt.Errorf("guardrail.regex_source must be local, agent_control, or hybrid")
 	}
 	seenOverlayDirs := make(map[string]struct{}, len(g.RulePackOverlayDirs))
 	for i, dir := range g.RulePackOverlayDirs {
@@ -2445,6 +2482,19 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 			ReportConfigLoadError(context.Background(), "agent_control_invalid")
 		}
 		return nil, fmt.Errorf("config: agent_control: %w", err)
+	}
+	switch cfg.Guardrail.EffectiveRegexSource() {
+	case RegexSourceLocal:
+		if cfg.AgentControl.RulePack.Enabled {
+			return nil, fmt.Errorf("config: guardrail.regex_source=local requires agent_control.rule_pack.enabled=false")
+		}
+	case RegexSourceAgentControl, RegexSourceHybrid:
+		if !cfg.AgentControl.Enabled || !cfg.AgentControl.RulePack.Enabled {
+			return nil, fmt.Errorf(
+				"config: guardrail.regex_source=%s requires agent_control.enabled=true and agent_control.rule_pack.enabled=true",
+				cfg.Guardrail.EffectiveRegexSource(),
+			)
+		}
 	}
 	if err := cfg.ApplicationProtection.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3382,15 +3432,19 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.rule_pack_overlay_dirs", []string{})
+	viper.SetDefault("guardrail.regex_source", RegexSourceLocal)
 	viper.SetDefault("agent_control.enabled", false)
+	viper.SetDefault("agent_control.deployment", "cisco_cloud")
+	viper.SetDefault("agent_control.server_url", "")
+	viper.SetDefault("agent_control.installation_id", "")
+	viper.SetDefault("agent_control.api_key_env", "AGENT_CONTROL_API_KEY")
 	viper.SetDefault("agent_control.agent_name", "defenseclaw-policy-sync")
 	viper.SetDefault("agent_control.target_type", "defenseclaw.installation")
-	viper.SetDefault("agent_control.target_id", "")
 	viper.SetDefault("agent_control.refresh_seconds", 60)
 	viper.SetDefault("agent_control.cache_poll_seconds", 2)
 	viper.SetDefault("agent_control.init_retry_max_seconds", 300)
 	viper.SetDefault("agent_control.managed_dir", "")
-	viper.SetDefault("agent_control.opa.enabled", true)
+	viper.SetDefault("agent_control.opa.enabled", false)
 	viper.SetDefault("agent_control.opa.precedence", "stricter")
 	viper.SetDefault("agent_control.opa.activation", "reload")
 	viper.SetDefault("agent_control.rule_pack.enabled", false)

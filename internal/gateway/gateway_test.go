@@ -3728,7 +3728,11 @@ func TestAPIPolicyStatusUsesActiveProviders(t *testing.T) {
 		}
 	})
 	api.SetRulePackStatusProvider(func() guardrail.ManagedRulePackStatus {
-		return guardrail.ManagedRulePackStatus{Present: true, ArtifactDigest: "sha256:rules"}
+		return guardrail.ManagedRulePackStatus{
+			Present:        true,
+			ArtifactDigest: "sha256:rules",
+			RegexSource:    guardrail.RegexSourceAgentControl,
+		}
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/policy/status", nil)
@@ -3751,6 +3755,9 @@ func TestAPIPolicyStatusUsesActiveProviders(t *testing.T) {
 	rulePack := body["rule_pack"].(map[string]interface{})
 	if rulePack["artifact_digest"] != "sha256:rules" {
 		t.Fatalf("rule-pack status = %#v", rulePack)
+	}
+	if rulePack["regex_source"] != guardrail.RegexSourceAgentControl {
+		t.Fatalf("rule-pack source = %#v", rulePack)
 	}
 }
 

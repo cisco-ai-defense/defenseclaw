@@ -1030,6 +1030,67 @@ func TestScanAllRulesForConnector_ConcurrentNoCrossContamination(t *testing.T) {
 	}
 }
 
+func TestApplyRulePackOverridesForSourceExcludesCompiledDefaults(t *testing.T) {
+	ruleCategoriesMu.Lock()
+	saved := allRuleCategories
+	ruleCategoriesMu.Unlock()
+	defer func() {
+		ruleCategoriesMu.Lock()
+		allRuleCategories = saved
+		ruleCategoriesMu.Unlock()
+	}()
+
+	managed := &guardrail.RulePack{RuleFiles: []*guardrail.RulesFileYAML{{
+		Version:  1,
+		Category: "agent-control",
+		Rules: []guardrail.RuleDefYAML{{
+			ID:         "AC-ONLY",
+			Pattern:    `central_only_[a-z]+`,
+			Title:      "Central-only rule",
+			Severity:   "CRITICAL",
+			Confidence: 1,
+		}},
+	}}}
+	ApplyRulePackOverridesForSource(managed, guardrail.RegexSourceAgentControl)
+	if findings := ScanAllRules("mkfs /dev/disk0", "exec"); len(findings) != 0 {
+		t.Fatalf("managed source leaked compiled defaults: %+v", findings)
+	}
+	if findings := ScanAllRules("central_only_payload", "exec"); len(findings) != 1 || findings[0].RuleID != "AC-ONLY" {
+		t.Fatalf("managed source findings = %+v", findings)
+	}
+
+	ApplyRulePackOverridesForSource(managed, guardrail.RegexSourceHybrid)
+	if findings := ScanAllRules("mkfs /dev/disk0", "exec"); len(findings) == 0 {
+		t.Fatal("hybrid source did not retain compiled defaults")
+	}
+	if findings := ScanAllRules("central_only_payload", "exec"); len(findings) != 1 || findings[0].RuleID != "AC-ONLY" {
+		t.Fatalf("hybrid managed findings = %+v", findings)
+	}
+}
+
+func TestApplyConnectorRulePackOverridesForAgentControlExcludesDefaults(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	managed := &guardrail.RulePack{RuleFiles: []*guardrail.RulesFileYAML{{
+		Version:  1,
+		Category: "agent-control",
+		Rules: []guardrail.RuleDefYAML{{
+			ID:         "AC-CONNECTOR",
+			Pattern:    `managed_connector_trigger`,
+			Title:      "Managed connector rule",
+			Severity:   "HIGH",
+			Confidence: 1,
+		}},
+	}}}
+	ApplyConnectorRulePackOverridesForSource("codex", managed, guardrail.RegexSourceAgentControl)
+	if findings := ScanAllRulesForConnector("codex", "mkfs /dev/disk0", "exec"); len(findings) != 0 {
+		t.Fatalf("connector managed source leaked defaults: %+v", findings)
+	}
+	findings := ScanAllRulesForConnector("codex", "managed_connector_trigger", "exec")
+	if len(findings) != 1 || findings[0].RuleID != "AC-CONNECTOR" {
+		t.Fatalf("connector managed findings = %+v", findings)
+	}
+}
+
 // TestApplyConnectorRulePackOverrides_NilPackPinsDefaults verifies that a
 // connector with a nil/empty pack is pinned to the compiled-in defaults rather
 // than inheriting whatever the global happens to hold — so it can never

@@ -402,6 +402,7 @@ func NewGuardrailProxy(
 	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp, providers)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
+	inspector.SetRegexSource(cfg.EffectiveRegexSource())
 	inspector.SetDetectionStrategy(
 		cfg.DetectionStrategy,
 		cfg.DetectionStrategyPrompt,
@@ -519,6 +520,9 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 		p.inspector.SetScannerMode(cfg.ScannerMode)
 	}
 	p.inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
+	if sourceSetter, ok := p.inspector.(interface{ SetRegexSource(string) }); ok {
+		sourceSetter.SetRegexSource(cfg.EffectiveRegexSource())
+	}
 	if strategySetter, ok := p.inspector.(interface {
 		SetDetectionStrategy(global, prompt, completion, toolCall string, sweep bool)
 	}); ok {

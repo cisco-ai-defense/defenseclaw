@@ -69,6 +69,88 @@ func TestLoadRulePackWithOverlaysPreservesBaseAndAddsRules(t *testing.T) {
 	}
 }
 
+func TestLoadRulePackForRegexSourceSemantics(t *testing.T) {
+	base := writeOverlay(t, "base.yaml", strings.NewReplacer(
+		"category: agent-control", "category: local-only",
+		"AC-CMD-RM-RF", "LOCAL-ONLY",
+	).Replace(validManagedRuleFile))
+	localPatterns := `version: 1
+injection:
+  - local-only-pattern
+`
+	if err := os.WriteFile(filepath.Join(base, "rules", "local-patterns.yaml"), []byte(localPatterns), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)
+
+	local, err := LoadRulePackForRegexSource(base, []string{overlay}, RegexSourceLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(local.RuleFiles) != 1 || local.RuleFiles[0].Category != "local-only" {
+		t.Fatalf("local rule files = %+v", local.RuleFiles)
+	}
+	if local.LocalPatterns == nil || len(local.LocalPatterns.Injection) != 1 {
+		t.Fatal("local source did not retain local patterns")
+	}
+
+	hybrid, err := LoadRulePackForRegexSource(base, []string{overlay}, RegexSourceHybrid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hybrid.RuleFiles) != 2 {
+		t.Fatalf("hybrid rule file count = %d, want 2", len(hybrid.RuleFiles))
+	}
+
+	managed, err := LoadRulePackForRegexSource(base, []string{overlay}, RegexSourceAgentControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(managed.RuleFiles) != 1 || managed.RuleFiles[0].Category != "agent-control" {
+		t.Fatalf("managed rule files = %+v", managed.RuleFiles)
+	}
+	if managed.LocalPatterns != nil {
+		t.Fatal("managed source retained local patterns")
+	}
+	if managed.Suppressions == nil || managed.SensitiveTools == nil || len(managed.JudgeConfigs) == 0 {
+		t.Fatal("managed source discarded local non-regex assets")
+	}
+}
+
+func TestAgentControlRegexSourceDoesNotConflictWithExcludedLocalIDs(t *testing.T) {
+	base := writeOverlay(t, "base.yaml", strings.Replace(validManagedRuleFile, "category: agent-control", "category: local", 1))
+	overlay := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)
+	if _, err := LoadRulePackForRegexSource(base, []string{overlay}, RegexSourceHybrid); err == nil ||
+		!strings.Contains(err.Error(), "duplicate rule id") {
+		t.Fatalf("hybrid duplicate error = %v", err)
+	}
+	managed, err := LoadRulePackForRegexSource(base, []string{overlay}, RegexSourceAgentControl)
+	if err != nil {
+		t.Fatalf("managed source must ignore excluded local ID collision: %v", err)
+	}
+	if len(managed.RuleFiles) != 1 || managed.RuleFiles[0].Rules[0].ID != "AC-CMD-RM-RF" {
+		t.Fatalf("managed rules = %+v", managed.RuleFiles)
+	}
+}
+
+func TestAgentControlRegexSourceAllowsIntentionalEmptySnapshot(t *testing.T) {
+	base := writeOverlay(t, "base.yaml", strings.NewReplacer(
+		"category: agent-control", "category: local",
+		"AC-CMD-RM-RF", "LOCAL-RULE",
+	).Replace(validManagedRuleFile))
+	emptyOverlay := writeOverlay(t, "", "")
+	managed, err := LoadRulePackForRegexSource(base, []string{emptyOverlay}, RegexSourceAgentControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(managed.RuleFiles) != 0 {
+		t.Fatalf("empty managed snapshot retained %d rule files", len(managed.RuleFiles))
+	}
+	if managed.Suppressions == nil || managed.SensitiveTools == nil {
+		t.Fatal("empty managed snapshot discarded local non-regex assets")
+	}
+}
+
 func TestLoadRulePackWithOverlaysAppliesAfterEachConnectorBase(t *testing.T) {
 	writeBase := func(category, ruleID string) string {
 		t.Helper()

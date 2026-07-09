@@ -51,6 +51,7 @@ func init() {
 	policyValidateCmd.Flags().StringVar(&policyValidateAgentControlCandidate, "candidate-agent-control", "", "Validate this Agent Control supplemental file instead of the active file")
 	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackBaseDir, "base-dir", "", "Operator rule-pack directory to preserve beneath the overlay")
 	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackOverlayDir, "overlay-dir", "", "Managed rules-only overlay directory to validate")
+	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackRegexSource, "regex-source", guardrail.RegexSourceHybrid, "Regex policy source (local, agent_control, hybrid)")
 	// Native pre-publication validation must be side-effect free and usable
 	// before the gateway/audit database is running. An explicit --rego-dir is
 	// self-contained and skips root bootstrap; the normal no-flag command keeps
@@ -80,6 +81,7 @@ var (
 	policyValidateAgentControlCandidate string
 	policyValidateRulePackBaseDir       string
 	policyValidateRulePackOverlayDir    string
+	policyValidateRulePackRegexSource   string
 )
 
 // ---------------------------------------------------------------------------
@@ -245,7 +247,11 @@ var policyValidateRulePackCmd = &cobra.Command{
 		if overlayDir == "" {
 			return fmt.Errorf("policy: --overlay-dir is required")
 		}
-		pack, err := guardrail.LoadRulePackWithOverlays(policyValidateRulePackBaseDir, []string{overlayDir})
+		pack, err := guardrail.LoadRulePackForRegexSource(
+			policyValidateRulePackBaseDir,
+			[]string{overlayDir},
+			policyValidateRulePackRegexSource,
+		)
 		if err != nil {
 			return fmt.Errorf("policy: managed rule-pack validation failed: %w", err)
 		}

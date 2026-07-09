@@ -258,17 +258,17 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if err != nil {
 		return nil, err
 	}
-	rulePackStatus, err := guardrail.AgentControlRulePackStatus(cfg.Guardrail.RulePackOverlayDirs)
+	rulePackStatus, err := activeManagedRulePackStatus(&cfg.Guardrail)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: managed rule-pack status: %w", err)
 	}
 	router.SetRulePack(rp)
-	ApplyRulePackOverrides(rp)
-	// local-patterns.yaml replaces the compiled-in local pattern set
-	// per-profile when present in the rule pack. Calling with nil
-	// LocalPatterns is a no-op (keeps the defaults), so this is safe
-	// even when an operator hasn't customized the file.
-	ApplyLocalPatternsOverride(rp.LocalPatterns)
+	ApplyRulePackOverridesForSource(rp, cfg.Guardrail.EffectiveRegexSource())
+	// local-patterns.yaml replaces the compiled-in local pattern set for local
+	// and hybrid modes. Managed-only mode never installs or executes it.
+	if cfg.Guardrail.EffectiveRegexSource() != config.RegexSourceAgentControl {
+		ApplyLocalPatternsOverride(rp.LocalPatterns)
+	}
 
 	// Seed custom-providers overlay from llm.base_url so a custom LLM
 	// gateway domain is recognized by isKnownProviderDomain(). Must run
@@ -1080,7 +1080,11 @@ func configRestartHelperArgs(argv []string) []string {
 }
 
 func loadSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error) {
-	rp, err := guardrail.LoadRulePackWithOverlays(cfg.Guardrail.RulePackDir, cfg.Guardrail.RulePackOverlayDirs)
+	rp, err := guardrail.LoadRulePackForRegexSource(
+		cfg.Guardrail.RulePackDir,
+		cfg.Guardrail.RulePackOverlayDirs,
+		cfg.Guardrail.EffectiveRegexSource(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: load managed rule-pack overlay: %w", err)
 	}
@@ -1089,8 +1093,22 @@ func loadSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error) {
 	return rp, nil
 }
 
-func loadCachedRulePackWithOverlays(cache *guardrail.RulePackCache, baseDir string, overlayDirs []string) (*guardrail.RulePack, error) {
-	return cache.LoadWithOverlays(baseDir, overlayDirs)
+func activeManagedRulePackStatus(cfg *config.GuardrailConfig) (guardrail.ManagedRulePackStatus, error) {
+	source := cfg.EffectiveRegexSource()
+	status := guardrail.ManagedRulePackStatus{RegexSource: source}
+	if source == config.RegexSourceLocal {
+		return status, nil
+	}
+	managed, err := guardrail.AgentControlRulePackStatus(cfg.RulePackOverlayDirs)
+	if err != nil {
+		return guardrail.ManagedRulePackStatus{}, err
+	}
+	managed.RegexSource = source
+	return managed, nil
+}
+
+func loadCachedRulePackWithOverlays(cache *guardrail.RulePackCache, baseDir string, overlayDirs []string, source string) (*guardrail.RulePack, error) {
+	return cache.LoadForRegexSource(baseDir, overlayDirs, source)
 }
 
 func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
@@ -1222,7 +1240,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 			}
 			return err
 		}
-		nextRulePackStatus, err = guardrail.AgentControlRulePackStatus(next.Guardrail.RulePackOverlayDirs)
+		nextRulePackStatus, err = activeManagedRulePackStatus(&next.Guardrail)
 		if err != nil {
 			if nextSinks != nil {
 				_ = nextSinks.Close()
@@ -1290,8 +1308,10 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	if s.router != nil {
 		if nextRulePack != nil {
 			s.router.SetRulePack(nextRulePack)
-			ApplyRulePackOverrides(nextRulePack)
-			ApplyLocalPatternsOverride(nextRulePack.LocalPatterns)
+			ApplyRulePackOverridesForSource(nextRulePack, next.Guardrail.EffectiveRegexSource())
+			if next.Guardrail.EffectiveRegexSource() != config.RegexSourceAgentControl {
+				ApplyLocalPatternsOverride(nextRulePack.LocalPatterns)
+			}
 			s.setRulePackStatus(nextRulePackStatus)
 		}
 		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
@@ -1446,7 +1466,8 @@ func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	return oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir ||
-		!reflect.DeepEqual(oldCfg.Guardrail.RulePackOverlayDirs, newCfg.Guardrail.RulePackOverlayDirs)
+		!reflect.DeepEqual(oldCfg.Guardrail.RulePackOverlayDirs, newCfg.Guardrail.RulePackOverlayDirs) ||
+		oldCfg.Guardrail.EffectiveRegexSource() != newCfg.Guardrail.EffectiveRegexSource()
 }
 
 func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {
@@ -1468,7 +1489,8 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
 		oldG.RulePackDir != newG.RulePackDir ||
-		!reflect.DeepEqual(oldG.RulePackOverlayDirs, newG.RulePackOverlayDirs) || oldG.HookSelfHeal != newG.HookSelfHeal ||
+		!reflect.DeepEqual(oldG.RulePackOverlayDirs, newG.RulePackOverlayDirs) ||
+		oldG.EffectiveRegexSource() != newG.EffectiveRegexSource() || oldG.HookSelfHeal != newG.HookSelfHeal ||
 		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
 		oldG.Judge.Enabled != newG.Judge.Enabled || !reflect.DeepEqual(oldG.Judge, newG.Judge) {
 		return true
@@ -2240,9 +2262,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	rp := s.router.RulePackSnapshot()
 	if rp == nil {
 		var err error
-		rp, err = guardrail.LoadRulePackWithOverlays(
+		rp, err = guardrail.LoadRulePackForRegexSource(
 			s.currentConfig().Guardrail.RulePackDir,
 			s.currentConfig().Guardrail.RulePackOverlayDirs,
+			s.currentConfig().Guardrail.EffectiveRegexSource(),
 		)
 		if err != nil {
 			return err
@@ -2281,9 +2304,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
-	rp, err = guardrail.LoadRulePackWithOverlays(
+	rp, err = guardrail.LoadRulePackForRegexSource(
 		s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()),
 		s.currentConfig().Guardrail.RulePackOverlayDirs,
+		s.currentConfig().Guardrail.EffectiveRegexSource(),
 	)
 	if err != nil {
 		return err
@@ -2293,9 +2317,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if s.router != nil {
 		s.router.SetRulePack(rp)
 	}
-	ApplyRulePackOverrides(rp)
-	ApplyConnectorRulePackOverrides(conn.Name(), rp)
-	ApplyLocalPatternsOverride(rp.LocalPatterns)
+	ApplyRulePackOverridesForSource(rp, s.currentConfig().Guardrail.EffectiveRegexSource())
+	ApplyConnectorRulePackOverridesForSource(conn.Name(), rp, s.currentConfig().Guardrail.EffectiveRegexSource())
+	if s.currentConfig().Guardrail.EffectiveRegexSource() != config.RegexSourceAgentControl {
+		ApplyLocalPatternsOverride(rp.LocalPatterns)
+	}
 	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
 	apiBind := "127.0.0.1"
 	if s.currentConfig().Gateway.APIBind != "" {
@@ -2739,9 +2765,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	primaryRP := s.router.RulePackSnapshot()
 	if primaryRP == nil {
 		var err error
-		primaryRP, err = guardrail.LoadRulePackWithOverlays(
+		primaryRP, err = guardrail.LoadRulePackForRegexSource(
 			s.currentConfig().Guardrail.RulePackDir,
 			s.currentConfig().Guardrail.RulePackOverlayDirs,
+			s.currentConfig().Guardrail.EffectiveRegexSource(),
 		)
 		if err != nil {
 			return err
@@ -3033,6 +3060,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			cache,
 			s.currentConfig().EffectiveRulePackDirForConnector(registration.conn.Name()),
 			s.currentConfig().Guardrail.RulePackOverlayDirs,
+			s.currentConfig().Guardrail.EffectiveRegexSource(),
 		)
 		if loadErr != nil {
 			return loadErr
@@ -3040,7 +3068,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 		if rp != nil {
 			rp.Validate()
 		}
-		ApplyConnectorRulePackOverrides(registration.conn.Name(), rp)
+		ApplyConnectorRulePackOverridesForSource(registration.conn.Name(), rp, s.currentConfig().Guardrail.EffectiveRegexSource())
 		succeeded = append(succeeded, registration.conn.Name())
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: registered %s for hook evaluation; lifecycle is owned by enterprise hook guardian\n", registration.conn.Name())
 	}
@@ -3311,6 +3339,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		cache,
 		s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()),
 		s.currentConfig().Guardrail.RulePackOverlayDirs,
+		s.currentConfig().Guardrail.EffectiveRegexSource(),
 	)
 	if err != nil {
 		return err
@@ -3323,7 +3352,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	// own pack at runtime (per-connector parity with single-connector mode).
 	// A nil pack still pins the connector to the compiled-in defaults rather
 	// than inheriting whichever pack the primary installed into the global.
-	ApplyConnectorRulePackOverrides(conn.Name(), rp)
+	ApplyConnectorRulePackOverridesForSource(conn.Name(), rp, s.currentConfig().Guardrail.EffectiveRegexSource())
 
 	// Enforce the same hook-contract gate the single-connector path applies in
 	// runGuardrail (see HookContractNeedsActionOverride call above). Without
@@ -3854,7 +3883,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.SetPolicyReloader(s.opa.Reload)
 		api.SetPolicyStatusProvider(s.opa.Status)
 	}
-	if len(s.currentConfig().Guardrail.RulePackOverlayDirs) > 0 {
+	if s.currentConfig().Guardrail.EffectiveRegexSource() != config.RegexSourceLocal {
 		api.SetPolicyRestartRequester(s.schedulePolicyProcessRestart)
 		api.SetPolicyRestartSupportedProvider(s.policyProcessRestartSupported)
 	}
