@@ -520,16 +520,31 @@ Runs connectivity and credential checks against all configured services
 ## Agent Control synchronization
 
 ```text
-defenseclaw agent-control setup [--target-id ID] [--enable-rule-pack]
+defenseclaw setup guardrail [--regex-source local|agent_control|hybrid]
+  [--agent-control-deployment cisco_cloud|self_hosted]
+  [--agent-control-url URL]
+  [--agent-control-installation-id ID]
+  [--agent-control-api-key-env ENV]
+defenseclaw agent-control setup --server-url URL
+  [--deployment cisco_cloud|self_hosted]
+  [--installation-id ID] [--api-key-env ENV]
+  [--enable-rule-pack --regex-source agent_control|hybrid]
 defenseclaw agent-control sync --once
 defenseclaw agent-control sync --watch
 defenseclaw agent-control status [--json-output]
 defenseclaw agent-control validate SNAPSHOT.json
 ```
 
-`setup` creates or persists the stable `defenseclaw.installation` target ID,
-validates SDK connectivity, prepares managed files, and optionally adds the
-strict rule-pack overlay. `sync --watch` is a separate Python process: it owns
+`setup guardrail` makes the regex authority explicit: `local` uses bundled and
+operator rules, `agent_control` uses only the validated managed snapshot, and
+`hybrid` is additive. For a managed source, setup resolves the API key through
+`defenseclaw keys set`, passes the configured URL and key explicitly to the SDK,
+downloads and validates an initial target-effective snapshot, saves
+last-known-good artifacts, and only then switches configuration and restarts.
+The lower-level `agent-control setup` command exposes the same preflight for
+automation and requires `--regex-source` whenever rule buckets are enabled.
+
+`sync --watch` is a separate Python process: it owns
 one Agent Control SDK session and polls that SDK's in-process cache. The Go
 sidecar never polls Agent Control. After publishing changed native artifacts,
 the synchronizer sends authenticated loopback requests to reload OPA or
