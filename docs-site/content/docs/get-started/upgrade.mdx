@@ -11,7 +11,9 @@ keywords:
 
 Use `defenseclaw upgrade` for an existing installation. It treats a release as
 one transaction across the Python CLI, Go gateway, operator configuration, and
-release-owned migrations:
+release-owned migrations. On native Windows installer-based installs, it
+verifies the setup executable and hands file replacement to
+`DefenseClawSetup-x64.exe` so the running CLI does not overwrite itself:
 
 ```bash
 defenseclaw upgrade --yes
@@ -30,10 +32,18 @@ backup, release-manifest validation, migrations, service restart, and a health
 check.
 </Callout>
 
+<Callout title="Native Windows setup handoff">
+`DefenseClawSetup-x64.exe` is the graphical and silent setup UI for the Windows
+product. It installs the existing CLI/TUI, gateway, hook launcher, and embedded
+managed Python runtime; it is not a separate native DefenseClaw GUI
+application.
+</Callout>
+
 ## What the upgrade does
 
 1. Resolves the target release and downloads its checksum, provenance, gateway,
-   and CLI artifacts.
+   and CLI artifacts. Native Windows setup installs download
+   `DefenseClawSetup-x64.exe` instead of replacing running files directly.
 2. Verifies the release manifest and SHA-256 checksums. When `cosign` is
    installed, it also verifies Sigstore provenance.
 3. Saves managed state under
@@ -41,7 +51,9 @@ check.
    `.env`, policies, connector backups, device identity, and the previous
    gateway binary.
 4. Stops the gateway, installs the matched CLI and gateway artifacts, and
-   verifies the installed gateway version.
+   verifies the installed gateway version. Native Windows setup installs verify
+   the setup executable's SHA-256 and Authenticode publisher, then run it in
+   upgrade mode.
 5. Runs every release-required migration through the durable migration cursor
    at `~/.defenseclaw/.migration_state.json`.
 6. Restarts services and polls gateway health.
@@ -50,6 +62,24 @@ The migration cursor records each successful version independently. If one
 step fails, it remains unapplied and can be retried without replaying unrelated
 successful migrations. The release manifest is checked before the command
 reports success.
+
+## Native Windows installer upgrades
+
+For a native Windows setup install, `defenseclaw upgrade` reads the signed
+upgrade manifest, downloads `DefenseClawSetup-x64.exe`, verifies the release
+checksum, validates the exact Authenticode publisher, creates the normal state
+backup, copies setup to its trusted maintenance cache, and starts it with the
+preserved install scope, connector, and mode. The CLI then exits so its embedded
+runtime is not locked while setup runs. The setup transaction
+stops only the owned gateway/watchdog process after validating its identity,
+replaces product-owned files, applies and verifies release-required migrations
+with the new embedded runtime, rolls back application files on failure, and
+restarts only services that were already running or explicitly requested.
+
+Enterprise-managed Windows deployments can update through their software
+channel instead. Managed update policy is respected so the self-updater does
+not fight Intune or SCCM rollout. The per-user setup path does not publish an
+MSI or accept machine scope.
 
 ## Configuration schema v7 and OTel
 

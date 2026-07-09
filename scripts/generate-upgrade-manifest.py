@@ -136,6 +136,21 @@ def build_manifest() -> dict[str, Any]:
         "min_upgrade_protocol": UPGRADE_PROTOCOL_VERSION,
         "migration_failure_policy": "fail" if required else "warn",
         "required_cli_migrations": required,
+        "windows_installer": {
+            "asset": "DefenseClawSetup-x64.exe",
+            "architectures": ["amd64"],
+            "handoff_args": [
+                "/upgrade",
+                "/quiet",
+                "/norestart",
+                "INSTALLSCOPE=user",
+            ],
+            "authenticode": {
+                "required": True,
+                "publisher": "Cisco Systems, Inc.",
+            },
+            "managed_policy": "respect",
+        },
         "generated_by": "scripts/generate-upgrade-manifest.py",
     }
 
