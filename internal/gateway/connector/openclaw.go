@@ -66,7 +66,7 @@ const insightClawOpenClawPluginID = "insightclaw"
 // whenever a new version has been security-reviewed. Never use a bare
 // package spec — the test TestInsightClawNPMSource_IsVersionPinned
 // enforces this.
-const insightClawNPMVersion = "1.0.1"
+const insightClawNPMVersion = "0.1.2"
 const insightClawNPMSource = "@outshift-open/insightclaw@" + insightClawNPMVersion
 
 var defaultInsightClawConfig = map[string]interface{}{
