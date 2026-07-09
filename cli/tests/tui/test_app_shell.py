@@ -1431,14 +1431,20 @@ async def test_alerts_filter_click_after_ack_survives_deferred_render(
             and not app.query_one("#alerts-controls").has_class("hidden")
         )
 
-        # Textual's pilot.pause() may wait up to one second for global CPU
-        # idleness. Complete that layout/readiness synchronization before
-        # timing the click so this assertion measures input acknowledgement,
-        # not unrelated runner load.
+        # Textual's Pilot.click wraps each synthetic mouse event in global-idle
+        # pauses, so its wall time measures test-runner load rather than the
+        # Button.Pressed acknowledgement. Complete layout first, then time the
+        # real button message and wait for its observable model/table result.
         await pilot.pause()
+        high_filter = app.query_one("#alerts-filter-high", Button)
         loop = asyncio.get_running_loop()
         started = loop.time()
-        assert await pilot.click("#alerts-filter-high")
+        high_filter.press()
+        await _wait_for_background(
+            lambda: alerts.severity_filter == "HIGH"
+            and app.query_one("#panel-table", DataTable).row_count == 1,
+            timeout=0.5,
+        )
         assert loop.time() - started < 0.5
 
         assert alerts.severity_filter == "HIGH"
