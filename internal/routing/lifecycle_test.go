@@ -5,85 +5,54 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestLifecycle_NewDefaults(t *testing.T) {
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
 		ConfigPath: "/etc/sr/config.yaml",
-		DataDir:    "/tmp/sr",
 		// Port not specified
 	})
 
-	if lc.port != 8080 {
-		t.Errorf("expected default port 8080, got %d", lc.port)
-	}
-	if lc.binPath != "/usr/bin/sr" {
-		t.Errorf("expected binPath /usr/bin/sr, got %s", lc.binPath)
+	if lc.port != 8888 {
+		t.Errorf("expected default port 8888, got %d", lc.port)
 	}
 	if lc.configPath != "/etc/sr/config.yaml" {
 		t.Errorf("expected configPath /etc/sr/config.yaml, got %s", lc.configPath)
 	}
-	if lc.dataDir != "/tmp/sr" {
-		t.Errorf("expected dataDir /tmp/sr, got %s", lc.dataDir)
-	}
 }
 
-func TestLifecycle_IsRunning_NilCmd(t *testing.T) {
+func TestLifecycle_NewWithPort(t *testing.T) {
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
 		ConfigPath: "/etc/sr/config.yaml",
 		Port:       9090,
-		DataDir:    "/tmp/sr",
 	})
 
-	if lc.IsRunning() {
-		t.Error("expected IsRunning to return false when cmd is nil")
-	}
-}
-
-func TestLifecycle_Stop_NilProcess(t *testing.T) {
-	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
-		ConfigPath: "/etc/sr/config.yaml",
-		Port:       9090,
-		DataDir:    "/tmp/sr",
-	})
-
-	// Should not panic
-	err := lc.Stop()
-	if err != nil {
-		t.Errorf("expected Stop to return nil, got %v", err)
-	}
-}
-
-func TestLifecycle_PID_NotStarted(t *testing.T) {
-	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
-		ConfigPath: "/etc/sr/config.yaml",
-		Port:       9090,
-		DataDir:    "/tmp/sr",
-	})
-
-	if lc.PID() != 0 {
-		t.Errorf("expected PID to return 0 when not started, got %d", lc.PID())
+	if lc.port != 9090 {
+		t.Errorf("expected port 9090, got %d", lc.port)
 	}
 }
 
 func TestLifecycle_Port(t *testing.T) {
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
 		ConfigPath: "/etc/sr/config.yaml",
 		Port:       9191,
-		DataDir:    "/tmp/sr",
 	})
 
 	if lc.Port() != 9191 {
-		t.Errorf("expected Port to return 9191, got %d", lc.Port())
+		t.Errorf("expected Port() to return 9191, got %d", lc.Port())
+	}
+}
+
+func TestLifecycle_IsRunning_NoServer(t *testing.T) {
+	lc := NewLifecycle(LifecycleConfig{
+		ConfigPath: "/etc/sr/config.yaml",
+		Port:       54321, // Random port with no server
+	})
+
+	if lc.IsRunning() {
+		t.Error("expected IsRunning() to return false when no server is running")
 	}
 }
 
@@ -100,19 +69,14 @@ func TestLifecycle_WaitForHealth_Success(t *testing.T) {
 	defer server.Close()
 
 	// Extract port from server URL
-	// server.URL format: "http://127.0.0.1:PORT"
-	// Parse to get port
-	serverURL := server.URL
 	var port int
-	if _, err := fmt.Sscanf(serverURL, "http://127.0.0.1:%d", &port); err != nil {
+	if _, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port); err != nil {
 		t.Fatalf("failed to parse server port: %v", err)
 	}
 
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
 		ConfigPath: "/etc/sr/config.yaml",
-		Port:       port, // Use the httptest server port
-		DataDir:    "/tmp/sr",
+		Port:       port,
 	})
 
 	ctx := context.Background()
@@ -123,21 +87,18 @@ func TestLifecycle_WaitForHealth_Success(t *testing.T) {
 }
 
 func TestLifecycle_WaitForHealth_Timeout(t *testing.T) {
-	// Use a port that has no server running
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
 		ConfigPath: "/etc/sr/config.yaml",
-		Port:       54321, // Random port with no server
-		DataDir:    "/tmp/sr",
+		Port:       54322, // Random port with no server
 	})
 
 	ctx := context.Background()
-	err := lc.WaitForHealth(ctx, 500*time.Millisecond) // Short timeout
+	err := lc.WaitForHealth(ctx, 500*time.Millisecond)
 	if err == nil {
 		t.Error("expected WaitForHealth to timeout, got nil error")
 	}
 
-	expectedErrMsg := "routing: sr health check timed out after"
+	expectedErrMsg := "routing: vllm-sr health check timed out"
 	if err != nil && len(err.Error()) > 0 {
 		if !contains(err.Error(), expectedErrMsg) {
 			t.Errorf("expected error message to contain '%s', got: %v", expectedErrMsg, err)
@@ -147,10 +108,8 @@ func TestLifecycle_WaitForHealth_Timeout(t *testing.T) {
 
 func TestLifecycle_WaitForHealth_ContextCanceled(t *testing.T) {
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/usr/bin/sr",
 		ConfigPath: "/etc/sr/config.yaml",
-		Port:       54322, // Random port with no server
-		DataDir:    "/tmp/sr",
+		Port:       54323,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -165,34 +124,17 @@ func TestLifecycle_WaitForHealth_ContextCanceled(t *testing.T) {
 	}
 }
 
-func TestLifecycle_DataDir_CreatedOnStart(t *testing.T) {
-	// Test that Start creates the data directory
-	tmpDir := t.TempDir()
-	dataDir := filepath.Join(tmpDir, "sr-data")
-
-	// Create a mock binary that exits immediately (use /bin/true or similar)
+func TestLifecycle_Stop_NilCmd(t *testing.T) {
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: "/bin/true", // Unix command that exits successfully
-		ConfigPath: filepath.Join(tmpDir, "config.yaml"),
+		ConfigPath: "/etc/sr/config.yaml",
 		Port:       9999,
-		DataDir:    dataDir,
 	})
 
-	ctx := context.Background()
-	err := lc.Start(ctx)
-
-	// The binary will exit immediately, but dataDir should be created
+	// Should not panic when cmd is nil
+	err := lc.Stop()
 	if err != nil {
-		t.Logf("Start returned error (expected for /bin/true): %v", err)
+		t.Errorf("expected Stop to return nil, got %v", err)
 	}
-
-	// Check if dataDir was created
-	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		t.Errorf("expected dataDir %s to be created, but it doesn't exist", dataDir)
-	}
-
-	// Cleanup
-	lc.Stop()
 }
 
 // Helper function to check if a string contains a substring

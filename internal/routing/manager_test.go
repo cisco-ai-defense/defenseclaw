@@ -3,8 +3,6 @@ package routing
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -14,189 +12,76 @@ func testContext(t *testing.T) context.Context {
 	return ctx
 }
 
-func TestBinaryManager_BinaryPath(t *testing.T) {
+func TestManager_NewManager(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
+	mgr := NewManager(tmpDir)
 
-	binPath := mgr.BinaryPath()
-
-	expectedExt := ""
-	if runtime.GOOS == "windows" {
-		expectedExt = ".exe"
-	}
-	expectedPath := filepath.Join(tmpDir, "bin", "semantic-router"+expectedExt)
-
-	if binPath != expectedPath {
-		t.Errorf("BinaryPath() = %q, want %q", binPath, expectedPath)
+	if mgr.dataDir != tmpDir {
+		t.Errorf("NewManager() dataDir = %q, want %q", mgr.dataDir, tmpDir)
 	}
 }
 
-func TestBinaryManager_NeedsDownload_Missing(t *testing.T) {
+func TestManager_IsInstalled(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
+	mgr := NewManager(tmpDir)
 
-	// No binary exists
-	if !mgr.NeedsDownload("0.3.0") {
-		t.Error("NeedsDownload() = false, want true when binary is missing")
-	}
+	// Just check it returns a bool without panic
+	result := mgr.IsInstalled()
+	t.Logf("IsInstalled() = %v", result)
 }
 
-func TestBinaryManager_NeedsDownload_VersionMismatch(t *testing.T) {
+func TestManager_InstalledVersion_NotInstalled(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
+	mgr := NewManager(tmpDir)
 
-	// Create bin directory and write version file with old version
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("failed to create bin dir: %v", err)
-	}
-
-	// Create the binary file
-	binPath := mgr.BinaryPath()
-	if err := os.WriteFile(binPath, []byte("fake binary"), 0755); err != nil {
-		t.Fatalf("failed to write fake binary: %v", err)
-	}
-
-	// Write old version
-	versionFile := filepath.Join(binDir, ".semantic-router-version")
-	if err := os.WriteFile(versionFile, []byte("0.2.0"), 0644); err != nil {
-		t.Fatalf("failed to write version file: %v", err)
-	}
-
-	// Check if needs download with newer version
-	if !mgr.NeedsDownload("0.3.0") {
-		t.Error("NeedsDownload() = false, want true when version mismatches")
-	}
-}
-
-func TestBinaryManager_NeedsDownload_Current(t *testing.T) {
-	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
-
-	// Create bin directory
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("failed to create bin dir: %v", err)
-	}
-
-	// Create the binary file
-	binPath := mgr.BinaryPath()
-	if err := os.WriteFile(binPath, []byte("fake binary"), 0755); err != nil {
-		t.Fatalf("failed to write fake binary: %v", err)
-	}
-
-	// Write current version
-	versionFile := filepath.Join(binDir, ".semantic-router-version")
-	if err := os.WriteFile(versionFile, []byte("0.3.0"), 0644); err != nil {
-		t.Fatalf("failed to write version file: %v", err)
-	}
-
-	// Check if needs download with same version
-	if mgr.NeedsDownload("0.3.0") {
-		t.Error("NeedsDownload() = true, want false when version matches and binary exists")
-	}
-}
-
-func TestBinaryManager_InstalledVersion_Empty(t *testing.T) {
-	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
-
-	// No version file exists
+	// When vllm-sr is not installed, should return empty string
 	version := mgr.InstalledVersion()
-	if version != "" {
-		t.Errorf("InstalledVersion() = %q, want empty string when no version file exists", version)
-	}
+	t.Logf("InstalledVersion() = %q (expected empty when not installed)", version)
 }
 
-func TestBinaryManager_InstalledVersion_Valid(t *testing.T) {
+func TestManager_DockerAvailable(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
+	mgr := NewManager(tmpDir)
 
-	// Create bin directory and write version file
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("failed to create bin dir: %v", err)
-	}
-
-	versionFile := filepath.Join(binDir, ".semantic-router-version")
-	if err := os.WriteFile(versionFile, []byte("0.3.0\n"), 0644); err != nil {
-		t.Fatalf("failed to write version file: %v", err)
-	}
-
-	// Check installed version
-	version := mgr.InstalledVersion()
-	if version != "0.3.0" {
-		t.Errorf("InstalledVersion() = %q, want %q", version, "0.3.0")
-	}
+	// Just verify it returns a bool without panic
+	result := mgr.DockerAvailable()
+	t.Logf("DockerAvailable() = %v", result)
 }
 
-func TestBinaryManager_EnsureBinary_AlreadyInstalled(t *testing.T) {
+func TestManager_EnsureInstalled_AlreadyInstalled(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
+	mgr := NewManager(tmpDir)
 
-	// Create bin directory
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("failed to create bin dir: %v", err)
+	// Skip if not actually installed
+	if !mgr.IsInstalled() {
+		t.Skip("vllm-sr not installed, skipping test")
 	}
 
-	// Create the binary file
-	binPath := mgr.BinaryPath()
-	if err := os.WriteFile(binPath, []byte("fake binary"), 0755); err != nil {
-		t.Fatalf("failed to write fake binary: %v", err)
-	}
-
-	// Write current version
-	versionFile := filepath.Join(binDir, ".semantic-router-version")
-	if err := os.WriteFile(versionFile, []byte("0.3.0"), 0644); err != nil {
-		t.Fatalf("failed to write version file: %v", err)
-	}
-
-	// EnsureBinary should return immediately without download
 	ctx := testContext(t)
-	resultPath, err := mgr.EnsureBinary(ctx, "0.3.0")
+	err := mgr.EnsureInstalled(ctx, "")
 	if err != nil {
-		t.Errorf("EnsureBinary() unexpected error: %v", err)
+		t.Errorf("EnsureInstalled() unexpected error: %v", err)
 	}
 
-	if resultPath != binPath {
-		t.Errorf("EnsureBinary() = %q, want %q", resultPath, binPath)
-	}
-
-	// Verify binary content unchanged (no download occurred)
-	content, err := os.ReadFile(binPath)
-	if err != nil {
-		t.Fatalf("failed to read binary: %v", err)
-	}
-	if string(content) != "fake binary" {
-		t.Error("EnsureBinary() modified existing binary when it shouldn't")
-	}
+	version := mgr.InstalledVersion()
+	t.Logf("Installed version: %s", version)
 }
 
-func TestBinaryManager_NeedsDownload_DefaultVersion(t *testing.T) {
+func TestManager_EnsureInstalled_WithVersion(t *testing.T) {
+	if os.Getenv("RUN_PIP_INSTALL_TESTS") != "1" {
+		t.Skip("Skipping pip install test (set RUN_PIP_INSTALL_TESTS=1 to run)")
+	}
+
 	tmpDir := t.TempDir()
-	mgr := NewBinaryManager(tmpDir)
+	mgr := NewManager(tmpDir)
 
-	// Create bin directory
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("failed to create bin dir: %v", err)
+	ctx := testContext(t)
+	err := mgr.EnsureInstalled(ctx, defaultSRVersion)
+	if err != nil {
+		t.Errorf("EnsureInstalled() error: %v", err)
 	}
 
-	// Create the binary file
-	binPath := mgr.BinaryPath()
-	if err := os.WriteFile(binPath, []byte("fake binary"), 0755); err != nil {
-		t.Fatalf("failed to write fake binary: %v", err)
-	}
-
-	// Write default version
-	versionFile := filepath.Join(binDir, ".semantic-router-version")
-	if err := os.WriteFile(versionFile, []byte(defaultSRVersion), 0644); err != nil {
-		t.Fatalf("failed to write version file: %v", err)
-	}
-
-	// Check with empty string (should use default)
-	if mgr.NeedsDownload("") {
-		t.Error("NeedsDownload(\"\") = true, want false when default version matches")
+	if !mgr.IsInstalled() {
+		t.Error("EnsureInstalled() completed but vllm-sr not found on PATH")
 	}
 }

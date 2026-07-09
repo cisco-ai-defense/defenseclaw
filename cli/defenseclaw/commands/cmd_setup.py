@@ -10147,7 +10147,7 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         if not app.cfg.routing.version:
             app.cfg.routing.version = "0.3.0"
         if not app.cfg.routing.port:
-            app.cfg.routing.port = 8080
+            app.cfg.routing.port = 8888
         app.cfg.save()
         click.echo()
         click.echo("  ✓ Semantic routing enabled")
@@ -10178,7 +10178,7 @@ def _print_routing_status(app: AppContext) -> None:
     click.echo("    Status:    enabled")
     version = app.cfg.routing.version or "0.3.0 (default)"
     click.echo(f"    Version:   {version}")
-    port = app.cfg.routing.port or 8080
+    port = app.cfg.routing.port or 8888
     click.echo(f"    Port:      {port}")
     click.echo(f"    Algorithm: {app.cfg.routing.algorithm or 'static (default)'}")
     click.echo()
