@@ -201,6 +201,22 @@ func TestDiffConfigsMarksApplicationProtectionChanged(t *testing.T) {
 	}
 }
 
+func TestDiffConfigsRequiresRestartForAgentControlRawSpoolChange(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.AgentControl.Enabled = true
+	newCfg.AgentControl.Observability.Enabled = true
+	newCfg.AgentControl.Observability.IncludeContent = true
+
+	diff := diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.Changed, "agent_control.observability") {
+		t.Fatalf("changed = %v, missing agent_control.observability", diff.Changed)
+	}
+	if !slices.Contains(diff.RestartRequired, "agent_control.observability") {
+		t.Fatalf("restart_required = %v, missing agent_control.observability", diff.RestartRequired)
+	}
+}
+
 func TestDiffConfigsMarksRuntimeTopologyRestartRequired(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := *oldCfg

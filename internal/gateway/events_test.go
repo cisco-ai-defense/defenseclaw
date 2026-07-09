@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // withCapturedEvents installs a temporary gatewaylog.Writer backed
@@ -348,6 +349,100 @@ func TestEmitEvent_DoesNotMutateCallerPayloads(t *testing.T) {
 	if payload.Reason != original {
 		t.Fatalf("emitEvent mutated caller payload: got %q want %q",
 			payload.Reason, original)
+	}
+}
+
+func TestEmitEvent_AgentControlRawSpoolIsIsolatedFromRedactedSinks(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	newWriter := func(name string, captured *gatewaylog.Event) *gatewaylog.Writer {
+		t.Helper()
+		writer, err := gatewaylog.New(gatewaylog.Config{
+			JSONLPath: filepath.Join(t.TempDir(), name),
+			Pretty:    io.Discard,
+		})
+		if err != nil {
+			t.Fatalf("new %s writer: %v", name, err)
+		}
+		writer.WithFanout(func(event gatewaylog.Event) { *captured = event })
+		return writer
+	}
+
+	var sinkEvent, agentControlEvent gatewaylog.Event
+	sinkWriter := newWriter("gateway.jsonl", &sinkEvent)
+	rawWriter := newWriter("gateway-events-unredacted.jsonl", &agentControlEvent)
+	previousSink := EventWriter()
+	previousRaw := AgentControlEventWriter()
+	SetEventWriter(sinkWriter)
+	SetAgentControlEventWriter(rawWriter)
+	t.Cleanup(func() {
+		SetEventWriter(previousSink)
+		SetAgentControlEventWriter(previousRaw)
+		_ = sinkWriter.Close()
+		_ = rawWriter.Close()
+	})
+
+	prompt := "you are now a helpful travel guide"
+	rawBody := `{"messages":[{"role":"user","content":"` + prompt + `"}]}`
+	emitEvent(t.Context(), gatewaylog.Event{
+		EventType: gatewaylog.EventLLMPrompt,
+		RequestID: "request-raw-isolation",
+		LLMPrompt: &gatewaylog.LLMPromptPayload{
+			Prompt:         prompt,
+			RawRequestBody: rawBody,
+		},
+	})
+
+	if agentControlEvent.LLMPrompt == nil || agentControlEvent.LLMPrompt.Prompt != prompt ||
+		agentControlEvent.LLMPrompt.RawRequestBody != rawBody {
+		t.Fatalf("Agent Control event did not retain exact content: %+v", agentControlEvent.LLMPrompt)
+	}
+	if sinkEvent.LLMPrompt == nil {
+		t.Fatal("redacted sink event missing prompt payload")
+	}
+	if sinkEvent.LLMPrompt.Prompt == prompt || sinkEvent.LLMPrompt.RawRequestBody == rawBody {
+		t.Fatalf("normal sink received raw content: %+v", sinkEvent.LLMPrompt)
+	}
+	if !strings.Contains(sinkEvent.LLMPrompt.Prompt, "<redacted") ||
+		!strings.Contains(sinkEvent.LLMPrompt.RawRequestBody, "<redacted") {
+		t.Fatalf("normal sink did not receive redacted placeholders: %+v", sinkEvent.LLMPrompt)
+	}
+}
+
+func TestEmitEvent_AgentControlSpoolPreservesGlobalRedactionOptOut(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	sinkEvents := withCapturedEvents(t)
+	rawWriter, err := gatewaylog.New(gatewaylog.Config{
+		JSONLPath: filepath.Join(t.TempDir(), "gateway-events-unredacted.jsonl"),
+		Pretty:    io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousRaw := AgentControlEventWriter()
+	SetAgentControlEventWriter(rawWriter)
+	t.Cleanup(func() {
+		SetAgentControlEventWriter(previousRaw)
+		_ = rawWriter.Close()
+	})
+
+	prompt := "global redaction is explicitly disabled"
+	emitEvent(t.Context(), gatewaylog.Event{
+		EventType: gatewaylog.EventLLMPrompt,
+		RequestID: "request-global-opt-out",
+		LLMPrompt: &gatewaylog.LLMPromptPayload{
+			Prompt: prompt,
+		},
+	})
+
+	if len(*sinkEvents) != 1 || (*sinkEvents)[0].LLMPrompt == nil {
+		t.Fatalf("expected one ordinary sink prompt event, got %+v", *sinkEvents)
+	}
+	if (*sinkEvents)[0].LLMPrompt.Prompt != prompt {
+		t.Fatalf("global redaction opt-out was ignored: got %q", (*sinkEvents)[0].LLMPrompt.Prompt)
 	}
 }
 

@@ -212,11 +212,19 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
     click.echo(
         f"Rules published/active: {state.rule_pack_published_digest or '-'} / {value['rule_pack_active_digest'] or '-'}"
     )
+    click.echo(
+        "Enforcement visibility: "
+        f"{state.observability_status} "
+        f"(sent={state.observability_sent_events}, dropped={state.observability_dropped_events}, "
+        f"unmapped={state.observability_unmapped_records})"
+    )
     if state.rule_pack_pending_restart:
         click.echo("Rule activation:      pending gateway restart")
         click.echo("Operator command:     defenseclaw-gateway restart")
     if state.last_error:
         click.echo(f"Last error:          {state.last_error}")
+    if state.observability_last_error:
+        click.echo(f"Visibility error:    {state.observability_last_error}")
 
 
 @agent_control_cmd.command("validate")

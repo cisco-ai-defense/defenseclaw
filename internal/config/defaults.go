@@ -216,6 +216,26 @@ func DefaultConfig() *Config {
 				MinSeverity: "HIGH",
 			},
 		},
+		AgentControl: AgentControlConfig{
+			AgentName:           "defenseclaw-policy-sync",
+			TargetType:          "defenseclaw.installation",
+			RefreshSeconds:      60,
+			CachePollSeconds:    2,
+			InitRetryMaxSeconds: 300,
+			OPA: AgentControlOPAConfig{
+				Enabled:    true,
+				Precedence: "stricter",
+				Activation: "reload",
+			},
+			RulePack: AgentControlRulePackConfig{
+				Activation: "restart",
+				MaxRules:   1000,
+			},
+			Observability: AgentControlObservabilityConfig{
+				Enabled:        true,
+				IncludeContent: true,
+			},
+		},
 		// AuditSinks is empty by default — operators opt in to forwarding
 		// by adding entries (splunk_hec / otlp_logs / http_jsonl). The
 		// local SQLite store always receives every event.

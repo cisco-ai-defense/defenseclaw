@@ -41,8 +41,9 @@ import (
 // checks for nil so unit tests and libraries that import internal/
 // gateway without running the sidecar can no-op cleanly.
 var (
-	gatewayEventsMu sync.RWMutex
-	gatewayEvents   *gatewaylog.Writer
+	gatewayEventsMu         sync.RWMutex
+	gatewayEvents           *gatewaylog.Writer
+	agentControlEventWriter *gatewaylog.Writer
 
 	// judgeResponseStore persists v7-correlated judge rows when set
 	// (tests, or sidecar wiring). When nil, legacy judgePersistor may
@@ -119,6 +120,23 @@ func EventWriter() *gatewaylog.Writer {
 	gatewayEventsMu.RLock()
 	defer gatewayEventsMu.RUnlock()
 	return gatewayEvents
+}
+
+// SetAgentControlEventWriter installs the private, local-only event writer
+// consumed by the Agent Control synchronizer. Unlike EventWriter, this writer
+// intentionally receives the original event before sink redaction. It must
+// never have OTel, webhook, Splunk, stderr, or audit fanout attached.
+func SetAgentControlEventWriter(w *gatewaylog.Writer) {
+	gatewayEventsMu.Lock()
+	defer gatewayEventsMu.Unlock()
+	agentControlEventWriter = w
+}
+
+// AgentControlEventWriter returns the active private writer (may be nil).
+func AgentControlEventWriter() *gatewaylog.Writer {
+	gatewayEventsMu.RLock()
+	defer gatewayEventsMu.RUnlock()
+	return agentControlEventWriter
 }
 
 // emitEvent is the low-level helper that all other emitters delegate
@@ -235,10 +253,17 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 
 func emitEvent(ctx context.Context, e gatewaylog.Event) {
 	w := EventWriter()
-	if w == nil {
+	agentControlWriter := AgentControlEventWriter()
+	if w == nil && agentControlWriter == nil {
 		return
 	}
 	stampEventCorrelation(&e, ctx)
+	// Agent Control's private spool is the sole raw-content exception. It is
+	// written before copy-on-write redaction, has no downstream fanout, and is
+	// created only when the integration's include_content setting is enabled.
+	if agentControlWriter != nil {
+		agentControlWriter.EmitContext(ctx, e)
+	}
 	if v := e.Verdict; v != nil {
 		cp := *v
 		cp.Reason = redaction.ForSinkReason(cp.Reason)
@@ -296,7 +321,9 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		cp.Reason = redaction.ForSinkReason(cp.Reason)
 		e.HookDecision = &cp
 	}
-	w.EmitContext(ctx, e)
+	if w != nil {
+		w.EmitContext(ctx, e)
+	}
 }
 
 // emitVerdictExtras carries optional verdict-event fields that

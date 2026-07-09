@@ -9,7 +9,7 @@ Specification* (`agent-control`)
 
 **DefenseClaw source baseline:** `8d2919df6` (`origin/main`, July 8, 2026)
 
-**Last updated:** July 8, 2026
+**Last updated:** July 9, 2026
 
 ## 1. Executive summary
 
@@ -30,10 +30,13 @@ The integration has two independent projection lanes:
    gain additive overlay and strict validation support before remotely
    managed rules can be enabled safely.
 
-The integration does **not** send prompts, completions, tool calls, or other
-runtime events to Agent Control. It consumes the target-effective control
-snapshot cached by the Agent Control SDK, translates matching configurations,
-publishes deterministic local artifacts, and requests local activation.
+The integration consumes the target-effective control snapshot cached by the
+Agent Control SDK, translates matching configurations, publishes deterministic
+local artifacts, and requests local activation. Its asynchronous visibility
+path reports final blocks for Agent Control-managed rule IDs through the SDK
+control-event sink. Exact blocked input, raw request body, and enforcement
+reason are included by default so Agent Control Monitor can display the
+complete denied span; endpoints can opt out to metadata-only delivery.
 
 The security boundary is:
 
@@ -59,6 +62,8 @@ flowchart LR
     OPA["Supplemental OPA data"]
     RULES["Guardrail rule overlay"]
     GW["DefenseClaw gateway"]
+    LOG["Private Agent Control raw spool"]
+    MON["Agent Control Monitor"]
 
     AC -->|"target-effective controls over TLS"| SDK
     SDK -->|"get_server_controls()"| SYNC
@@ -66,11 +71,14 @@ flowchart LR
     SYNC -.->|"Phase 2"| RULES
     OPA -->|"authenticated hot reload"| GW
     RULES -->|"restart until hot reload exists"| GW
+    GW -->|"raw local events"| LOG
+    LOG -->|"async correlated deny events"| SYNC
+    SDK -->|"control events"| MON
 ```
 
 The synchronizer is not a second policy engine. It has no event-time API and
-does not interpret prompts or tool calls. It only projects control-plane data
-into DefenseClaw-owned representations.
+does not interpret prompts or tool calls. Policy projection and asynchronous
+post-decision visibility are both outside the gateway request path.
 
 ## 3. Relationship to the Agent Control companion specification
 
@@ -83,7 +91,7 @@ into DefenseClaw-owned representations.
 | Wire contract | Exact evaluator names and versioned configuration envelopes | Authoritative provider values and resource limits |
 | Runtime | SDK cache and refresh lifecycle | Extraction, native validation, publication, activation, rollback |
 | Enforcement | None for these distribution controls | OPA and guardrail runtime decisions |
-| Observability | Control authoring/binding and SDK retrieval | Projection, activation, LKG, and local enforcement state |
+| Observability | Control authoring/binding, SDK retrieval, and control-event ingestion/Monitor | Projection, activation, LKG, local enforcement state, and exact block correlation |
 
 ### 3.2 Required clarification to the companion specification
 
@@ -195,7 +203,8 @@ separate compatibility change.
 
 ### 5.2 Non-goals
 
-- Evaluating DefenseClaw events through Agent Control.
+- Evaluating DefenseClaw events through Agent Control or making Agent Control
+  availability affect a local decision.
 - Accepting or generating arbitrary Rego.
 - Allowing Agent Control to change HILT, guardrail mode, hook fail mode,
   scanner strategy, credentials, paths, or service permissions.
@@ -768,6 +777,10 @@ agent_control:
     enabled: false        # phase 2 feature gate
     activation: restart   # restart | manual
     max_rules: 1000
+
+  observability:
+    enabled: true          # async final managed blocks
+    include_content: true  # exact blocked content; false is metadata-only
 ```
 
 Validation rejects:
@@ -780,6 +793,10 @@ Validation rejects:
 - rule-pack enablement when the overlay capability is unavailable;
 - managed paths outside the DefenseClaw data root in managed mode;
 - credential values under the `agent_control` block.
+
+Changes to the integration enablement or observability content mode are
+gateway-and-synchronizer-restart-required because the protected raw writer and
+selected source are process-scoped.
 
 ### 11.2 CLI surface
 
@@ -814,13 +831,15 @@ defenseclaw agent-control validate <path>
 - maintains one SDK session;
 - polls the local SDK cache;
 - coalesces unchanged snapshots;
+- tails new final block verdicts from the protected Agent Control raw spool and
+  reports only events correlated to effective Agent Control rule controls;
 - shuts down the SDK cleanly on termination.
 
 `status` reports configuration, SDK compatibility, redacted connection
 identity, hashed target identity, snapshot freshness (`not_exposed_by_sdk`
-until the SDK supplies a timestamp), lane states, digests,
-last activation, pending restart, and the last safe error. It never prints
-raw policy by default.
+until the SDK supplies a timestamp), lane states, digests, last activation,
+pending restart, enforcement-event delivery counters/cursor health, and the
+last safe errors. It never prints raw policy or event content.
 
 `validate` performs strict schema and native validation without publication
 or activation.
@@ -894,6 +913,18 @@ the Agent Control-managed overlay and restore local baseline behavior.
 - Hash the target ID in persisted status and telemetry.
 - Redact authorization headers, API keys, raw target IDs, full policies, and
   regex content from exceptions and logs.
+- Send control identity, deny decision, correlation IDs, matching rule IDs,
+  severity, direction, latency, exact blocked input, raw request body, and
+  enforcement reason to the Agent Control event sink by default.
+- Keep the raw source local-only at
+  `<data_dir>/agent-control/gateway-events-unredacted.jsonl`, with `0700`
+  parent permissions, `0600` file permissions, size rotation, and seven-day
+  retention. Do not attach any ordinary sink fanout to this writer.
+- Let every other sink keep standard global behavior: redacted while
+  `privacy.disable_redaction=false`, unredacted when an operator sets it true.
+- Support `agent_control.observability.include_content=false` as the explicit
+  metadata-only opt-out, using the standard gateway JSONL source and its global
+  redaction behavior.
 - Do not put control ID, rule ID, digest, URL, or error text in metric labels.
 
 ## 15. Observability and persistent state
@@ -919,6 +950,13 @@ Persist state atomically as a diagnostic index, not as policy authority:
   "ignored_controls": 3,
   "last_observed_at": "2026-07-08T15:00:00Z",
   "last_activated_at": "2026-07-08T15:00:01Z",
+  "observability_status": "watching",
+  "observability_log_path": "<data_dir>/agent-control/gateway-events-unredacted.jsonl",
+  "observability_log_offset": 48391,
+  "observability_sent_events": 4,
+  "observability_dropped_events": 0,
+  "observability_unmapped_records": 1,
+  "observability_last_sent_at": "2026-07-08T15:02:17Z",
   "last_error": null
 }
 ```
@@ -926,6 +964,36 @@ Persist state atomically as a diagnostic index, not as policy authority:
 Register audit actions for synchronization, publication, activation, and
 rollback. Emit lifecycle events for init, snapshot, candidate rejection,
 publish, activate, rollback, staleness, and shutdown.
+
+The enforcement visibility bridge consumes only complete JSONL records where
+`event_type=verdict`, `verdict.stage=final`, and `verdict.action=block`. It
+joins `verdict.rule_ids` to the effective `defenseclaw.rule_pack` controls and
+emits one SDK `ControlExecutionEvent` per matching control with `action=deny`.
+For older v7 gateway producers that omit `rule_ids`, it may use the portion of
+a structured category before the first colon only when that exact value exists
+in the effective rule-control index. It never parses the verdict reason.
+It uses the gateway trace ID when valid, derives a stable span ID, and derives a
+deterministic UUIDv5 `control_execution_id`. Agent Control stores that ID
+idempotently, so replay after a process crash or partial SDK delivery is safe.
+
+The cursor records source path, device, inode, and byte offset. First enablement
+and any metadata/raw source change start at end-of-file to avoid uploading
+historical endpoint activity. Rotation starts the replacement file at byte
+zero; truncation safely resets the offset. The
+reader refuses symlinks, non-regular files, hard links, and unexpected owners,
+bounds each line to 1 MiB, and never stalls policy synchronization on malformed
+or unmapped records. SDK rejection leaves the cursor before the source record
+for retry. All visibility failures are fail-open with respect to local
+enforcement.
+
+Default exact-content delivery keeps a bounded in-memory map of recent `llm_prompt`
+records keyed by request ID. On the matching final managed block it adds the
+prompt, raw request body, and enforcement reason to event metadata, with each
+string capped at 64 KiB and a truncation marker. It labels whether a redaction
+placeholder was observed. The Agent Control Monitor recent-executions panel
+opens the newest event and renders trace, span, request, rule, decision,
+duration, content, reason, and raw body. React text escaping remains mandatory;
+the UI must not inject metadata as HTML.
 
 Recommended low-cardinality metrics:
 
@@ -954,7 +1022,7 @@ during implementation without changing the contracts in this document.
 | `cli/defenseclaw/config.py` | Add typed integration config, merge, save, and validation |
 | `cli/defenseclaw/main.py` | Register the `agent-control` command group |
 | `cli/defenseclaw/commands/cmd_agent_control.py` | Implement setup, sync, status, and validate UX |
-| `cli/defenseclaw/agent_control/` | SDK lifecycle, extractor, models, canonicalization, state, publisher, activation |
+| `cli/defenseclaw/agent_control/` | SDK lifecycle, extractor, models, canonicalization, state, publisher, activation, and asynchronous enforcement visibility |
 | `internal/policy/engine.go` | Strict supplemental loader and atomic digest/generation metadata |
 | `internal/policy/types.go` | Internal status types if needed; do not change public evaluation shapes |
 | `policies/rego/agent_control_guardrail.rego` | Stable precedence helpers |
@@ -962,6 +1030,8 @@ during implementation without changing the contracts in this document.
 | `internal/gateway/api.go` | Add authenticated policy status/readback and additive reload response fields |
 | `internal/audit/actions.go` | Register sync/publish/activate/rollback actions |
 | `internal/config/config.go` | Phase 2 overlay directories and Go config validation |
+| `internal/gateway/agent_control_events.go` | Protected, rotated Agent Control-only raw event spool |
+| `internal/gateway/events.go` | Raw private-spool fanout before ordinary sink redaction |
 | `internal/guardrail/rulepack.go` | Phase 2 strict managed-overlay loading |
 | `internal/guardrail/rulepack_cache.go` | Phase 2 activation/restart status behavior |
 | `internal/gateway/rules.go` | Shared strict rule validation and deterministic overlay merge |
@@ -1005,6 +1075,14 @@ during implementation without changing the contracts in this document.
 - Add deterministic rule projection and versioned publication.
 - Add restart/readback/rollback and multi-connector tests.
 - Remove the phase 2 feature gate only after transactional activation passes.
+
+### Phase 3: Enforcement visibility
+
+- Correlate final native block verdicts to effective Agent Control rule
+  controls without sending content.
+- Emit deterministic SDK control events outside the request path.
+- Persist a rotation-aware cursor and expose delivery health/counters.
+- Verify Agent Control Monitor ingestion in the local bucket demonstration.
 
 Additional OPA domains require separate versioned contracts and precedence
 rules. They must not be added through a generic arbitrary JSON patch.
@@ -1057,6 +1135,11 @@ Cover:
 - Repeated unchanged snapshots producing no write or reload.
 - Rule-pack phase 2 preserving suppressions, judge prompts, and connector base
   selection.
+- Final managed block becoming an idempotent Agent Control `deny` event, with
+  no prompt, completion, tool payload, or verdict reason in the event body.
+- SDK event rejection leaving the JSONL cursor in place for retry.
+- First start skipping history, plus rotation, truncation, malformed records,
+  unmapped rule IDs, oversized lines, and unsafe source-file identity.
 
 ### 18.4 End-to-end scenario
 
@@ -1069,7 +1152,10 @@ Cover:
 7. Send guardrail inputs around both thresholds and verify local merge mode.
 8. Disable/unbind the control and verify local policy is restored.
 9. Supply an invalid candidate and verify LKG remains active.
-10. Stop Agent Control and verify DefenseClaw enforcement continues.
+10. Verify the Agent Control Monitor shows the enabled bucket's `deny` event
+    with the DefenseClaw request/trace correlation.
+11. Stop Agent Control and verify DefenseClaw enforcement continues while the
+    visibility cursor reports degraded delivery and retries after recovery.
 
 ### 18.5 Expected verification commands
 
@@ -1109,7 +1195,8 @@ commands and observed results.
 OPA phase 1 is complete when:
 
 1. DefenseClaw consumes target-effective controls only through the SDK cache.
-2. Agent Control is absent from event-time enforcement paths.
+2. Agent Control is absent from event-time enforcement paths; asynchronous
+   post-decision visibility cannot change or delay a decision.
 3. Both evaluator types are global, typed, discoverable, and neutral if
    executed.
 4. Provider enums, threshold ordering, regex semantics, and resource limits
@@ -1127,6 +1214,8 @@ OPA phase 1 is complete when:
 12. Existing behavior is unchanged while the integration is disabled.
 13. Unit, Go, Rego, integration, end-to-end, security, and compatibility tests
     pass with recorded results.
+14. Final blocks from Agent Control-managed rules appear as idempotent `deny`
+    events in Agent Control Monitor without content leakage.
 
 Rule-pack phase 2 is complete only when:
 

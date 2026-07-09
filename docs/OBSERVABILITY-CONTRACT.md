@@ -158,6 +158,42 @@ Complete enumeration (must match `AllActions()`):
 
 Agent Control lifecycle actions: `agent-control-sync`, `agent-control-publish`, `agent-control-activate`, `agent-control-rollback`.
 
+### Agent Control enforcement visibility
+
+When `agent_control.observability.enabled` is true, the separate Python watcher
+tails new records from the private Agent Control event spool and maps only `verdict.stage=final` plus
+`verdict.action=block` records whose `rule_ids` belong to an effective
+`defenseclaw.rule_pack` control. For older v7 producers that omit `rule_ids`, an
+exact category prefix is accepted only when it is present in that effective
+control index; the free-form verdict reason is never parsed. Each matching control produces an Agent Control
+`ControlExecutionEvent` with `action=deny`, a deterministic execution ID, the
+control ID/name, trace correlation, rule IDs, severity, direction, and latency.
+The event includes exact blocked prompt, raw request body, and the
+operator-facing verdict reason by default. Each content field is bounded to
+64 KiB. The cursor is persisted in
+`<data_dir>/agent-control/state.json`; first start begins at end-of-file, and
+stable execution IDs make crash/retry replays idempotent at the Agent Control
+store.
+
+The gateway writes raw events only to
+`<data_dir>/agent-control/gateway-events-unredacted.jsonl`, beneath a `0700`
+directory and a `0600` file, with bounded rotation and seven-day retention.
+No audit, OTLP, webhook, Splunk, stderr, or normal gateway JSONL fanout is
+attached to this writer. Those sinks continue to follow the standard global
+contract: `privacy.disable_redaction: false` redacts them and `true` leaves
+them unredacted.
+
+Set `agent_control.observability.include_content: false` to use the standard
+`<data_dir>/gateway.jsonl` source (which follows global redaction) and omit
+content/reason fields from the SDK event. Agent Control Monitor labels content-bearing events
+`UNREDACTED` and opens the latest span with trace, span, request, rule, input,
+reason, and raw-body details.
+
+This export is asynchronous and outside the enforcement path. SDK, network, or
+event-log failures never change a DefenseClaw decision. `defenseclaw
+agent-control status` exposes `watching`, `waiting_for_log`, `degraded`, or
+`disabled` plus sent/dropped/unmapped counters.
+
 ---
 
 ## Structured audit payloads

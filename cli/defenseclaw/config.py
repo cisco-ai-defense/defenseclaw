@@ -2292,6 +2292,14 @@ class AgentControlRulePackConfig:
 
 
 @dataclass
+class AgentControlObservabilityConfig:
+    """Report managed final block decisions through the Agent Control SDK."""
+
+    enabled: bool = True
+    include_content: bool = True
+
+
+@dataclass
 class AgentControlConfig:
     """Optional Agent Control policy-distribution synchronizer settings."""
 
@@ -2305,6 +2313,7 @@ class AgentControlConfig:
     managed_dir: str = ""
     opa: AgentControlOPAConfig = field(default_factory=AgentControlOPAConfig)
     rule_pack: AgentControlRulePackConfig = field(default_factory=AgentControlRulePackConfig)
+    observability: AgentControlObservabilityConfig = field(default_factory=AgentControlObservabilityConfig)
 
     def validate(self) -> None:
         if self.agent_name != "defenseclaw-policy-sync":
@@ -4157,6 +4166,7 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
         "managed_dir",
         "opa",
         "rule_pack",
+        "observability",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -4169,12 +4179,19 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
     if rule_value is not None and not isinstance(rule_value, dict):
         raise ValueError("agent_control.rule_pack must be a mapping")
     rule_raw = rule_value or {}
+    observability_value = raw.get("observability")
+    if observability_value is not None and not isinstance(observability_value, dict):
+        raise ValueError("agent_control.observability must be a mapping")
+    observability_raw = observability_value or {}
     unknown_opa = sorted(set(opa_raw) - {"enabled", "precedence", "activation"})
     if unknown_opa:
         raise ValueError(f"agent_control.opa contains unsupported keys: {unknown_opa}")
     unknown_rule = sorted(set(rule_raw) - {"enabled", "activation", "max_rules"})
     if unknown_rule:
         raise ValueError(f"agent_control.rule_pack contains unsupported keys: {unknown_rule}")
+    unknown_observability = sorted(set(observability_raw) - {"enabled", "include_content"})
+    if unknown_observability:
+        raise ValueError(f"agent_control.observability contains unsupported keys: {unknown_observability}")
     return AgentControlConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
         agent_name=str(raw.get("agent_name", "defenseclaw-policy-sync") or ""),
@@ -4193,6 +4210,10 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
             enabled=_coerce_bool(rule_raw.get("enabled", False)),
             activation=str(rule_raw.get("activation", "restart") or ""),
             max_rules=int(rule_raw.get("max_rules", 1000)),
+        ),
+        observability=AgentControlObservabilityConfig(
+            enabled=_coerce_bool(observability_raw.get("enabled", True), default=True),
+            include_content=_coerce_bool(observability_raw.get("include_content", True), default=True),
         ),
     )
 

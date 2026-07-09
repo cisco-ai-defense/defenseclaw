@@ -34,6 +34,18 @@ class SyncState:
     last_published_at: str | None = None
     last_activated_at: str | None = None
     last_error: str | None = None
+    observability_status: str = "disabled"
+    observability_log_path: str | None = None
+    observability_log_device: int | None = None
+    observability_log_inode: int | None = None
+    observability_log_offset: int = 0
+    observability_sent_events: int = 0
+    observability_dropped_events: int = 0
+    observability_unmapped_records: int = 0
+    observability_invalid_records: int = 0
+    observability_last_observed_at: str | None = None
+    observability_last_sent_at: str | None = None
+    observability_last_error: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> SyncState:

@@ -110,6 +110,10 @@ type Sidecar struct {
 	// the writer through every call site.
 	events *gatewaylog.Writer
 
+	// agentControlEvents is the local-only unredacted spool consumed by
+	// the Agent Control synchronizer. It never receives external fanout.
+	agentControlEvents *gatewaylog.Writer
+
 	// judge is the LLM judge instance shared between the proxy lane
 	// (EventRouter.SetJudge) and the hook lane (APIServer.SetHookJudge
 	// in runAPI) so both lanes use one Bifrost client cache and one
@@ -338,6 +342,12 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		alertCancel()
 		return nil, fmt.Errorf("sidecar: init gateway event writer: %w", err)
 	}
+	agentControlEvents, err := newAgentControlEventWriter(cfg, schemaValidator)
+	if err != nil {
+		_ = events.Close()
+		alertCancel()
+		return nil, fmt.Errorf("sidecar: init Agent Control private event writer: %w", err)
+	}
 	otelFanout := newRuntimeOTelFanout(otel)
 	// Mirror every structured event onto the OTel pipeline so
 	// operators with an OTLP collector already deployed pick up
@@ -353,6 +363,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		events.WithFanoutContext(logger.ForwardGatewayEventToSinks)
 	}
 	SetEventWriter(events)
+	SetAgentControlEventWriter(agentControlEvents)
 	// Layer 3 egress observability: wire the OTel provider so
 	// RecordEgress fires alongside every EventEgress emission.
 	// Resets to no-op on shutdown via the matching SetEventWriter(nil) path.
@@ -500,6 +511,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		alertCtx:           alertCtx,
 		alertCancel:        alertCancel,
 		events:             events,
+		agentControlEvents: agentControlEvents,
 		judge:              hookJudge,
 		rulePackStatus:     rulePackStatus,
 		judgeStore:         judgeStore,
@@ -844,6 +856,10 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		}
 		_ = s.events.Close()
 		SetEventWriter(nil)
+		SetAgentControlEventWriter(nil)
+		if s.agentControlEvents != nil {
+			_ = s.agentControlEvents.Close()
+		}
 		SetEgressTelemetry(nil)
 		SetJudgePersistor(nil)
 	}

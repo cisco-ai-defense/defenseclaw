@@ -22,6 +22,7 @@ import plistlib
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -371,6 +372,7 @@ class ConfigTests(unittest.TestCase):
                 "target_id": "installation-1",
                 "opa": {"precedence": "remote", "activation": "manual"},
                 "rule_pack": {"enabled": True, "activation": "restart", "max_rules": 500},
+                "observability": {"enabled": False},
             }
         )
         settings.validate()
@@ -379,6 +381,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(value["target_id"], "installation-1")
         self.assertEqual(value["opa"]["precedence"], "remote")
         self.assertTrue(value["rule_pack"]["enabled"])
+        self.assertFalse(value["observability"]["enabled"])
+        self.assertTrue(value["observability"]["include_content"])
 
     def test_default_agent_control_block_is_not_serialized(self) -> None:
         self.assertNotIn("agent_control", _config_to_dict(Config()))
@@ -404,11 +408,50 @@ class ConfigTests(unittest.TestCase):
             _merge_agent_control({"opa": "remote"})
         with self.assertRaisesRegex(ValueError, "agent_control.rule_pack must be a mapping"):
             _merge_agent_control({"rule_pack": []})
+        with self.assertRaisesRegex(ValueError, "agent_control.observability must be a mapping"):
+            _merge_agent_control({"observability": "enabled"})
 
     def test_agent_control_requires_dedicated_agent_and_target_type(self) -> None:
         value = AgentControlConfig(enabled=True, target_id="installation-1", agent_name="shared-agent")
         with self.assertRaisesRegex(ValueError, "agent_name"):
             value.validate()
+
+    def test_unredacted_observability_uses_private_spool_without_global_privacy_opt_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = root / "policies"
+            (policy / "rego").mkdir(parents=True)
+            cfg = Config(data_dir=str(root), policy_dir=str(policy))
+            cfg.agent_control.enabled = True
+            cfg.agent_control.target_id = "installation-1"
+            self.assertFalse(cfg.privacy.disable_redaction)
+            synchronizer = AgentControlSynchronizer(
+                cfg,
+                sdk=FakeSDK([]),
+                gateway=FakeGateway(),
+                validator=FakeValidator(),
+            )
+            self.assertEqual(
+                synchronizer.event_bridge.event_log_path,
+                root / "agent-control" / "gateway-events-unredacted.jsonl",
+            )
+
+    def test_metadata_only_observability_uses_standard_gateway_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = root / "policies"
+            (policy / "rego").mkdir(parents=True)
+            cfg = Config(data_dir=str(root), policy_dir=str(policy))
+            cfg.agent_control.enabled = True
+            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.observability.include_content = False
+            synchronizer = AgentControlSynchronizer(
+                cfg,
+                sdk=FakeSDK([]),
+                gateway=FakeGateway(),
+                validator=FakeValidator(),
+            )
+            self.assertEqual(synchronizer.event_bridge.event_log_path, root / "gateway.jsonl")
 
 
 class PackagingTests(unittest.TestCase):
@@ -447,12 +490,17 @@ class FakeSDK:
         self.controls = controls
         self.init_kwargs: dict[str, Any] = {}
         self.shutdown_calls = 0
+        self.written_events: list[Any] = []
 
     def init(self, **kwargs: Any) -> None:
         self.init_kwargs = kwargs
 
     def get_server_controls(self) -> list[dict[str, Any]]:
         return self.controls
+
+    def write_events(self, events: list[Any]) -> Any:
+        self.written_events.extend(events)
+        return SimpleNamespace(accepted=len(events), dropped=0)
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -574,6 +622,33 @@ class SynchronizerTests(unittest.TestCase):
                 [_watch_retry_delay(i, poll_seconds=2, cap_seconds=10) for i in range(1, 6)],
                 [2.0, 4.0, 8.0, 10.0, 10.0],
             )
+
+    def test_observability_bridge_init_failure_does_not_block_policy_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = root / "policies"
+            (policy / "rego").mkdir(parents=True)
+            cfg = Config(data_dir=str(root), policy_dir=str(policy))
+            cfg.agent_control.enabled = True
+            cfg.agent_control.target_id = "installation-1"
+            with mock.patch(
+                "defenseclaw.agent_control.sync.EnforcementEventBridge",
+                side_effect=OSError("sensitive local detail"),
+            ):
+                synchronizer = AgentControlSynchronizer(
+                    cfg,
+                    sdk=FakeSDK([]),
+                    gateway=FakeGateway(),
+                    validator=FakeValidator(),
+                )
+
+            self.assertIsNone(synchronizer.event_bridge)
+            self.assertEqual(synchronizer.state.observability_status, "degraded")
+            self.assertEqual(
+                synchronizer.state.observability_last_error,
+                "observability bridge initialization failed (OSError)",
+            )
+            synchronizer.process_snapshot([])
 
     def test_watch_does_not_retry_unchanged_poison_snapshot_at_poll_rate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

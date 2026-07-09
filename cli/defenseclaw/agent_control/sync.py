@@ -28,6 +28,7 @@ from .models import (
     extract_lane_candidates,
     snapshot_counts,
 )
+from .observability import EnforcementEventBridge
 from .publisher import (
     ActivationError,
     GatewayClient,
@@ -53,6 +54,8 @@ class AgentControlSDK(Protocol):
     def init(self, **kwargs: Any) -> Any: ...
 
     def get_server_controls(self) -> list[dict[str, Any]] | None: ...
+
+    def write_events(self, events: Any) -> Any: ...
 
     def shutdown(self) -> None: ...
 
@@ -114,6 +117,28 @@ class AgentControlSynchronizer:
         self.state.target_type = self.settings.target_type
         self.state.target_id_hash = "sha256:" + hashlib.sha256(self.settings.target_id.encode("utf-8")).hexdigest()
         self.state.sdk_version = str(getattr(self.sdk, "__version__", "unknown"))
+        self.event_bridge: EnforcementEventBridge | None = None
+        if self.settings.observability.enabled:
+            event_log_path = Path(cfg.data_dir) / "gateway.jsonl"
+            if self.settings.observability.include_content:
+                event_log_path = Path(cfg.data_dir) / "agent-control" / "gateway-events-unredacted.jsonl"
+            try:
+                self.event_bridge = EnforcementEventBridge(
+                    event_log_path=event_log_path,
+                    agent_name=self.settings.agent_name,
+                    sdk=self.sdk,
+                    state=self.state,
+                    include_content=self.settings.observability.include_content,
+                )
+                self.state.observability_status = "waiting_for_log"
+                self.state.observability_last_error = None
+            except Exception as exc:
+                error_type = type(exc).__name__
+                logger.warning("Agent Control observability bridge init failed (%s)", error_type)
+                self.state.observability_status = "degraded"
+                self.state.observability_last_error = f"observability bridge initialization failed ({error_type})"
+        else:
+            self.state.observability_status = "disabled"
         if self.settings.opa.enabled and self.settings.opa.precedence == "remote":
             logger.warning(
                 "Agent Control OPA precedence is remote; central policy may weaken local thresholds or trust"
@@ -128,6 +153,8 @@ class AgentControlSynchronizer:
                 )
                 self._reconcile_state()
                 self.process_snapshot(controls)
+                self._update_observability_controls(controls)
+                self._poll_observability()
                 return self.state
             finally:
                 self._shutdown_sdk()
@@ -153,6 +180,7 @@ class AgentControlSynchronizer:
                                 retry_not_before = 0.0
                             if now >= retry_not_before:
                                 self.process_snapshot(controls)
+                                self._update_observability_controls(controls)
                                 last_projection = projection
                                 failed_projection = None
                                 failure_attempts = 0
@@ -172,7 +200,9 @@ class AgentControlSynchronizer:
                             self.state.last_error,
                         )
 
+                    self._poll_observability()
                     if self.stop_event.wait(self.settings.cache_poll_seconds):
+                        self._poll_observability()
                         break
                     try:
                         cached = self.sdk.get_server_controls()
@@ -409,6 +439,7 @@ class AgentControlSynchronizer:
                     target_type=self.settings.target_type,
                     target_id=self.settings.target_id,
                     policy_refresh_interval_seconds=self.settings.refresh_seconds,
+                    observability_enabled=self.settings.observability.enabled,
                 )
                 controls = self.sdk.get_server_controls()
                 if controls is not None:
@@ -471,6 +502,20 @@ class AgentControlSynchronizer:
             self.sdk.shutdown()
         except Exception as exc:
             logger.error("Agent Control SDK shutdown failed (%s)", type(exc).__name__)
+
+    def _update_observability_controls(self, controls: list[dict[str, Any]]) -> None:
+        if self.event_bridge is None:
+            return
+        self.event_bridge.update_controls(controls if self.settings.rule_pack.enabled else [])
+
+    def _poll_observability(self) -> None:
+        if self.event_bridge is None:
+            return
+        if self.event_bridge.poll():
+            try:
+                save_state(self.publisher.state_path, self.state)
+            except OSError as exc:
+                logger.error("Agent Control observability cursor persistence failed (%s)", type(exc).__name__)
 
     def _audit(self, action: str, lane: str, digest: str | None) -> None:
         if self.audit_logger is None:

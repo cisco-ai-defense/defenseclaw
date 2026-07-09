@@ -238,16 +238,17 @@ type Config struct {
 // gateway never contacts Agent Control; it models this block so config parity
 // and validation remain strict while the Python service owns the SDK session.
 type AgentControlConfig struct {
-	Enabled             bool                       `mapstructure:"enabled"                yaml:"enabled"`
-	AgentName           string                     `mapstructure:"agent_name"             yaml:"agent_name"`
-	TargetType          string                     `mapstructure:"target_type"            yaml:"target_type"`
-	TargetID            string                     `mapstructure:"target_id"              yaml:"target_id"`
-	RefreshSeconds      int                        `mapstructure:"refresh_seconds"         yaml:"refresh_seconds"`
-	CachePollSeconds    int                        `mapstructure:"cache_poll_seconds"      yaml:"cache_poll_seconds"`
-	InitRetryMaxSeconds int                        `mapstructure:"init_retry_max_seconds" yaml:"init_retry_max_seconds"`
-	ManagedDir          string                     `mapstructure:"managed_dir"             yaml:"managed_dir,omitempty"`
-	OPA                 AgentControlOPAConfig      `mapstructure:"opa"                     yaml:"opa"`
-	RulePack            AgentControlRulePackConfig `mapstructure:"rule_pack"               yaml:"rule_pack"`
+	Enabled             bool                            `mapstructure:"enabled"                yaml:"enabled"`
+	AgentName           string                          `mapstructure:"agent_name"             yaml:"agent_name"`
+	TargetType          string                          `mapstructure:"target_type"            yaml:"target_type"`
+	TargetID            string                          `mapstructure:"target_id"              yaml:"target_id"`
+	RefreshSeconds      int                             `mapstructure:"refresh_seconds"         yaml:"refresh_seconds"`
+	CachePollSeconds    int                             `mapstructure:"cache_poll_seconds"      yaml:"cache_poll_seconds"`
+	InitRetryMaxSeconds int                             `mapstructure:"init_retry_max_seconds" yaml:"init_retry_max_seconds"`
+	ManagedDir          string                          `mapstructure:"managed_dir"             yaml:"managed_dir,omitempty"`
+	OPA                 AgentControlOPAConfig           `mapstructure:"opa"                     yaml:"opa"`
+	RulePack            AgentControlRulePackConfig      `mapstructure:"rule_pack"               yaml:"rule_pack"`
+	Observability       AgentControlObservabilityConfig `mapstructure:"observability"       yaml:"observability"`
 }
 
 type AgentControlOPAConfig struct {
@@ -260,6 +261,11 @@ type AgentControlRulePackConfig struct {
 	Enabled    bool   `mapstructure:"enabled"    yaml:"enabled"`
 	Activation string `mapstructure:"activation" yaml:"activation"`
 	MaxRules   int    `mapstructure:"max_rules"  yaml:"max_rules"`
+}
+
+type AgentControlObservabilityConfig struct {
+	Enabled        bool `mapstructure:"enabled"         yaml:"enabled"`
+	IncludeContent bool `mapstructure:"include_content" yaml:"include_content"`
 }
 
 func (c *AgentControlConfig) Validate() error {
@@ -3390,6 +3396,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("agent_control.rule_pack.enabled", false)
 	viper.SetDefault("agent_control.rule_pack.activation", "restart")
 	viper.SetDefault("agent_control.rule_pack.max_rules", 1000)
+	viper.SetDefault("agent_control.observability.enabled", true)
+	viper.SetDefault("agent_control.observability.include_content", true)
 	viper.SetDefault("guardrail.hilt.enabled", false)
 	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
 	viper.SetDefault("guardrail.judge.enabled", false)

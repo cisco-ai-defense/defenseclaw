@@ -533,7 +533,14 @@ strict rule-pack overlay. `sync --watch` is a separate Python process: it owns
 one Agent Control SDK session and polls that SDK's in-process cache. The Go
 sidecar never polls Agent Control. After publishing changed native artifacts,
 the synchronizer sends authenticated loopback requests to reload OPA or
-restart for rule-pack changes and verifies the resulting digest. `status`
-never prints credentials or raw policy content. `validate` runs both the
+restart for rule-pack changes and verifies the resulting digest. While running
+in watch mode, it also tails new final block verdicts from the Agent Control
+private spool and reports blocks caused by Agent Control-managed rules through
+the SDK observability sink. Exact blocked input, raw request body, and
+enforcement reason are included by default; set
+`agent_control.observability.include_content: false` for metadata-only export.
+Other sinks continue to follow the global `privacy.disable_redaction` setting.
+`status` shows event delivery counters but never prints credentials or raw
+policy/content. `validate` runs both the
 closed Python schema checks and the gateway's authoritative Go/Rego validators
 against temporary candidate files without publishing or activating them.

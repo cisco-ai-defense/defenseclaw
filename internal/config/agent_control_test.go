@@ -39,6 +39,7 @@ func validAgentControlConfig() AgentControlConfig {
 			Activation: "restart",
 			MaxRules:   1000,
 		},
+		Observability: AgentControlObservabilityConfig{Enabled: true, IncludeContent: true},
 	}
 }
 
@@ -68,6 +69,19 @@ func TestAgentControlConfigValidate(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestDefaultAgentControlConfig(t *testing.T) {
+	cfg := DefaultConfig().AgentControl
+	if cfg.Enabled {
+		t.Fatal("Agent Control integration must remain opt-in")
+	}
+	if !cfg.Observability.Enabled || !cfg.Observability.IncludeContent {
+		t.Fatalf("Agent Control observability defaults = %+v, want enabled exact content", cfg.Observability)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default Agent Control config is invalid: %v", err)
 	}
 }
 

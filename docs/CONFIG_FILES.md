@@ -530,12 +530,40 @@ agent_control:
     enabled: false
     activation: restart
     max_rules: 1000
+  observability:
+    enabled: true
+    include_content: true
 ```
 
 `stricter` keeps whichever local/remote threshold activates earlier and the
 stricter Cisco trust level. `remote` uses the remote threshold/trust values
 while a control is present. HILT, guardrail mode, hook fail mode, scanner
 strategy, and the local policy baseline remain local in both modes.
+
+`observability.enabled` asynchronously reports final block decisions caused by
+Agent Control-managed rule IDs through the SDK's control-event sink. The
+synchronizer tails the protected
+`<data_dir>/agent-control/gateway-events-unredacted.jsonl` spool. It sends
+control identity, decision, correlation, rule IDs, severity, direction,
+latency, exact blocked prompt, raw request body, and enforcement reason by
+default. Content fields are capped at 64 KiB. Disable observability to keep
+Agent Control policy distribution one-way. The setting does not affect local
+enforcement.
+
+Set `observability.include_content: false` to export decision/correlation
+metadata only. In that mode the synchronizer tails the standard
+`<data_dir>/gateway.jsonl`, whose content follows the global redaction setting.
+The Agent Control raw spool is a scoped exception;
+all other sinks keep the normal global behavior: redacted when
+`privacy.disable_redaction: false`, unredacted when it is `true`. Confirm
+self-hosted or Cisco Cloud Control authorization, data residency, access,
+retention, and deletion requirements before enabling production traffic.
+Changes to `agent_control.enabled`, `observability.enabled`, or
+`observability.include_content` require restarting both the gateway and the
+synchronizer because the private writer and selected source are process-scoped.
+Exact-content mode also requires both processes to run under the same OS
+identity so the synchronizer can read the intentionally private `0700`/`0600`
+spool. The packaged services use the `defenseclaw` account for both.
 
 Run `defenseclaw agent-control setup` instead of editing the target identity
 or managed overlay path manually.
