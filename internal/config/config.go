@@ -1784,13 +1784,11 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 }
 
 // EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector: a per-connector override (when set) wins, otherwise it
-// falls back to the global EffectiveHookFailMode(). This is the additive
-// multi-connector sibling — the global EffectiveHookFailMode() keeps its
-// original no-arg signature and behavior so existing single-connector
-// callers (sidecar boot, config-edit surfaces) are untouched; only the
-// per-connector boot loop calls this variant. Pass "" to resolve the
-// global value. Pure lookup — never errors, never mutates.
+// connector. An explicit connector override wins even in observe mode: it is
+// an operator-selected response-integrity posture, not a policy verdict.
+// Observe-only connectors without an override retain the historical fail-open
+// behavior; action mode falls through to the global value. Pass "" to resolve
+// the global connector mode/value. Pure lookup — never errors, never mutates.
 func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 	if g == nil {
 		return "closed"
@@ -1807,6 +1805,9 @@ func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 			}
 			return "closed"
 		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(g.EffectiveMode(connector)), "action") {
+		return "open"
 	}
 	return g.EffectiveHookFailMode()
 }

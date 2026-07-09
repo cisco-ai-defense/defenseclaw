@@ -474,7 +474,7 @@ func (a *APIServer) hookDecisionMeta(
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
-	if snapshot, ok := a.hookLifecycleSnapshot(meta.Source, meta.SessionID, meta.AgentID); ok {
+	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
 		// The lifecycle emitter advanced the execution cursor immediately
 		// before evaluation. Reuse its phase/sequence/operation identifiers
 		// so the decision nests beside that hook transition rather than

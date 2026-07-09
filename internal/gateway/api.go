@@ -769,6 +769,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	// Provider configuration belongs to the management API so hook-only
+	// deployments can inspect and reload it without enabling the proxy listener.
+	a.registerProviderRoutes(mux)
 	// /api/v1/inspect/* and /api/v1/{connector}/hook are both in the
 	// agent's critical path: every connector hook (claude-code-hook,
 	// codex-hook, cursor-hook, ...) hits one of them. Wrap them in a
@@ -1079,6 +1082,15 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"health":     snap,
 		"provenance": version.Current(),
+		// Runtime identity is intentionally available only through this
+		// authenticated endpoint. Doctor uses it to bind the live listener to
+		// the managed process and configured data home without reading another
+		// process's memory or environment. Never add authentication material to
+		// this object.
+		"runtime": map[string]interface{}{
+			"pid":      os.Getpid(),
+			"data_dir": a.configDataDir(),
+		},
 		// connector_mode reports which guardrail surface the active
 		// connector is running. The TUI uses this to render the
 		// "Observability mode" banner with the right copy and to
@@ -2904,7 +2916,9 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
-// tokenAuth wraps a handler with Bearer token authentication.
+// tokenAuth wraps a handler with Bearer token authentication. Management
+// clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
+// X-DC-Auth header; all are compared against the same gateway token.
 // GET /health is exempt to allow unauthenticated health checks.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2926,6 +2940,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if token == "" {
 			token = r.Header.Get("X-DefenseClaw-Token")
+		}
+		if token == "" {
+			if dcAuth := r.Header.Get("X-DC-Auth"); strings.HasPrefix(dcAuth, "Bearer ") {
+				token = strings.TrimPrefix(dcAuth, "Bearer ")
+			}
 		}
 
 		expected := ""

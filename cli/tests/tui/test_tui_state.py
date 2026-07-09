@@ -7,16 +7,27 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from defenseclaw import file_permissions
+from defenseclaw.tui.services import tui_state as tui_state_module
 from defenseclaw.tui.services.tui_state import (
     PALETTE_MRU_LIMIT,
     STATE_FILENAME,
     TUIState,
     TUIStateStore,
 )
+from tests.permissions import set_known_windows_directory_acl
+
+
+def _assert_private(path: Path) -> None:
+    if os.name == "nt":
+        assert file_permissions.windows_acl_write_error(path) is None
+    else:
+        assert path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.fixture
@@ -45,11 +56,25 @@ def test_save_writes_atomically_with_mode_0600(state_dir: Path) -> None:
     assert body["palette_mru"] == ["scan-all"]
     assert body["active_panel"] == "overview"
 
-    mode = path.stat().st_mode & 0o777
-    assert mode == 0o600
+    _assert_private(path)
+    if os.name == "nt":
+        assert file_permissions.windows_acl_write_error(path.parent) is None
+    else:
+        assert path.parent.stat().st_mode & 0o777 == 0o700
 
-    parent_mode = path.parent.stat().st_mode & 0o777
-    assert parent_mode == 0o700
+
+def test_save_rewrite_is_private_in_unicode_space_directory(tmp_path: Path) -> None:
+    state_dir = tmp_path / "operator state 雪"
+    store = TUIStateStore(state_dir)
+    store.record_command("first")
+    assert store.save() is True
+    store.record_command("second")
+    assert store.save() is True
+
+    path = state_dir / STATE_FILENAME
+    assert json.loads(path.read_text(encoding="utf-8"))["palette_mru"] == ["second", "first"]
+    _assert_private(path)
+    assert list(state_dir.glob(f".{STATE_FILENAME}.*.tmp")) == []
 
 
 def test_round_trip_preserves_all_fields(state_dir: Path) -> None:
@@ -111,7 +136,72 @@ def test_corrupt_payload_is_quarantined(state_dir: Path) -> None:
     assert state == TUIState()
     backup = state_path.with_suffix(state_path.suffix + ".bak")
     assert backup.exists()
+    assert backup.read_text(encoding="utf-8") == "{not valid json"
+    _assert_private(backup)
     assert not state_path.exists()
+
+
+def test_save_protection_failure_preserves_existing_state(monkeypatch, state_dir: Path) -> None:
+    state_dir.mkdir(parents=True)
+    state_path = state_dir / STATE_FILENAME
+    original = '{"active_panel": "alerts"}'
+    state_path.write_text(original, encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise PermissionError("injected ACL protection failure")
+
+    monkeypatch.setattr(tui_state_module, "atomic_write_private_bytes", fail)
+    store = TUIStateStore(state_dir)
+    store.record_command("doctor")
+
+    assert store.save() is False
+    assert state_path.read_text(encoding="utf-8") == original
+
+
+def test_save_refuses_symlink_without_modifying_target(state_dir: Path, tmp_path: Path) -> None:
+    state_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-state.json"
+    outside.write_text("outside remains unchanged", encoding="utf-8")
+    state_path = state_dir / STATE_FILENAME
+    try:
+        state_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    store = TUIStateStore(state_dir)
+    store.record_command("doctor")
+    assert store.save() is False
+    assert outside.read_text(encoding="utf-8") == "outside remains unchanged"
+    assert state_path.is_symlink()
+
+
+def test_load_does_not_quarantine_through_symlink(state_dir: Path, tmp_path: Path) -> None:
+    state_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-corrupt.json"
+    outside.write_text("{synthetic invalid json", encoding="utf-8")
+    state_path = state_dir / STATE_FILENAME
+    try:
+        state_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert TUIStateStore(state_dir).load() == TUIState()
+    assert outside.read_text(encoding="utf-8") == "{synthetic invalid json"
+    assert not state_path.with_suffix(state_path.suffix + ".bak").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL convergence")
+@pytest.mark.allow_subprocess
+def test_save_removes_inherited_everyone_write_on_windows(state_dir: Path) -> None:
+    state_dir.mkdir(parents=True)
+    set_known_windows_directory_acl(state_dir, everyone_write=True)
+    store = TUIStateStore(state_dir)
+    store.record_command("doctor")
+
+    assert store.save() is True
+    path = state_dir / STATE_FILENAME
+    assert file_permissions.windows_acl_write_error(state_dir) is None
+    assert file_permissions.windows_acl_write_error(path) is None
 
 
 def test_mark_seen_writes_iso_timestamp(state_dir: Path) -> None:
@@ -208,6 +298,7 @@ def test_legacy_state_file_without_theme_loads(state_dir: Path) -> None:
     assert state.theme == ""
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows chmod does not model DACL access denial")
 def test_save_to_readonly_path_returns_false(state_dir: Path) -> None:
     state_dir.mkdir(parents=True)
     state_dir.chmod(0o500)

@@ -159,6 +159,30 @@ class ActionEntry:
 
 
 @dataclass
+class QuarantineRecord:
+    """Durable provenance for one physically quarantined asset.
+
+    Enforcement decisions remain in :class:`ActionEntry`; this record exists
+    only to make the filesystem move recoverable after those decisions change.
+    A single physical item may be associated with more than one connector.
+    """
+
+    id: str
+    target_type: str
+    target_name: str
+    original_path: str
+    quarantine_path: str
+    content_hash: str
+    reason: str = ""
+    state: str = "active"
+    ownership_json: str = "{}"
+    restore_path: str = ""
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    connectors: tuple[str, ...] = ()
+
+
+@dataclass
 class Event:
     id: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

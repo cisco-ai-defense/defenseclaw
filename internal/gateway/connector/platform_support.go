@@ -26,9 +26,10 @@ import (
 type PlatformSupportStatus string
 
 const (
-	PlatformSupported   PlatformSupportStatus = "supported"
-	PlatformPreview     PlatformSupportStatus = "preview"
-	PlatformUnsupported PlatformSupportStatus = "unsupported"
+	PlatformSupported    PlatformSupportStatus = "supported"
+	PlatformPreview      PlatformSupportStatus = "preview"
+	PlatformNotCertified PlatformSupportStatus = "not_certified"
+	PlatformUnsupported  PlatformSupportStatus = "unsupported"
 )
 
 // PlatformSupport includes both the machine-readable state and the reason that
@@ -53,39 +54,39 @@ var proxyConnectors = map[string]struct{}{
 var windowsConnectorSupport = map[string]PlatformSupport{
 	"codex": {
 		Status: PlatformSupported,
-		Reason: "Codex CLI and the DefenseClaw hook entrypoint run natively on Windows.",
+		Reason: "Codex CLI and the DefenseClaw hook entrypoint are certified on native Windows x64.",
 	},
 	"claudecode": {
 		Status: PlatformSupported,
-		Reason: "Claude Code supports native Windows with Git for Windows and native hooks.",
+		Reason: "Claude Code with Git for Windows and native hooks is certified on native Windows x64.",
 	},
 	"cursor": {
-		Status: PlatformSupported,
-		Reason: "Cursor IDE hooks run natively on Windows; Cursor CLI remains WSL-only.",
+		Status: PlatformNotCertified,
+		Reason: "The DefenseClaw Cursor integration has not completed native Windows x64 certification.",
 	},
 	"windsurf": {
-		Status: PlatformSupported,
-		Reason: "Windsurf documents native Windows Cascade hooks.",
+		Status: PlatformNotCertified,
+		Reason: "The DefenseClaw Windsurf integration has not completed native Windows x64 certification.",
 	},
 	"geminicli": {
-		Status: PlatformSupported,
-		Reason: "Gemini CLI documents native Windows command hooks and PowerShell execution.",
+		Status: PlatformNotCertified,
+		Reason: "The DefenseClaw Gemini CLI integration has not completed native Windows x64 certification.",
 	},
 	"copilot": {
-		Status: PlatformSupported,
-		Reason: "GitHub Copilot CLI documents Windows hook execution through PowerShell.",
+		Status: PlatformNotCertified,
+		Reason: "The DefenseClaw GitHub Copilot CLI integration has not completed native Windows x64 certification.",
 	},
 	"antigravity": {
-		Status: PlatformSupported,
-		Reason: "Antigravity runs natively on Windows and exposes local JSON hooks.",
+		Status: PlatformNotCertified,
+		Reason: "The DefenseClaw Antigravity integration has not completed native Windows x64 certification.",
 	},
 	"opencode": {
-		Status: PlatformSupported,
-		Reason: "OpenCode runs directly on Windows and loads the JavaScript bridge plugin without shell shims.",
+		Status: PlatformNotCertified,
+		Reason: "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
 	},
 	"hermes": {
-		Status: PlatformPreview,
-		Reason: "Hermes supports native Windows upstream, but DefenseClaw's native Windows hook integration remains preview pending live end-to-end validation.",
+		Status: PlatformNotCertified,
+		Reason: "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
 	},
 	"openhands": {
 		Status: PlatformUnsupported,
@@ -112,17 +113,17 @@ func IsProxyConnector(name string) bool {
 	return ok
 }
 
-// ConnectorSupportOnOS returns a supported/preview/unsupported classification
-// with a human-readable reason. Unknown plugin connectors preserve historical
-// behavior and remain available.
+// ConnectorSupportOnOS returns a supported/preview/not-certified/unsupported
+// classification with a human-readable reason. Unknown plugin connectors fail
+// closed on Windows pending separate certification.
 func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 	if goos == "windows" {
 		if support, ok := windowsConnectorSupport[name]; ok {
 			return support
 		}
 		return PlatformSupport{
-			Status: PlatformSupported,
-			Reason: "No native Windows restriction is registered for this plugin connector.",
+			Status: PlatformNotCertified,
+			Reason: "This connector has not completed native Windows x64 certification.",
 		}
 	}
 	return PlatformSupport{
@@ -134,7 +135,12 @@ func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 // connectorSupportedOnOS reports whether setup/presentation may offer name on
 // goos. Preview connectors are deliberately available.
 func connectorSupportedOnOS(name, goos string) bool {
-	return ConnectorSupportOnOS(name, goos).Status != PlatformUnsupported
+	status := ConnectorSupportOnOS(name, goos).Status
+	return connectorStatusAvailable(status)
+}
+
+func connectorStatusAvailable(status PlatformSupportStatus) bool {
+	return status == PlatformSupported || status == PlatformPreview
 }
 
 // ConnectorSupportOnHostOS returns the full classification for the host OS.
@@ -144,17 +150,37 @@ func ConnectorSupportOnHostOS(name string) PlatformSupport {
 
 // ConnectorSupportedOnHostOS reports availability on the current host OS.
 func ConnectorSupportedOnHostOS(name string) bool {
-	return ConnectorSupportOnHostOS(name).Status != PlatformUnsupported
+	status := ConnectorSupportOnHostOS(name).Status
+	return connectorStatusAvailable(status)
+}
+
+// CheckPlatformSupport returns the shared operator-facing preview warning or
+// unsupported error for a connector on goos. Supported connectors return two
+// empty values so callers can preserve their existing control flow.
+func CheckPlatformSupport(name, goos string) (string, error) {
+	support := ConnectorSupportOnOS(name, goos)
+	switch support.Status {
+	case PlatformUnsupported:
+		return "", fmt.Errorf("connector %q is not supported on %s: %s", name, goos, support.Reason)
+	case PlatformNotCertified:
+		return "", fmt.Errorf("connector %q is not certified on %s: %s", name, goos, support.Reason)
+	case PlatformPreview:
+		return fmt.Sprintf("connector %s is preview on %s: %s", name, goos, support.Reason), nil
+	default:
+		return "", nil
+	}
+}
+
+// CheckPlatformSupportOnHost applies CheckPlatformSupport to runtime.GOOS.
+func CheckPlatformSupportOnHost(name string) (string, error) {
+	return CheckPlatformSupport(name, runtime.GOOS)
 }
 
 // validateConnectorSupportedOnOS returns the clear setup error used by direct
 // connector lifecycle calls. It is injectable by OS for focused tests.
 func validateConnectorSupportedOnOS(name, goos string) error {
-	support := ConnectorSupportOnOS(name, goos)
-	if support.Status != PlatformUnsupported {
-		return nil
-	}
-	return fmt.Errorf("connector %q is not supported on %s: %s", name, goos, support.Reason)
+	_, err := CheckPlatformSupport(name, goos)
+	return err
 }
 
 func errConnectorUnsupportedOnOS(name, goos string) error {

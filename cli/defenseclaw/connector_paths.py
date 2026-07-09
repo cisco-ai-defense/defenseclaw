@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import stat
 import subprocess
 import sys
@@ -64,6 +63,11 @@ except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
     import tomli as tomllib
 
 import yaml
+
+from defenseclaw.file_permissions import (
+    atomic_write_private_bytes,
+    open_regular_file_no_follow,
+)
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -2262,10 +2266,12 @@ def _capture_managed_mcp_backup(path: str) -> None:
         # right absolute path even when called from a different cwd.
         _registry_register(os.path.abspath(path), backup)
         return
-    # follow_symlinks=False is defense-in-depth: even if a symlink slips
-    # past the lstat above (e.g. TOCTOU), copy2 will not follow it.
-    shutil.copy2(path, backup, follow_symlinks=False)
-    os.chmod(backup, 0o600)
+    # The descriptor-level identity check is defense-in-depth: even if a
+    # symlink/reparse point slips past the lstat above (e.g. TOCTOU), the read
+    # refuses to follow it or a replacement file.
+    fd = open_regular_file_no_follow(path)
+    with os.fdopen(fd, "rb") as source:
+        atomic_write_private_bytes(backup, source.read(), protect_parent=False)
     _registry_register(os.path.abspath(path), backup)
 
 
@@ -2328,27 +2334,8 @@ def _registry_load() -> dict[str, dict[str, str]]:
 
 def _registry_save(state: dict[str, dict[str, str]]) -> None:
     path = _registry_path()
-    parent = os.path.dirname(path)
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(parent, 0o700)
-    except OSError:
-        pass
-    import tempfile
-
-    fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-registry-", dir=parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
-            f.write("\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    atomic_write_private_bytes(path, payload.encode("utf-8"))
 
 
 def _registry_key(abs_target: str) -> str:
@@ -2409,46 +2396,13 @@ def lookup_managed_mcp_backup(path: str) -> str | None:
 
 
 def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:
-    import tempfile
-
-    parent = os.path.dirname(path) or "."
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".defenseclaw-", suffix=".tmp", dir=parent)
-    try:
-        with os.fdopen(fd, "w") as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-        except OSError:
-            pass
+    payload = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+    atomic_write_private_bytes(path, payload.encode("utf-8"))
 
 
 def _atomic_write_text(path: str, text: str) -> None:
     """Atomically write UTF-8 text with private permissions."""
-    import tempfile
-
-    parent = os.path.dirname(path) or "."
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-", dir=parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_write_private_bytes(path, text.encode("utf-8"))
 
 
 def _windsurf_existing_mcp_write_path() -> str | None:
@@ -2465,19 +2419,5 @@ def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
     never leaves a half-written file. Mirrors the Go gateway's
     atomicWriteFile contract for connector config patches.
     """
-    import tempfile
-
-    parent = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-", dir=parent)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2, sort_keys=True)
-            f.write("\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    atomic_write_private_bytes(path, payload.encode("utf-8"))

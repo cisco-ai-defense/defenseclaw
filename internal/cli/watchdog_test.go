@@ -22,11 +22,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
@@ -37,65 +41,74 @@ func TestProbeHealth(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	t.Run("unreachable", func(t *testing.T) {
-		got := probeHealth(client, "http://127.0.0.1:1/health")
-		if got != stateDown {
-			t.Fatalf("unreachable: got %v want stateDown", got)
+		got := probeHealth(client, "http://127.0.0.1:1/health", watchdogHealthRequirements{})
+		if got.state != stateDown {
+			t.Fatalf("unreachable: got %v want stateDown", got.state)
 		}
 	})
 
 	cases := []struct {
-		name   string
-		status int
-		body   string
-		want   watchdogState
+		name         string
+		status       int
+		body         string
+		requirements watchdogHealthRequirements
+		want         watchdogState
 	}{
 		{
-			name:   "gateway running only",
-			status: http.StatusOK,
-			body:   `{"gateway":{"state":"running"}}`,
-			want:   stateHealthy,
+			name:         "gateway running only",
+			status:       http.StatusOK,
+			body:         `{"gateway":{"state":"running"}}`,
+			requirements: watchdogHealthRequirements{requireFleet: true},
+			want:         stateHealthy,
 		},
 		{
-			name:   "gateway and guardrail running",
-			status: http.StatusOK,
-			body:   `{"gateway":{"state":"running"},"guardrail":{"state":"running"}}`,
-			want:   stateHealthy,
+			name:         "gateway and guardrail running",
+			status:       http.StatusOK,
+			body:         `{"gateway":{"state":"running"},"guardrail":{"state":"running"}}`,
+			requirements: watchdogHealthRequirements{requireFleet: true, requireGuardrail: true},
+			want:         stateHealthy,
 		},
 		{
-			name:   "guardrail error",
-			status: http.StatusOK,
-			body:   `{"gateway":{"state":"running"},"guardrail":{"state":"error"}}`,
-			want:   stateDegraded,
+			name:         "guardrail error",
+			status:       http.StatusOK,
+			body:         `{"gateway":{"state":"running"},"guardrail":{"state":"error"}}`,
+			requirements: watchdogHealthRequirements{requireFleet: true, requireGuardrail: true},
+			want:         stateDegraded,
 		},
 		{
-			name:   "gateway starting",
-			status: http.StatusOK,
-			body:   `{"gateway":{"state":"starting"}}`,
-			want:   stateDown,
+			name:         "gateway starting",
+			status:       http.StatusOK,
+			body:         `{"gateway":{"state":"starting"}}`,
+			requirements: watchdogHealthRequirements{requireFleet: true},
+			want:         stateDown,
 		},
 		{
-			name:   "empty gateway state",
-			status: http.StatusOK,
-			body:   `{}`,
-			want:   stateDown,
+			name:         "empty gateway state",
+			status:       http.StatusOK,
+			body:         `{}`,
+			requirements: watchdogHealthRequirements{requireFleet: true},
+			want:         stateDown,
 		},
 		{
-			name:   "invalid json",
-			status: http.StatusOK,
-			body:   `not json`,
-			want:   stateDown,
+			name:         "invalid json",
+			status:       http.StatusOK,
+			body:         `not json`,
+			requirements: watchdogHealthRequirements{requireFleet: true},
+			want:         stateDown,
 		},
 		{
-			name:   "http 500",
-			status: http.StatusInternalServerError,
-			body:   `{"gateway":{"state":"running"}}`,
-			want:   stateDown,
+			name:         "http 500",
+			status:       http.StatusInternalServerError,
+			body:         `{"gateway":{"state":"running"}}`,
+			requirements: watchdogHealthRequirements{requireFleet: true},
+			want:         stateDown,
 		},
 		{
-			name:   "gateway null",
-			status: http.StatusOK,
-			body:   `{"gateway":null}`,
-			want:   stateDown,
+			name:         "gateway null",
+			status:       http.StatusOK,
+			body:         `{"gateway":null}`,
+			requirements: watchdogHealthRequirements{requireFleet: true},
+			want:         stateDown,
 		},
 	}
 	for _, tc := range cases {
@@ -108,9 +121,150 @@ func TestProbeHealth(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got := probeHealth(client, srv.URL+"/health")
-			if got != tc.want {
-				t.Fatalf("got %s want %s", got, tc.want)
+			got := probeHealth(client, srv.URL+"/health", tc.requirements)
+			if got.state != tc.want {
+				t.Fatalf("got %s want %s", got.state, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatchdogHealthRequirementsFromConfig(t *testing.T) {
+	t.Run("hook-only multi connector", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Enabled = true
+		cfg.Guardrail.Connector = ""
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+			"codex":      {},
+			"claudecode": {},
+		}
+		cfg.Claw.Mode = ""
+		cfg.Gateway.Host = "127.0.0.1"
+		cfg.Gateway.FleetMode = "auto"
+		cfg.Gateway.Watcher.Enabled = true
+
+		got := watchdogHealthRequirementsFromConfig(cfg)
+		if got.requireFleet {
+			t.Fatal("hook-only loopback topology must not require the fleet gateway")
+		}
+		if !got.requireGuardrail || !got.requireWatcher {
+			t.Fatalf("required protection flags = %+v", got)
+		}
+		if want := []string{"claudecode", "codex"}; !reflect.DeepEqual(got.connectors, want) {
+			t.Fatalf("connectors = %v, want %v", got.connectors, want)
+		}
+	})
+
+	t.Run("fleet topology", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Connector = "openclaw"
+		cfg.Guardrail.Connectors = nil
+		cfg.Gateway.FleetMode = "auto"
+		if got := watchdogHealthRequirementsFromConfig(cfg); !got.requireFleet {
+			t.Fatal("OpenClaw topology must require the fleet gateway")
+		}
+	})
+
+	t.Run("explicit fleet on for hook connector", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Connector = "codex"
+		cfg.Guardrail.Connectors = nil
+		cfg.Gateway.Host = "127.0.0.1"
+		cfg.Gateway.FleetMode = "enabled"
+		if got := watchdogHealthRequirementsFromConfig(cfg); !got.requireFleet {
+			t.Fatal("explicit fleet enable must remain required")
+		}
+	})
+}
+
+func TestProbeHealthTopologyMatrix(t *testing.T) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	hookRequirements := watchdogHealthRequirements{
+		requireGuardrail: true,
+		requireWatcher:   true,
+		connectors:       []string{"claudecode", "codex"},
+	}
+	cases := []struct {
+		name         string
+		body         string
+		requirements watchdogHealthRequirements
+		want         watchdogState
+		wantSeverity string
+	}{
+		{
+			name: "hook-only regression fleet and optional services disabled",
+			body: `{
+				"gateway":{"state":"disabled"},
+				"watcher":{"state":"running"},
+				"guardrail":{"state":"running"},
+				"telemetry":{"state":"disabled"},
+				"sinks":{"state":"disabled"},
+				"connectors":[{"name":"codex","state":"running"},{"name":"claudecode","state":"running"}]
+			}`,
+			requirements: hookRequirements,
+			want:         stateHealthy,
+		},
+		{
+			name: "hook-only required connector down",
+			body: `{
+				"gateway":{"state":"disabled"},
+				"watcher":{"state":"running"},
+				"guardrail":{"state":"running"},
+				"connectors":[{"name":"codex","state":"running"},{"name":"claudecode","state":"error"}]
+			}`,
+			requirements: hookRequirements,
+			want:         stateDegraded,
+			wantSeverity: "HIGH",
+		},
+		{
+			name: "hook-only required watcher down",
+			body: `{
+				"gateway":{"state":"disabled"},
+				"watcher":{"state":"error"},
+				"guardrail":{"state":"running"},
+				"connectors":[{"name":"codex","state":"running"},{"name":"claudecode","state":"running"}]
+			}`,
+			requirements: hookRequirements,
+			want:         stateDegraded,
+			wantSeverity: "HIGH",
+		},
+		{
+			name:         "required fleet disabled",
+			body:         `{"gateway":{"state":"disabled"},"guardrail":{"state":"running"},"connector":{"name":"openclaw","state":"running"}}`,
+			requirements: watchdogHealthRequirements{requireFleet: true, requireGuardrail: true, connectors: []string{"openclaw"}},
+			want:         stateDown,
+			wantSeverity: "CRITICAL",
+		},
+		{
+			name:         "required fleet and guardrail running",
+			body:         `{"gateway":{"state":"running"},"guardrail":{"state":"running"},"connector":{"name":"openclaw","state":"running"}}`,
+			requirements: watchdogHealthRequirements{requireFleet: true, requireGuardrail: true, connectors: []string{"openclaw"}},
+			want:         stateHealthy,
+		},
+		{
+			name:         "legacy singular connector",
+			body:         `{"gateway":{"state":"disabled"},"guardrail":{"state":"running"},"connector":{"name":"codex","state":"running"}}`,
+			requirements: watchdogHealthRequirements{requireGuardrail: true, connectors: []string{"codex"}},
+			want:         stateHealthy,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			got := probeHealth(client, srv.URL, tc.requirements)
+			if got.state != tc.want {
+				t.Fatalf("state = %s, want %s (details=%q)", got.state, tc.want, got.details)
+			}
+			if got.severity != tc.wantSeverity {
+				t.Fatalf("severity = %q, want %q", got.severity, tc.wantSeverity)
+			}
+			if got.state == stateHealthy && strings.Contains(strings.ToLower(got.notification), "unprotected") {
+				t.Fatalf("healthy hook topology produced false outage text: %q", got.notification)
 			}
 		})
 	}
@@ -142,7 +296,7 @@ func TestWatchdogStateTransitions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil, nil)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, nil, nil)
 
 	if n := downProbes.Load(); n < 2 {
 		t.Fatalf("expected at least %d probes while server returned errors after flip, got %d", 2, n)
@@ -233,15 +387,15 @@ func TestWatchdogWebhookDispatchOnStateChange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, healthSrv.URL+"/health", 10*time.Millisecond, 2, webhooks, nil)
+	runWatchdogLoop(ctx, healthSrv.URL+"/health", 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, webhooks, nil)
 
 	time.Sleep(100 * time.Millisecond)
 
 	mu.Lock()
 	count := len(received)
 	mu.Unlock()
-	if count < 1 {
-		t.Fatalf("expected at least 1 webhook event for gateway-down, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 webhook event for gateway-down, got %d", count)
 	}
 
 	mu.Lock()
@@ -256,6 +410,112 @@ func TestWatchdogWebhookDispatchOnStateChange(t *testing.T) {
 	}
 	if evt["severity"] != "CRITICAL" {
 		t.Errorf("expected severity=CRITICAL, got %v", evt["severity"])
+	}
+}
+
+func TestWatchdogHookOnlyDoesNotDispatchFalseOutage(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+
+	var received atomic.Int32
+	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhookSrv.Close()
+
+	webhooks := gateway.NewWebhookDispatcher([]config.WebhookConfig{{
+		URL:             webhookSrv.URL,
+		Type:            "generic",
+		Enabled:         true,
+		CooldownSeconds: intPtr(0),
+	}})
+	defer webhooks.Close()
+
+	healthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"gateway":{"state":"disabled"},
+			"watcher":{"state":"running"},
+			"guardrail":{"state":"running"},
+			"telemetry":{"state":"disabled"},
+			"sinks":{"state":"disabled"},
+			"connectors":[{"name":"codex","state":"running"},{"name":"claudecode","state":"running"}]
+		}`))
+	}))
+	defer healthSrv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	runWatchdogLoop(ctx, healthSrv.URL, 10*time.Millisecond, 2, watchdogHealthRequirements{
+		requireGuardrail: true,
+		requireWatcher:   true,
+		connectors:       []string{"codex", "claudecode"},
+	}, webhooks, nil)
+
+	time.Sleep(30 * time.Millisecond)
+	if got := received.Load(); got != 0 {
+		t.Fatalf("healthy hook-only topology dispatched %d false outage event(s)", got)
+	}
+}
+
+func TestWatchdogDispatchesOneOutageAndOneRecovery(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+
+	var mu sync.Mutex
+	var actions []string
+	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Event struct {
+				Action string `json:"action"`
+			} `json:"event"`
+		}
+		if json.NewDecoder(r.Body).Decode(&payload) == nil {
+			mu.Lock()
+			actions = append(actions, payload.Event.Action)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhookSrv.Close()
+
+	webhooks := gateway.NewWebhookDispatcher([]config.WebhookConfig{{
+		URL:             webhookSrv.URL,
+		Type:            "generic",
+		Enabled:         true,
+		CooldownSeconds: intPtr(0),
+	}})
+
+	var probes atomic.Int32
+	healthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := probes.Add(1)
+		if n == 3 || n == 4 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"gateway":{"state":"running"}}`))
+	}))
+	defer healthSrv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Millisecond)
+	defer cancel()
+	runWatchdogLoop(ctx, healthSrv.URL, 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, webhooks, nil)
+	// Dispatch is asynchronous. Close deterministically drains every accepted
+	// delivery, avoiding a scheduler-dependent sleep before the assertion.
+	webhooks.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{string(audit.ActionGatewayDown), string(audit.ActionGatewayRecovered)}
+	// WebhookDispatcher intentionally delivers endpoints asynchronously; pin
+	// exactly-once transition delivery without imposing goroutine completion
+	// order on the receiver.
+	sort.Strings(actions)
+	sort.Strings(want)
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatalf("health transition actions = %v, want %v", actions, want)
 	}
 }
 
@@ -285,7 +545,7 @@ func TestWatchdogStatePersistenceAndRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil, nil)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, nil, nil)
 
 	restored := loadWatchdogState(tmpDir)
 	if restored != stateHealthy {

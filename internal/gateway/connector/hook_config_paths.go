@@ -61,13 +61,12 @@ func ownedHookCommandNeedles(opts SetupOpts, conn Connector) []string {
 //     absolute script path under <DataDir>/hooks/. Forward-slash paths contain
 //     no characters JSON/TOML/YAML escape, so the path appears verbatim.
 //
-//   - Windows: the config stores the native invocation
-//     (`"C:\...\defenseclaw-gateway.exe" hook --connector <name>`). The
-//     absolute exe path's backslashes and the surrounding quotes ARE escaped on
-//     serialization (`\"C:\\...\\..exe\"`), so the full command would never
-//     match the raw bytes. We therefore key on `hook --connector <name>` — the
-//     same distinctive marker isNativeHookCommand recognizes — which contains
-//     no escaped characters and survives verbatim across JSON/TOML/YAML.
+//   - Windows: most connectors store the native invocation
+//     (`"C:\...\defenseclaw-hook.exe" hook --connector <name>`). The absolute
+//     exe path's backslashes and surrounding quotes are escaped during config
+//     serialization, so their stable marker is `hook --connector <name>`.
+//     Cursor is the exception: its native transport requires the generated
+//     cursor-hook.ps1 adapter, and its decoded command is matched exactly.
 func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []string {
 	if owner, ok := conn.(HookConfigReferenceOwner); ok {
 		return uniqueNonEmptyStrings(owner.HookConfigReferenceNeedles(opts))
@@ -77,6 +76,10 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 		return nil
 	}
 	if goos == "windows" {
+		if conn.Name() == "cursor" {
+			unixCommand := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
+			return []string{hookInvocationCommandFor("windows", conn.Name(), unixCommand)}
+		}
 		return []string{nativeHookFlag + conn.Name()}
 	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")

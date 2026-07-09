@@ -26,6 +26,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -33,6 +36,7 @@ var (
 	cfg                          *config.Config
 	auditStore                   *audit.Store
 	auditLog                     *audit.Logger
+	otelProvider                 *telemetry.Provider // deprecated schema-v7 lifecycle seam
 	appVersion                   string
 	activeObservabilityV8Startup *observabilityV8Startup
 )
@@ -58,6 +62,40 @@ func SetBuildInfo(commit, date string) {
 	)
 }
 
+// rootPersistentPreRunE is also used by enterprise hook commands that need
+// the same authenticated v8 runtime context without executing the root command.
+func rootPersistentPreRunE(_ *cobra.Command, _ []string) error {
+	if err := daemon.RegisterCurrentProcess(); err != nil {
+		return err
+	}
+	activeObservabilityV8Startup = nil
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+	var err error
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	if err != nil {
+		return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
+	}
+	version.SetBinaryVersion(appVersion)
+	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
+		if err := safefile.ProtectDirectory(auditDir); err != nil {
+			return fmt.Errorf("failed to prepare audit store directory: %w", err)
+		}
+	}
+	auditStore, err = audit.NewStore(cfg.AuditDB)
+	if err != nil {
+		return fmt.Errorf("failed to open audit store: %w", err)
+	}
+	if err := auditStore.Init(); err != nil {
+		return fmt.Errorf("failed to init audit store: %w", err)
+	}
+	auditLog = audit.NewLogger(auditStore)
+	installCorrelator(auditStore, os.Stderr)
+	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+		loadDotEnvIntoOS(resolved)
+	}
+	return nil
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "defenseclaw-gateway",
 	Short: "DefenseClaw gateway sidecar daemon",
@@ -67,6 +105,12 @@ and exposes a local REST API for the Python CLI.
 
 Run without arguments to start the sidecar daemon.`,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		// Windows daemon children can explicitly break away from the launcher's
+		// Job Object. Register their strong process identity before any fallible
+		// initialization so cancellation cannot strand an unmanaged sidecar.
+		if err := daemon.RegisterCurrentProcess(); err != nil {
+			return err
+		}
 		// Cobra normally executes this process once, but tests and embedders can
 		// execute the command tree repeatedly. Never retain a previous source.
 		activeObservabilityV8Startup = nil
@@ -84,6 +128,11 @@ Run without arguments to start the sidecar daemon.`,
 		}
 		version.SetBinaryVersion(appVersion)
 
+		if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
+			if err := safefile.ProtectDirectory(auditDir); err != nil {
+				return fmt.Errorf("failed to prepare audit store directory: %w", err)
+			}
+		}
 		auditStore, err = audit.NewStore(cfg.AuditDB)
 		if err != nil {
 			return fmt.Errorf("failed to open audit store: %w", err)

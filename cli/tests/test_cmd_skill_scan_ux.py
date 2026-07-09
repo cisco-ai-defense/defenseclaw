@@ -320,6 +320,83 @@ class TestScanAllUX(_SkillScanUXBase):
         self.assertIn("blocked=0", result.output)
         self.assertIn("findings=1", result.output)
 
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch(
+        "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+        return_value={"skills": [{"name": "alpha"}]},
+    )
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_name_only_listing_falls_back_for_missing_path(
+        self,
+        mock_cls,
+        _mock_list,
+        _mock_info,
+    ) -> None:
+        root = self._make_skills_dir(["alpha"])
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        mock_cls.return_value.scan.side_effect = self._clean_result
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_cls.return_value.scan.assert_called_once_with(os.path.join(root, "alpha"))
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_complete_listing_remains_authoritative(
+        self,
+        mock_cls,
+        mock_list,
+        mock_info,
+    ) -> None:
+        root = self._make_skills_dir(["alpha", "filesystem-only"])
+        alpha = os.path.join(root, "alpha")
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        mock_list.return_value = {"skills": [{"name": "alpha", "baseDir": alpha}]}
+        mock_cls.return_value.scan.side_effect = self._clean_result
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_cls.return_value.scan.assert_called_once_with(alpha)
+        mock_info.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_filesystem_fallback_expands_codex_system_children(
+        self, mock_cls, _mock_list,
+    ) -> None:
+        root = self._make_skills_dir(["operator-skill"])
+        system_root = os.path.join(root, ".system")
+        child_paths = [
+            os.path.join(system_root, "imagegen"),
+            os.path.join(system_root, "skill-installer"),
+        ]
+        for path in child_paths:
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(f"# {os.path.basename(path)}\n")
+
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+
+        mock_scanner = MagicMock()
+        mock_scanner.scan.side_effect = lambda path: self._clean_result(path)
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "--all", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        scanned = [call.args[0] for call in mock_scanner.scan.call_args_list]
+        self.assertEqual(
+            scanned,
+            [os.path.join(root, "operator-skill"), *child_paths],
+        )
+        self.assertNotIn(system_root, scanned)
+        self.assertIn("Scanning 3 skills on codex", result.output)
+
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_all_handles_scanner_exception(self, mock_cls, _mock_list) -> None:
@@ -328,7 +405,7 @@ class TestScanAllUX(_SkillScanUXBase):
         self.app.cfg.skill_dirs = lambda connector=None: [root]
 
         def scan_impl(p):
-            if p.endswith("/alpha"):
+            if os.path.basename(p) == "alpha":
                 return self._clean_result(p)
             raise RuntimeError("boom")
 

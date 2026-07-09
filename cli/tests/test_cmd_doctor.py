@@ -24,6 +24,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from tests.environment import isolated_home_env
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
@@ -664,7 +666,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 )
             cfg = self._cfg(tmp, "openhands")
             cfg.claw.workspace_dir = workspace
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_openhands_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -732,13 +734,13 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             home = os.path.join(tmp, "home")
             os.makedirs(home, exist_ok=True)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.passed, 0, result.checks)
             self.assertEqual(result.failed, 1)
             detail = result.checks[0]["detail"]
-            self.assertIn(".gemini/config/hooks.json", detail)
+            self.assertIn(os.path.join(".gemini", "config", "hooks.json"), detail)
             # Sanity: should NOT point at the legacy
             # antigravity-cli/ path now that we've pivoted.
             self.assertNotIn("antigravity-cli", detail)
@@ -765,7 +767,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                     fh,
                 )
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.passed, 0, result.checks)
@@ -785,7 +787,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             with open(hook_path, "w", encoding="utf-8") as fh:
                 json.dump(self._antigravity_hooks_payload(script_path), fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -812,7 +814,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -839,7 +841,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -1522,7 +1524,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
             self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
             result = _DoctorResult()
 
-            cmd_doctor._check_codex_hooks(cfg, result)
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix")
 
         freshness = [c for c in result.checks if c["label"] == "Codex hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
@@ -1573,7 +1575,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 "expanduser",
                 side_effect=lambda p: p.replace("~", home, 1) if p.startswith("~") else p,
             ):
-                cmd_doctor._check_claudecode_hooks(cfg, result)
+                cmd_doctor._check_claudecode_hooks(cfg, result, platform_name="posix")
 
         freshness = [c for c in result.checks if c["label"] == "Claude Code hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
@@ -2094,6 +2096,23 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(body, "response exceeds 128-byte limit")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor._http_probe",
+        return_value=(200, "response exceeds 1048576-byte limit"),
+    )
+    def test_sidecar_health_surfaces_oversized_document_reason(self, _probe):
+        cfg = SimpleNamespace(
+            openshell=None,
+            gateway=SimpleNamespace(api_port=self.port),
+        )
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        row = next(c for c in result.checks if c["label"] == "Sidecar health JSON")
+        self.assertEqual(row["status"], "warn")
+        self.assertEqual(row["detail"], "response exceeds 1048576-byte limit")
 
 
 class GuardrailProxyMultiConnectorTests(unittest.TestCase):

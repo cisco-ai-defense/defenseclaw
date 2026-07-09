@@ -37,8 +37,8 @@ Schema-evolution contract:
   unknown schemas to force the operator into ``defenseclaw doctor
   migration-state --reset`` rather than letting us downgrade their
   state silently.
-* Atomic writes: every save goes through ``tempfile.NamedTemporaryFile``
-  + ``os.replace`` so a crash mid-write leaves the previous good copy.
+* Atomic writes: every save goes through the shared private-file writer,
+  which stages and flushes beside the target before ``os.replace``.
 * Mode 0o600: the file logs upgrade timestamps. Not strictly secret,
   but tightening permissions matches the rest of ``~/.defenseclaw/``
   and stops accidental world-readable installs.
@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
+import tempfile  # noqa: F401 - shared-writer patch seam for upgrade prefix tests
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -265,7 +265,6 @@ def save(data_dir: str, state: MigrationState) -> None:
     will just bootstrap again from ``from_version``, which usually
     re-applies idempotent migrations harmlessly.
     """
-    os.makedirs(data_dir, exist_ok=True)
     target = state_path(data_dir)
 
     payload = {
@@ -275,32 +274,22 @@ def save(data_dir: str, state: MigrationState) -> None:
         "applied_at": state.applied_at,
     }
 
-    # NamedTemporaryFile in delete=False mode so we control the rename
-    # explicitly. dir=data_dir keeps the rename on the same filesystem
-    # as the target — required for os.replace to be atomic.
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=f".migration_state.{upgrade_mutation_temp_suffix()}",
-        suffix=".tmp",
-        dir=data_dir,
+    from defenseclaw.file_permissions import (
+        atomic_write_text_secure,
+        make_private_directory,
     )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        # Tighten perms BEFORE the rename so the file appears at its
-        # final path with the intended mode (and never spends a
-        # microsecond at the default 0o600/0o644 from mkstemp).
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, target)
-    except OSError:
-        # Clean up the temp file if the rename never happened.
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
+
+    make_private_directory(data_dir)
+
+    def write_state(stream) -> None:
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+
+    atomic_write_text_secure(
+        target,
+        write_state,
+        prefix=f".migration_state.{upgrade_mutation_temp_suffix()}",
+    )
 
 
 def is_applied(state: MigrationState | None, version: str) -> bool:

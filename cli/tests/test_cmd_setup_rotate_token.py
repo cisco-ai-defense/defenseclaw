@@ -14,17 +14,19 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import click
 from click.testing import CliRunner
 from defenseclaw.audit_actions import ACTION_SETUP_GATEWAY
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+from tests.permissions import assert_owner_only_file
 
 
 class RotateTokenFileWriteTests(unittest.TestCase):
@@ -36,8 +38,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
             _rotate_token_atomic_write(dotenv, "deadbeef" * 8)
 
             self.assertTrue(os.path.exists(dotenv))
-            mode = stat.S_IMODE(os.stat(dotenv).st_mode)
-            self.assertEqual(mode, 0o600, f"expected 0o600, got {oct(mode)}")
+            assert_owner_only_file(dotenv)
 
             with open(dotenv) as fh:
                 body = fh.read()
@@ -220,6 +221,93 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             restart.assert_not_called()
             self.assertIn("canonical setup audit event was not recorded", result.output)
+
+    def test_inactive_openclaw_hint_is_ignored_for_codex_only_roster(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            with mock.patch.object(cmd_setup, "_restart_services") as restart:
+                result = CliRunner().invoke(
+                    cmd_setup.rotate_token_cmd,
+                    ["--yes", "--connector", "openclaw"],
+                    obj=app,
+                )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart.assert_called_once()
+        self.assertEqual(restart.call_args.kwargs["connector"], "codex")
+        self.assertEqual(restart.call_args.kwargs["connectors"], ["codex"])
+        self.assertIn("Ignoring inactive connector restart hint 'openclaw'", result.output)
+
+    def test_repeat_rotation_refreshes_each_multi_connector_roster_once(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["claude-code", "codex", "codex"])
+            with mock.patch.object(cmd_setup, "_restart_services") as restart:
+                results = [
+                    CliRunner().invoke(
+                        cmd_setup.rotate_token_cmd,
+                        ["--yes", "--connector", "openclaw"],
+                        obj=app,
+                    )
+                    for _ in range(2)
+                ]
+
+            with open(os.path.join(td, ".env")) as fh:
+                token_lines = [
+                    line
+                    for line in fh.read().splitlines()
+                    if line.startswith("DEFENSECLAW_GATEWAY_TOKEN=")
+                ]
+
+        self.assertTrue(all(result.exit_code == 0 for result in results))
+        self.assertEqual(restart.call_count, 2)
+        for call in restart.call_args_list:
+            self.assertEqual(call.kwargs["connector"], "claudecode")
+            self.assertEqual(call.kwargs["connectors"], ["claudecode", "codex"])
+        self.assertEqual(len(token_lines), 1)
+
+    def test_empty_authoritative_roster_never_uses_openclaw_hint(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, [])
+            with mock.patch.object(cmd_setup, "_restart_services") as restart:
+                result = CliRunner().invoke(
+                    cmd_setup.rotate_token_cmd,
+                    ["--yes", "--connector", "openclaw"],
+                    obj=app,
+                )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart.assert_not_called()
+        self.assertIn("active connector roster: none", result.output)
+        self.assertIn("no active connector configured", result.output)
+
+    def test_restart_failure_propagates_after_token_write(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            with mock.patch.object(
+                cmd_setup,
+                "_restart_services",
+                side_effect=click.ClickException("simulated restart failure"),
+            ) as restart:
+                result = CliRunner().invoke(
+                    cmd_setup.rotate_token_cmd,
+                    ["--yes"],
+                    obj=app,
+                )
+            token_written = os.path.exists(os.path.join(td, ".env"))
+
+        self.assertNotEqual(result.exit_code, 0)
+        restart.assert_called_once()
+        self.assertTrue(token_written)
+        self.assertIn("simulated restart failure", result.output)
+        self.assertNotIn("Hook scripts refreshed", result.output)
 
 
 if __name__ == "__main__":

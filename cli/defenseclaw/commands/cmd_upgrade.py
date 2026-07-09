@@ -57,6 +57,10 @@ import requests
 
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.platform_support import (
+    WINDOWS_CERTIFIED_ARCHITECTURES,
+    WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
+)
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
 from defenseclaw.upgrade_receipt import (
     begin_upgrade_receipt,
@@ -128,6 +132,22 @@ _COSIGN_BOOTSTRAP_SHA256 = {
     ("linux", "arm64"): "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917",
 }
 _TARGET_CONFIG_VERSION = 8
+_TUI_SMOKE_CODE = """
+import asyncio
+import tempfile
+
+from defenseclaw.tui.app import DefenseClawTUI
+
+
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = DefenseClawTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+
+asyncio.run(smoke())
+"""
 _MAX_WHEEL_MIGRATIONS_BYTES = 8 * 1024 * 1024
 _MAX_WHEEL_METADATA_BYTES = 256 * 1024
 _MAX_WHEEL_MUTATOR_WRAPPER_BYTES = 256 * 1024
@@ -1362,6 +1382,17 @@ def _detect_platform() -> tuple[str, str]:
 
     if system not in ("darwin", "linux", "windows"):
         ux.err(f"Unsupported OS: {system}", indent="  ")
+        raise SystemExit(1)
+
+    if system == "windows" and arch in WINDOWS_NOT_CERTIFIED_ARCHITECTURES:
+        ux.err(
+            f"Windows {arch.upper()} is not certified for this release; "
+            "use certified Windows x64 (amd64).",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    if system == "windows" and arch not in WINDOWS_CERTIFIED_ARCHITECTURES:
+        ux.err(f"Unsupported Windows architecture: {arch}", indent="  ")
         raise SystemExit(1)
 
     return system, arch
@@ -3812,6 +3843,40 @@ def _managed_venv_path() -> str:
     return os.path.join(_upgrade_recovery_home(), ".venv")
 
 
+def _run_managed_validation(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    failure_message: str,
+) -> None:
+    """Run one bounded post-install check and preserve useful diagnostics."""
+
+    try:
+        _run_phase_two_mutator(
+            argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        def output_text(value: str | bytes | None) -> str:
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return value or ""
+
+        stdout = getattr(exc, "stdout", None)
+        stderr = getattr(exc, "stderr", None)
+        output = "\n".join((output_text(stdout), output_text(stderr)))
+        detail = " | ".join(
+            line.strip() for line in output.splitlines()[:5] if line.strip()
+        )
+        suffix = f": {detail[:1000]}" if detail else ""
+        ux.err(f"{failure_message}{suffix}", indent="  ")
+        raise SystemExit(1) from exc
+
+
 def _install_wheel(
     whl_path: str,
     os_name: str | None = None,
@@ -3837,12 +3902,14 @@ def _install_wheel(
     scripts_subdir = "Scripts" if os_name == "windows" else "bin"
     python_exe = "python.exe" if os_name == "windows" else "python"
     venv_python = os.path.join(venv, scripts_subdir, python_exe)
+    managed_env = _sanitized_python_child_environment()
 
     if not os.path.isfile(venv_python):
         click.echo(f"  {ux.dim('→')} Creating venv ...")
         _run_phase_two_mutator(
             [uv, "--no-config", "venv", venv, "--python", "3.12"],
             check=True,
+            env=managed_env,
         )
 
     install_args = [
@@ -3860,10 +3927,23 @@ def _install_wheel(
         # dependency-stable in both directions; this phase must not contact an
         # index or rewrite shared packages.
         install_args.extend(("--offline", "--no-deps", "--reinstall"))
+    else:
+        install_args.extend(("--reinstall", "--no-cache", "--strict"))
     install_args.append(whl_path)
     _run_phase_two_mutator(
         install_args,
         check=True,
+        env=managed_env,
+    )
+    _run_managed_validation(
+        [uv, "--no-config", "pip", "check", "--python", venv_python],
+        env=managed_env,
+        failure_message="Managed CLI dependency validation failed",
+    )
+    _run_managed_validation(
+        [venv_python, "-I", "-c", _TUI_SMOKE_CODE],
+        env=managed_env,
+        failure_message="Managed TUI launch validation failed",
     )
 
     install_dir = os.path.expanduser("~/.local/bin")
@@ -3871,12 +3951,7 @@ def _install_wheel(
 
     if os_name == "windows":
         cli_exe = os.path.join(venv, "Scripts", "defenseclaw.exe")
-        shim = os.path.join(install_dir, "defenseclaw.cmd")
-        if os.path.isfile(cli_exe):
-            # PATHEXT includes .CMD, so `defenseclaw` and
-            # shutil.which("defenseclaw") both resolve to this shim.
-            with open(shim, "w", encoding="ascii", newline="\r\n") as f:
-                f.write(f'@echo off\r\n"{cli_exe}" %*\r\n')
+        _publish_windows_cli_launcher(cli_exe, install_dir)
     else:
         symlink = os.path.join(install_dir, "defenseclaw")
         venv_bin = os.path.join(venv, "bin", "defenseclaw")
@@ -3885,6 +3960,60 @@ def _install_wheel(
                 os.remove(symlink)
             os.symlink(venv_bin, symlink)
     ux.ok("Python CLI installed")
+
+
+def _publish_windows_cli_launcher(cli_exe: str, install_dir: str) -> None:
+    """Atomically publish the CMD shim after removing an exact EXE shadow."""
+
+    if not os.path.isfile(cli_exe):
+        ux.err(f"Managed CLI executable not found: {cli_exe}", indent="  ")
+        raise SystemExit(1)
+
+    shim = os.path.join(install_dir, "defenseclaw.cmd")
+    shadow = os.path.join(install_dir, "defenseclaw.exe")
+    fd, temporary_shim = tempfile.mkstemp(
+        prefix=".defenseclaw.cmd.",
+        suffix=".tmp",
+        dir=install_dir,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="") as stream:
+            fd = -1
+            stream.write(f'@echo off\r\n"{cli_exe}" %*\r\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        if os.path.lexists(shadow):
+            try:
+                # unlink removes only this exact directory entry; it does not
+                # follow or execute a potentially untrusted launcher.
+                os.unlink(shadow)
+            except OSError as exc:
+                ux.err(
+                    f"Cannot remove shadowing CLI launcher '{shadow}': {exc}",
+                    indent="  ",
+                )
+                raise SystemExit(1) from exc
+            if os.path.lexists(shadow):
+                ux.err(
+                    f"Cannot remove shadowing CLI launcher '{shadow}': entry still exists",
+                    indent="  ",
+                )
+                raise SystemExit(1)
+
+        os.replace(temporary_shim, shim)
+        temporary_shim = ""
+    except UnicodeEncodeError as exc:
+        ux.err(
+            f"Cannot publish Windows CLI launcher for non-ASCII path '{cli_exe}'",
+            indent="  ",
+        )
+        raise SystemExit(1) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temporary_shim and os.path.lexists(temporary_shim):
+            os.unlink(temporary_shim)
 
 
 def _run_installed_migrations(

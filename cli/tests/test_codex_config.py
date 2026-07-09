@@ -31,12 +31,15 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
 
 from tests.connector_fixtures import make_codex_config
+from tests.environment import isolated_home_env
 
 
 class _IsolatedHomeAndCwd:
@@ -59,17 +62,14 @@ class _IsolatedHomeAndCwd:
         self._tmp_cwd = tempfile.TemporaryDirectory(prefix="dc-codex-cwd-")
         self.home = self._tmp_home.name
         self.cwd = self._tmp_cwd.name
-        self._prev_home = os.environ.get("HOME")
-        os.environ["HOME"] = self.home
+        self._env = patch.dict(os.environ, isolated_home_env(self.home), clear=False)
+        self._env.start()
         self._prev_cwd = os.getcwd()
         os.chdir(self.cwd)
         return self
 
     def __exit__(self, *exc):
-        if self._prev_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = self._prev_home
+        self._env.stop()
         if self._prev_cwd is not None:
             os.chdir(self._prev_cwd)
         if self._tmp_home is not None:
@@ -82,7 +82,7 @@ class MakeCodexConfigShapeTests(unittest.TestCase):
     def test_default_writes_model_provider(self):
         with _IsolatedHomeAndCwd() as iso:
             path = make_codex_config(iso.home)
-            self.assertTrue(path.endswith(".codex/config.toml"))
+            self.assertEqual(Path(path).parts[-2:], (".codex", "config.toml"))
             with open(path) as fh:
                 body = fh.read()
             self.assertIn('model_provider = "openai"', body)

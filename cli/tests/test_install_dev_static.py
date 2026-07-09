@@ -18,7 +18,7 @@ MAKEFILE = ROOT / "Makefile"
 
 
 def test_dev_install_syncs_openclaw_embed_before_go_build() -> None:
-    text = INSTALL_DEV.read_text()
+    text = INSTALL_DEV.read_text(encoding="utf-8")
     sync = 'make -C "${REPO_ROOT}" sync-openclaw-extension'
     build = 'GOOS="${OS}" GOARCH="${ARCH_NORMALIZED}" go build'
     assert sync in text

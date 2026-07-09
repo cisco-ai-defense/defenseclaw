@@ -290,7 +290,14 @@ func (c *hookOnlyConnector) Description() string                    { return c.d
 func (c *hookOnlyConnector) HookAPIPath() string                    { return c.apiPath }
 func (c *hookOnlyConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *hookOnlyConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
-func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string     { return []string{c.scriptName} }
+func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string {
+	// Cursor's PowerShell adapter is required only for its native Windows
+	// transport. Unix and macOS continue to use the existing shell hook.
+	if c.name == "cursor" && runtime.GOOS == "windows" {
+		return []string{c.scriptName, "cursor-hook.ps1"}
+	}
+	return []string{c.scriptName}
+}
 func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return c.Capabilities(opts).Hooks
 }
@@ -782,10 +789,11 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 }
 
 // hookCommand returns the command an agent runs for this connector's hook. On
-// Unix it is the bundled .sh path; on Windows it is the native DefenseClaw
-// `hook` subcommand invocation. The same value is used at setup, teardown, and
-// VerifyClean so the JSON/YAML hook removers (which match on the exact command
-// string) recognize the entries DefenseClaw inserted.
+// Unix it is the bundled .sh path. Most Windows connectors use the native
+// DefenseClaw `hook` subcommand; Cursor uses a PowerShell adapter because its
+// object pipeline does not preserve native stdin JSON. The same value is used
+// at setup, teardown, and VerifyClean so the JSON/YAML hook removers (which
+// match on the exact command string) recognize the entries DefenseClaw added.
 func (c *hookOnlyConnector) hookCommand(opts SetupOpts) string {
 	return hookInvocationCommand(c.name, filepath.Join(opts.DataDir, "hooks", c.scriptName))
 }
@@ -974,7 +982,12 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	case "hermes":
 		err = patchHermesHooks(path, hookScript)
 	case "cursor":
-		err = patchCursorHooks(path, hookScript, c.effectiveFailClosed(opts))
+		err = patchCursorHooks(
+			path,
+			hookScript,
+			filepath.Join(opts.DataDir, "hooks", c.scriptName),
+			c.effectiveFailClosed(opts),
+		)
 	case "windsurf":
 		err = patchWindsurfHooks(path, hookScript)
 	case "geminicli":
@@ -1383,7 +1396,7 @@ func removeHermesHooks(path, hookScript string) error {
 	return atomicWriteFile(path, data, 0o600)
 }
 
-func patchCursorHooks(path, hookScript string, failClosed bool) error {
+func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -1419,9 +1432,37 @@ func patchCursorHooks(path, hookScript string, failClosed bool) error {
 			"timeout":    30000,
 			"failClosed": failClosed,
 		}
-		hooks[event] = appendUniqueFlatHook(hooks[event], hookScript, entry)
+		// Replace instead of merely appending. This both migrates the previous
+		// direct-native Windows command to the PowerShell adapter and refreshes
+		// failClosed when the connector moves between observe and action mode.
+		// Entries not owned by DefenseClaw are preserved in their original order.
+		hooks[event] = replaceManagedCursorHooks(hooks[event], hookScript, legacyShellScript, entry)
 	}
 	return writeJSONObject(path, cfg)
+}
+
+func replaceManagedCursorHooks(raw interface{}, hookScript, legacyShellScript string, entry map[string]interface{}) []interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]interface{}, 0, len(list)+1)
+	for _, item := range list {
+		if managedHookCommandEntry(item, hookScript) ||
+			managedHookCommandEntry(item, legacyShellScript) ||
+			managedCursorNativeHookEntry(item) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return append(out, entry)
+}
+
+func managedCursorNativeHookEntry(raw interface{}) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	command, _ := entry["command"].(string)
+	command = strings.TrimSpace(command)
+	return strings.HasSuffix(command, nativeHookFlag+"cursor") && isNativeHookCommand(command)
 }
 
 func patchWindsurfHooks(path, hookScript string) error {
@@ -2015,6 +2056,12 @@ func shellWord(s string) string {
 	// single-quoting would corrupt the executable path and break invocation,
 	// so pass these through unchanged. Unix .sh paths still get quoted.
 	if isNativeHookCommand(s) {
+		return s
+	}
+	// Cursor's Windows adapter is already a complete PowerShell invocation.
+	// Wrapping it in shell single quotes would turn the call operator and path
+	// into inert text when Cursor inserts the command after `$input |`.
+	if strings.HasPrefix(s, "& '") && strings.HasSuffix(s, "'") {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
