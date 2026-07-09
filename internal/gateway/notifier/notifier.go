@@ -348,38 +348,17 @@ func (d *Dispatcher) OnServiceState(ev ServiceStateEvent) {
 
 // dispatchToastOnly runs the OS-toast half of dispatch (dedup +
 // rate-limit + sender fan-out) without invoking notifyObservers.
-// Used by OnServiceState so the observer lane can be fired
+// Used by OnServiceState so the observer lane fires
 // unconditionally before the toast lane's master switch runs.
+// The dedup + rate-limit protocol is delegated to acquireToastSlot
+// so it stays in lockstep with dispatch's OS-toast path.
 func (d *Dispatcher) dispatchToastOnly(cat Category, src Source, target, reason string, n notify.Notification) {
 	if d == nil || d.sender == nil {
 		return
 	}
-	now := d.now()
-	key := dedupKey(cat, src, target, reason)
-	dedupWindow := d.cfg.EffectiveDedupWindow()
-	maxPerMin := d.cfg.EffectiveMaxPerMinute()
-
-	d.mu.Lock()
-	d.sweepLocked(now, dedupWindow)
-	if last, ok := d.seen[key]; ok && now.Sub(last) < dedupWindow {
-		d.mu.Unlock()
-		return
+	if d.acquireToastSlot(cat, src, target, reason) {
+		go d.send(n)
 	}
-	d.seen[key] = now
-
-	d.advanceBucketLocked(now, maxPerMin)
-	if d.bucketRemaining <= 0 {
-		d.suppressedInWin++
-		if !d.rollupAnnounced && d.suppressedInWin == 1 {
-			d.rollupAnnounced = true
-		}
-		d.mu.Unlock()
-		return
-	}
-	d.bucketRemaining--
-	d.mu.Unlock()
-
-	go d.send(n)
 }
 
 // AddObserver registers a non-OS sink for every observation that
@@ -445,26 +424,62 @@ func (d *Dispatcher) allowSource(s Source) bool {
 }
 
 // dispatch is the choke point that applies dedup + rate limit and
-// hands off to the goroutine sender. All counter / map mutation
-// happens under d.mu; the actual sender.Run is dispatched outside
-// the lock so a slow osascript invocation cannot serialize block
-// requests.
+// hands off to the goroutine sender. The OS toast lane runs
+// acquireToastSlot for the standard "dedup + rate-limit" protocol;
+// observers see events unconditionally after the toast lane
+// finishes so downstream consumers (e.g. the local IPC bridge)
+// receive every filtered event without inheriting dispatch's
+// slow-osascript cost.
 func (d *Dispatcher) dispatch(cat Category, src Source, target, reason string, n notify.Notification, event any) {
 	if d == nil || d.sender == nil {
 		return
+	}
+	if d.acquireToastSlot(cat, src, target, reason) {
+		go d.send(n)
+	}
+
+	// Fan out to non-OS observers (e.g. the local IPC bridge).
+	// Observers see events after they pass the same filter chain as
+	// the OS toast, so downstream consumers inherit dedup /
+	// rate-limit for free.
+	d.notifyObservers(Observation{
+		Category:     cat,
+		Source:       src,
+		Notification: n,
+		Event:        event,
+	})
+}
+
+// acquireToastSlot runs the shared "dedup + rate-limit" protocol
+// under d.mu and reports whether the caller may hand the current
+// notification to the OS sender. Called by both dispatch (the
+// block/approval lanes) and dispatchToastOnly (the service-state
+// lane). Extracted so any future change to the bucket algorithm
+// happens in one place.
+//
+// Returns true iff:
+//   - the (cat, src, target, reason) key has not been sent within
+//     the effective dedup window, AND
+//   - the current minute's token bucket still has capacity.
+//
+// A false return may still have side effects (rollup announcement,
+// suppressedInWin bump); see advanceBucketLocked for the rollup
+// contract.
+func (d *Dispatcher) acquireToastSlot(cat Category, src Source, target, reason string) bool {
+	if d == nil {
+		return false
 	}
 	now := d.now()
 	key := dedupKey(cat, src, target, reason)
 	dedupWindow := d.cfg.EffectiveDedupWindow()
 	maxPerMin := d.cfg.EffectiveMaxPerMinute()
 
-	var toSend []notify.Notification
-
 	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	d.sweepLocked(now, dedupWindow)
 	if last, ok := d.seen[key]; ok && now.Sub(last) < dedupWindow {
-		d.mu.Unlock()
-		return
+		return false
 	}
 	d.seen[key] = now
 
@@ -474,32 +489,16 @@ func (d *Dispatcher) dispatch(cat Category, src Source, target, reason string, n
 		// Allow exactly one rollup per minute window so operators
 		// see "the dispatcher is throttling" without flooding.
 		if !d.rollupAnnounced && d.suppressedInWin == 1 {
-			// Reserve a slot for the rollup at window roll. We do not
-			// emit it now — a real notification might still be more
-			// useful than a count — but the announce flag prevents
-			// double rollups inside the same minute.
+			// Reserve a slot for the rollup at window roll. We do
+			// not emit it now — a real notification might still be
+			// more useful than a count — but the announce flag
+			// prevents double rollups inside the same minute.
 			d.rollupAnnounced = true
 		}
-		d.mu.Unlock()
-		return
+		return false
 	}
 	d.bucketRemaining--
-	toSend = append(toSend, n)
-	d.mu.Unlock()
-
-	for _, item := range toSend {
-		go d.send(item)
-	}
-
-	// Fan out to non-OS observers (e.g. the AVC IPC bridge). Observers
-	// see events after they pass the same filter chain as the OS toast,
-	// so downstream consumers inherit dedup / rate-limit for free.
-	d.notifyObservers(Observation{
-		Category:     cat,
-		Source:       src,
-		Notification: n,
-		Event:        event,
-	})
+	return true
 }
 
 // serviceStateNotification renders a gateway-state transition toast.
