@@ -513,17 +513,23 @@ synchronizer. Credentials are environment variables and must not be stored in
 this block.
 
 ```yaml
+guardrail:
+  regex_source: agent_control  # local | agent_control | hybrid
+
 agent_control:
   enabled: true
+  deployment: self_hosted      # cisco_cloud | self_hosted
+  server_url: https://agent-control.example.internal
+  installation_id: defenseclaw-laptop-01
+  api_key_env: AGENT_CONTROL_API_KEY
   agent_name: defenseclaw-policy-sync
   target_type: defenseclaw.installation
-  target_id: 7a7f412e-d0cc-42de-a35d-f7ff3caecce8
   refresh_seconds: 60
   cache_poll_seconds: 2
   init_retry_max_seconds: 300
   managed_dir: ""
   opa:
-    enabled: true
+    enabled: false
     precedence: stricter
     activation: reload
   rule_pack:
@@ -534,6 +540,12 @@ agent_control:
     enabled: true
     include_content: true
 ```
+
+`guardrail.regex_source` is the explicit regex authority. `local` uses only
+bundled/operator rules and disables managed rule sync; `agent_control` excludes
+all local regex contributions; `hybrid` adds managed rules after local rules.
+All modes retain local judges, suppressions, sensitive tools, HILT, connector
+topology, and failure settings.
 
 `stricter` keeps whichever local/remote threshold activates earlier and the
 stricter Cisco trust level. `remote` uses the remote threshold/trust values

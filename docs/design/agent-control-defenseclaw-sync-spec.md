@@ -234,21 +234,23 @@ Use this target pair:
 
 ```text
 target_type = defenseclaw.installation
-target_id   = <persisted UUID or provisioned immutable ID>
+target_id   = <configured DefenseClaw installation_id>
 ```
 
-The setup command creates the UUID once or accepts an externally provisioned
-value. It is persisted with mode `0600`, is never derived only from hostname,
-and is not regenerated during normal startup or upgrade. Resetting identity
-is an explicit operator action.
+The setup command defaults `installation_id` to a readable
+`defenseclaw-<hostname>` value and accepts an externally provisioned inventory
+or MDM identifier. It persists the value in `config.yaml` and passes it to the
+Agent Control wire contract as `target_id`; it is not regenerated during
+normal startup. Resetting identity is an explicit operator action.
 
 The target values are limited to 255 characters to match Agent Control's
 target contract.
 
 ### 6.3 Credentials
 
-- Read `AGENT_CONTROL_URL`, `AGENT_CONTROL_API_KEY`, and the optional standard
-  API-key-header environment variable through the SDK.
+- Read `agent_control.server_url` from configuration and resolve the secret
+  named by `agent_control.api_key_env` through DefenseClaw's credential store.
+- Pass the URL and resolved key explicitly to every SDK `init()` call.
 - Use a regular runtime credential, never an Agent Control administrator
   credential.
 - Require certificate verification for non-loopback URLs.
@@ -683,8 +685,10 @@ The synchronizer calls:
 ```python
 agent_control.init(
     agent_name="defenseclaw-policy-sync",
+    server_url=server_url,
+    api_key=resolved_api_key,
     target_type="defenseclaw.installation",
-    target_id=target_id,
+    target_id=installation_id,
     policy_refresh_interval_seconds=refresh_seconds,
 )
 ```
@@ -758,18 +762,24 @@ runtime readback confirms its digest.
 Add a typed configuration block:
 
 ```yaml
+guardrail:
+  regex_source: local  # local | agent_control | hybrid
+
 agent_control:
   enabled: false
+  deployment: cisco_cloud  # cisco_cloud | self_hosted
+  server_url: ""
+  installation_id: ""
+  api_key_env: AGENT_CONTROL_API_KEY
   agent_name: defenseclaw-policy-sync
   target_type: defenseclaw.installation
-  target_id: ""
   refresh_seconds: 60
   cache_poll_seconds: 2
   init_retry_max_seconds: 300
   managed_dir: ""  # default: <data_dir>/agent-control
 
   opa:
-    enabled: true
+    enabled: false
     precedence: stricter  # stricter | remote
     activation: reload    # reload | manual
 
@@ -785,7 +795,11 @@ agent_control:
 
 Validation rejects:
 
-- an enabled integration without a stable target ID;
+- an enabled integration without a stable installation ID, absolute service
+  URL, or valid API-key environment-variable name;
+- non-loopback plain-HTTP Agent Control URLs;
+- a managed/hybrid regex source without Agent Control and rule synchronization
+  enabled;
 - partial target pairs;
 - invalid or unreasonably small intervals;
 - unsupported precedence or activation values;
@@ -811,7 +825,7 @@ defenseclaw agent-control validate <path>
 `setup`:
 
 - checks Python and optional dependency compatibility;
-- creates or imports the stable target ID;
+- creates or imports the stable installation ID;
 - creates managed directories and the active supplemental file;
 - adds the fixed rule overlay path only when phase 2 is enabled;
 - validates Agent Control connectivity and authentication;
@@ -910,7 +924,7 @@ the Agent Control-managed overlay and restore local baseline behavior.
 
 - Use non-admin Agent Control credentials.
 - Keep gateway activation loopback-bound and token-authenticated.
-- Hash the target ID in persisted status and telemetry.
+- Hash the installation/target ID in persisted status and telemetry.
 - Redact authorization headers, API keys, raw target IDs, full policies, and
   regex content from exceptions and logs.
 - Send control identity, deny decision, correlation IDs, matching rule IDs,
@@ -1219,10 +1233,13 @@ OPA phase 1 is complete when:
 
 Rule-pack phase 2 is complete only when:
 
-1. The Agent Control rules are additive to every connector's local base pack.
+1. `local`, `agent_control`, and `hybrid` select the regex authority explicitly;
+   managed mode contains no bundled/local regex contribution, while hybrid is
+   additive for every connector.
 2. Managed rules use strict shared native validation.
-3. Local suppressions, judge prompts, sensitive tools, local patterns, and
-   base rule categories remain intact.
+3. Local suppressions, judge prompts, sensitive tools, HILT, and connector
+   settings remain intact in every mode; local patterns and base rule
+   categories are intentionally excluded only in `agent_control` mode.
 4. Restart activation, readback, rollback, and pending-restart states are
    transactional and tested.
 

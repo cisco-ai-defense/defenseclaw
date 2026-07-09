@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -304,7 +305,15 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--api-key")
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("AGENT_CONTROL_ADMIN_API_KEY")
+        or os.environ.get("AGENT_CONTROL_API_KEY"),
+        help=(
+            "Administrator API key. Prefer AGENT_CONTROL_ADMIN_API_KEY in the "
+            "environment so the secret is not exposed in process arguments."
+        ),
+    )
     parser.add_argument("--api-key-header", default="X-API-Key")
     parser.add_argument("--target-type", default=DEFAULT_TARGET_TYPE)
     parser.add_argument("--target-id", default=DEFAULT_TARGET_ID)

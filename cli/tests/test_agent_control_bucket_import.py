@@ -78,6 +78,15 @@ def test_api_rejects_insecure_non_loopback_server_urls() -> None:
     bucket_import.AgentControlAPI("https://agent-control.example.test", "secret", "X-API-Key")
 
 
+def test_parse_args_reads_admin_key_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_CONTROL_ADMIN_API_KEY", "admin-secret")
+    monkeypatch.setenv("AGENT_CONTROL_API_KEY", "runtime-secret")
+
+    args = bucket_import.parse_args([])
+
+    assert args.api_key == "admin-secret"
+
+
 def test_find_control_follows_cursor_pagination() -> None:
     api = bucket_import.AgentControlAPI("https://agent-control.example.test", None, "X-API-Key")
     paths: list[str] = []
