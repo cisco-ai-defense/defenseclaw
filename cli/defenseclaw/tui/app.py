@@ -303,6 +303,19 @@ class _SignalRefreshSnapshot:
     silent_bypass: int
 
 
+@dataclass(frozen=True)
+class _OverviewDiskRefreshSnapshot:
+    """Worker-loaded Overview disk data used after passive health polls."""
+
+    source_token: tuple[str, str]
+    alert_events: tuple[Any, ...]
+    scan_blocks: tuple[Any, ...]
+    egress_events: tuple[Any, ...]
+    enforcement: EnforcementCounts
+    doctor: DoctorCache | None
+    silent_bypass: int
+
+
 class _BodyStatic(Static):
     """The shared ``#body`` Static, made mouse-aware for the connector chip.
 
@@ -943,6 +956,8 @@ class DefenseClawTUI(App[None]):
         self._applying_panel_snapshot = False
         self._signal_refresh_running = False
         self._signal_refresh_pending = False
+        self._overview_disk_refresh_running = False
+        self._overview_disk_refresh_pending = False
         # Cosmetic state writes are atomic but can still be slow on Windows
         # when endpoint protection scans the replacement file. Keep in-memory
         # unread/active-panel state synchronous, then debounce only the disk
@@ -6058,6 +6073,15 @@ class DefenseClawTUI(App[None]):
         self._queue_deferred_panel_render(panel, generation)
         return generation
 
+    def _invalidate_panel_render_generation(self, panel: str) -> None:
+        """Make any in-flight snapshot for *panel* stale after live input."""
+
+        if getattr(self, "_app_shutting_down", False):
+            return
+        self._panel_render_generation += 1
+        self._panel_render_queued.pop(panel, None)
+        self._panel_render_pending.pop(panel, None)
+
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
         """Resolve a click on the ``#body`` Static to a connector chip action.
 
@@ -8751,6 +8775,8 @@ class DefenseClawTUI(App[None]):
     def _apply_alert_action(self, action: AlertPanelAction) -> bool:
         if not action.handled:
             return False
+        if self.active_panel == "alerts":
+            self._invalidate_panel_render_generation("alerts")
         if action.copy_text:
             # The alerts panel signals "copy this to the clipboard" by
             # populating ``copy_text``. Without this branch the hint
@@ -10775,6 +10801,105 @@ class DefenseClawTUI(App[None]):
         if self.active_panel in {"alerts", "audit", "logs", "overview"} and not self.help_open:
             self._schedule_active_panel_refresh("signal-data")
 
+    def _schedule_overview_disk_refresh(self) -> None:
+        """Refresh Overview's disk-backed counts without blocking input."""
+
+        if getattr(self, "_app_shutting_down", False):
+            return
+        if not self.is_running:
+            self._refresh_overview_disk_models()
+            return
+        if self._overview_disk_refresh_running:
+            self._overview_disk_refresh_pending = True
+            return
+        self._overview_disk_refresh_running = True
+        detached = self._detached_render_context("overview")
+        source = self._worker_audit_store_source()
+        try:
+            worker = self.run_worker(
+                self._run_overview_disk_refresh(detached, source),
+                name="overview-disk-refresh",
+                group="overview-disk-refresh",
+                exclusive=False,
+                thread=False,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 - teardown may race the timer.
+            self._overview_disk_refresh_running = False
+            return
+        self._panel_render_workers["__overview_disk__"] = worker
+
+    async def _run_overview_disk_refresh(
+        self,
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> None:
+        try:
+            snapshot = await asyncio.to_thread(self._build_overview_disk_refresh_snapshot, detached, source)
+            self._apply_overview_disk_refresh_snapshot(snapshot)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - cached Overview data remains visible.
+            if not getattr(self, "_app_shutting_down", False):
+                self._set_status(f"Overview refresh deferred after transient error: {exc}")
+        finally:
+            self._overview_disk_refresh_running = False
+            self._panel_render_workers.pop("__overview_disk__", None)
+            if self._overview_disk_refresh_pending and not getattr(self, "_app_shutting_down", False):
+                self._overview_disk_refresh_pending = False
+                self.call_later(self._schedule_overview_disk_refresh)
+
+    def _build_overview_disk_refresh_snapshot(
+        self,
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> _OverviewDiskRefreshSnapshot:
+        worker_store = self._attach_worker_audit_store(detached, source)
+        try:
+            detached._refresh_overview_disk_models()
+            return _OverviewDiskRefreshSnapshot(
+                source_token=self._worker_store_source_token(source),
+                alert_events=tuple(detached.alerts_model.audit_events),
+                scan_blocks=tuple(detached.alerts_model.scan_blocks),
+                egress_events=tuple(detached.alerts_model.egress_events),
+                enforcement=detached.overview_model.enforcement,
+                doctor=detached.overview_model.doctor,
+                silent_bypass=detached.overview_model.silent_bypass,
+            )
+        finally:
+            if worker_store is not None:
+                try:
+                    worker_store.close()
+                except Exception:  # noqa: BLE001 - reader teardown is best-effort.
+                    pass
+
+    def _apply_overview_disk_refresh_snapshot(self, snapshot: _OverviewDiskRefreshSnapshot) -> None:
+        """Install refreshed Overview disk data on Textual's UI thread."""
+
+        if getattr(self, "_app_shutting_down", False):
+            return
+        if snapshot.source_token != self._worker_store_source_token(self._worker_audit_store_source()):
+            return
+        alerts = self.alerts_model
+        if (
+            tuple(alerts.audit_events) != snapshot.alert_events
+            or tuple(alerts.scan_blocks) != snapshot.scan_blocks
+            or tuple(alerts.egress_events) != snapshot.egress_events
+        ):
+            alerts.audit_events = list(snapshot.alert_events)
+            alerts.scan_blocks = list(snapshot.scan_blocks)
+            alerts.egress_events = list(snapshot.egress_events)
+            alerts._invalidate_row_caches()
+            alerts.apply_filter()
+
+        self.overview_model.set_enforcement_counts(snapshot.enforcement)
+        self.overview_model.set_doctor_cache(snapshot.doctor)
+        self.overview_model.set_silent_bypass_count(snapshot.silent_bypass)
+        self._sync_setup_readiness()
+        self._update_tab_labels()
+        if self.active_panel == "overview" and not self.help_open:
+            self._schedule_overview_sampled_refresh(allow_scrolled=True)
+
     def _poll_overview_audit_stats(self) -> None:
         """Invalidate/repaint Overview when persisted hook totals change."""
 
@@ -11004,7 +11129,7 @@ class DefenseClawTUI(App[None]):
         # preserving live counts without performing a synchronous signature
         # pass here on the event loop.
         if self.active_panel == "overview" and not self.help_open:
-            self._refresh_overview_disk_models()
+            self._schedule_overview_disk_refresh()
             self._render_overview_scope_indicator()
             self._schedule_overview_sampled_refresh(
                 allow_scrolled=True,
