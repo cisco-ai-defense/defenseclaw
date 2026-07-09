@@ -21,6 +21,10 @@ BASH_INSTALL_LINES = (
     'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',
     'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash',
 )
+UPGRADE_SCRIPT_LINES = (
+    f"UPGRADE_SCRIPT_VERSION={CURRENT_RELEASE}",
+    'UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"',
+)
 
 DOC_INSTALL_COMMANDS = {
     "README.md": BASH_INSTALL_LINES,
@@ -64,6 +68,13 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1" not in text
         for expected in expected_lines:
             assert expected in text, f"{rel} is missing install snippet line: {expected}"
+
+
+def test_install_docs_do_not_pipe_main_upgrader() -> None:
+    text = (ROOT / "docs/INSTALL.md").read_text()
+    assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh" not in text
+    for expected in UPGRADE_SCRIPT_LINES:
+        assert expected in text
 
 
 def test_installer_help_does_not_pipe_main_installer() -> None:
