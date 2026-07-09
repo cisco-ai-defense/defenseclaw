@@ -129,14 +129,13 @@ The important qualifier is **permanently**. A standard user—or an AI agent exe
 
 ## What moves to system scope
 
-| Surface | Linux path | macOS path | Owner |
-| --- | --- | --- | --- |
-| Binaries | `/opt/defenseclaw/bin` | `/opt/cisco/secureclient/defenseclaw/bin` | root/admin |
-| Config | `/etc/defenseclaw/config.yaml` | `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` | root/admin |
-| Runtime state | `/var/lib/defenseclaw` | `/opt/cisco/secureclient/defenseclaw/runtime` | root |
-| Logs | `/var/log/defenseclaw` | `/Library/Logs/Cisco/SecureClient/DefenseClaw` | root |
-| Linux service | `/etc/systemd/system/defenseclaw-gateway.service` | n/a | root |
-| macOS service | n/a | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` | root |
+| Surface | Linux path | Linux owner | macOS path | macOS owner |
+| --- | --- | --- | --- | --- |
+| Binaries | `/opt/defenseclaw/bin` | `root:root` | `/opt/cisco/secureclient/defenseclaw/bin` | `root:wheel` |
+| Config | `/etc/defenseclaw/config.yaml` | `root:defenseclaw` | `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` | `root:wheel` |
+| Runtime state | `/var/lib/defenseclaw` | `defenseclaw:defenseclaw` | `/opt/cisco/secureclient/defenseclaw/runtime` | `root:wheel` |
+| Logs | `/var/log/defenseclaw` | `defenseclaw:defenseclaw` | `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` |
+| Service definition | `/etc/systemd/system/defenseclaw-gateway.service` | `root:root` | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` | `root:wheel` |
 
 User-owned agent configuration remains in user space. Examples include `~/.codex/config.toml`, `~/.claude/settings.json`, and `~/.gemini/settings.json`. DefenseClaw can only harden those files by installing and repairing hooks through a privileged enterprise controller; users still own the agent's native configuration file.
 
@@ -422,9 +421,17 @@ Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defe
 
 ## macOS LaunchDaemon layout
 
-Install the binary under `/opt/cisco/secureclient/defenseclaw/bin`, create the managed config and guardian manifest under `/opt/cisco/secureclient/defenseclaw/etc`, then install both packaged LaunchDaemons. The managed config must set `data_dir: "/opt/cisco/secureclient/defenseclaw/runtime"` so mutable service state stays separate from the administrator-owned config.
+The macOS design uses two privilege domains — mirroring the Linux table above but collapsed to root for the daemon side, because the managed cloud auth provider requires root to read and re-perm its on-disk credential store. There is no dedicated `defenseclaw` service user on macOS.
 
-The gateway daemon runs as root (uid 0). No dedicated service user is created — the managed cloud auth provider requires root to read and re-perm its on-disk credential store.
+| Component | Identity | Writable scope | Purpose |
+| --- | --- | --- | --- |
+| Gateway | root (uid 0) | `/opt/cisco/secureclient/defenseclaw/runtime`, `/Library/Logs/Cisco/SecureClient/DefenseClaw` | Inspection, policy, audit, hook API, and health. |
+| Hook guardian | root (uid 0), same daemon-level authority | Allow-listed user homes plus guardian/runtime state | Install and repair native user hooks after trusted path validation. |
+| AI agent | Interactive standard user | Its normal user profile | Invoke native hooks; cannot manage the LaunchDaemon or administrator assets. |
+
+macOS launchd does not offer the fine-grained sandbox directives systemd exposes (`ProtectSystem`, `ProtectHome`, capability bounding set, syscall filters, etc.), so isolation is enforced through the surrounding endpoint boundary — code-signing/notarization policy, MDM file ownership and ACL enforcement, launchd system-domain control, Endpoint Security/EDR, and restricted local-admin membership — instead of by narrowing the daemon's process privileges. Both packaged plists deliberately omit `UserName` and `GroupName` so launchd runs the daemons as root by default; the installer refuses to load a plist that pins them to any other identity.
+
+Install the binary under `/opt/cisco/secureclient/defenseclaw/bin`, create the managed config and guardian manifest under `/opt/cisco/secureclient/defenseclaw/etc`, then install both packaged LaunchDaemons. The managed config must set `data_dir: "/opt/cisco/secureclient/defenseclaw/runtime"` so mutable service state stays separate from the administrator-owned config.
 
 Prepare the administrator-approved config and guardian manifest outside the managed destination. From the extracted DefenseClaw release archive, run:
 
