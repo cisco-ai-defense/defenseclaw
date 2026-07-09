@@ -34,6 +34,12 @@ type service struct {
 	nowFn      func() time.Time
 	statsPoll  time.Duration
 	healthWait time.Duration
+
+	// logf receives structured log lines. Nil is treated as "do not
+	// log"; the server wiring supplies a non-nil callback in
+	// production so operators see stats-source errors in
+	// gateway.log without them ever landing on the wire.
+	logf func(format string, args ...any)
 }
 
 // GetHealth streams health snapshots per the contract: the first
@@ -84,11 +90,17 @@ func (s *service) GetHealth(req *pb.GetHealthRequest, stream grpc.ServerStreamin
 
 // GetStatsSnapshot streams aggregate counters. First message is
 // immediate; subsequent messages are sent when any counter changes
-// (or availability transitions) at a 2s poll cadence.
+// (or availability transitions) at a 2s poll cadence. Errors from
+// the underlying counter source are logged locally and surfaced on
+// the wire as availability=ERROR — never as a gRPC error, per the
+// v1 contract's availability-enum design.
 func (s *service) GetStatsSnapshot(req *pb.GetStatsSnapshotRequest, stream grpc.ServerStreamingServer[pb.StatsSnapshot]) error {
 	ctx := stream.Context()
 
-	last, _ := snapshotStats(s.statsSrc)
+	last, err := snapshotStats(s.statsSrc)
+	if err != nil {
+		s.logStatsError(err)
+	}
 	if err := stream.Send(last); err != nil {
 		return err
 	}
@@ -101,7 +113,10 @@ func (s *service) GetStatsSnapshot(req *pb.GetStatsSnapshotRequest, stream grpc.
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			cur, _ := snapshotStats(s.statsSrc)
+			cur, err := snapshotStats(s.statsSrc)
+			if err != nil {
+				s.logStatsError(err)
+			}
 			if statsChanged(last, cur) {
 				if err := stream.Send(cur); err != nil {
 					return err
@@ -110,6 +125,13 @@ func (s *service) GetStatsSnapshot(req *pb.GetStatsSnapshotRequest, stream grpc.
 			}
 		}
 	}
+}
+
+func (s *service) logStatsError(err error) {
+	if s.logf == nil || err == nil {
+		return
+	}
+	s.logf("stats source error: %v", err)
 }
 
 // WatchNotifications streams user-visible notifications. On

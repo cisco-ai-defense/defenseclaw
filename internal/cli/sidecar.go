@@ -106,9 +106,14 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}
 
-	// Local UDS gRPC server for AVC (Cisco Secure Client). Only
-	// constructed when the deployment mode / operator opt-in asks
-	// for it — see internal/ipc for the wire contract.
+	// Local UDS gRPC server for external consumers. Only constructed
+	// when the deployment mode / operator opt-in asks for it — see
+	// internal/ipc for the wire contract. Construction failures
+	// (malformed socket_mode, unresolvable path, etc.) are logged
+	// and skipped rather than aborting the whole sidecar, mirroring
+	// the fault-isolation posture of the other opt-in subsystems
+	// (guardrail, watcher, AI discovery): a broken IPC surface must
+	// never take the gateway offline.
 	if cfg.ManagedIPCEnabled() {
 		ipcSrv, err := ipc.NewServer(ipc.ServerOptions{
 			Config:     cfg,
@@ -118,9 +123,11 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 			Version:    version.Current().BinaryVersion,
 		})
 		if err != nil {
-			return fmt.Errorf("sidecar: ipc init: %w", err)
+			fmt.Fprintf(os.Stderr,
+				"[sidecar] ipc init failed, continuing without IPC surface: %v\n", err)
+		} else {
+			sc.SetIPCRunner(ipcSrv)
 		}
-		sc.SetIPCRunner(ipcSrv)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

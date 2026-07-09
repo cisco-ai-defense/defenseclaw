@@ -15,6 +15,7 @@ package e2e
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -250,14 +251,38 @@ func TestIPC_WatchNotifications(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
-	// Give the server a beat to register the subscription before we
-	// publish; otherwise the block event races the subscribe.
-	time.Sleep(50 * time.Millisecond)
 
-	dispatcher.OnBlock(notifier.BlockEvent{
-		Source: notifier.SourceHook,
-		Target: "shell.rm",
-		Reason: "dangerous",
+	// The stream registers the subscriber asynchronously in the RPC
+	// handler on the server side, so a single OnBlock right after Open
+	// can race the subscribe. Rather than a fixed sleep (flaky on
+	// slow CI), keep publishing distinct targets on a ticker until
+	// the client receives one — the dispatcher's dedup window is on
+	// target+reason, so distinct targets guarantee eventual delivery
+	// once the subscription lands.
+	publishStop := make(chan struct{})
+	publishDone := make(chan struct{})
+	go func() {
+		defer close(publishDone)
+		i := 0
+		tick := time.NewTicker(25 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-publishStop:
+				return
+			case <-tick.C:
+				i++
+				dispatcher.OnBlock(notifier.BlockEvent{
+					Source: notifier.SourceHook,
+					Target: fmt.Sprintf("shell.rm-%d", i),
+					Reason: "dangerous",
+				})
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(publishStop)
+		<-publishDone
 	})
 
 	rec, err := recvWithDeadline(stream, 2*time.Second)
@@ -364,18 +389,6 @@ func recvWithDeadline[T any](stream grpc.ServerStreamingClient[T], d time.Durati
 	case <-time.After(d):
 		return nil, errors.New("recv timed out")
 	}
-}
-
-func waitFor(t *testing.T, d time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("waitFor: condition never became true")
 }
 
 func seedBlockedSkill(t *testing.T, store *audit.Store, name string) {

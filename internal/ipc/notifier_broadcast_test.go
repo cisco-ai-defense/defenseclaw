@@ -5,6 +5,7 @@
 package ipc
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -142,6 +143,61 @@ func TestBroadcastDropsSlowSubscriber(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("publish blocked on full subscriber buffer — must be non-blocking")
 	}
+}
+
+// TestBroadcastConcurrentPublishCancel exercises the publish/cancel
+// race under `go test -race`. Regression guard for the earlier
+// implementation which released the mutex before sending, letting
+// a concurrent cancel close the channel underneath publish and
+// crash with "send on closed channel".
+func TestBroadcastConcurrentPublishCancel(t *testing.T) {
+	b := newBroadcast()
+
+	const publishers = 4
+	const subscribers = 8
+	const iterations = 200
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Publishers hammer publish() in a tight loop.
+	for i := 0; i < publishers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					b.publish(rec("burst", pb.NotificationPresentation_NOTIFICATION_PRESENTATION_TRANSIENT))
+				}
+			}
+		}()
+	}
+
+	// Subscribers churn subscribe/cancel repeatedly.
+	for i := 0; i < subscribers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, cancel := b.subscribe()
+				// Immediately cancel — we're stress-testing the
+				// close path, not consumption.
+				cancel()
+			}
+		}()
+	}
+
+	// Give the loop a slice of wall-clock so the publishers pile
+	// up while subscribers cancel underneath them, then stop.
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// Any send-on-closed-channel panic is caught by the race
+	// detector's crash handler; reaching this line is the assertion.
 }
 
 func titles(rs []*pb.NotificationRecord) []string {

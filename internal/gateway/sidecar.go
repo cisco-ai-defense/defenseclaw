@@ -1617,7 +1617,12 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			continue
 		}
 
-		if tel := s.otelSnapshot(); !firstConnect && tel != nil {
+		// Capture the boot-vs-reconnect status BEFORE clearing
+		// firstConnect so the block below can still distinguish the
+		// two. Suppresses a spurious "protection restored" toast on
+		// process boot.
+		reconnected := !firstConnect
+		if tel := s.otelSnapshot(); reconnected && tel != nil {
 			tel.RecordWatcherRestart(ctx)
 		}
 		firstConnect = false
@@ -1648,7 +1653,7 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		s.health.SetGateway(StateRunning, "", map[string]interface{}{
 			"protocol": hello.Protocol,
 		})
-		if s.osNotifier != nil {
+		if reconnected && s.osNotifier != nil {
 			s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
 				State:  notifier.ServiceStateReconnected,
 				Reason: fmt.Sprintf("gateway ready (protocol=%d)", hello.Protocol),

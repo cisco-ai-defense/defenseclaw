@@ -93,6 +93,7 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		nowFn:      time.Now,
 		statsPoll:  2 * time.Second,
 		healthWait: 200 * time.Millisecond,
+		logf:       opts.Logf,
 	}
 
 	// Register the observer on the dispatcher so every user-visible

@@ -47,13 +47,21 @@ func TestResolveSocketPath(t *testing.T) {
 			want: "/custom/socket.sock",
 		},
 		{
-			name: "env var overrides mode default",
+			name: "env var overrides default in unmanaged mode",
+			cfg: &config.Config{
+				DataDir: "/home/user/.defenseclaw",
+			},
+			env:  "/tmp/env.sock",
+			want: "/tmp/env.sock",
+		},
+		{
+			name: "env var IGNORED in managed_enterprise (fail-closed)",
 			cfg: &config.Config{
 				DataDir:        "/opt/dc/runtime",
 				DeploymentMode: managed.DeploymentModeManagedEnterprise,
 			},
-			env:  "/tmp/env.sock",
-			want: "/tmp/env.sock",
+			env:  "/tmp/attacker.sock",
+			want: "/opt/dc/ipc/" + SocketFileName,
 		},
 		{
 			name: "managed_enterprise falls back to dirname(data_dir)/ipc/…",

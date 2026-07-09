@@ -39,5 +39,3 @@ func extractPeerIdentity(c net.Conn) (peerIdentity, error) {
 func newValidatingListener(inner net.Listener, allowedUIDs []int, logReject func(peerIdentity, string)) net.Listener {
 	return inner
 }
-
-func selfUID() uint32 { return 0 }

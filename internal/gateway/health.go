@@ -335,15 +335,23 @@ func (h *SidecarHealth) Subscribe() (<-chan struct{}, func()) {
 	var once sync.Once
 	cancel := func() {
 		once.Do(func() {
+			// Hold subMu across both the slice mutation and the
+			// close so a concurrent notifySubscribers cannot pick
+			// up this channel from a stale snapshot and send on
+			// it after close. Allocating a fresh backing array
+			// also prevents a reader that already copied the
+			// slice header from seeing the removed entry mutated
+			// underneath them.
 			h.subMu.Lock()
-			for i, existing := range h.subs {
-				if existing == ch {
-					h.subs = append(h.subs[:i], h.subs[i+1:]...)
-					break
+			next := make([]chan struct{}, 0, len(h.subs))
+			for _, existing := range h.subs {
+				if existing != ch {
+					next = append(next, existing)
 				}
 			}
-			h.subMu.Unlock()
+			h.subs = next
 			close(ch)
+			h.subMu.Unlock()
 		})
 	}
 	return ch, cancel
@@ -351,12 +359,13 @@ func (h *SidecarHealth) Subscribe() (<-chan struct{}, func()) {
 
 // notifySubscribers fans out a non-blocking wake-up to every current
 // subscriber. Never blocks: a full 1-element buffer means the
-// subscriber already has a pending notification, so we drop the extra.
+// subscriber already has a pending notification, so we drop the
+// extra. Held under subMu so a concurrent cancel cannot close a
+// channel between our decision to send and the send itself.
 func (h *SidecarHealth) notifySubscribers() {
 	h.subMu.Lock()
-	subs := h.subs
-	h.subMu.Unlock()
-	for _, ch := range subs {
+	defer h.subMu.Unlock()
+	for _, ch := range h.subs {
 		select {
 		case ch <- struct{}{}:
 		default:

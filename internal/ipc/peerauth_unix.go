@@ -15,7 +15,6 @@ package ipc
 import (
 	"fmt"
 	"net"
-	"os"
 )
 
 // peerIdentity carries the credentials extracted from a UDS peer.
@@ -106,14 +105,6 @@ func (l *validatingListener) Accept() (net.Conn, error) {
 
 func (l *validatingListener) Close() error   { return l.inner.Close() }
 func (l *validatingListener) Addr() net.Addr { return l.inner.Addr() }
-
-// selfUID returns the current process's effective UID. Used by the
-// server to auto-populate the allowlist when the operator has not
-// configured any UIDs but the mode still requires one (unmanaged
-// operators occasionally set socket_mode=0666 for local testing).
-func selfUID() uint32 {
-	return uint32(os.Geteuid())
-}
 
 // readPeerIdentity is the platform-specific getsockopt(2) call for
 // peer credentials. Implemented in peerauth_linux.go and

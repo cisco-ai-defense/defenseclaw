@@ -49,9 +49,14 @@ const (
 // resolution rules.
 //
 //  1. cfg.Managed.SocketPath (verbatim)
-//  2. $DEFENSECLAW_IPC_SOCKET
+//  2. $DEFENSECLAW_IPC_SOCKET (dev / test rigs only)
 //  3. managed_enterprise → filepath.Join(filepath.Dir(cfg.DataDir), "ipc", SocketFileName)
 //  4. otherwise → filepath.Join(cfg.DataDir, "ipc", SocketFileName)
+//
+// The env override is intentionally ignored in managed_enterprise so
+// a systemd unit drop-in or launchd env inheritance cannot redirect
+// the enterprise-owned socket path. Operators who need to move the
+// socket in production must set cfg.Managed.SocketPath explicitly.
 //
 // Never returns an error: rule 4 always produces a value.
 func ResolveSocketPath(cfg *config.Config) string {
@@ -61,8 +66,10 @@ func ResolveSocketPath(cfg *config.Config) string {
 	if p := cfg.Managed.SocketPath; p != "" {
 		return p
 	}
-	if p := os.Getenv(SocketEnvVar); p != "" {
-		return p
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if p := os.Getenv(SocketEnvVar); p != "" {
+			return p
+		}
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return filepath.Join(filepath.Dir(cfg.DataDir), "ipc", SocketFileName)

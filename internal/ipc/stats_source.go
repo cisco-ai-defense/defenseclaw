@@ -27,12 +27,13 @@ type statsSource interface {
 }
 
 // snapshotStats reads the current aggregate counters and returns a
-// StatsSnapshot with the AVC-required schema_version + availability
-// fields set. On DB error the counters are zeroed and availability
-// is ERROR — the consumer relies on the enum to distinguish real
-// zeros from unavailability. The error is returned for structured
-// logging by the caller (never propagated over the stream — the
-// contract has a dedicated availability enum for that).
+// StatsSnapshot with the schema_version + availability fields set.
+// On DB error the counters are zeroed and availability is ERROR —
+// the consumer relies on the enum to distinguish real zeros from
+// unavailability. The error is returned alongside the snapshot so
+// callers can log it locally; it is never propagated over the
+// stream because the wire contract has a dedicated availability
+// enum for that.
 func snapshotStats(src statsSource) (*pb.StatsSnapshot, error) {
 	c, err := src.GetCounts()
 	if err != nil {
@@ -53,10 +54,12 @@ func snapshotStats(src statsSource) (*pb.StatsSnapshot, error) {
 	}, nil
 }
 
-// statsChanged reports whether the counter portions of two
-// StatsSnapshots differ. Availability is not compared here — the
-// service layer already handles availability transitions as its own
-// signal.
+// statsChanged reports whether two StatsSnapshots differ across any
+// field the consumer cares about — counter values AND availability.
+// The availability comparison matters because a database going down
+// on a fresh install produces zero counters in both the AVAILABLE
+// and ERROR snapshots; only the enum transition tells the consumer
+// "we lost our stats source" and it must be surfaced as an update.
 func statsChanged(a, b *pb.StatsSnapshot) bool {
 	if a == nil || b == nil {
 		return a != b

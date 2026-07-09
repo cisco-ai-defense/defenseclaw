@@ -21,11 +21,12 @@ func (f fakeStats) GetCounts() (audit.Counts, error) { return f.counts, f.err }
 
 func TestSnapshotStats(t *testing.T) {
 	cases := []struct {
-		name      string
-		src       fakeStats
-		wantAvail pb.StatsAvailability
-		wantScans uint64
-		wantErr   bool
+		name              string
+		src               fakeStats
+		wantAvail         pb.StatsAvailability
+		wantScans         uint64
+		wantBlockedSkills uint64
+		wantErr           bool
 	}{
 		{
 			name: "healthy DB → AVAILABLE with counters",
@@ -34,8 +35,9 @@ func TestSnapshotStats(t *testing.T) {
 				BlockedMCPs: 1, AllowedMCPs: 3,
 				Alerts: 4, TotalScans: 12,
 			}},
-			wantAvail: pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
-			wantScans: 12,
+			wantAvail:         pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
+			wantScans:         12,
+			wantBlockedSkills: 2,
 		},
 		{
 			name:      "DB error → ERROR with zero counters",
@@ -49,8 +51,9 @@ func TestSnapshotStats(t *testing.T) {
 			src: fakeStats{counts: audit.Counts{
 				BlockedSkills: -3, TotalScans: 7,
 			}},
-			wantAvail: pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
-			wantScans: 7,
+			wantAvail:         pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
+			wantScans:         7,
+			wantBlockedSkills: 0,
 		},
 	}
 
@@ -68,6 +71,9 @@ func TestSnapshotStats(t *testing.T) {
 			}
 			if got.TotalScans != tc.wantScans {
 				t.Errorf("total scans: got %d want %d", got.TotalScans, tc.wantScans)
+			}
+			if got.BlockedSkills != tc.wantBlockedSkills {
+				t.Errorf("blocked skills: got %d want %d", got.BlockedSkills, tc.wantBlockedSkills)
 			}
 			if got.SchemaVersion != schemaVersion {
 				t.Errorf("schema version: got %d want %d", got.SchemaVersion, schemaVersion)

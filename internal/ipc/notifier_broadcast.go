@@ -94,15 +94,22 @@ func (b *broadcast) subscribe() (<-chan *pb.NotificationRecord, func()) {
 	var once sync.Once
 	cancel := func() {
 		once.Do(func() {
+			// Hold b.mu across both slice mutation and channel
+			// close so a concurrent publish cannot pick up this
+			// subscriber and then send on its channel after
+			// close. Also allocate a fresh backing array so any
+			// reader that already copied the slice header sees
+			// its own snapshot instead of a mutated one.
 			b.mu.Lock()
-			for i, existing := range b.subscribers {
-				if existing == sub {
-					b.subscribers = append(b.subscribers[:i], b.subscribers[i+1:]...)
-					break
+			next := make([]*subscriber, 0, len(b.subscribers))
+			for _, existing := range b.subscribers {
+				if existing != sub {
+					next = append(next, existing)
 				}
 			}
-			b.mu.Unlock()
+			b.subscribers = next
 			close(sub.ch)
+			b.mu.Unlock()
 		})
 	}
 	return sub.ch, cancel
@@ -112,12 +119,19 @@ func (b *broadcast) subscribe() (<-chan *pb.NotificationRecord, func()) {
 // (when the presentation says so) records it in the retention ring.
 // Slow subscribers are dropped by non-blocking send — the block
 // path must never stall on a full IPC buffer.
+//
+// The fan-out runs under b.mu so a concurrent cancel cannot close
+// a subscriber channel between our decision to send and the send
+// itself. That serializes with subscribe/cancel but the per-send
+// select is non-blocking, so publish still returns in bounded time
+// even with dozens of subscribers.
 func (b *broadcast) publish(rec *pb.NotificationRecord) {
 	if rec == nil {
 		return
 	}
 
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.evictExpiredLocked()
 	if isRetained(rec.Presentation) {
 		b.retained = append(b.retained, retainedRecord{record: rec, receipts: b.nowFn()})
@@ -126,11 +140,7 @@ func (b *broadcast) publish(rec *pb.NotificationRecord) {
 			b.retained = b.retained[len(b.retained)-notifierRetentionMax:]
 		}
 	}
-	subs := make([]*subscriber, len(b.subscribers))
-	copy(subs, b.subscribers)
-	b.mu.Unlock()
-
-	for _, s := range subs {
+	for _, s := range b.subscribers {
 		select {
 		case s.ch <- rec:
 		default:

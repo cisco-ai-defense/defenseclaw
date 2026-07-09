@@ -115,14 +115,23 @@ func TestComposeBody_RedactsAccidentalSecrets(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
-		want string
+		want string // empty → assert no redaction happened
 	}{
 		{"bearer token", "auth failed: Bearer abc123.def456.ghi789", "<redacted>"},
+		{"authorization basic", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "<redacted>"},
 		{"api_key=", "api_key=sk-live-abc123", "<redacted>"},
 		{"api-key=", "api-key=sk-1234", "<redacted>"},
+		{"apikey (no separator)", "apikey=sk-1234", "<redacted>"},
 		{"password=", "password=hunter2", "<redacted>"},
+		{"password: colon", "password: hunter2", "<redacted>"},
 		{"token=", "token=eyJhbGciOi", "<redacted>"},
+		{"secret=", "secret=topsecret123", "<redacted>"},
+		{"passphrase=", "passphrase=corny-horse-battery-staple", "<redacted>"},
+		{"aws access key id", "session id AKIAIOSFODNN7EXAMPLE was denied", "<redacted>"},
+		{"jwt bare", "cookie: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoaSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", "<redacted>"},
+		{"pem private key opener", "-----BEGIN RSA PRIVATE KEY-----", "<redacted>"},
 		{"benign text is untouched", "no secret here", ""},
+		{"the word secret alone is not redacted", "keep this secret in mind", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
