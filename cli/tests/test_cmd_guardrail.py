@@ -246,7 +246,9 @@ class FailModeCommandTests(unittest.TestCase):
     def test_set_open_to_closed_persists_and_restarts(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="codex", hook_fail_mode="open")
-        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+        with patch(
+            "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+        ) as restart_mock:
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
             )
@@ -256,15 +258,21 @@ class FailModeCommandTests(unittest.TestCase):
         restart_mock.assert_called_once()
         # Active connector must propagate so hooks for the right
         # connector get rewritten.
-        kwargs = restart_mock.call_args.kwargs
-        self.assertEqual(kwargs.get("connector"), "codex")
+        self.assertEqual(restart_mock.call_args.args[1], "codex")
 
     def test_set_same_value_is_noop(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, hook_fail_mode="closed")
-        result = runner.invoke(
-            cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+        state = SimpleNamespace(
+            current=True, runtime="closed", desired="closed", drift=()
         )
+        with patch(
+            "defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode",
+            return_value=state,
+        ):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+            )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("already 'closed'", result.output)
         app.cfg.save.assert_not_called()
@@ -309,6 +317,7 @@ class FailModeCommandTests(unittest.TestCase):
                 cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
             )
         self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
         # Config write failed → must NOT restart the gateway, or the
         # sidecar would re-render hooks from the on-disk old value
         # while we believe we just changed it.
@@ -718,7 +727,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         app = make_multi_ctx({"codex": None, "claudecode": None})
         app.cfg.guardrail.connectors["codex"].mode = "action"
         with patch(
-            "defenseclaw.commands.cmd_setup._restart_services"
+            "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
         ) as restart_mock:
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd,
@@ -733,7 +742,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
-        self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
+        self.assertEqual(restart_mock.call_args.args[1], "codex")
 
     def test_show_per_connector_value_without_mode(self):
         runner = CliRunner()
@@ -743,7 +752,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
             cmd_guardrail.fail_mode_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("open", result.output)
+        self.assertIn("unknown", result.output)
+        self.assertIn("desired closed", result.output)
         self.assertIn("override", result.output)
         app.cfg.save.assert_not_called()
 
@@ -785,12 +795,14 @@ class PerConnectorFailModeTests(unittest.TestCase):
         app = make_multi_ctx({"codex": None, "claudecode": None})
         app.cfg.guardrail.connectors["codex"].mode = "action"
         app.cfg.guardrail.connectors["claudecode"].mode = "action"
-        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+        with patch(
+            "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+        ):
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "closed")
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "closed")
         self.assertEqual(app.cfg.guardrail.connectors["claudecode"].hook_fail_mode, "closed")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
@@ -801,7 +813,14 @@ class PerConnectorFailModeTests(unittest.TestCase):
         app = make_multi_ctx({"codex": None, "geminicli": None})
         app.cfg.guardrail.hook_fail_mode = "open"
         app.cfg.guardrail.connectors["geminicli"].hook_fail_mode = "closed"
-        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+        state = SimpleNamespace(current=True, drift=())
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock,
+            patch(
+                "defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode",
+                return_value=state,
+            ),
+        ):
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app
             )
@@ -812,12 +831,36 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("geminicli"), "open")
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
+        self.assertEqual(
+            set(restart_mock.call_args.kwargs["connectors"]),
+            {"codex", "geminicli"},
+        )
+
+    def test_bare_set_reload_failure_restores_config_and_runtime(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app.cfg.guardrail.hook_fail_mode = "open"
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services",
+            side_effect=[OSError("reload failed"), None],
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "")
+        self.assertEqual(app.cfg.guardrail.connectors["geminicli"].hook_fail_mode, "")
+        self.assertEqual(restart_mock.call_count, 2)
+        self.assertIn("restored", result.output)
 
     def test_connector_open_clears_dormant_closed_override_in_observe_mode(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
-        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+        with patch(
+            "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+        ):
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd,
                 ["open", "--connector", "codex", "--yes"],

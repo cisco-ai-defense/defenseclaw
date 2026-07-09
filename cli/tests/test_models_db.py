@@ -185,6 +185,27 @@ class ModelsDbTests(unittest.TestCase):
         counts = self.store.get_counts()
         self.assertEqual(counts.blocked_egress_calls, 1)
 
+    def test_store_enables_quarantine_foreign_key_cascade(self):
+        self.assertEqual(self.store.db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        record = self.store.create_quarantine_record(
+            "skill",
+            "unsafe-skill",
+            "/tmp/unsafe-skill",
+            "/tmp/quarantine/unsafe-skill",
+            "sha256-fixture",
+            "test",
+            "codex",
+        )
+
+        with self.store.db:
+            self.store.db.execute("DELETE FROM quarantine_records WHERE id = ?", (record.id,))
+
+        association = self.store.db.execute(
+            "SELECT 1 FROM quarantine_record_connectors WHERE quarantine_id = ?",
+            (record.id,),
+        ).fetchone()
+        self.assertIsNone(association)
+
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()
         os.unlink(self.tmp.name)

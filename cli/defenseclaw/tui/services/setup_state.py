@@ -645,6 +645,8 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
     if key.startswith(("skill_actions.", "mcp_actions.", "plugin_actions.")):
         _apply_action_matrix_field(cfg, key, value)
         return
+    if _apply_global_registry_required_field(cfg, key, value):
+        return
     if key.startswith("asset_policy.connectors."):
         _apply_per_connector_asset_policy_field(cfg, key, value)
         return
@@ -661,6 +663,24 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
         _apply_judge_hook_connector_toggle(cfg, key, value)
         return
     _apply_typed_field(cfg, key, value)
+
+
+def _apply_global_registry_required_field(cfg: object | dict[str, Any], key: str, value: str) -> bool:
+    """Route broad TUI registry-required edits through the shared resolver."""
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "asset_policy" or parts[2] != "registry_required":
+        return False
+    if parts[1] not in {"skill", "mcp", "plugin"}:
+        return False
+    try:
+        from defenseclaw.config import Config  # noqa: PLC0415
+        from defenseclaw.registry_policy import reconcile_registry_required  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - dict/test fixtures use the generic writer.
+        return False
+    if not isinstance(cfg, Config):
+        return False
+    reconcile_registry_required(cfg, parts[1], value.strip().lower() == "true")
+    return True
 
 
 # B4/E4c/E4d: the config editor exposes every per-connector guardrail override.
@@ -1065,6 +1085,18 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
         set_config_value(cfg, key, _coerce_per_connector_asset_policy_value(field_name, value))
         return
 
+    coerced = _coerce_per_connector_asset_policy_value(field_name, value)
+    if field_name == "registry_required" and coerced is not None:
+        try:
+            from defenseclaw.config import Config  # noqa: PLC0415
+            from defenseclaw.registry_policy import reconcile_registry_required  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - continue through the typed fallback.
+            pass
+        else:
+            if isinstance(cfg, Config):
+                reconcile_registry_required(cfg, asset_type, coerced, connector=connector)
+                return
+
     try:
         from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - degrade to the dict fallback.
@@ -1093,7 +1125,7 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
                     setattr(replacement_block, sib_key, sib_val)
         setattr(entry, asset_type, replacement_block)
         block = replacement_block
-    setattr(block, field_name, _coerce_per_connector_asset_policy_value(field_name, value))
+    setattr(block, field_name, coerced)
 
 
 _BOOL_FIELD_KEYS = frozenset(

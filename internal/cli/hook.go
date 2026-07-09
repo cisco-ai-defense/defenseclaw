@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -192,7 +193,7 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 		failMode = v
 	}
 	if failMode == "" {
-		failMode = sidecar["DEFENSECLAW_FAIL_MODE"]
+		failMode = hookSidecarFailMode(sidecar, connector)
 	}
 
 	opts := hookexec.Options{
@@ -225,14 +226,30 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	return opts
 }
 
-// readHookSidecar parses the hooks/.hookcfg file setup writes on Windows. It is
-// a small `KEY=value` file (DEFENSECLAW_GATEWAY_ADDR, DEFENSECLAW_FAIL_MODE); an
-// absent or unreadable file yields an empty map so callers fall back to flags,
-// environment, then defaults. Values may be optionally quoted.
+// readHookSidecar parses the hooks/.hookcfg file setup writes on Windows.
+// Version 2 is JSON with a connector-keyed fail_modes map. The legacy
+// KEY=value shape remains readable so the first connector refresh can migrate
+// an existing install without changing its runtime behavior beforehand.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
 	data, err := os.ReadFile(path)
 	if err != nil {
+		return out
+	}
+	var current struct {
+		Version     int               `json:"version"`
+		GatewayAddr string            `json:"gateway_addr"`
+		FailModes   map[string]string `json:"fail_modes"`
+		LegacyMode  string            `json:"legacy_fail_mode"`
+	}
+	if json.Unmarshal(data, &current) == nil && current.Version >= 2 {
+		out["DEFENSECLAW_GATEWAY_ADDR"] = current.GatewayAddr
+		for connector, mode := range current.FailModes {
+			out[hookSidecarFailModeKey(connector)] = mode
+		}
+		if current.LegacyMode != "" {
+			out["DEFENSECLAW_FAIL_MODE"] = current.LegacyMode
+		}
 		return out
 	}
 	for _, line := range strings.Split(string(data), "\n") {
@@ -257,6 +274,19 @@ func readHookSidecar(path string) map[string]string {
 		}
 	}
 	return out
+}
+
+func hookSidecarFailMode(sidecar map[string]string, connector string) string {
+	if mode := sidecar[hookSidecarFailModeKey(connector)]; mode != "" {
+		return mode
+	}
+	return sidecar["DEFENSECLAW_FAIL_MODE"]
+}
+
+func hookSidecarFailModeKey(connector string) string {
+	name := strings.ToUpper(strings.TrimSpace(connector))
+	name = strings.NewReplacer("-", "", "_", "", " ", "").Replace(name)
+	return "DEFENSECLAW_FAIL_MODE_" + name
 }
 
 // hookIsLoopbackAddr reports whether addr ("host:port" or a bare host) targets

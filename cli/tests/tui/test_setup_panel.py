@@ -2506,6 +2506,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
     assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
     assert fields["guardrail.connectors.codex.hilt.min_severity"].value == "LOW"
@@ -2516,6 +2517,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # hermes has no override → inherits the global effective values.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
     assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
     assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
     assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"
@@ -2565,10 +2567,20 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
     cfg = _multi_connector_cfg()
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "closed")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "closed"
-    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "open"
+    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "closed"
     # Anything that is not "closed" normalizes to "open".
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    state = SimpleNamespace(runtime="open", desired="closed")
+    monkeypatch.setattr("defenseclaw.fail_mode.resolve_connector_fail_mode", lambda *_args: state)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "open"
 
 
 def test_per_connector_block_message_writes_string() -> None:
@@ -2697,3 +2709,55 @@ def test_per_connector_asset_policy_field_writes_typed_override() -> None:
 
     apply_config_field(cfg, "asset_policy.connectors.hermes.mcp.registry_required", "")
     assert entry.mcp.registry_required is None
+
+
+def test_global_registry_required_field_reconciles_every_active_connector() -> None:
+    from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.asset_policy.skill.registry_required = False
+    cfg.asset_policy.connectors = {
+        "codex": PerConnectorAssetPolicy(
+            mode="action",
+            skill=PerConnectorAssetTypePolicy(
+                default="deny", registry_required=False, registry_empty_action="warn",
+            ),
+        ),
+        "hermes": PerConnectorAssetPolicy(
+            skill=PerConnectorAssetTypePolicy(registry_required=True),
+        ),
+    }
+
+    apply_config_field(cfg, "asset_policy.skill.registry_required", "true")
+
+    assert cfg.asset_policy.skill.registry_required is True
+    for connector in ("codex", "hermes"):
+        assert cfg.asset_policy.effective_asset_type_policy(connector, "skill").registry_required is True
+        assert cfg.asset_policy.connectors[connector].skill.registry_required is None
+    assert cfg.asset_policy.connectors["codex"].mode == "action"
+    assert cfg.asset_policy.connectors["codex"].skill.default == "deny"
+    assert cfg.asset_policy.connectors["codex"].skill.registry_empty_action == "warn"
+
+
+def test_scoped_registry_required_field_uses_same_resolver_without_peer_changes() -> None:
+    from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.asset_policy.mcp.registry_required = True
+    cfg.asset_policy.connectors = {
+        "codex": PerConnectorAssetPolicy(mcp=PerConnectorAssetTypePolicy(registry_required=True)),
+        "hermes": PerConnectorAssetPolicy(
+            mode="observe",
+            mcp=PerConnectorAssetTypePolicy(default="deny", registry_required=True),
+        ),
+    }
+
+    apply_config_field(cfg, "asset_policy.connectors.codex.mcp.registry_required", "false")
+
+    assert cfg.asset_policy.mcp.registry_required is True
+    assert cfg.asset_policy.connectors["codex"].mcp.registry_required is False
+    assert cfg.asset_policy.connectors["hermes"].mcp.registry_required is True
+    assert cfg.asset_policy.connectors["hermes"].mcp.default == "deny"
+    assert cfg.asset_policy.connectors["hermes"].mode == "observe"
