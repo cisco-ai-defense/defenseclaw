@@ -232,6 +232,7 @@ type Config struct {
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 	Routing               RoutingConfig               `mapstructure:"routing"          yaml:"routing,omitempty"`
+	Training              TrainingConfig              `mapstructure:"training"         yaml:"training,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
