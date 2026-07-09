@@ -916,8 +916,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["enabled"])
         self.assertEqual(raw["guardrail"]["mode"], "observe")
 
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
     @patch("defenseclaw.commands.cmd_setup._preflight_guardrail_agent_control")
-    def test_non_interactive_agent_control_managed_writes_explicit_source(self, preflight):
+    def test_non_interactive_agent_control_managed_writes_explicit_source(self, preflight, restart_services):
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
@@ -940,13 +941,13 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "MY_AGENT_CONTROL_KEY",
                 "--no-agent-control-manage-opa",
                 "--agent-control-monitor-content",
-                "--no-restart",
             ],
             obj=self.app,
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
         preflight.assert_called_once()
+        restart_services.assert_called_once()
         self.assertEqual(self.app.cfg.guardrail.regex_source, "agent_control")
         self.assertTrue(self.app.cfg.agent_control.enabled)
         self.assertTrue(self.app.cfg.agent_control.rule_pack.enabled)
@@ -958,6 +959,33 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(self.app.cfg.agent_control.observability.include_content)
         self.assertIn("guardrail.regex_source", result.output)
         self.assertIn("last-known-good", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_guardrail_agent_control")
+    def test_first_managed_regex_transition_rejects_no_restart(self, preflight):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--regex-source",
+                "hybrid",
+                "--agent-control-url",
+                "https://agent-control.example.test",
+                "--agent-control-installation-id",
+                "defenseclaw-laptop-01",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("first switch", result.output)
+        self.assertIn("requires --restart", result.output)
+        self.assertEqual(self.app.cfg.guardrail.regex_source, "local")
+        self.assertFalse(self.app.cfg.agent_control.enabled)
+        preflight.assert_not_called()
 
     def test_agent_control_flags_require_managed_or_hybrid_source(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -978,8 +1006,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("Agent Control options require", result.output)
 
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
     @patch("defenseclaw.commands.cmd_setup._preflight_guardrail_agent_control")
-    def test_interactive_managed_source_shows_security_warning_and_review(self, _preflight):
+    def test_interactive_managed_source_shows_security_warning_and_review(self, _preflight, restart_services):
         from defenseclaw.commands.cmd_setup import setup
 
         user_input = "\n".join(
@@ -1004,7 +1033,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            ["guardrail", "--connector", "openclaw"],
             obj=self.app,
             input=user_input,
         )
@@ -1017,6 +1046,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Agent Control managed", result.output)
         self.assertIn("exact / unredacted", result.output)
         self.assertIn("last-known-good managed policy", result.output)
+        restart_services.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_setup._preflight_guardrail_agent_control")
     def test_interactive_cancel_does_not_persist_agent_control_secret(self, preflight):

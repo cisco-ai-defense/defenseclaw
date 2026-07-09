@@ -4410,6 +4410,18 @@ def setup_guardrail(
             disable_redaction=disable_redaction,
         )
 
+    first_managed_regex_transition = (
+        original_guardrail.regex_source == "local"
+        and gc.regex_source in {"agent_control", "hybrid"}
+    )
+    if first_managed_regex_transition and not restart:
+        app.cfg.guardrail = original_guardrail
+        app.cfg.agent_control = original_agent_control
+        raise click.UsageError(
+            "The first switch to Agent Control-managed regex rules requires --restart "
+            "so the validated snapshot and source change activate together"
+        )
+
     if not gc.enabled:
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return

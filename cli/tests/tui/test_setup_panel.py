@@ -511,6 +511,76 @@ def test_guardrail_wizard_prefills_single_connector_and_passes_explicit_scope() 
     assert argv[argv.index("--connector") + 1] == "codex"
 
 
+def test_guardrail_wizard_makes_local_regex_source_explicit_and_hides_agent_control() -> None:
+    fields = _guardrail_wizard_fields_for({}, {"claw": {"mode": "codex"}})
+    labels = {field.label for field in fields}
+
+    assert wizard_field_value(fields, "Regex Policy Source") == "local"
+    assert "Agent Control" not in labels
+    assert "Agent Control URL" not in labels
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
+    assert _pair_after(argv, "--regex-source") == "local"
+    assert not any(arg.startswith("--agent-control-") for arg in argv)
+
+
+def test_guardrail_wizard_managed_source_shows_complete_secret_free_agent_control_form() -> None:
+    cfg = {
+        "claw": {"mode": "codex"},
+        "guardrail": {"regex_source": "agent_control"},
+        "agent_control": {
+            "deployment": "self_hosted",
+            "server_url": "http://127.0.0.1:8000",
+            "installation_id": "defenseclaw-demo",
+            "api_key_env": "DEMO_AGENT_CONTROL_KEY",
+            "opa": {"enabled": False},
+            "observability": {"include_content": True},
+        },
+    }
+    fields = _guardrail_wizard_fields_for({}, cfg)
+    labels = {field.label for field in fields}
+
+    assert {
+        "Agent Control",
+        "Deployment",
+        "Agent Control URL",
+        "Installation ID",
+        "Agent Control API Key Env",
+        "Manage OPA Thresholds",
+        "Send Exact Monitor Content",
+    } <= labels
+    assert wizard_field_value(fields, "Send Exact Monitor Content") == "yes"
+    assert not any(field.kind == "password" and field.label.startswith("Agent Control") for field in fields)
+    key_field = next(field for field in fields if field.label == "Agent Control API Key Env")
+    assert "defenseclaw keys set <ENV_NAME>" in key_field.hint
+
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
+    assert _pair_after(argv, "--regex-source") == "agent_control"
+    assert _pair_after(argv, "--agent-control-deployment") == "self_hosted"
+    assert _pair_after(argv, "--agent-control-url") == "http://127.0.0.1:8000"
+    assert _pair_after(argv, "--agent-control-installation-id") == "defenseclaw-demo"
+    assert _pair_after(argv, "--agent-control-api-key-env") == "DEMO_AGENT_CONTROL_KEY"
+    assert "ac_secret_must_never_appear" not in argv
+
+
+def test_guardrail_regex_source_goal_rebuilds_agent_control_fields_for_hybrid() -> None:
+    model = SetupPanelModel(cfg={"claw": {"mode": "codex"}})
+    _select_goal(model, SetupWizard.GUARDRAIL, "regex-source")
+    assert "Agent Control URL" not in {field.label for field in model.form_fields}
+
+    model.form_fields = list(_with_field(model.form_fields, "Regex Policy Source", "hybrid"))
+    model.recompute_dependent_fields()
+
+    labels = {field.label for field in model.form_fields}
+    assert "Agent Control URL" in labels
+    assert "Strategy" not in labels
+    assert missing_required_fields(SetupWizard.GUARDRAIL, model.form_fields) == ("Agent Control URL",)
+
+    model.form_fields = list(_with_field(model.form_fields, "Agent Control URL", "https://control.example.test"))
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, model.form_fields)
+    assert _pair_after(argv, "--regex-source") == "hybrid"
+    assert _pair_after(argv, "--agent-control-url") == "https://control.example.test"
+
+
 def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
     fields = wizard_form_defs(SetupWizard.TRUSTED_PATHS)
     assert build_wizard_args(SetupWizard.TRUSTED_PATHS, fields) == ("setup", "trusted-paths", "list")
