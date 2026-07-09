@@ -233,6 +233,10 @@ type Config struct {
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 	Routing               RoutingConfig               `mapstructure:"routing"          yaml:"routing,omitempty"`
 	Training              TrainingConfig              `mapstructure:"training"         yaml:"training,omitempty"`
+	// Managed configures the local UDS gRPC server consumed by AVC
+	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
+	// returns true — see managed.go.
+	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
