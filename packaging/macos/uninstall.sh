@@ -246,18 +246,23 @@ done
 # LEGACY_INSTALL_PREFIX is /Library/DefenseClaw/ — binary-only in the
 # old layout (runtime lived under LEGACY_SUPPORT_DIR), so it's safe to
 # remove wholesale in either mode.
+# `${var:?}` on the rm targets is defence-in-depth against an empty/unset
+# INSTALL_PREFIX after a future refactor — a bare `rm -rf /` or `rm -rf
+# /bin` would be catastrophic. Shellcheck SC2115. The `[[ -d ]]` guards
+# already handle the empty case at runtime, but the shell-parameter form
+# turns any unset-variable slip into a hard error instead of a delete.
 if [[ "${PURGE}" == "true" ]]; then
-  if [[ -d "${INSTALL_PREFIX}" ]]; then
+  if [[ -d "${INSTALL_PREFIX:?}" ]]; then
     log "removing ${INSTALL_PREFIX}"
-    rm -rf "${INSTALL_PREFIX}"
+    rm -rf "${INSTALL_PREFIX:?}"
   fi
-elif [[ -d "${INSTALL_PREFIX}/bin" ]]; then
+elif [[ -d "${INSTALL_PREFIX:?}/bin" ]]; then
   log "removing ${INSTALL_PREFIX}/bin (runtime/config preserved for reinstall)"
-  rm -rf "${INSTALL_PREFIX}/bin"
+  rm -rf "${INSTALL_PREFIX:?}/bin"
 fi
-if [[ -d "${LEGACY_INSTALL_PREFIX}" ]]; then
+if [[ -d "${LEGACY_INSTALL_PREFIX:?}" ]]; then
   log "removing ${LEGACY_INSTALL_PREFIX}"
-  rm -rf "${LEGACY_INSTALL_PREFIX}"
+  rm -rf "${LEGACY_INSTALL_PREFIX:?}"
 fi
 
 # ---- runtime state ------------------------------------------------------
