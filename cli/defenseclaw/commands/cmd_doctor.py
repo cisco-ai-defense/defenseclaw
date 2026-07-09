@@ -2505,6 +2505,35 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit_aid_hint(f"endpoint: {endpoint}")
 
 
+def _check_agent_control_config(cfg, r: _DoctorResult) -> None:
+    """Check the source/Agent Control contract without contacting the service."""
+    regex_source = getattr(cfg.guardrail, "regex_source", "local") or "local"
+    settings = getattr(cfg, "agent_control", None)
+    if regex_source == "local":
+        _emit("skip", "Agent Control", "regex source is local", r=r)
+        return
+    if settings is None:
+        _emit("fail", "Agent Control", "configuration block is missing", r=r)
+        return
+    try:
+        settings.validate()
+    except ValueError as exc:
+        _emit("fail", "Agent Control", str(exc), r=r)
+        return
+    if not settings.enabled or not settings.rule_pack.enabled:
+        _emit("fail", "Agent Control", "managed regex source is selected but rule synchronization is disabled", r=r)
+        return
+    if settings.deployment == "cisco_cloud" and not settings.server_url.startswith("https://"):
+        _emit("fail", "Agent Control", "Cisco Enterprise Cloud requires an HTTPS URL", r=r)
+        return
+    _emit(
+        "pass",
+        "Agent Control",
+        f"{regex_source} · {settings.deployment} · installation={settings.installation_id} · last-known-good",
+        r=r,
+    )
+
+
 def _check_observability(cfg, r: _DoctorResult) -> None:
     """Walk every observability destination (gateway OTel + audit_sinks)
     and probe each one according to its kind.
@@ -3218,6 +3247,7 @@ def doctor(
             # hook rows) instead of only the primary.
             _check_hilt_support(cfg, _conn, r)
     _check_guardrail_proxy(cfg, r)
+    _check_agent_control_config(cfg, r)
     if not json_out:
         _doctor_subsection("Credentials")
     _check_llm_api_key(cfg, r)

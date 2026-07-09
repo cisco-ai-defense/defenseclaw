@@ -70,6 +70,13 @@ class TestGuardrailConfig(unittest.TestCase):
         self.assertEqual(gc.block_message, "")
         self.assertFalse(gc.hilt.enabled)
         self.assertEqual(gc.hilt.min_severity, "HIGH")
+        self.assertEqual(gc.regex_source, "local")
+
+    def test_regex_source_validation(self):
+        for value in ("local", "agent_control", "hybrid"):
+            GuardrailConfig(regex_source=value).validate()
+        with self.assertRaisesRegex(ValueError, "guardrail.regex_source"):
+            GuardrailConfig(regex_source="replace").validate()
 
     def test_default_config_includes_guardrail(self):
         cfg = default_config()
@@ -909,6 +916,158 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["enabled"])
         self.assertEqual(raw["guardrail"]["mode"], "observe")
 
+    @patch("defenseclaw.commands.cmd_setup._preflight_guardrail_agent_control")
+    def test_non_interactive_agent_control_managed_writes_explicit_source(self, preflight):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--mode",
+                "action",
+                "--regex-source",
+                "agent_control",
+                "--agent-control-deployment",
+                "self_hosted",
+                "--agent-control-url",
+                "https://agent-control.example.test",
+                "--agent-control-installation-id",
+                "defenseclaw-laptop-01",
+                "--agent-control-api-key-env",
+                "MY_AGENT_CONTROL_KEY",
+                "--no-agent-control-manage-opa",
+                "--agent-control-monitor-content",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        preflight.assert_called_once()
+        self.assertEqual(self.app.cfg.guardrail.regex_source, "agent_control")
+        self.assertTrue(self.app.cfg.agent_control.enabled)
+        self.assertTrue(self.app.cfg.agent_control.rule_pack.enabled)
+        self.assertEqual(self.app.cfg.agent_control.deployment, "self_hosted")
+        self.assertEqual(self.app.cfg.agent_control.server_url, "https://agent-control.example.test")
+        self.assertEqual(self.app.cfg.agent_control.installation_id, "defenseclaw-laptop-01")
+        self.assertEqual(self.app.cfg.agent_control.api_key_env, "MY_AGENT_CONTROL_KEY")
+        self.assertFalse(self.app.cfg.agent_control.opa.enabled)
+        self.assertTrue(self.app.cfg.agent_control.observability.include_content)
+        self.assertIn("guardrail.regex_source", result.output)
+        self.assertIn("last-known-good", result.output)
+
+    def test_agent_control_flags_require_managed_or_hybrid_source(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--regex-source",
+                "local",
+                "--agent-control-url",
+                "https://agent-control.example.test",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("Agent Control options require", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_guardrail_agent_control")
+    def test_interactive_managed_source_shows_security_warning_and_review(self, _preflight):
+        from defenseclaw.commands.cmd_setup import setup
+
+        user_input = "\n".join(
+            [
+                "",  # enable
+                "",  # observe mode
+                "",  # hook fail mode
+                "2",  # Agent Control managed
+                "2",  # self-hosted
+                "",  # localhost URL default
+                "",  # installation ID default
+                "",  # API key env default
+                "n",  # OPA remains local
+                "",  # exact monitor content
+                "n",  # do not enter missing key in this mocked preflight test
+                "",  # acknowledge managed-mode warning
+                "",  # local scanner engine
+                "",  # no judge
+                "",  # no advanced options
+                "",  # apply review
+            ]
+        )
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            obj=self.app,
+            input=user_input,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Agent Control managed mode", result.output)
+        self.assertIn("Local regex enforcement will be replaced", result.output)
+        self.assertIn("Guardrail configuration", result.output)
+        self.assertIn("Regex policy source:", result.output)
+        self.assertIn("Agent Control managed", result.output)
+        self.assertIn("exact / unredacted", result.output)
+        self.assertIn("last-known-good managed policy", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_guardrail_agent_control")
+    def test_interactive_cancel_does_not_persist_agent_control_secret(self, preflight):
+        from defenseclaw.commands.cmd_setup import setup
+
+        dotenv_path = os.path.join(self.tmp_dir, ".env")
+        original_dotenv = Path(dotenv_path).read_bytes()
+        env_name = "DEFENSECLAW_CANCELLED_AGENT_CONTROL_KEY"
+        original_env = os.environ.pop(env_name, None)
+        user_input = "\n".join(
+            [
+                "",  # enable
+                "",  # observe mode
+                "",  # hook fail mode
+                "2",  # Agent Control managed
+                "2",  # self-hosted
+                "",  # localhost URL default
+                "",  # installation ID default
+                env_name,
+                "n",  # OPA remains local
+                "",  # exact monitor content
+                "",  # enter key for validation
+                "must-not-be-persisted",
+                "",  # acknowledge managed-mode warning
+                "",  # local scanner engine
+                "",  # no judge
+                "",  # no advanced options
+                "n",  # decline final Apply
+            ]
+        )
+        try:
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--connector", "openclaw", "--no-restart"],
+                obj=self.app,
+                input=user_input,
+            )
+        finally:
+            if original_env is not None:
+                os.environ[env_name] = original_env
+            else:
+                os.environ.pop(env_name, None)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("setup cancelled", result.output.lower())
+        preflight.assert_not_called()
+        self.assertEqual(Path(dotenv_path).read_bytes(), original_dotenv)
+        self.assertNotIn(b"must-not-be-persisted", Path(dotenv_path).read_bytes())
+        self.assertEqual(self.app.cfg.guardrail.regex_source, "local")
+        self.assertFalse(self.app.cfg.agent_control.enabled)
+
     def test_setup_succeeds_without_openclaw_config(self):
         """Setup no longer requires OpenClaw config — connector setup runs at gateway start."""
         from defenseclaw.commands.cmd_setup import setup
@@ -1449,6 +1608,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "2",      # action mode
             "",       # hook fail-mode (default = open)
             "n",      # human approval (inline) — declined
+            "",       # local regex policy source
             "",       # local scanner
             "2",      # LLM role for proxy-backed connector: judge AND agent
             "n",      # no LLM judge

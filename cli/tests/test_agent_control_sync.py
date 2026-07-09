@@ -26,7 +26,9 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+import click
 import yaml
+from click.testing import CliRunner
 from defenseclaw.agent_control.models import (
     MAX_CONTROLS,
     MAX_RULES,
@@ -48,6 +50,7 @@ from defenseclaw.agent_control.sync import (
     _watch_retry_delay,
     configured_rule_pack_base_dirs,
 )
+from defenseclaw.commands.cmd_agent_control import agent_control_cmd, configure_agent_control
 from defenseclaw.config import (
     AgentControlConfig,
     Config,
@@ -56,6 +59,7 @@ from defenseclaw.config import (
     _merge_agent_control,
     _merge_guardrail,
 )
+from defenseclaw.context import AppContext
 
 
 def opa_control(*, block_at: str = "HIGH", alert_at: str = "MEDIUM") -> dict[str, Any]:
@@ -369,7 +373,10 @@ class ConfigTests(unittest.TestCase):
         settings = _merge_agent_control(
             {
                 "enabled": True,
-                "target_id": "installation-1",
+                "deployment": "self_hosted",
+                "server_url": "https://agent-control.example.test",
+                "installation_id": "installation-1",
+                "api_key_env": "MY_AGENT_CONTROL_KEY",
                 "opa": {"precedence": "remote", "activation": "manual"},
                 "rule_pack": {"enabled": True, "activation": "restart", "max_rules": 500},
                 "observability": {"enabled": False},
@@ -378,11 +385,54 @@ class ConfigTests(unittest.TestCase):
         settings.validate()
         cfg = Config(agent_control=settings)
         value = _config_to_dict(cfg)["agent_control"]
-        self.assertEqual(value["target_id"], "installation-1")
+        self.assertEqual(value["installation_id"], "installation-1")
+        self.assertEqual(value["deployment"], "self_hosted")
+        self.assertEqual(value["server_url"], "https://agent-control.example.test")
+        self.assertEqual(value["api_key_env"], "MY_AGENT_CONTROL_KEY")
         self.assertEqual(value["opa"]["precedence"], "remote")
         self.assertTrue(value["rule_pack"]["enabled"])
         self.assertFalse(value["observability"]["enabled"])
         self.assertTrue(value["observability"]["include_content"])
+
+    def test_agent_control_opa_management_defaults_off(self) -> None:
+        self.assertFalse(AgentControlConfig().opa.enabled)
+        self.assertFalse(_merge_agent_control({}).opa.enabled)
+
+    def test_agent_control_requires_https_outside_loopback(self) -> None:
+        value = AgentControlConfig(
+            enabled=True,
+            installation_id="installation-1",
+            server_url="http://agent-control.example.test",
+        )
+        with self.assertRaisesRegex(ValueError, "requires HTTPS"):
+            value.validate()
+
+    def test_agent_control_allows_http_for_loopback_development(self) -> None:
+        for server_url in (
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+            "http://[::1]:8000",
+        ):
+            with self.subTest(server_url=server_url):
+                AgentControlConfig(
+                    enabled=True,
+                    deployment="self_hosted",
+                    installation_id="installation-1",
+                    server_url=server_url,
+                ).validate()
+
+    def test_agent_control_rejects_url_credentials_and_invalid_env_name(self) -> None:
+        value = AgentControlConfig(
+            enabled=True,
+            installation_id="installation-1",
+            server_url="https://user:secret@agent-control.example.test",
+        )
+        with self.assertRaisesRegex(ValueError, "must not contain credentials"):
+            value.validate()
+        value.server_url = "https://agent-control.example.test"
+        value.api_key_env = "not-an-env-name"
+        with self.assertRaisesRegex(ValueError, "environment variable name"):
+            value.validate()
 
     def test_default_agent_control_block_is_not_serialized(self) -> None:
         self.assertNotIn("agent_control", _config_to_dict(Config()))
@@ -412,7 +462,12 @@ class ConfigTests(unittest.TestCase):
             _merge_agent_control({"observability": "enabled"})
 
     def test_agent_control_requires_dedicated_agent_and_target_type(self) -> None:
-        value = AgentControlConfig(enabled=True, target_id="installation-1", agent_name="shared-agent")
+        value = AgentControlConfig(
+            enabled=True,
+            installation_id="installation-1",
+            server_url="https://agent-control.example.test",
+            agent_name="shared-agent",
+        )
         with self.assertRaisesRegex(ValueError, "agent_name"):
             value.validate()
 
@@ -423,7 +478,8 @@ class ConfigTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             self.assertFalse(cfg.privacy.disable_redaction)
             synchronizer = AgentControlSynchronizer(
                 cfg,
@@ -443,7 +499,8 @@ class ConfigTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             cfg.agent_control.observability.include_content = False
             synchronizer = AgentControlSynchronizer(
                 cfg,
@@ -540,8 +597,254 @@ class FakeValidator:
     def validate_opa(self, *, rego_dir: Path, candidate: Path) -> None:
         self.calls.append((rego_dir, candidate))
 
-    def validate_rule_pack(self, *, base_dirs: list[Path], overlay_dir: Path) -> None:
+    def validate_rule_pack(
+        self,
+        *,
+        base_dirs: list[Path],
+        overlay_dir: Path,
+        regex_source: str = "hybrid",
+    ) -> None:
         self.rule_calls.append((base_dirs, overlay_dir))
+
+
+class SetupCommandTests(unittest.TestCase):
+    @staticmethod
+    def _command_app(root: Path) -> AppContext:
+        policy = root / "policies"
+        (policy / "rego").mkdir(parents=True)
+        app = AppContext()
+        app.cfg = Config(data_dir=str(root), policy_dir=str(policy))
+        return app
+
+    @staticmethod
+    def _write_prior_artifacts(root: Path) -> tuple[Path, Path]:
+        opa_path = root / "policies/rego/data-agent-control.json"
+        rule_path = root / "agent-control/rule-pack/current/rules/agent-control.yaml"
+        opa_path.parent.mkdir(parents=True, exist_ok=True)
+        rule_path.parent.mkdir(parents=True, exist_ok=True)
+        opa_path.write_bytes(b"prior-opa\n")
+        rule_path.write_bytes(b"prior-rules\n")
+        return opa_path, rule_path
+
+    def test_configure_agent_control_passes_explicit_url_and_resolved_key_to_sdk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = root / "policies"
+            (policy / "rego").mkdir(parents=True)
+            cfg = Config(data_dir=str(root), policy_dir=str(policy))
+            cfg.guardrail.regex_source = "agent_control"
+            sdk = FakeSDK([rule_control()])
+            app = SimpleNamespace(cfg=cfg)
+
+            with mock.patch.dict(os.environ, {"MY_AGENT_CONTROL_KEY": "setup-secret"}, clear=False):
+                managed_dir = configure_agent_control(
+                    app,
+                    deployment="self_hosted",
+                    server_url="https://agent-control.example.test/",
+                    installation_id="defenseclaw-test-host",
+                    api_key_env="MY_AGENT_CONTROL_KEY",
+                    enable_rule_pack=True,
+                    manage_opa=False,
+                    include_content=True,
+                    require_rules=True,
+                    save_config=False,
+                    sdk=sdk,
+                    validator=FakeValidator(),
+                )
+
+            self.assertEqual(sdk.init_kwargs["server_url"], "https://agent-control.example.test")
+            self.assertEqual(sdk.init_kwargs["api_key"], "setup-secret")
+            self.assertEqual(sdk.init_kwargs["target_id"], "defenseclaw-test-host")
+            self.assertEqual(managed_dir, (root / "agent-control").resolve())
+            self.assertTrue(cfg.agent_control.rule_pack.enabled)
+            self.assertEqual(cfg.guardrail.rule_pack_overlay_dirs, [str(managed_dir / "rule-pack/current")])
+
+    def test_managed_setup_rejects_empty_initial_rule_snapshot_before_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = root / "policies"
+            (policy / "rego").mkdir(parents=True)
+            cfg = Config(data_dir=str(root), policy_dir=str(policy))
+            cfg.guardrail.regex_source = "agent_control"
+            app = SimpleNamespace(cfg=cfg)
+
+            with self.assertRaisesRegex(click.ClickException, "contains no DefenseClaw regex rules"):
+                configure_agent_control(
+                    app,
+                    deployment="cisco_cloud",
+                    server_url="https://agent-control.example.test",
+                    installation_id="defenseclaw-test-host",
+                    api_key_env="AGENT_CONTROL_API_KEY",
+                    enable_rule_pack=True,
+                    manage_opa=False,
+                    include_content=True,
+                    require_rules=True,
+                    save_config=False,
+                    sdk=FakeSDK([]),
+                    validator=FakeValidator(),
+                )
+
+            self.assertFalse((root / "agent-control/rule-pack/current/rules/agent-control.yaml").exists())
+
+    def test_opa_preflight_validates_against_configured_policy_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._command_app(root)
+            app.cfg.guardrail.regex_source = "agent_control"
+            validator = FakeValidator()
+
+            configure_agent_control(
+                app,
+                deployment="self_hosted",
+                server_url="https://agent-control.example.test",
+                installation_id="defenseclaw-test-host",
+                api_key_env="AGENT_CONTROL_API_KEY",
+                enable_rule_pack=True,
+                manage_opa=True,
+                include_content=True,
+                save_config=False,
+                sdk=FakeSDK([opa_control(), rule_control()]),
+                validator=validator,
+            )
+
+            self.assertEqual(validator.calls[0][0], root / "policies")
+
+    def test_direct_rule_setup_requires_explicit_regex_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._command_app(Path(tmp))
+            result = CliRunner().invoke(
+                agent_control_cmd,
+                [
+                    "setup",
+                    "--server-url",
+                    "https://agent-control.example.test",
+                    "--enable-rule-pack",
+                ],
+                obj=app,
+            )
+
+            self.assertEqual(result.exit_code, 2, result.output)
+            self.assertIn("--regex-source is required", result.output)
+            self.assertEqual(app.cfg.guardrail.regex_source, "local")
+
+    def test_rule_validation_failure_never_partially_publishes_opa(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._command_app(root)
+            opa_path, rule_path = self._write_prior_artifacts(root)
+            validator = FakeValidator()
+            validator.validate_rule_pack = mock.Mock(side_effect=PublicationError("invalid managed rules"))
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_CONTROL_API_KEY": "test-secret"}),
+                mock.patch(
+                    "defenseclaw.commands.cmd_agent_control.load_agent_control_sdk",
+                    return_value=FakeSDK([opa_control(), rule_control()]),
+                ),
+                mock.patch(
+                    "defenseclaw.commands.cmd_agent_control.NativeValidator",
+                    return_value=validator,
+                ),
+            ):
+                result = CliRunner().invoke(
+                    agent_control_cmd,
+                    [
+                        "setup",
+                        "--server-url",
+                        "https://agent-control.example.test",
+                        "--enable-rule-pack",
+                        "--regex-source",
+                        "agent_control",
+                        "--manage-opa",
+                    ],
+                    obj=app,
+                )
+
+            self.assertNotEqual(result.exit_code, 0, result.output)
+            self.assertEqual(opa_path.read_bytes(), b"prior-opa\n")
+            self.assertEqual(rule_path.read_bytes(), b"prior-rules\n")
+            self.assertEqual(app.cfg.guardrail.regex_source, "local")
+            self.assertFalse(app.cfg.agent_control.enabled)
+
+    def test_second_publication_failure_rolls_back_first_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._command_app(root)
+            opa_path, rule_path = self._write_prior_artifacts(root)
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_CONTROL_API_KEY": "test-secret"}),
+                mock.patch(
+                    "defenseclaw.commands.cmd_agent_control.load_agent_control_sdk",
+                    return_value=FakeSDK([opa_control(), rule_control()]),
+                ),
+                mock.patch(
+                    "defenseclaw.commands.cmd_agent_control.NativeValidator",
+                    return_value=FakeValidator(),
+                ),
+                mock.patch.object(
+                    ManagedPublisher,
+                    "publish_rule_pack",
+                    side_effect=PublicationError("simulated second publication failure"),
+                ),
+            ):
+                result = CliRunner().invoke(
+                    agent_control_cmd,
+                    [
+                        "setup",
+                        "--server-url",
+                        "https://agent-control.example.test",
+                        "--enable-rule-pack",
+                        "--regex-source",
+                        "hybrid",
+                        "--manage-opa",
+                    ],
+                    obj=app,
+                )
+
+            self.assertNotEqual(result.exit_code, 0, result.output)
+            self.assertEqual(opa_path.read_bytes(), b"prior-opa\n")
+            self.assertEqual(rule_path.read_bytes(), b"prior-rules\n")
+            self.assertEqual(app.cfg.guardrail.regex_source, "local")
+            self.assertFalse(app.cfg.agent_control.enabled)
+
+    def test_config_save_failure_rolls_back_both_lanes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._command_app(root)
+            opa_path, rule_path = self._write_prior_artifacts(root)
+            app.cfg.save = mock.Mock(side_effect=OSError("simulated disk failure"))
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_CONTROL_API_KEY": "test-secret"}),
+                mock.patch(
+                    "defenseclaw.commands.cmd_agent_control.load_agent_control_sdk",
+                    return_value=FakeSDK([opa_control(), rule_control()]),
+                ),
+                mock.patch(
+                    "defenseclaw.commands.cmd_agent_control.NativeValidator",
+                    return_value=FakeValidator(),
+                ),
+            ):
+                result = CliRunner().invoke(
+                    agent_control_cmd,
+                    [
+                        "setup",
+                        "--server-url",
+                        "https://agent-control.example.test",
+                        "--enable-rule-pack",
+                        "--regex-source",
+                        "agent_control",
+                        "--manage-opa",
+                    ],
+                    obj=app,
+                )
+
+            self.assertNotEqual(result.exit_code, 0, result.output)
+            self.assertEqual(opa_path.read_bytes(), b"prior-opa\n")
+            self.assertEqual(rule_path.read_bytes(), b"prior-rules\n")
+            self.assertEqual(app.cfg.guardrail.regex_source, "local")
+            self.assertFalse(app.cfg.agent_control.enabled)
 
 
 class FakeGateway:
@@ -634,7 +937,8 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             with mock.patch(
                 "defenseclaw.agent_control.sync.EnforcementEventBridge",
                 side_effect=OSError("sensitive local detail"),
@@ -661,7 +965,8 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             sdk = FakeSDK([])
             stop_event = StopAfterPolls(5)
             synchronizer = AgentControlSynchronizer(
@@ -692,7 +997,8 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             sdk = FakeSDK([opa_control()])
             stop_event = StopAfterPolls(1)
             synchronizer = AgentControlSynchronizer(
@@ -722,7 +1028,8 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             cfg.agent_control.opa.enabled = False
             cfg.agent_control.opa.activation = "manual"
             synchronizer = AgentControlSynchronizer(
@@ -739,7 +1046,8 @@ class SynchronizerTests(unittest.TestCase):
             root = Path(tmp)
             cfg = Config(data_dir=str(root), policy_dir="")
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             cfg.agent_control.opa.enabled = False
             cfg.agent_control.rule_pack.enabled = True
             cfg.agent_control.rule_pack.activation = "manual"
@@ -760,7 +1068,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             cfg.agent_control.opa.activation = "manual"
             synchronizer = AgentControlSynchronizer(
                 cfg,
@@ -781,7 +1091,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             synchronizer = AgentControlSynchronizer(
                 cfg,
                 sdk=FakeSDK([]),
@@ -803,7 +1115,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             sdk = SequenceSDK([None, []])
             synchronizer = AgentControlSynchronizer(
                 cfg,
@@ -827,19 +1141,24 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
+            cfg.agent_control.api_key_env = "CUSTOM_AGENT_CONTROL_KEY"
             cfg.agent_control.rule_pack.enabled = True
             sdk = FakeSDK([opa_control(), rule_control()])
             gateway = FakeGateway()
             validator = FakeValidator()
-            synchronizer = AgentControlSynchronizer(cfg, sdk=sdk, gateway=gateway, validator=validator)
-
-            state = synchronizer.run_once()
+            with mock.patch.dict(os.environ, {"CUSTOM_AGENT_CONTROL_KEY": "sdk-secret"}, clear=False):
+                synchronizer = AgentControlSynchronizer(cfg, sdk=sdk, gateway=gateway, validator=validator)
+                state = synchronizer.run_once()
 
             self.assertEqual(state.status, "active")
             self.assertEqual(state.opa_active_digest, gateway.opa[-1])
             self.assertEqual(state.rule_pack_active_digest, gateway.rules[-1])
             self.assertEqual(sdk.init_kwargs["target_type"], "defenseclaw.installation")
+            self.assertEqual(sdk.init_kwargs["server_url"], "https://agent-control.example.test")
+            self.assertEqual(sdk.init_kwargs["api_key"], "sdk-secret")
             self.assertEqual(sdk.shutdown_calls, 1)
             self.assertEqual(len(validator.calls), 1)
             self.assertEqual(len(validator.rule_calls), 1)
@@ -853,7 +1172,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             cfg.agent_control.rule_pack.enabled = True
             invalid_rule = rule_control()
             invalid_rule["control"]["execution"] = "server"
@@ -879,7 +1200,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             gateway = FakeGateway()
             validator = FakeValidator()
             audit_logger = FakeAuditLogger()
@@ -905,7 +1228,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             publisher = ManagedPublisher(data_dir=str(root), policy_dir=str(policy))
             previous = extract_candidates([]).opa_artifact("stricter")
             previous_digest = publisher.publish_opa(previous).digest
@@ -934,7 +1259,8 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             cfg.agent_control.opa.enabled = False
             cfg.agent_control.rule_pack.enabled = True
             publisher = ManagedPublisher(data_dir=str(root), policy_dir=str(policy))
@@ -966,7 +1292,8 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
             cfg.agent_control.opa.enabled = False
             cfg.agent_control.rule_pack.enabled = True
             gateway = FakeGateway()
@@ -988,7 +1315,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-secret-target"
+            cfg.agent_control.installation_id = "installation-secret-target"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             publisher = ManagedPublisher(data_dir=str(root), policy_dir=str(policy))
             previous = extract_candidates([]).opa_artifact("stricter")
             publisher.publish_opa(previous)
@@ -1014,7 +1343,9 @@ class SynchronizerTests(unittest.TestCase):
             (policy / "rego").mkdir(parents=True)
             cfg = Config(data_dir=str(root), policy_dir=str(policy))
             cfg.agent_control.enabled = True
-            cfg.agent_control.target_id = "installation-1"
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.agent_control.opa.enabled = True
             cfg.agent_control.rule_pack.enabled = True
             gateway = FakeGateway()
             synchronizer = AgentControlSynchronizer(

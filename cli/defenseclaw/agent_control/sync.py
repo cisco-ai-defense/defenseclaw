@@ -70,6 +70,20 @@ def load_agent_control_sdk() -> AgentControlSDK:
     return agent_control
 
 
+def resolve_agent_control_sdk_credentials(settings: Any, data_dir: str, *, require_key: bool = True) -> tuple[str, str]:
+    """Resolve explicit SDK connection kwargs from config + the secret store."""
+    from defenseclaw.credentials import resolve
+
+    settings.validate()
+    credential = resolve(settings.api_key_env, data_dir)
+    if require_key and not credential.is_set:
+        raise SynchronizationError(
+            f"Agent Control credential ${settings.api_key_env} is not set; "
+            f"run 'defenseclaw keys set {settings.api_key_env}'"
+        )
+    return settings.server_url.rstrip("/"), credential.value
+
+
 class AgentControlSynchronizer:
     def __init__(
         self,
@@ -89,6 +103,11 @@ class AgentControlSynchronizer:
             raise SynchronizationError("Agent Control integration is disabled")
         if self.settings.opa.enabled and not cfg.policy_dir:
             raise SynchronizationError("policy_dir is required for Agent Control OPA synchronization")
+        self.sdk_server_url, self.sdk_api_key = resolve_agent_control_sdk_credentials(
+            self.settings,
+            cfg.data_dir,
+            require_key=sdk is None,
+        )
         self.sdk = sdk or load_agent_control_sdk()
         self.publisher = publisher or ManagedPublisher(
             data_dir=cfg.data_dir,
@@ -115,7 +134,9 @@ class AgentControlSynchronizer:
         self.state = load_state(self.publisher.state_path)
         self.state.agent_name = self.settings.agent_name
         self.state.target_type = self.settings.target_type
-        self.state.target_id_hash = "sha256:" + hashlib.sha256(self.settings.target_id.encode("utf-8")).hexdigest()
+        self.state.target_id_hash = (
+            "sha256:" + hashlib.sha256(self.settings.installation_id.encode("utf-8")).hexdigest()
+        )
         self.state.sdk_version = str(getattr(self.sdk, "__version__", "unknown"))
         self.event_bridge: EnforcementEventBridge | None = None
         if self.settings.observability.enabled:
@@ -359,7 +380,11 @@ class AgentControlSynchronizer:
 
         if content is not None:
             overlay_dir = self.publisher.stage_rule_pack(content)
-            self.validator.validate_rule_pack(base_dirs=self._rule_pack_base_dirs(), overlay_dir=overlay_dir)
+            self.validator.validate_rule_pack(
+                base_dirs=self._rule_pack_base_dirs(),
+                overlay_dir=overlay_dir,
+                regex_source=self.cfg.guardrail.regex_source,
+            )
         publication = self.publisher.publish_rule_pack(content)
         self.state.rule_pack_published_digest = artifact_digest
         self.state.last_published_at = utc_now()
@@ -436,8 +461,10 @@ class AgentControlSynchronizer:
                 self.sdk.init(
                     agent_name=self.settings.agent_name,
                     agent_description="DefenseClaw policy synchronization",
+                    server_url=self.sdk_server_url,
+                    api_key=self.sdk_api_key,
                     target_type=self.settings.target_type,
-                    target_id=self.settings.target_id,
+                    target_id=self.settings.installation_id,
                     policy_refresh_interval_seconds=self.settings.refresh_seconds,
                     observability_enabled=self.settings.observability.enabled,
                 )
@@ -492,8 +519,8 @@ class AgentControlSynchronizer:
             "critical_disk_runtime_divergence" if isinstance(error, RollbackDivergenceError) else "error_lkg_preserved"
         )
         safe = _safe_error(error)
-        if self.settings.target_id:
-            safe = safe.replace(self.settings.target_id, "<target-id-redacted>")
+        if self.settings.installation_id:
+            safe = safe.replace(self.settings.installation_id, "<installation-id-redacted>")
         self.state.last_error = safe
         save_state(self.publisher.state_path, self.state)
 

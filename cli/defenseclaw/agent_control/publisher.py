@@ -267,7 +267,13 @@ class NativeValidator:
             message = (result.stderr or result.stdout or "native validation failed").strip()
             raise PublicationError(message[-1000:])
 
-    def validate_rule_pack(self, *, base_dirs: list[Path], overlay_dir: Path) -> None:
+    def validate_rule_pack(
+        self,
+        *,
+        base_dirs: list[Path],
+        overlay_dir: Path,
+        regex_source: str = "hybrid",
+    ) -> None:
         binary = shutil.which(self.binary)
         if binary is None:
             raise PublicationError(f"{self.binary} is required for native rule-pack validation")
@@ -286,6 +292,8 @@ class NativeValidator:
                         base_arg,
                         "--overlay-dir",
                         str(overlay_dir),
+                        "--regex-source",
+                        regex_source,
                     ],
                     check=False,
                     capture_output=True,

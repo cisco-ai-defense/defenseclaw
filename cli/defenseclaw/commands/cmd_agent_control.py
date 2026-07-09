@@ -18,12 +18,14 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
+import re
 import signal
+import socket
 import tempfile
-import uuid
 from dataclasses import asdict
 from pathlib import Path
 from threading import Event
@@ -38,6 +40,7 @@ from defenseclaw.agent_control.publisher import (
     ManagedPublisher,
     NativeValidator,
     PublicationError,
+    SingleWriterLock,
 )
 from defenseclaw.agent_control.state import load_state
 from defenseclaw.agent_control.sync import (
@@ -45,6 +48,7 @@ from defenseclaw.agent_control.sync import (
     SynchronizationError,
     configured_rule_pack_base_dirs,
     load_agent_control_sdk,
+    resolve_agent_control_sdk_credentials,
 )
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -54,80 +58,234 @@ def agent_control_cmd() -> None:
     """Synchronize Agent Control policy into local DefenseClaw enforcement."""
 
 
+def default_installation_id() -> str:
+    """Return a stable, readable first-run installation identifier."""
+    hostname = re.sub(r"[^A-Za-z0-9._-]+", "-", socket.gethostname()).strip("-.")
+    return f"defenseclaw-{hostname or 'host'}"[:255]
+
+
+def configure_agent_control(
+    app: AppContext,
+    *,
+    deployment: str,
+    server_url: str,
+    installation_id: str,
+    api_key_env: str,
+    enable_rule_pack: bool,
+    manage_opa: bool,
+    include_content: bool,
+    manual_activation: bool = False,
+    require_rules: bool = False,
+    save_config: bool = True,
+    api_key_override: str | None = None,
+    sdk: Any | None = None,
+    validator: NativeValidator | None = None,
+) -> Path:
+    """Preflight, validate, and publish one initial managed snapshot.
+
+    Config is not saved until the SDK snapshot has passed the strict envelope
+    parser and native validators.  This gives setup a fail-safe boundary: a
+    failed first fetch leaves the existing local regex posture on disk.
+    """
+    try:
+        if not app.cfg.policy_dir:
+            raise click.ClickException("policy_dir must be configured before Agent Control setup")
+
+        original_guardrail = copy.deepcopy(app.cfg.guardrail)
+        original_agent_control = copy.deepcopy(app.cfg.agent_control)
+        settings = app.cfg.agent_control
+        settings.enabled = True
+        settings.deployment = deployment.strip()
+        settings.server_url = server_url.strip().rstrip("/")
+        settings.installation_id = installation_id.strip() or default_installation_id()
+        settings.api_key_env = api_key_env.strip()
+        settings.rule_pack.enabled = enable_rule_pack
+        settings.opa.enabled = manage_opa
+        settings.observability.include_content = include_content
+        if manual_activation:
+            settings.opa.activation = "manual"
+            settings.rule_pack.activation = "manual"
+        settings.validate()
+
+        managed_regex = app.cfg.guardrail.regex_source in {"agent_control", "hybrid"}
+        if enable_rule_pack != managed_regex:
+            raise click.ClickException(
+                "Agent Control rule-pack sync and guardrail.regex_source must be configured together"
+            )
+
+        override = (api_key_override or "").strip()
+        server_url_resolved, resolved_api_key = resolve_agent_control_sdk_credentials(
+            settings,
+            app.cfg.data_dir,
+            require_key=sdk is None and not override,
+        )
+        api_key = override or resolved_api_key
+        if sdk is None:
+            sdk = load_agent_control_sdk()
+
+        controls: list[dict[str, Any]]
+        try:
+            sdk.init(
+                agent_name=settings.agent_name,
+                agent_description="DefenseClaw policy synchronization",
+                server_url=server_url_resolved,
+                api_key=api_key,
+                target_type=settings.target_type,
+                target_id=settings.installation_id,
+                policy_refresh_interval_seconds=settings.refresh_seconds,
+            )
+            snapshot = sdk.get_server_controls()
+            if snapshot is None:
+                raise SynchronizationError("Agent Control did not return a successful initial snapshot")
+            controls = snapshot
+            candidates = extract_candidates(controls)
+            if require_rules and not candidates.rules:
+                raise SynchronizationError("the effective Agent Control snapshot contains no DefenseClaw regex rules")
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, SynchronizationError) else f"{type(exc).__name__}"
+            raise click.ClickException(f"Agent Control connectivity/policy validation failed ({detail})") from exc
+        finally:
+            try:
+                sdk.shutdown()
+            except Exception:
+                pass
+
+        publisher = ManagedPublisher(
+            data_dir=app.cfg.data_dir,
+            policy_dir=app.cfg.policy_dir,
+            managed_dir=settings.managed_dir,
+            opa_enabled=settings.opa.enabled,
+        )
+        validator = validator or NativeValidator()
+        publications: list[Any] = []
+        with SingleWriterLock(publisher.lock_path):
+            publisher.prepare()
+
+            # Stage and validate every enabled lane before changing either
+            # active artifact. A bad rule bucket must never leave a new OPA
+            # threshold file active (or vice versa).
+            opa_content: bytes | None = None
+            rule_content: bytes | None = None
+            if settings.opa.enabled:
+                opa_content = candidates.opa_artifact(settings.opa.precedence)
+                opa_candidate = publisher.stage_opa(opa_content)
+                validator.validate_opa(
+                    rego_dir=Path(app.cfg.policy_dir),
+                    candidate=opa_candidate,
+                )
+            if settings.rule_pack.enabled:
+                rule_content = candidates.rule_pack_artifact()
+                if rule_content is not None:
+                    overlay_candidate = publisher.stage_rule_pack(rule_content)
+                    validator.validate_rule_pack(
+                        base_dirs=configured_rule_pack_base_dirs(app.cfg),
+                        overlay_dir=overlay_candidate,
+                        regex_source=app.cfg.guardrail.regex_source,
+                    )
+
+            try:
+                if settings.opa.enabled and opa_content is not None:
+                    publications.append(publisher.publish_opa(opa_content))
+                if settings.rule_pack.enabled:
+                    publications.append(publisher.publish_rule_pack(rule_content))
+
+                overlay_path = str(publisher.rule_pack_root)
+                overlay_norm = os.path.normpath(overlay_path.strip())
+                overlays = [
+                    value
+                    for value in app.cfg.guardrail.rule_pack_overlay_dirs
+                    if os.path.normpath(value.strip()) != overlay_norm
+                ]
+                if settings.rule_pack.enabled:
+                    overlays.append(overlay_path)
+                app.cfg.guardrail.rule_pack_overlay_dirs = overlays
+                app.cfg.guardrail.validate()
+                if save_config:
+                    app.cfg.save()
+            except Exception as exc:
+                rollback_error: Exception | None = None
+                for publication in reversed(publications):
+                    try:
+                        publisher.rollback(publication)
+                    except Exception as rollback_exc:  # pragma: no cover - critical contingency
+                        rollback_error = rollback_exc
+                        break
+                if rollback_error is not None:
+                    raise PublicationError(
+                        f"Agent Control setup failed ({type(exc).__name__}); artifact rollback failed"
+                    ) from rollback_error
+                raise
+
+        return publisher.managed_dir
+    except Exception:
+        if "original_guardrail" in locals():
+            app.cfg.guardrail = original_guardrail
+            app.cfg.agent_control = original_agent_control
+        raise
+
+
 @agent_control_cmd.command("setup")
-@click.option("--target-id", default="", help="Stable Agent Control target ID (default: generate UUID)")
+@click.option("--deployment", type=click.Choice(["cisco_cloud", "self_hosted"]), default="cisco_cloud")
+@click.option("--server-url", required=True, help="Agent Control service URL")
+@click.option("--installation-id", default="", help="Stable installation ID (default: defenseclaw-<hostname>)")
+@click.option("--api-key-env", default="AGENT_CONTROL_API_KEY", help="Environment variable holding the API key")
 @click.option("--enable-rule-pack/--no-enable-rule-pack", default=None)
+@click.option(
+    "--regex-source",
+    type=click.Choice(["agent_control", "hybrid"]),
+    default=None,
+    help="Required when Agent Control rule buckets are enabled",
+)
+@click.option("--manage-opa/--no-manage-opa", default=None)
+@click.option("--include-content/--metadata-only", default=None)
 @click.option("--manual-activation", is_flag=True, help="Publish without reloading/restarting the gateway")
 @pass_ctx
 def setup_agent_control(
     app: AppContext,
-    target_id: str,
+    deployment: str,
+    server_url: str,
+    installation_id: str,
+    api_key_env: str,
     enable_rule_pack: bool | None,
+    regex_source: str | None,
+    manage_opa: bool | None,
+    include_content: bool | None,
     manual_activation: bool,
 ) -> None:
     """Configure a stable DefenseClaw installation target and managed paths."""
-    try:
-        sdk = load_agent_control_sdk()
-    except SynchronizationError as exc:
-        raise click.ClickException(str(exc)) from exc
-    if not app.cfg.policy_dir:
-        raise click.ClickException("policy_dir must be configured before Agent Control setup")
-
+    original_guardrail = copy.deepcopy(app.cfg.guardrail)
+    original_agent_control = copy.deepcopy(app.cfg.agent_control)
     settings = app.cfg.agent_control
-    settings.target_id = target_id.strip() or settings.target_id.strip() or str(uuid.uuid4())
-    settings.enabled = True
-    if enable_rule_pack is not None:
-        settings.rule_pack.enabled = enable_rule_pack
-    if manual_activation:
-        settings.opa.activation = "manual"
-        settings.rule_pack.activation = "manual"
-    settings.validate()
-
+    effective_rule_pack = settings.rule_pack.enabled if enable_rule_pack is None else enable_rule_pack
+    if effective_rule_pack and regex_source is None:
+        raise click.UsageError("--regex-source is required when Agent Control rule buckets are enabled")
+    if not effective_rule_pack and regex_source is not None:
+        raise click.UsageError("--regex-source requires --enable-rule-pack")
+    app.cfg.guardrail.regex_source = regex_source if effective_rule_pack else "local"
     try:
-        sdk.init(
-            agent_name=settings.agent_name,
-            agent_description="DefenseClaw policy synchronization",
-            target_type=settings.target_type,
-            target_id=settings.target_id,
-            policy_refresh_interval_seconds=settings.refresh_seconds,
+        managed_dir = configure_agent_control(
+            app,
+            deployment=deployment,
+            server_url=server_url,
+            installation_id=installation_id,
+            api_key_env=api_key_env,
+            enable_rule_pack=effective_rule_pack,
+            manage_opa=settings.opa.enabled if manage_opa is None else manage_opa,
+            include_content=(settings.observability.include_content if include_content is None else include_content),
+            manual_activation=manual_activation,
         )
-        if sdk.get_server_controls() is None:
-            raise RuntimeError("Agent Control did not return a successful initial snapshot")
-    except Exception as exc:
-        raise click.ClickException(f"Agent Control connectivity validation failed ({type(exc).__name__})") from exc
-    finally:
-        try:
-            sdk.shutdown()
-        except Exception:
-            pass
-
-    publisher = ManagedPublisher(
-        data_dir=app.cfg.data_dir,
-        policy_dir=app.cfg.policy_dir,
-        managed_dir=settings.managed_dir,
-        opa_enabled=settings.opa.enabled,
-    )
-    publisher.prepare()
-    if settings.opa.enabled:
-        disabled = extract_candidates([]).opa_artifact(settings.opa.precedence)
-        if publisher.active_digest(publisher.opa_active_path) is None:
-            publisher.publish_opa(disabled)
-    overlay_path = str(publisher.rule_pack_root)
-    overlay_norm = os.path.normpath(overlay_path.strip())
-    overlays = [
-        value for value in app.cfg.guardrail.rule_pack_overlay_dirs if os.path.normpath(value.strip()) != overlay_norm
-    ]
-    if settings.rule_pack.enabled:
-        overlays.append(overlay_path)
-    app.cfg.guardrail.rule_pack_overlay_dirs = overlays
-    app.cfg.guardrail.validate()
-    app.cfg.save()
+    except Exception:
+        app.cfg.guardrail = original_guardrail
+        app.cfg.agent_control = original_agent_control
+        raise
 
     click.echo("Agent Control synchronization configured.")
     click.echo(f"  agent:       {settings.agent_name}")
     click.echo(f"  target_type: {settings.target_type}")
-    click.echo(f"  target_id:   {settings.target_id}")
-    click.echo(f"  managed_dir: {publisher.managed_dir}")
+    click.echo(f"  deployment:    {settings.deployment}")
+    click.echo(f"  server_url:    {settings.server_url}")
+    click.echo(f"  installation:  {settings.installation_id}")
+    click.echo(f"  managed_dir:   {managed_dir}")
     click.echo("Bind the DefenseClaw controls to this exact target, then run:")
     click.echo("  defenseclaw agent-control sync --once")
 
@@ -171,10 +329,14 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
     value["managed_dir"] = str(publisher.managed_dir)
     value.setdefault("opa_active_digest", None)
     value.setdefault("rule_pack_active_digest", None)
-    if app.cfg.agent_control.target_id:
+    if app.cfg.agent_control.installation_id:
         value["target_id_hash"] = (
-            "sha256:" + hashlib.sha256(app.cfg.agent_control.target_id.encode("utf-8")).hexdigest()
+            "sha256:" + hashlib.sha256(app.cfg.agent_control.installation_id.encode("utf-8")).hexdigest()
         )
+    value["deployment"] = app.cfg.agent_control.deployment
+    value["server_url"] = app.cfg.agent_control.server_url
+    value["installation_id"] = app.cfg.agent_control.installation_id
+    value["regex_source"] = app.cfg.guardrail.regex_source
     try:
         sdk = load_agent_control_sdk()
         value["sdk_version"] = str(getattr(sdk, "__version__", "unknown"))
@@ -205,6 +367,10 @@ def status_agent_control(app: AppContext, json_output: bool) -> None:
         click.echo(json.dumps(value, indent=2, sort_keys=True))
         return
     click.echo(f"Status:              {state.status}")
+    click.echo(f"Regex source:        {value['regex_source']}")
+    click.echo(f"Deployment:          {value['deployment']}")
+    click.echo(f"Server:              {value['server_url'] or '-'}")
+    click.echo(f"Installation:        {value['installation_id'] or '-'}")
     click.echo(f"SDK compatible:      {value['sdk_compatible']}")
     click.echo(f"Gateway readback:    {value['runtime_status']}")
     click.echo(f"Snapshot:            {state.snapshot_state} (freshness: {state.snapshot_freshness})")

@@ -22,9 +22,11 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -34,6 +36,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -70,6 +73,8 @@ _log = logging.getLogger(__name__)
 _privacy_disable_redaction_warned = False
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
 _untrusted_managed_config_warned_paths: set[str] = set()
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
@@ -1804,6 +1809,10 @@ class GuardrailConfig:
     # (the YAML parser below uses .get(key, <default>) so the presence
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
+    # Selects which regex rule contribution is evaluated at runtime:
+    # local=bundled/operator rules, agent_control=managed snapshot only,
+    # hybrid=local plus the managed Agent Control overlay.
+    regex_source: str = "local"
     rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
     # Strict rules-only overlays applied after every connector's effective
     # base pack. Agent Control uses one managed entry here without replacing
@@ -1958,6 +1967,9 @@ class GuardrailConfig:
         loop. Raises :class:`ValueError` with a named message on the
         first violation.
         """
+        if self.regex_source not in {"local", "agent_control", "hybrid"}:
+            raise ValueError("guardrail.regex_source must be 'local', 'agent_control', or 'hybrid'")
+
         seen_overlay_dirs: set[str] = set()
         for index, directory in enumerate(self.rule_pack_overlay_dirs):
             if not isinstance(directory, str) or not directory.strip():
@@ -2279,7 +2291,7 @@ def _normalize_connector_key(name: str | None) -> str:
 
 @dataclass
 class AgentControlOPAConfig:
-    enabled: bool = True
+    enabled: bool = False
     precedence: str = "stricter"
     activation: str = "reload"
 
@@ -2304,9 +2316,12 @@ class AgentControlConfig:
     """Optional Agent Control policy-distribution synchronizer settings."""
 
     enabled: bool = False
+    deployment: str = "cisco_cloud"
+    server_url: str = ""
     agent_name: str = "defenseclaw-policy-sync"
     target_type: str = "defenseclaw.installation"
-    target_id: str = ""
+    installation_id: str = ""
+    api_key_env: str = "AGENT_CONTROL_API_KEY"
     refresh_seconds: int = 60
     cache_poll_seconds: int = 2
     init_retry_max_seconds: int = 300
@@ -2316,14 +2331,33 @@ class AgentControlConfig:
     observability: AgentControlObservabilityConfig = field(default_factory=AgentControlObservabilityConfig)
 
     def validate(self) -> None:
+        if self.deployment not in {"cisco_cloud", "self_hosted"}:
+            raise ValueError("agent_control.deployment must be 'cisco_cloud' or 'self_hosted'")
         if self.agent_name != "defenseclaw-policy-sync":
             raise ValueError("agent_control.agent_name must be 'defenseclaw-policy-sync'")
         if self.target_type != "defenseclaw.installation":
             raise ValueError("agent_control.target_type must be 'defenseclaw.installation'")
-        if len(self.target_id) > 255:
-            raise ValueError("agent_control.target_id cannot exceed 255 characters")
-        if self.enabled and not self.target_id.strip():
-            raise ValueError("agent_control.target_id is required when integration is enabled")
+        if len(self.installation_id) > 255:
+            raise ValueError("agent_control.installation_id cannot exceed 255 characters")
+        if self.enabled and not self.installation_id.strip():
+            raise ValueError("agent_control.installation_id is required when integration is enabled")
+        if self.enabled and not self.server_url.strip():
+            raise ValueError("agent_control.server_url is required when integration is enabled")
+        if self.server_url:
+            parsed = urlsplit(self.server_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("agent_control.server_url must be an absolute HTTP(S) URL")
+            if parsed.username is not None or parsed.password is not None:
+                raise ValueError("agent_control.server_url must not contain credentials")
+            host_is_loopback = parsed.hostname.lower() == "localhost"
+            try:
+                host_is_loopback = host_is_loopback or ipaddress.ip_address(parsed.hostname).is_loopback
+            except ValueError:
+                pass
+            if parsed.scheme != "https" and not host_is_loopback:
+                raise ValueError("agent_control.server_url requires HTTPS except for loopback development")
+        if not _ENV_VAR_NAME_RE.fullmatch(self.api_key_env):
+            raise ValueError("agent_control.api_key_env must be an environment variable name")
         if self.refresh_seconds <= 0:
             raise ValueError("agent_control.refresh_seconds must be greater than zero")
         if self.cache_poll_seconds <= 0:
@@ -4140,6 +4174,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
+        regex_source=str(raw.get("regex_source", "local") or "local"),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
         rule_pack_overlay_dirs=[str(value) for value in raw_overlay_dirs],
         connector=raw.get("connector", ""),
@@ -4157,9 +4192,12 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
         raise ValueError("agent_control must be a mapping")
     allowed = {
         "enabled",
+        "deployment",
+        "server_url",
         "agent_name",
         "target_type",
-        "target_id",
+        "installation_id",
+        "api_key_env",
         "refresh_seconds",
         "cache_poll_seconds",
         "init_retry_max_seconds",
@@ -4194,15 +4232,18 @@ def _merge_agent_control(raw: Any) -> AgentControlConfig:
         raise ValueError(f"agent_control.observability contains unsupported keys: {unknown_observability}")
     return AgentControlConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
+        deployment=str(raw.get("deployment", "cisco_cloud") or ""),
+        server_url=str(raw.get("server_url", "") or ""),
         agent_name=str(raw.get("agent_name", "defenseclaw-policy-sync") or ""),
         target_type=str(raw.get("target_type", "defenseclaw.installation") or ""),
-        target_id=str(raw.get("target_id", "") or ""),
+        installation_id=str(raw.get("installation_id", "") or ""),
+        api_key_env=str(raw.get("api_key_env", "AGENT_CONTROL_API_KEY") or ""),
         refresh_seconds=int(raw.get("refresh_seconds", 60)),
         cache_poll_seconds=int(raw.get("cache_poll_seconds", 2)),
         init_retry_max_seconds=int(raw.get("init_retry_max_seconds", 300)),
         managed_dir=str(raw.get("managed_dir", "") or ""),
         opa=AgentControlOPAConfig(
-            enabled=_coerce_bool(opa_raw.get("enabled", True), default=True),
+            enabled=_coerce_bool(opa_raw.get("enabled", False)),
             precedence=str(opa_raw.get("precedence", "stricter") or ""),
             activation=str(opa_raw.get("activation", "reload") or ""),
         ),
@@ -4923,6 +4964,13 @@ def load() -> Config:
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
     cfg.agent_control.validate()
+    if cfg.guardrail.regex_source in {"agent_control", "hybrid"}:
+        if not cfg.agent_control.enabled or not cfg.agent_control.rule_pack.enabled:
+            raise ValueError(
+                "guardrail.regex_source requires agent_control.enabled and agent_control.rule_pack.enabled"
+            )
+    elif cfg.agent_control.rule_pack.enabled:
+        raise ValueError("agent_control.rule_pack.enabled requires guardrail.regex_source agent_control or hybrid")
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.

@@ -30,6 +30,7 @@ from defenseclaw.commands.cmd_doctor import (
     _ANTHROPIC_DEFAULT_PROBE_MODEL,
     _anthropic_probe_model,
     _bedrock_region,
+    _check_agent_control_config,
     _check_antigravity_hooks,
     _check_cisco_ai_defense,
     _check_connector_residue,
@@ -45,6 +46,7 @@ from defenseclaw.commands.cmd_doctor import (
     _verify_bedrock,
 )
 from defenseclaw.config import (
+    AgentControlConfig,
     CiscoAIDefenseConfig,
     Config,
     GatewayConfig,
@@ -81,6 +83,25 @@ class DoctorMultiConnectorInventoryTests(unittest.TestCase):
 
 
 class DoctorGuardrailTests(unittest.TestCase):
+    def test_agent_control_managed_posture_is_visible(self):
+        cfg = Config(
+            guardrail=GuardrailConfig(regex_source="agent_control"),
+            agent_control=AgentControlConfig(
+                enabled=True,
+                deployment="cisco_cloud",
+                server_url="https://agent-control.example.test",
+                installation_id="defenseclaw-test",
+            ),
+        )
+        cfg.agent_control.rule_pack.enabled = True
+        result = _DoctorResult()
+
+        _check_agent_control_config(cfg, result)
+
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.passed, 1)
+        self.assertIn("last-known-good", result.checks[0]["detail"])
+
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
     def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe):
         cfg = Config(

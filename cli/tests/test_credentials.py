@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw import credentials as C
 from defenseclaw.config import (
+    AgentControlConfig,
     CiscoAIDefenseConfig,
     ClawConfig,
     Config,
@@ -99,6 +100,21 @@ class RequirementPredicateTests(unittest.TestCase):
     def test_judge_key_not_used_when_guardrail_disabled(self):
         cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=False))
         self.assertEqual(C._judge_api_key(cfg), C.Requirement.NOT_USED)
+
+    def test_agent_control_key_tracks_configured_env_and_endpoint(self):
+        settings = AgentControlConfig(
+            enabled=True,
+            deployment="self_hosted",
+            server_url="https://agent-control.example.test",
+            installation_id="defenseclaw-test",
+            api_key_env="MY_AGENT_CONTROL_KEY",
+        )
+        cfg = _make_cfg("/tmp/dc-test", agent_control=settings)
+
+        self.assertEqual(C._agent_control_key(cfg), C.Requirement.REQUIRED)
+        spec = next(spec for spec in C.CREDENTIALS if spec.feature == "agent_control")
+        self.assertEqual(spec.resolve_env_name(cfg), "MY_AGENT_CONTROL_KEY")
+        self.assertEqual(spec.resolve_bound_endpoint(cfg), "https://agent-control.example.test")
 
     def test_judge_key_not_used_when_default_key_covers_it(self):
         """With no per-component llm.api_key_env override, JUDGE_API_KEY
