@@ -52,36 +52,58 @@ Runtime state, configuration, connector backups, and audit history remain under
 
 <Step>
 
-### Download the setup executable
+### Download and verify the setup executable
 
-Download `DefenseClawSetup-x64.exe` from the GitHub release page. Production
-release artifacts are Authenticode signed by the DefenseClaw publisher and have
-matching release checksums. Local or pull-request artifacts may be unsigned and
-must be treated as test builds.
+For a normal release installation, download `DefenseClawSetup-x64.exe`
+directly from [GitHub Releases](https://github.com/cisco-ai-defense/defenseclaw/releases).
+A release asset is the executable itself; there is no outer ZIP to extract.
 
-Double-click the file for the graphical setup wizard, or run a silent per-user
-install:
+Before treating an executable as a production build, open **Properties >
+Digital Signatures**, confirm that Windows reports a valid signature from
+`Cisco Systems, Inc.`, and compare its SHA-256 with the checksum published for
+that release. A direct download alone is not proof that a build is signed.
 
-```powershell
-.\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
-```
-
-Use `CONNECTOR=claudecode` for Claude Code, or `CONNECTOR=none` to configure
-later. The setup executable contains the gateway, native hook launcher, Python
-wheel, pinned Python runtime, and required Python packages, so installation does
-not need network access after the file has been downloaded.
-
-The finish screen directs you to `defenseclaw init` and `defenseclaw tui`. It
-can open a terminal in the installed command directory, but it does not install
-or claim a separate native DefenseClaw GUI application.
+GitHub Actions artifacts are for testing. Actions downloads wrap the build
+outputs in a ZIP: choose **Extract all** once, then run
+`DefenseClawSetup-x64.exe` from the extracted folder. Do not run the executable
+from File Explorer's compressed-folder view. Local, pull-request, and unsigned
+Actions builds are test-only and must not be presented as production releases.
 
 </Step>
 
 <Step>
 
-### Configure one or more agents
+### Run the graphical wizard
 
-If you installed with `CONNECTOR=none`, run the wizard after setup:
+Double-click `DefenseClawSetup-x64.exe`. The wizard installs for the current
+Windows user and does not request an installation directory or machine-wide
+administrator access.
+
+Choose a connector:
+
+- **Codex CLI** or **Claude Code** configures that native agent.
+- **Configure later** installs the product without changing an agent's hook
+  configuration.
+
+Start with **Observe** mode, which records decisions without blocking agent
+actions. Choose **Action** only after you have reviewed observed traffic and
+are ready to enforce supported decisions. Leave **Start gateway after install**
+selected for the usual interactive setup, then choose **Install**.
+
+While packaged files are installed, the wizard displays a moving progress bar
+and remains responsive; the controls stay disabled until the transaction
+finishes. Wait for the **DefenseClaw is installed** screen. Choose **Open
+Terminal** to open PowerShell in the installed command directory, or choose
+**Finish** and open a new terminal yourself. The wizard installs the existing
+CLI/TUI, gateway, hook launcher, and managed runtime—not a separate desktop GUI.
+
+</Step>
+
+<Step>
+
+### Complete connector configuration
+
+If you chose **Configure later**, initialize DefenseClaw from the terminal:
 
 ```powershell
 defenseclaw init
@@ -98,7 +120,7 @@ defenseclaw init --connector codex
 
 <Step>
 
-### Verify the gateway and hook launcher
+### Verify the installation
 
 Open a new PowerShell or cmd window so the updated user `PATH` is loaded, then
 run:
@@ -114,16 +136,9 @@ defenseclaw doctor
 ```
 
 If initialization did not start the gateway, run `defenseclaw-gateway start`
-and repeat `defenseclaw doctor`.
-
-</Step>
-
-<Step>
-
-### Drive the native agent
-
-Restart the configured agent so it reloads its hook configuration, then trigger
-a prompt or tool call. Inspect the resulting decisions:
+and repeat `defenseclaw doctor`. Restart the configured agent so it reloads its
+hook configuration, then trigger a prompt or tool call and review activity in
+the TUI:
 
 ```powershell
 defenseclaw tui
@@ -134,9 +149,36 @@ defenseclaw alerts
 
 </Steps>
 
+The setup executable contains the gateway, native hook launcher, Python wheel,
+pinned Python runtime, and required Python packages, so installation does not
+need network access after the file has been downloaded.
+
+## Quiet installation for automation
+
+The graphical wizard is the normal interactive path. Enterprise software
+deployment and other automation can use the optional quiet command-line
+surface:
+
+```powershell
+.\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
+```
+
+Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure
+later. `MODE=action` enables enforcement instead of observation, and
+`STARTGATEWAY=0` leaves the gateway stopped. This setup executable is per-user
+only: it rejects `INSTALLSCOPE=machine`, and this release path does not publish
+an MSI. Administrators can distribute the EXE through their managed software
+channel while running it in each target user's context.
+
 ## Repair, upgrade, and uninstall
 
-Repair reinstalls the exact packaged files and keeps user configuration:
+For interactive maintenance, open **Settings > Apps > Installed apps**, find
+**DefenseClaw**, and use **Modify** to repair or **Uninstall** to remove it.
+Repair reinstalls the exact packaged files while preserving configuration,
+connector settings, and audit history. Uninstall preserves
+`%USERPROFILE%\.defenseclaw` unless you explicitly select removal of user data.
+
+Automation can call the same maintenance executable quietly:
 
 ```powershell
 .\DefenseClawSetup-x64.exe /repair /quiet /norestart INSTALLSCOPE=user
@@ -157,8 +199,8 @@ not fight Intune or SCCM rollout. This setup executable is per-user only and
 rejects `INSTALLSCOPE=machine`; this release path does not publish an MSI.
 
 Uninstall removes product-owned application files, the installer cache,
-Installed Apps registration, and the setup-owned user `PATH` entry. User data is preserved by
-default:
+Installed Apps registration, and the setup-owned user `PATH` entry. User data
+is preserved by default:
 
 ```powershell
 .\DefenseClawSetup-x64.exe /uninstall /quiet
@@ -229,8 +271,9 @@ to the installer transaction.
 Use a disposable Windows user account or VM when testing installer builds. The
 installer writes HKCU Installed Apps entries and updates that user's `PATH`;
 testing in a throwaway profile avoids overwriting an active DefenseClaw
-installation. Unsigned local artifacts should be labeled as test builds and
-never treated as production releases.
+installation. Extract an Actions artifact ZIP before launching its setup EXE.
+Unsigned local, pull-request, and Actions artifacts should be labeled as test
+builds and never treated as signed production-release evidence.
 
 ## Operations and limits
 
@@ -277,9 +320,17 @@ defenseclaw setup splunk --disable --logs
     then `Get-Command defenseclaw`.
   </Accordion>
   <Accordion title="Windows reports an unknown publisher">
-    Local and pull-request artifacts may be unsigned. Production release
-    artifacts must validate as Authenticode signed by the DefenseClaw publisher
-    and match the release checksum before installation or upgrade.
+    Treat the file as a test build unless it came from the intended release and
+    Windows validates its Authenticode signer as `Cisco Systems, Inc.`. A
+    production build must also match the release SHA-256. Local, pull-request,
+    and unsigned Actions artifacts are testing-only.
+  </Accordion>
+  <Accordion title="The setup window stops responding">
+    A healthy wizard remains responsive while the moving progress bar is
+    visible and eventually enables **Finish** and **Open Terminal**. If Windows
+    reports **Not Responding**, end that setup process and do not assume the
+    installation completed. For a test artifact, report the build identifier
+    and reproduce it in a disposable user account or VM.
   </Accordion>
   <Accordion title="The gateway runs but hooks do not fire">
     Run `defenseclaw-gateway restart`, `defenseclaw doctor`, and `defenseclaw
