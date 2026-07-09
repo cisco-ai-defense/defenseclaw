@@ -1420,17 +1420,26 @@ def scan(
         else:
             connectors = [None]
         json_rows: list[dict[str, Any]] = []
+        enforcement_failed = False
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
             if remote:
                 rows = _scan_all_remote(app, as_json, connector=c)
             else:
-                rows = _scan_all(app, scanner, as_json, enforce=action, connector=c)
+                try:
+                    rows = _scan_all(app, scanner, as_json, enforce=action, connector=c)
+                except SystemExit as exc:
+                    if not action or exc.code in (None, 0):
+                        raise
+                    enforcement_failed = True
+                    rows = []
             if as_json:
                 json_rows.extend(rows or [])
         if as_json:
             click.echo(json.dumps(json_rows, indent=2, default=str))
+        if enforcement_failed:
+            raise SystemExit(1)
         return
 
     if not target:
@@ -1879,6 +1888,8 @@ def _apply_scan_enforcement(
     eval_connector = connector or (
         app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
     )
+    canonical_connector = _normalize_runtime_connector(eval_connector)
+    scoped_connector = canonical_connector if connector else ""
     decision = evaluate_admission(
         pe,
         policy_dir=app.cfg.policy_dir,
@@ -1887,7 +1898,7 @@ def _apply_scan_enforcement(
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
-        connector=eval_connector,
+        connector=canonical_connector,
         asset_policy=app.cfg.asset_policy,
     )
 
@@ -1911,46 +1922,61 @@ def _apply_scan_enforcement(
             pe,
             skill_name,
             skill_path,
-            connector or "",
+            scoped_connector,
             enforcement_reason,
         )
         if dest:
-            applied_actions.append("quarantined")
+            try:
+                _verify_scan_action_persisted(
+                    app, skill_name, "file", "quarantine", scoped_connector,
+                )
+                applied_actions.append("quarantined")
+            except Exception as exc:  # noqa: BLE001 - physical quarantine remains in place.
+                click.echo(
+                    f"[scan] quarantine policy persistence failed for {skill_name!r}: {exc}",
+                    err=True,
+                )
+                failed_actions.append("quarantine policy")
         else:
             click.echo(f"[scan] quarantine failed for {skill_name!r}", err=True)
             failed_actions.append("quarantine")
 
     if action_cfg.runtime == "disable":
-        target_connector = _normalize_runtime_connector(connector or eval_connector)
         try:
-            if target_connector == "openclaw":
+            if canonical_connector == "openclaw":
                 client = _sidecar_client(app)
                 client.disable_skill(skill_name)
-            if connector:
+            if scoped_connector:
                 pe.disable_for_connector(
-                    "skill", skill_name, target_connector, enforcement_reason,
+                    "skill", skill_name, scoped_connector, enforcement_reason,
                 )
             else:
                 pe.disable("skill", skill_name, enforcement_reason)
-            if target_connector == "openclaw":
+            _verify_scan_action_persisted(
+                app, skill_name, "runtime", "disable", scoped_connector,
+            )
+            if canonical_connector == "openclaw":
                 applied_actions.append("disabled via gateway")
             else:
                 applied_actions.append(
-                    f"runtime disable recorded for connector={target_connector}"
+                    f"runtime disable recorded for connector={canonical_connector}"
                 )
         except Exception as exc:  # noqa: BLE001 - report persistence/RPC failures uniformly.
-            label = "gateway disable" if target_connector == "openclaw" else "runtime policy persistence"
+            label = "gateway disable" if canonical_connector == "openclaw" else "runtime policy persistence"
             click.echo(f"[scan] {label} failed for {skill_name!r}: {exc}", err=True)
             failed_actions.append("runtime disable")
 
     if action_cfg.install == "block":
         try:
-            if connector:
+            if scoped_connector:
                 pe.block_for_connector(
-                    "skill", skill_name, _normalize_runtime_connector(connector), enforcement_reason,
+                    "skill", skill_name, scoped_connector, enforcement_reason,
                 )
             else:
                 pe.block("skill", skill_name, enforcement_reason)
+            _verify_scan_action_persisted(
+                app, skill_name, "install", "block", scoped_connector,
+            )
             applied_actions.append("added to block list")
         except Exception as exc:  # noqa: BLE001 - preserve other defense-in-depth actions.
             click.echo(
@@ -1963,7 +1989,10 @@ def _apply_scan_enforcement(
         actions_str = ", ".join(applied_actions)
         click.echo(f"[scan] enforcement: {skill_name!r}: {actions_str}")
         if app.logger:
-            detail = f"severity={sev} findings={len(result.findings)}"
+            detail = (
+                f"severity={sev} findings={len(result.findings)} "
+                f"connector={canonical_connector}"
+            )
             app.logger.log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
 
     if failed_actions:
@@ -1971,6 +2000,21 @@ def _apply_scan_enforcement(
         raise click.ClickException(
             f"configured enforcement incomplete for {skill_name!r}: {failed} failed"
         )
+
+
+def _verify_scan_action_persisted(
+    app: AppContext,
+    skill_name: str,
+    field: str,
+    value: str,
+    connector: str,
+) -> None:
+    """Fail unless one exact scoped enforcement field is durably readable."""
+    if app.store is None or not app.store.has_action(
+        "skill", skill_name, field, value, connector,
+    ):
+        scope = connector or "global"
+        raise RuntimeError(f"{field}={value} was not persisted for connector={scope}")
 
 
 def _enable_skill_via_gateway(app: AppContext, skill_name: str) -> bool:

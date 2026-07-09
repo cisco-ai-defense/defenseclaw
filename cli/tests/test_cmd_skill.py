@@ -272,7 +272,10 @@ class TestSkillScan(SkillCommandTestBase):
             verdict="blocked",
             action=SeverityAction(file="quarantine", runtime="disable", install="block"),
         )
-        mock_quarantine.return_value = os.path.join(self.tmp_dir, "quarantined")
+        def quarantine_side_effect(_app, pe, name, _path, connector, reason):
+            pe.quarantine_for_connector("skill", name, connector, reason)
+            return os.path.join(self.tmp_dir, "quarantined")
+        mock_quarantine.side_effect = quarantine_side_effect
         skill_dir = os.path.join(self.tmp_dir, "dirty-skill")
         os.makedirs(skill_dir)
         result = ScanResult(
@@ -303,7 +306,7 @@ class TestSkillScan(SkillCommandTestBase):
     ):
         mock_admission.return_value = MagicMock(
             verdict="blocked",
-            action=SeverityAction(file="none", runtime="disable", install="block"),
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
         )
         skill_dir = os.path.join(self.tmp_dir, "alias-skill")
         os.makedirs(skill_dir)
@@ -326,6 +329,15 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertTrue(self.app.store.has_action(
             "skill", "alias-skill", "install", "block", "claudecode",
         ))
+        self.assertTrue(self.app.store.has_action(
+            "skill", "alias-skill", "file", "quarantine", "claudecode",
+        ))
+        records = self.app.store.list_quarantine_records(
+            "skill", "alias-skill", "claudecode",
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].connectors, ("claudecode",))
+        self.assertIsNone(self.app.store.get_action("skill", "alias-skill", "claude-code"))
 
     @patch("defenseclaw.commands.cmd_skill._sidecar_client")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
@@ -463,6 +475,227 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertTrue(self.app.store.has_action(
             "skill", "cli-partial-skill", "install", "block", "codex",
         ))
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_missing_store_and_silent_noop_fail_closed(self, mock_admission):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="none", runtime="disable", install="block"),
+        )
+        result = ScanResult(
+            scanner="skill-scanner", target="inert",
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        skill_dir = os.path.join(self.tmp_dir, "missing-store-skill")
+        os.makedirs(skill_dir)
+
+        missing_store_app = MagicMock(cfg=self.app.cfg, store=None, logger=None)
+        noop_pe = MagicMock()
+        with self.assertRaises(click.ClickException):
+            _apply_scan_enforcement(
+                missing_store_app, noop_pe, "missing-store-skill", skill_dir, result,
+                connector="codex",
+            )
+        noop_pe.disable_for_connector.assert_called_once()
+        noop_pe.block_for_connector.assert_called_once()
+
+        silent_name = "silent-noop-skill"
+        silent_dir = os.path.join(self.tmp_dir, silent_name)
+        os.makedirs(silent_dir)
+        silent_pe = MagicMock()
+        with self.assertRaises(click.ClickException):
+            _apply_scan_enforcement(
+                self.app, silent_pe, silent_name, silent_dir, result, connector="codex",
+            )
+        self.assertIsNone(self.app.store.get_action("skill", silent_name, "codex"))
+        silent_pe.disable_for_connector.assert_called_once()
+        silent_pe.block_for_connector.assert_called_once()
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_scan_action_cli_claude_alias_uses_one_canonical_scope(
+        self, mock_scan, mock_admission, mock_client,
+    ):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+        skill_dir = os.path.join(self.tmp_dir, "cli-alias-skill")
+        os.makedirs(skill_dir)
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        result = self.invoke([
+            "scan", "cli-alias-skill", "--path", skill_dir,
+            "--connector", "claude-code", "--action", "--no-use-llm",
+        ])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_client.assert_not_called()
+        entry = self.app.store.get_action("skill", "cli-alias-skill", "claudecode")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.actions.file, "quarantine")
+        self.assertEqual(entry.actions.runtime, "disable")
+        self.assertEqual(entry.actions.install, "block")
+        self.assertIsNone(self.app.store.get_action("skill", "cli-alias-skill", "claude-code"))
+        records = self.app.store.list_quarantine_records(
+            "skill", "cli-alias-skill", "claudecode",
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].connectors, ("claudecode",))
+
+    def _configure_two_scan_connectors(self, skill_name):
+        roots = {
+            "codex": os.path.join(self.tmp_dir, "codex", "skills"),
+            "claudecode": os.path.join(self.tmp_dir, "claudecode", "skills"),
+        }
+        paths = {}
+        for connector, root in roots.items():
+            paths[connector] = os.path.join(root, skill_name)
+            os.makedirs(paths[connector])
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "claude-code"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [  # type: ignore[method-assign]
+            roots["claudecode" if connector == "claude-code" else (connector or "codex")]
+        ]
+        return paths
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_scan_action_global_two_hook_connectors_are_isolated(
+        self, mock_scan, mock_admission, mock_list, mock_client,
+    ):
+        name = "global-skill"
+        paths = self._configure_two_scan_connectors(name)
+        mock_list.side_effect = lambda _app, connector=None: {
+            "skills": [{"name": name, "baseDir": paths[
+                "claudecode" if connector == "claude-code" else connector
+            ]}]
+        }
+        mock_scan.side_effect = lambda path: ScanResult(
+            scanner="skill-scanner", target=path,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+
+        result = self.invoke(["scan", "--action", "--no-use-llm"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_scan.call_count, 2)
+        mock_client.assert_not_called()
+        for connector in ("codex", "claudecode"):
+            entry = self.app.store.get_action("skill", name, connector)
+            self.assertEqual(entry.actions.file, "quarantine")
+            self.assertEqual(entry.actions.runtime, "disable")
+            self.assertEqual(entry.actions.install, "block")
+        self.assertIsNone(self.app.store.get_action("skill", name))
+        self.assertIsNone(self.app.store.get_action("skill", name, "claude-code"))
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance")
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_scan_action_global_peer_failure_continues_and_returns_nonzero(
+        self, mock_scan, mock_admission, mock_list, mock_quarantine, mock_client,
+    ):
+        name = "global-partial-skill"
+        paths = self._configure_two_scan_connectors(name)
+        mock_list.side_effect = lambda _app, connector=None: {
+            "skills": [{"name": name, "baseDir": paths[
+                "claudecode" if connector == "claude-code" else connector
+            ]}]
+        }
+        mock_scan.side_effect = lambda path: ScanResult(
+            scanner="skill-scanner", target=path,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+        def quarantine_side_effect(_app, pe, skill, _path, connector, reason):
+            if connector == "codex":
+                return None
+            pe.quarantine_for_connector("skill", skill, connector, reason)
+            return os.path.join(self.tmp_dir, "mock-quarantine")
+        mock_quarantine.side_effect = quarantine_side_effect
+
+        result = self.invoke(["scan", "--action", "--no-use-llm"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(mock_scan.call_count, 2)
+        mock_client.assert_not_called()
+        codex_entry = self.app.store.get_action("skill", name, "codex")
+        self.assertEqual(codex_entry.actions.runtime, "disable")
+        self.assertEqual(codex_entry.actions.install, "block")
+        claude_entry = self.app.store.get_action("skill", name, "claudecode")
+        self.assertEqual(claude_entry.actions.file, "quarantine")
+        self.assertEqual(claude_entry.actions.runtime, "disable")
+        self.assertEqual(claude_entry.actions.install, "block")
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_scan_enforcement_restore_and_scoped_unblock_preserve_peer(
+        self, mock_scan, mock_admission, mock_client,
+    ):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [self.tmp_dir]  # type: ignore[method-assign]
+        name = "lifecycle-skill"
+        skill_dir = os.path.join(self.tmp_dir, name)
+        os.makedirs(skill_dir)
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+        pe = PolicyEngine(self.app.store)
+        pe.disable_for_connector("skill", name, "codex", "peer state")
+
+        scan_result = self.invoke([
+            "scan", name, "--path", skill_dir, "--connector", "claude-code",
+            "--action", "--no-use-llm",
+        ])
+        self.assertEqual(scan_result.exit_code, 0, scan_result.output)
+        restore_result = self.invoke(["restore", name, "--connector", "claude-code"])
+        self.assertEqual(restore_result.exit_code, 0, restore_result.output)
+        restored = self.app.store.get_action("skill", name, "claudecode")
+        self.assertEqual(restored.actions.file, "")
+        self.assertEqual(restored.actions.runtime, "disable")
+        self.assertEqual(restored.actions.install, "block")
+
+        unblock_result = self.invoke(["unblock", name, "--connector", "claude-code"])
+        self.assertEqual(unblock_result.exit_code, 0, unblock_result.output)
+        self.assertIsNone(self.app.store.get_action("skill", name, "claudecode"))
+        self.assertTrue(self.app.store.has_action(
+            "skill", name, "runtime", "disable", "codex",
+        ))
+        mock_client.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
