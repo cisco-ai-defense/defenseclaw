@@ -842,7 +842,15 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		return nil
 	}
 	needle := c.hookCommand(opts)
-	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) {
+	if c.name == "antigravity" {
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err == nil &&
+			structuredHookCommandReferences(cfg, []string{needle, legacyAntigravityWindowsHookCommand()}) {
+			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
+		}
+	}
+	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) ||
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 	}
 	return nil
@@ -969,8 +977,10 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 		return removeHermesHooks(path, hookScript)
 	case "geminicli":
 		return removeGeminiConfigEntries(path, hookScript)
-	case "cursor", "windsurf", "copilot", "openhands", "antigravity":
+	case "cursor", "windsurf", "copilot", "openhands":
 		return removeJSONHookReferences(path, hookScript)
+	case "antigravity":
+		return removeJSONHookReferences(path, hookScript, legacyAntigravityWindowsHookCommand())
 	default:
 		return nil
 	}
@@ -1727,10 +1737,11 @@ var antigravityLifecycleEvents = []string{
 // tokenizes the command itself and passes quote characters through to direct
 // exec, so shell quoting becomes literal path bytes and the hook silently
 // no-fires (verified empirically via the v0.5.0 Antigravity smoke test). On
-// Unix hookScript is the bare absolute .sh path. On Windows it is the PATH-
-// resolved `defenseclaw-gateway.exe hook --connector antigravity` command;
-// using the stable executable name avoids an unquotable absolute install path
-// containing spaces while retaining the native Go hook path.
+// Unix hookScript is the bare absolute .sh path. On Windows it is a
+// tokenizer-safe PowerShell command whose encoded script invokes the absolute
+// managed defenseclaw-hook.exe path. The visible command has no quoted tokens
+// or user-profile path segments for agy to mis-tokenize, and the launcher lookup
+// does not depend on Antigravity's current directory or PATH.
 func patchAntigravityHooks(path, hookScript string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -1836,7 +1847,7 @@ func appendUniqueGeminiHookGroup(raw interface{}, hookScript string, group map[s
 	return append(list, group)
 }
 
-func removeJSONHookReferences(path, hookScript string) error {
+func removeJSONHookReferences(path string, hookScripts ...string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1844,7 +1855,7 @@ func removeJSONHookReferences(path, hookScript string) error {
 		}
 		return err
 	}
-	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+	pruned, _ := removeHookScriptReferences(cfg, hookScripts...).(map[string]interface{})
 	if pruned == nil {
 		pruned = map[string]interface{}{}
 	}
@@ -1902,21 +1913,21 @@ func removeManagedGeminiTelemetry(cfg map[string]interface{}) {
 	}
 }
 
-func removeHookScriptReferences(raw interface{}, hookScript string) interface{} {
+func removeHookScriptReferences(raw interface{}, hookScripts ...string) interface{} {
 	switch v := raw.(type) {
 	case []interface{}:
 		out := make([]interface{}, 0, len(v))
 		for _, item := range v {
-			if containsHookScript(item, hookScript) {
+			if containsHookScript(item, hookScripts...) {
 				continue
 			}
-			out = append(out, removeHookScriptReferences(item, hookScript))
+			out = append(out, removeHookScriptReferences(item, hookScripts...))
 		}
 		return out
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(v))
 		for key, value := range v {
-			out[key] = removeHookScriptReferences(value, hookScript)
+			out[key] = removeHookScriptReferences(value, hookScripts...)
 		}
 		pruneEmptyMapArrays(out)
 		return out
@@ -1953,23 +1964,29 @@ func pruneEmptyMapArrays(obj map[string]interface{}) {
 	}
 }
 
-func containsHookScript(raw interface{}, hookScript string) bool {
+func containsHookScript(raw interface{}, hookScripts ...string) bool {
 	switch v := raw.(type) {
 	case []interface{}:
 		for _, item := range v {
-			if containsHookScript(item, hookScript) {
+			if containsHookScript(item, hookScripts...) {
 				return true
 			}
 		}
 	case map[string]interface{}:
-		if managedHookCommandEntry(v, hookScript) {
-			return true
+		for _, hookScript := range hookScripts {
+			if managedHookCommandEntry(v, hookScript) {
+				return true
+			}
 		}
 		if hooks, ok := v["hooks"]; ok {
-			return containsHookScript(hooks, hookScript)
+			return containsHookScript(hooks, hookScripts...)
 		}
 	}
 	return false
+}
+
+func legacyAntigravityWindowsHookCommand() string {
+	return windowsHookBinaryName + " " + nativeHookFlag + "antigravity"
 }
 
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {

@@ -437,7 +437,15 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 					wantConfigNeedle = nativeHookFlag + conn.Name()
 				}
 			}
-			if !strings.Contains(string(data), wantConfigNeedle) {
+			if runtime.GOOS == "windows" && conn.Name() == "antigravity" {
+				var cfg map[string]interface{}
+				if err := json.Unmarshal(data, &cfg); err != nil {
+					t.Fatalf("parse antigravity config after setup: %v\n%s", err, data)
+				}
+				if !structuredHookCommandReferences(cfg, []string{conn.hookCommand(opts)}) {
+					t.Fatalf("config after setup does not reference safe Antigravity command:\n%s", string(data))
+				}
+			} else if !strings.Contains(string(data), wantConfigNeedle) {
 				t.Fatalf("config after setup does not reference %s:\n%s", wantConfigNeedle, string(data))
 			}
 			if err := conn.Teardown(context.Background(), opts); err != nil {
@@ -582,9 +590,10 @@ func mapKeys(m map[string]interface{}) []string {
 //   - its value is a map with key "PreToolUse"
 //   - "PreToolUse" is a list with exactly one entry
 //   - that entry has matcher="*" and hooks=[{type="command",
-//     command=<bare absolute path to antigravity-hook.sh>}]
-//   - the inner command field has no quote characters and no
-//     surrounding whitespace
+//     command=<tokenizer-safe Antigravity command>}]
+//   - the inner command field has no visible quote characters and no
+//     surrounding whitespace; on Windows the absolute managed launcher path
+//     lives inside the PowerShell encoded command instead
 //
 // If a future agy release pivots back to a flat schema, OR adds
 // shell invocation, OR moves the hooks file again, this test must
@@ -673,12 +682,19 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 	if command != wantCommand {
 		t.Fatalf("command=%q want %q", command, wantCommand)
 	}
-	// Unix runs the absolute shell hook. Windows uses the stable no-console hook
-	// basename through PATH because agy's direct-exec tokenizer cannot dequote
-	// an absolute executable path containing spaces.
+	// Unix runs the absolute shell hook. Windows runs a tokenizer-safe system
+	// PowerShell command whose encoded script invokes the absolute no-console
+	// hook launcher path; agy's direct-exec tokenizer cannot dequote that path
+	// if it is placed visibly in hooks.json.
 	if runtime.GOOS == "windows" {
-		if command != `defenseclaw-hook.exe hook --connector antigravity` {
-			t.Fatalf("windows command=%q", command)
+		if command == legacyAntigravityWindowsHookCommand() {
+			t.Fatalf("windows command still uses vulnerable bare launcher: %q", command)
+		}
+		decoded := decodePowerShellEncodedCommandForTest(t, command)
+		if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
+			!strings.Contains(decoded, nativeHookFlag+"antigravity") ||
+			!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
+			t.Fatalf("windows encoded command lost managed launcher or hardening:\n%s", decoded)
 		}
 	} else {
 		if !strings.HasSuffix(command, "antigravity-hook.sh") {
@@ -743,6 +759,63 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 		if !ok || eventCommand != wantCommand {
 			t.Errorf("%s[%q][0].hooks[0].command=%#v want %q", outerKey, event, hookEntry["command"], wantCommand)
 		}
+	}
+}
+
+func TestAntigravityRemoveConfigEntriesPrunesLegacyWindowsCommand(t *testing.T) {
+	setHookBinaryOverride(t, `C:\Users\Jane Doe\.local\bin\defenseclaw-hook.exe`)
+	current := hookInvocationCommandFor("windows", "antigravity", "")
+	legacy := legacyAntigravityWindowsHookCommand()
+	foreign := `foreign-hook.exe hook --connector antigravity`
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	cfg := map[string]interface{}{
+		"defenseclaw-antigravity-pretooluse": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher": "*",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": current},
+						map[string]interface{}{"type": "command", "command": legacy},
+					},
+				},
+			},
+		},
+		"operator-hook": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher": "*",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": foreign},
+					},
+				},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write fixture hooks.json: %v", err)
+	}
+
+	conn := NewAntigravityConnector()
+	if err := conn.removeConfigEntries(path, current); err != nil {
+		t.Fatalf("removeConfigEntries: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pruned hooks.json: %v", err)
+	}
+	var pruned map[string]interface{}
+	if err := json.Unmarshal(after, &pruned); err != nil {
+		t.Fatalf("parse pruned hooks.json: %v\n%s", err, after)
+	}
+	if structuredHookCommandReferences(pruned, []string{current, legacy}) {
+		t.Fatalf("managed Antigravity command survived pruning:\n%s", after)
+	}
+	if !strings.Contains(string(after), foreign) {
+		t.Fatalf("foreign hook was not preserved:\n%s", after)
 	}
 }
 

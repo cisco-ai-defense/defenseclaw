@@ -65,8 +65,10 @@ func ownedHookCommandNeedles(opts SetupOpts, conn Connector) []string {
 //     (`"C:\...\defenseclaw-hook.exe" hook --connector <name>`). The absolute
 //     exe path's backslashes and surrounding quotes are escaped during config
 //     serialization, so their stable marker is `hook --connector <name>`.
-//     Cursor is the exception: its native transport requires the generated
-//     cursor-hook.ps1 adapter, and its decoded command is matched exactly.
+//     Cursor is matched exactly because its native transport requires the
+//     generated cursor-hook.ps1 adapter. Antigravity is also matched exactly
+//     because its direct-exec tokenizer requires a PowerShell encoded-command
+//     wrapper rather than a visibly quoted absolute executable path.
 func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []string {
 	if owner, ok := conn.(HookConfigReferenceOwner); ok {
 		return uniqueNonEmptyStrings(owner.HookConfigReferenceNeedles(opts))

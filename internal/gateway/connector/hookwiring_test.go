@@ -19,14 +19,19 @@ package connector
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf16"
 )
 
 func setHookBinaryOverride(t *testing.T, path string) {
@@ -34,6 +39,29 @@ func setHookBinaryOverride(t *testing.T, path string) {
 	prev := defenseclawHookBinaryOverride
 	defenseclawHookBinaryOverride = path
 	t.Cleanup(func() { defenseclawHookBinaryOverride = prev })
+}
+
+func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string {
+	t.Helper()
+	parts := strings.Fields(command)
+	for i, part := range parts {
+		if strings.EqualFold(part, "-EncodedCommand") && i+1 < len(parts) {
+			data, err := base64.StdEncoding.DecodeString(parts[i+1])
+			if err != nil {
+				t.Fatalf("decode PowerShell encoded command: %v", err)
+			}
+			if len(data)%2 != 0 {
+				t.Fatalf("encoded PowerShell command has odd byte length: %d", len(data))
+			}
+			wide := make([]uint16, len(data)/2)
+			for j := range wide {
+				wide[j] = binary.LittleEndian.Uint16(data[j*2:])
+			}
+			return string(utf16.Decode(wide))
+		}
+	}
+	t.Fatalf("command has no -EncodedCommand token: %q", command)
+	return ""
 }
 
 func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
@@ -270,15 +298,24 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
 	}
 
-	// Antigravity's direct-exec parser does not dequote command paths. Use the
-	// installer-provided PATH entry so an install root containing spaces still
-	// works without quote characters becoming part of argv[0].
+	// Antigravity's direct-exec parser does not dequote command paths. Keep the
+	// visible command tokenizer-safe and put the absolute managed hook path in a
+	// PowerShell encoded command so install roots containing spaces still work.
 	agy := hookInvocationCommandFor("windows", "antigravity", unix)
-	if agy != `defenseclaw-hook.exe hook --connector antigravity` {
+	if !strings.HasPrefix(agy, windowsSystemPowerShellExe()+" -NoLogo -NoProfile -NonInteractive -EncodedCommand ") {
 		t.Errorf("antigravity command = %q", agy)
 	}
 	if strings.ContainsAny(agy, `"'`) {
 		t.Errorf("antigravity direct-exec command contains literal quotes: %q", agy)
+	}
+	if strings.Contains(agy, legacyAntigravityWindowsHookCommand()) {
+		t.Errorf("antigravity command still contains vulnerable bare launcher: %q", agy)
+	}
+	decoded := decodePowerShellEncodedCommandForTest(t, agy)
+	if !strings.Contains(decoded, powershellQuoteLiteral(windowsExe)) ||
+		!strings.Contains(decoded, nativeHookFlag+"antigravity") ||
+		!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
+		t.Errorf("antigravity encoded command lost managed launcher or hardening:\n%s", decoded)
 	}
 }
 
@@ -401,6 +438,89 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	if !strings.Contains(strings.ToLower(string(out)), "cmd.exe") {
 		t.Fatalf("Codex-style cmd.exe probe did not execute where.exe; output: %s", out)
 	}
+}
+
+func TestAntigravityWindowsHookCommandBypassesUntrustedCurrentDirectory(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Antigravity direct-exec exploit regression is Windows-specific")
+	}
+
+	root := t.TempDir()
+	managedDir := filepath.Join(root, "Managed Install With Spaces")
+	untrustedDir := filepath.Join(root, "Untrusted Workspace")
+	if err := os.MkdirAll(managedDir, 0o700); err != nil {
+		t.Fatalf("create managed dir: %v", err)
+	}
+	if err := os.MkdirAll(untrustedDir, 0o700); err != nil {
+		t.Fatalf("create untrusted dir: %v", err)
+	}
+	managedMarker := filepath.Join(root, "managed.txt")
+	fakeMarker := filepath.Join(root, "fake.txt")
+	managedHook := buildAntigravityProbeLauncher(t, managedDir, "managed", managedMarker, 0, true)
+	_ = buildAntigravityProbeLauncher(t, untrustedDir, "fake", fakeMarker, 42, false)
+	setHookBinaryOverride(t, managedHook)
+
+	command := hookInvocationCommandFor("windows", "antigravity", "")
+	argv := strings.Fields(command)
+	if len(argv) == 0 {
+		t.Fatalf("empty Antigravity command")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = untrustedDir
+	cmd.Env = append(os.Environ(), "PATH="+untrustedDir+";"+managedDir+";"+os.Getenv("PATH"))
+	cmd.Stdin = strings.NewReader(`{"hookEventName":"PreToolUse"}`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Antigravity direct-exec probe failed: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	if _, err := os.Stat(fakeMarker); !os.IsNotExist(err) {
+		t.Fatalf("untrusted current-directory launcher was executed; marker err=%v", err)
+	}
+	data, err := os.ReadFile(managedMarker)
+	if err != nil {
+		t.Fatalf("managed launcher marker missing: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	text := string(data)
+	if !strings.Contains(text, "managed") ||
+		!strings.Contains(text, "hook") ||
+		!strings.Contains(text, "--connector") ||
+		!strings.Contains(text, "antigravity") ||
+		!strings.Contains(text, `"hookEventName":"PreToolUse"`) {
+		t.Fatalf("managed launcher received wrong invocation: %q", text)
+	}
+}
+
+func buildAntigravityProbeLauncher(t *testing.T, dir, label, marker string, exitCode int, validate bool) string {
+	t.Helper()
+	source := filepath.Join(dir, label+"-hook-probe.go")
+	body := fmt.Sprintf(`package main
+
+import (
+	"io"
+	"os"
+	"strings"
+)
+
+func main() {
+	stdin, _ := io.ReadAll(os.Stdin)
+	_ = os.WriteFile(%q, []byte(%q+"\n"+strings.Join(os.Args, "\n")+"\n"+string(stdin)), 0o600)
+	if %t && (len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != "antigravity") {
+		os.Exit(7)
+	}
+	os.Exit(%d)
+}
+`, marker, label, validate, exitCode)
+	if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s probe source: %v", label, err)
+	}
+	exe := filepath.Join(dir, windowsHookBinaryName)
+	build := exec.Command("go", "build", "-o", exe, source)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build %s probe launcher: %v\n%s", label, err, output)
+	}
+	return exe
 }
 
 // TestShellWordPassesNativeCommandThrough ensures the bash-style quoter does not
@@ -616,6 +736,25 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					if !strings.Contains(adapterText, marker) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
 					}
+				}
+			} else if connectorName == "antigravity" {
+				wantCommand := hookInvocationCommand(
+					"antigravity",
+					filepath.Join(dataDir, "hooks", "antigravity-hook.sh"),
+				)
+				encodedCommand, err := json.Marshal(wantCommand)
+				if err != nil {
+					t.Fatalf("encode Antigravity Windows command: %v", err)
+				}
+				if !strings.Contains(text, string(encodedCommand)) {
+					t.Errorf("config missing safe Antigravity command %q:\n%s", wantCommand, text)
+				}
+				if strings.Contains(text, legacyAntigravityWindowsHookCommand()) {
+					t.Errorf("config still contains legacy bare Antigravity launcher:\n%s", text)
+				}
+				decoded := decodePowerShellEncodedCommandForTest(t, wantCommand)
+				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
+					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {
