@@ -1,22 +1,10 @@
 # Managed Semantic Router Sidecar — Technical Spec
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Goal:** Enable DefenseClaw to manage the vLLM Semantic Router as a single Docker container, using its classify/intent API for routing decisions while preserving Bifrost in the forwarding path for multi-provider format translation.
 
-**Goal:** Enable DefenseClaw to download, configure, and manage the vLLM Semantic Router as a local subprocess — providing all 14 selection algorithms and 17 signal types with zero user interaction with the SR binary directly. DefenseClaw owns the config, lifecycle, and API surface.
+**Architecture:** DefenseClaw starts a single router container from the `ghcr.io/vllm-project/semantic-router/vllm-sr:latest` image. At boot, it translates its `routing:` config block into the SR's v0.3 canonical format, starts the container with the router binary directly (no Envoy, no storage backends), and registers a `RemoteRouterClient` that calls `POST /api/v1/classify/intent` for every request. The response contains `recommended_model` — DefenseClaw then forwards via Bifrost to the appropriate upstream.
 
-**Architecture:** DefenseClaw manages the semantic router binary the same way it manages `defenseclaw-gateway` (daemon lifecycle, PID tracking, log rotation, health checks). The user configures routing exclusively via `~/.defenseclaw/config.yaml`. At sidecar boot, DefenseClaw translates its `routing:` block into the SR's native config, starts the SR subprocess, and registers a `RemoteRouterClient` as the active `ModelRouter`. All LLM requests continue through Bifrost for provider translation, auth, and streaming — the SR only decides *which* model handles each request.
-
-**Tech Stack:** Go (DefenseClaw gateway), vLLM Semantic Router binary (external, downloaded), HTTP JSON for router communication, existing Bifrost SDK for upstream forwarding.
-
-## Global Constraints
-
-- DefenseClaw is the single source of truth — users never edit SR config directly
-- SR is a managed subprocess (like the gateway daemon): start, stop, health-check, log rotation
-- Bifrost remains in the forwarding path for multi-provider format translation
-- Fallback: if SR is unavailable, DefenseClaw falls through to default provider (zero disruption)
-- Binary download: versioned, checksum-verified, platform-aware (darwin-arm64, darwin-amd64, linux-amd64, linux-arm64)
-- SR listens on loopback only (127.0.0.1:8080), no auth needed (same trust model as guardrail proxy)
-- Config hot-reload: when `routing:` block changes in config.yaml, DefenseClaw regenerates SR config and signals the SR to reload
+**Tech Stack:** Go (DefenseClaw gateway), Docker (single container), vLLM Semantic Router v0.3 (router binary only), HTTP JSON for routing decisions, existing Bifrost SDK for upstream forwarding.
 
 ---
 
@@ -28,31 +16,31 @@
 │                                                                          │
 │  routing:                                                                │
 │    enabled: true                                                         │
-│    algorithm: hybrid                                                     │
-│    models: [...]                                                         │
-│    signals: {...}                                                         │
-│    decisions: [...]                                                       │
+│    models: [{name: reasoning, ...}, {name: code, ...}, {name: fast, ...}]│
+│    signals: {keywords: [...]}                                            │
+│    decisions: [{name: reasoning_route, ...}, ...]                        │
 └────────────────────────────────┬────────────────────────────────────────┘
                                  │ parsed at sidecar boot
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  DefenseClaw Gateway (sidecar.go Run)                                    │
+│  DefenseClaw Gateway (sidecar.go)                                        │
 │                                                                          │
-│  1. Translate config.RoutingConfig → SR native YAML                      │
-│     Write to ~/.defenseclaw/semantic-router/config.yaml                  │
-│  2. Ensure SR binary exists (download if missing/outdated)               │
-│  3. Start SR subprocess (managed lifecycle)                              │
-│  4. Health-check SR on 127.0.0.1:8080/health                            │
-│  5. Register RemoteRouterClient as ModelRouter                           │
+│  Startup:                                                                │
+│  1. Check Docker is available                                            │
+│  2. Translate config → SR v0.3 YAML                                      │
+│  3. docker run (single router container, port 8888)                      │
+│  4. Health-check GET /health                                             │
+│  5. Register RemoteRouterClient                                          │
 │                                                                          │
 │  Request flow:                                                           │
 │  ┌────────────────────────────────────────────────────────────────────┐ │
 │  │ User prompt                                                         │ │
 │  │   → Pre-call guardrails (regex + judge + policy)                    │ │
-│  │   → ModelRouter.Route(input)                                        │ │
-│  │       → POST http://127.0.0.1:8080/v1/route                        │ │
-│  │       ← {model, provider, base_url, reason}                        │ │
+│  │   → RemoteRouterClient.Route()                                      │ │
+│  │       POST http://127.0.0.1:8888/api/v1/classify/intent             │ │
+│  │       ← {recommended_model: "reasoning", routing_decision: "..."}   │ │
 │  │   → Bifrost (format translation + auth + streaming)                 │ │
+│  │       Uses recommended_model to select provider                     │ │
 │  │       → Upstream LLM (Anthropic, OpenAI, Ollama, Bedrock, etc.)     │ │
 │  │   → Post-call guardrails                                            │ │
 │  │   → Response to user                                                │ │
@@ -60,38 +48,189 @@
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  Semantic Router subprocess (managed by DefenseClaw)                      │
-│  Binary: ~/.defenseclaw/bin/semantic-router                               │
-│  Config: ~/.defenseclaw/semantic-router/config.yaml                       │
-│  Logs:   ~/.defenseclaw/semantic-router/router.log                        │
-│  PID:    ~/.defenseclaw/semantic-router/router.pid                        │
-│  Port:   127.0.0.1:8080                                                  │
+│  Docker container: defenseclaw-semantic-router                            │
+│  Image: ghcr.io/vllm-project/semantic-router/vllm-sr:latest              │
+│  Entrypoint: /usr/local/bin/router (direct binary, no shell wrapper)     │
+│  Port: 8888 (API server)                                                 │
 │                                                                          │
-│  Capabilities (all from vLLM SR):                                        │
+│  Exposed endpoints:                                                      │
+│  - GET  /health                    → {"status": "healthy"}               │
+│  - GET  /ready                     → readiness + model status            │
+│  - GET  /v1/models                 → available model list                │
+│  - POST /api/v1/classify/intent    → routing decision (main API)         │
+│  - POST /api/v1/classify/pii       → PII detection                       │
+│  - POST /api/v1/classify/security  → jailbreak detection                 │
+│  - POST /api/v1/classify/combined  → all-in-one classification           │
+│                                                                          │
+│  Capabilities:                                                           │
 │  - 14 selection algorithms                                               │
 │  - 17 signal types (keywords, embeddings, domain, complexity, etc.)      │
 │  - Boolean decision trees (AND/OR/NOT)                                   │
-│  - Online learning (Elo, RL, KNN adapt from feedback)                    │
-│  - Semantic caching                                                      │
-│  - Built-in embedding inference (Candle/ONNX)                            │
+│  - Runs on CPU only, no GPU required                                     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Block Diagram: How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         USER / AGENT                                  │
+│                    (Claude Code, Hermes, Codex, etc.)                │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ LLM request
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DEFENSECLAW GATEWAY                                │
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │  1. PRE-CALL GUARDRAILS                                      │    │
+│  │     • Regex pattern matching                                 │    │
+│  │     • LLM Judge (injection, PII, exfil)                      │    │
+│  │     • OPA policy evaluation                                  │    │
+│  │     → BLOCK if policy violation detected                     │    │
+│  └──────────────────────────────┬──────────────────────────────┘    │
+│                                 │ passed                             │
+│                                 ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │  2. SEMANTIC ROUTER (ModelRouter.Route)                       │    │
+│  │                                                              │    │
+│  │     RemoteRouterClient                                       │    │
+│  │       │                                                      │    │
+│  │       │  POST /api/v1/classify/intent                        │    │
+│  │       │  {messages: [...]}                                   │    │
+│  │       ▼                                                      │    │
+│  │  ┌──────────────────────────────────┐                        │    │
+│  │  │  Docker: defenseclaw-semantic-    │                        │    │
+│  │  │         router (port 8888)       │                        │    │
+│  │  │                                  │                        │    │
+│  │  │  Signals: keyword match,         │                        │    │
+│  │  │  embedding, domain, complexity   │                        │    │
+│  │  │                                  │                        │    │
+│  │  │  Decision: priority rules        │                        │    │
+│  │  │  (AND/OR/NOT boolean tree)       │                        │    │
+│  │  │                                  │                        │    │
+│  │  │  Algorithm: static, elo,         │                        │    │
+│  │  │  router-dc, automix, hybrid...   │                        │    │
+│  │  └──────────────────┬───────────────┘                        │    │
+│  │                     │                                        │    │
+│  │       ← {recommended_model: "reasoning"}                     │    │
+│  │                                                              │    │
+│  └──────────────────────────────┬──────────────────────────────┘    │
+│                                 │ model decided                      │
+│                                 ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │  3. BIFROST (Provider SDK)                                    │    │
+│  │                                                              │    │
+│  │     • Selects provider based on recommended_model            │    │
+│  │     • Format translation:                                    │    │
+│  │       OpenAI ↔ Anthropic ↔ Bedrock ↔ Gemini ↔ Ollama       │    │
+│  │     • API key resolution (env vars, vaults)                  │    │
+│  │     • Streaming (SSE chunked transfer)                       │    │
+│  │     • Retry / failover                                       │    │
+│  │                                                              │    │
+│  └──────────────────────────────┬──────────────────────────────┘    │
+│                                 │ formatted request                  │
+│                                 ▼                                    │
+│                    ┌────────────────────────┐                        │
+│                    │    UPSTREAM LLM        │                        │
+│                    │                        │                        │
+│                    │  • api.anthropic.com   │                        │
+│                    │  • api.openai.com      │                        │
+│                    │  • Ollama localhost     │                        │
+│                    │  • Bedrock             │                        │
+│                    │  • Azure OpenAI        │                        │
+│                    └────────────┬───────────┘                        │
+│                                 │ response                           │
+│                                 ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │  4. POST-CALL GUARDRAILS                                      │    │
+│  │     • Response inspection (PII, harmful content)             │    │
+│  │     • Audit logging                                          │    │
+│  │     • Telemetry (OTel spans, metrics)                        │    │
+│  │     → BLOCK/REDACT if policy violation                       │    │
+│  └──────────────────────────────┬──────────────────────────────┘    │
+│                                 │                                    │
+└─────────────────────────────────┼────────────────────────────────────┘
+                                  │ response
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         USER / AGENT                                  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Integration Flow (Sequence)
+
+```
+    User          DefenseClaw        Semantic Router       Bifrost         LLM Provider
+     │                │                    │                  │                │
+     │─── prompt ────▶│                    │                  │                │
+     │                │── guardrails ──┐   │                  │                │
+     │                │                │   │                  │                │
+     │                │◀── pass ───────┘   │                  │                │
+     │                │                    │                  │                │
+     │                │── classify/intent ─▶│                  │                │
+     │                │                    │── evaluate ──┐   │                │
+     │                │                    │  signals     │   │                │
+     │                │                    │  decisions   │   │                │
+     │                │                    │  algorithm   │   │                │
+     │                │                    │◀─────────────┘   │                │
+     │                │◀─ recommended_model─│                  │                │
+     │                │                    │                  │                │
+     │                │── forward(model) ──────────────────▶  │                │
+     │                │                    │                  │── request ────▶│
+     │                │                    │                  │◀── response ───│
+     │                │◀───────────────────────────────────── │                │
+     │                │                    │                  │                │
+     │                │── post-guardrails ┐│                  │                │
+     │                │◀──────────────────┘│                  │                │
+     │◀── response ───│                    │                  │                │
+     │                │                    │                  │                │
+```
+
+---
+
 ## Why Bifrost Is Still Required
+
+The SR only answers **"which model should handle this?"** — it does NOT forward requests to backends.
 
 | Concern | Semantic Router | Bifrost | DefenseClaw |
 |---------|----------------|---------|-------------|
-| Which model handles this request? | Yes | — | — |
-| Translate OpenAI ↔ Anthropic ↔ Bedrock ↔ Gemini format | — | Yes | — |
-| Resolve API keys (env vars, vaults, token resolvers) | — | Yes | Yes |
-| Handle streaming (SSE, chunked transfer) | — | Yes | — |
-| Retry / failover on provider errors | — | Yes | — |
-| Pre/post-call guardrail inspection | — | — | Yes |
-| Audit logging, telemetry, HILT | — | — | Yes |
+| Which model handles this request? | ✅ | — | — |
+| Translate OpenAI ↔ Anthropic ↔ Bedrock ↔ Gemini format | — | ✅ | — |
+| Resolve API keys | — | ✅ | ✅ |
+| Handle streaming (SSE) | — | ✅ | — |
+| Retry / failover | — | ✅ | — |
+| Pre/post-call guardrails | — | — | ✅ |
+| Audit logging, telemetry | — | — | ✅ |
 
-**The SR answers "where?" — Bifrost handles "how to get there."**
+---
 
-Exception: when ALL models are behind the same OpenAI-compatible API (e.g., all Ollama), `rawForwardChatCompletion` (already exists) can bypass Bifrost. The router just swaps `base_url` + `model`.
+## Routing Decision API
+
+### `POST /api/v1/classify/intent`
+
+**Request:**
+```json
+{
+  "messages": [
+    {"role": "user", "content": "analyze the tradeoffs between REST and gRPC"}
+  ],
+  "options": {"return_probabilities": true}
+}
+```
+
+**Response:**
+```json
+{
+  "recommended_model": "reasoning",
+  "routing_decision": "reasoning_route",
+  "matched_signals": {"keywords": ["complex_task"]},
+  "classification": {"category": "reasoning_route", "confidence": 0.92},
+  "decision_result": {"decision_name": "reasoning_route", "confidence": 0.92}
+}
+```
+
+DefenseClaw uses `recommended_model` to override the Bifrost model selection. If the API is unavailable or returns no recommendation, the request falls through to the default provider.
 
 ---
 
@@ -99,24 +238,16 @@ Exception: when ALL models are behind the same OpenAI-compatible API (e.g., all 
 
 ```yaml
 routing:
-  enabled: true                         # master switch
-  version: "0.3.0"                      # desired SR binary version
-  port: 8080                            # SR listen port (loopback only)
-  algorithm: hybrid                     # global default algorithm
+  enabled: true
+  version: "0.3.0"              # vllm-sr version (for pip install)
+  port: 8888                    # API port the router listens on
+  algorithm: hybrid             # global default selection algorithm
 
-  # Embedding for signals (SR runs inference internally via Candle/ONNX,
-  # or delegates to Ollama if configured)
-  embedding:
-    provider: ollama                    # ollama | internal (SR's built-in Candle)
-    base_url: http://127.0.0.1:11434
-    model: nomic-embed-text
+  # Optional: point to external SR instead of managed container
+  remote:
+    endpoint: ""                # e.g. http://sr-service:8080 (K8s/Docker)
+    timeout_ms: 100
 
-  # LLM for classification signals (domain, complexity)
-  llm_classifier:
-    base_url: http://127.0.0.1:11434
-    model: qwen3:4b
-
-  # Model backends the router can choose from
   models:
     - name: reasoning
       provider: anthropic
@@ -127,8 +258,8 @@ routing:
     - name: code
       provider: ollama
       model: qwen3:4b
-      base_url: http://127.0.0.1:11434
-      capabilities: [code, debugging, refactoring]
+      base_url: http://host.docker.internal:11434
+      capabilities: [code, debugging]
       cost_per_1k_tokens: 0.0
     - name: fast
       provider: openai
@@ -137,7 +268,6 @@ routing:
       capabilities: [chat, simple-qa]
       cost_per_1k_tokens: 0.00015
 
-  # Signal configuration
   signals:
     keywords:
       - name: complex_task
@@ -146,290 +276,235 @@ routing:
       - name: code_task
         keywords: ["code", "function", "debug", "implement"]
         operator: OR
-    embedding:
-      enabled: true
-      threshold: 0.75
-    domain:
-      enabled: true
-    complexity:
-      enabled: true
-    context_length:
-      thresholds: [4096, 32768]
-    # All other signals (language, pii, jailbreak, etc.) enabled by default
 
-  # Decision rules with boolean tree conditions
   decisions:
-    - name: complex_reasoning
+    - name: reasoning_route
       priority: 100
+      operator: AND
       conditions:
-        operator: AND
-        children:
-          - signal: complex_task
-          - signal: complexity
-            min_confidence: 0.8
+        - type: keyword
+          name: complex_task
       model_refs: [reasoning]
-      algorithm: router-dc
-
-    - name: code_work
+    - name: code_route
       priority: 90
+      operator: AND
       conditions:
-        operator: OR
-        children:
-          - signal: code_task
-          - signal: domain
-            value: "code"
+        - type: keyword
+          name: code_task
       model_refs: [code]
-      algorithm: static
-
-    - name: safe_default
-      priority: 80
-      conditions:
-        operator: NOT
-        children:
-          - signal: jailbreak
-      model_refs: [reasoning, code, fast]
-      algorithm: hybrid
-
-    - name: fallback
+    - name: default_route
       priority: 10
       model_refs: [fast]
-      algorithm: static
 ```
 
 ---
 
-## SR Native Config (Generated by DefenseClaw)
+## Generated SR Config (v0.3 Canonical Format)
 
-DefenseClaw translates the above into the SR's own format and writes it to `~/.defenseclaw/semantic-router/config.yaml`. The user never sees or edits this file.
+DefenseClaw translates the above into `~/.defenseclaw/semantic-router/config.yaml`:
+
+```yaml
+version: v0.3
+listeners:
+  - name: http-8888
+    address: 0.0.0.0
+    port: 8888
+    timeout: 300s
+providers:
+  reasoning:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    capabilities: [reasoning, analysis, long-context]
+    cost_per_1k_tokens: 0.003
+  code:
+    provider: ollama
+    model: qwen3:4b
+    base_url: http://host.docker.internal:11434
+    capabilities: [code, debugging]
+  fast:
+    provider: openai
+    model: gpt-4o-mini
+    capabilities: [chat, simple-qa]
+    cost_per_1k_tokens: 0.00015
+routing:
+  signals:
+    keywords:
+      - name: complex_task
+        keywords: [analyze, compare, synthesize, step by step]
+        operator: OR
+      - name: code_task
+        keywords: [code, function, debug, implement]
+        operator: OR
+  decisions:
+    - name: reasoning_route
+      description: Route to reasoning_route
+      priority: 100
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: complex_task
+      modelRefs:
+        - model: reasoning
+    - name: code_route
+      description: Route to code_route
+      priority: 90
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: code_task
+      modelRefs:
+        - model: code
+    - name: default_route
+      description: Route to default_route
+      priority: 10
+      rules:
+        operator: AND
+      modelRefs:
+        - model: fast
+```
 
 ---
 
-## Component Breakdown
+## Component Implementation
 
-### 1. SR Binary Manager (`internal/routing/manager.go`)
+### 1. Config Translator (`internal/routing/config_translate.go`)
 
-Responsibilities:
-- Download SR binary from releases (versioned, checksummed)
-- Platform detection (GOOS/GOARCH)
-- Install to `~/.defenseclaw/bin/semantic-router`
-- Version checking (upgrade when `routing.version` changes)
-- Signature/checksum verification
+Converts `config.RoutingConfig` → SR v0.3 canonical YAML:
+- `version: v0.3` header
+- `listeners[]` with port and timeout
+- `providers{}` as named map (not array)
+- `routing.signals` + `routing.decisions` (nested under routing, not top-level)
+- Decisions use `rules{operator, conditions[]}` and `modelRefs[{model}]` format
+- Atomic write (temp file + rename)
 
-Download URL pattern:
+### 2. Lifecycle Manager (`internal/routing/lifecycle.go`)
+
+Starts the router as a single Docker container:
 ```
-https://github.com/vllm-project/semantic-router/releases/download/v{version}/semantic-router-{os}-{arch}{.exe}
-```
-
-### 2. SR Lifecycle Manager (`internal/routing/lifecycle.go`)
-
-Responsibilities:
-- Start SR as detached subprocess (like `internal/daemon/`)
-- PID file management (`~/.defenseclaw/semantic-router/router.pid`)
-- Log rotation (`~/.defenseclaw/semantic-router/router.log`)
-- Health check (GET `http://127.0.0.1:{port}/health`)
-- Graceful shutdown (SIGTERM → SIGKILL after timeout)
-- Restart on crash (watchdog-style)
-- Context-aware: stops when gateway context is cancelled
-
-### 3. Config Translator (`internal/routing/config_translate.go`)
-
-Responsibilities:
-- Convert `config.RoutingConfig` → SR native YAML format
-- Write to `~/.defenseclaw/semantic-router/config.yaml`
-- Signal to running SR to reload (POST `/v1/config/reload` or SIGHUP)
-- Validate translated config before writing (fail-fast on bad config)
-
-### 4. Remote Router Client (`internal/gateway/model_router_remote.go`)
-
-Responsibilities:
-- Implement `ModelRouter` interface
-- POST to `http://127.0.0.1:{port}/v1/route` with request payload
-- Parse response: `{backend_name, model, provider, base_url, api_key, reason}`
-- Timeout handling (default 50ms, configurable)
-- Graceful fallback: return nil on any error (gateway uses default path)
-- Connection pooling (reuse HTTP connections)
-
-Request/Response contract:
-```json
-// POST /v1/route
-{
-  "messages": [{"role": "user", "content": "analyze this code"}],
-  "model": "requested-model",
-  "stream": false,
-  "session_id": "abc123",
-  "user_id": "user@example.com"
-}
-
-// Response
-{
-  "backend": "reasoning",
-  "model": "claude-sonnet-4-6",
-  "provider": "anthropic",
-  "base_url": "https://api.anthropic.com",
-  "algorithm": "router-dc",
-  "decision": "complex_reasoning",
-  "confidence": 0.92,
-  "reason": "embedding similarity 0.92 to 'reasoning and analysis' capability"
-}
+docker run -d \
+  --name defenseclaw-semantic-router \
+  -v <config-dir>:/app/config \
+  -p 8888:8888 \
+  --entrypoint /usr/local/bin/router \
+  ghcr.io/vllm-project/semantic-router/vllm-sr:latest \
+  -config=/app/config/config.yaml \
+  -port=50051 \
+  -enable-api=true \
+  -api-port=8888
 ```
 
-### 5. CLI Command (`internal/cli/setup_routing.go`)
+- Removes any existing container before starting
+- Health checks via `GET /health` on configured port
+- Stop via `docker rm -f`
+- Single container (~10s startup), no Envoy/Redis/Postgres/Milvus
 
-```bash
-defenseclaw setup routing --enable     # download binary, write config, start
-defenseclaw setup routing --disable    # stop SR, remove from startup
-defenseclaw setup routing --status     # show SR health, algorithm, signals
-defenseclaw setup routing --upgrade    # download latest version
-```
+### 3. Remote Router Client (`internal/gateway/model_router_remote.go`)
 
-### 6. Feedback Loop (`internal/gateway/model_router_feedback.go`)
+Implements `ModelRouter` interface:
+- `POST /api/v1/classify/intent` with messages
+- Parses `recommended_model` from response
+- Returns `ModelRouterDecision{Model: recommended_model}`
+- 100ms default timeout, graceful nil-return on any error
+- Connection pooling (10 idle connections)
 
-After each response:
-- Record latency, token count, error status
-- POST to SR's `/v1/feedback` endpoint so Elo/RL/KNN adapt
-- Wired into the existing post-call path in `handleChatCompletion`
+### 4. Orchestrator (`internal/routing/orchestrator.go`)
+
+Startup sequence:
+1. Check Docker is available
+2. Translate config to SR format
+3. Start router container
+4. Wait for health (60s timeout)
+5. Return endpoint URL
+
+### 5. Manager (`internal/routing/manager.go`)
+
+Handles `pip install vllm-sr` for the CLI tool (used by setup command only, not by the container path). Checks if Docker is available.
+
+### 6. CLI Command (`cli/defenseclaw/commands/cmd_setup.py`)
+
+`defenseclaw setup routing --enable`:
+1. Installs vllm-sr via pip (if not present)
+2. Checks Docker is running
+3. Saves config
+4. Restarts gateway (which starts the container)
 
 ---
 
-## Lifecycle Integration
+## Modes
 
-### Startup sequence (in `sidecar.go Run()`)
+| Mode | When | Behavior |
+|------|------|----------|
+| `managed` (default) | `routing.enabled: true` | DefenseClaw starts router container, manages lifecycle |
+| `remote` | `routing.remote.endpoint` is set | DefenseClaw calls external SR instance (no container) |
+| disabled | `routing.enabled: false` | Zero overhead, all requests go to default provider |
+
+If the SR is unavailable (container crash, network error, timeout), the request falls through to the default provider — graceful degradation, not an error.
+
+---
+
+## What Runs (Minimal Footprint)
+
+| Component | Required? | Notes |
+|-----------|-----------|-------|
+| **Router container** | Yes | Single container, ~200MB image, CPU only |
+| Envoy | No | Not needed — we use classify API directly |
+| Redis | No | Not needed for keyword-only routing |
+| Postgres | No | Not needed for keyword-only routing |
+| Milvus | No | Only needed if embedding signals enabled |
+| Grafana/Prometheus/Jaeger | No | Observability lives in DefenseClaw |
+| Dashboard | No | Config managed by DefenseClaw |
+| Simulator | No | Dev/test only |
+
+**Total: 1 container, ~10s startup, <5ms per routing decision.**
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Docker not running | Log error, routing disabled, gateway starts normally |
+| Container fails to start | Log error, routing disabled |
+| Container crashes | RemoteRouterClient gets error → nil → default provider |
+| API timeout (>100ms) | nil → default provider |
+| No routing decision returned | nil → default provider |
+| Config validation fails | Refuse to write, keep previous |
+
+---
+
+## Tested End-to-End Results
 
 ```
-1. Parse config.Routing
-2. If !routing.Enabled → skip (zero overhead)
-3. EnsureSRBinary(routing.Version) → download if missing/outdated
-4. TranslateConfig(routing) → write SR native config
-5. StartSR(port, configPath) → subprocess with PID tracking
-6. WaitForHealth(port, timeout=5s) → poll /health
-7. RegisterModelRouter(NewRemoteRouterClient(port, timeout))
-8. Log: "[guardrail] semantic router enabled (v{version}, {algorithm})"
-```
+$ curl /api/v1/classify/intent -d '{"messages":[{"role":"user","content":"analyze tradeoffs"}]}'
+→ recommended_model: "reasoning", matched_signals: {keywords: ["complex_task"]}
 
-### Shutdown sequence
+$ curl /api/v1/classify/intent -d '{"messages":[{"role":"user","content":"implement fibonacci"}]}'
+→ recommended_model: "code", matched_signals: {keywords: ["code_task"]}
 
-```
-1. Gateway context cancelled
-2. Send SIGTERM to SR process
-3. Wait up to 5s for graceful exit
-4. If still alive: SIGKILL
-5. Remove PID file
-```
-
-### Hot-reload (config.yaml changes)
-
-```
-1. Config watcher detects routing: block change
-2. TranslateConfig(newRouting) → write new SR config
-3. POST /v1/config/reload to SR (or restart SR if reload unsupported)
-4. Health-check new instance
-5. Log: "[guardrail] semantic router config reloaded"
+$ curl /api/v1/classify/intent -d '{"messages":[{"role":"user","content":"what is 2+2"}]}'
+→ recommended_model: "fast", matched_signals: {}
 ```
 
 ---
 
 ## File Structure
 
-### New files to create
-
 | File | Responsibility |
 |------|----------------|
-| `internal/routing/manager.go` | SR binary download, version check, platform detection |
-| `internal/routing/manager_test.go` | Mock download, checksum verification |
-| `internal/routing/lifecycle.go` | Start/stop/health-check/restart SR subprocess |
-| `internal/routing/lifecycle_test.go` | Mock process lifecycle |
-| `internal/routing/config_translate.go` | DefenseClaw config → SR native config YAML generation |
-| `internal/routing/config_translate_test.go` | Translation correctness |
-| `internal/gateway/model_router_remote.go` | RemoteRouterClient implementing ModelRouter |
-| `internal/gateway/model_router_remote_test.go` | Mock SR API, timeout, fallback |
+| `internal/routing/config_translate.go` | DefenseClaw config → SR v0.3 YAML |
+| `internal/routing/config_translate_test.go` | Translation correctness tests |
+| `internal/routing/lifecycle.go` | Docker container start/stop/health |
+| `internal/routing/lifecycle_test.go` | Lifecycle logic tests |
+| `internal/routing/orchestrator.go` | Full startup sequence orchestration |
+| `internal/routing/manager.go` | pip install + Docker availability check |
+| `internal/routing/manager_test.go` | Manager logic tests |
+| `internal/gateway/model_router_remote.go` | RemoteRouterClient (classify/intent API) |
+| `internal/gateway/model_router_remote_test.go` | Client tests (mock SR) |
 | `internal/gateway/model_router_feedback.go` | Post-response feedback to SR |
-| `internal/cli/setup_routing.go` | CLI command: enable/disable/status/upgrade |
-
-### Modified files
-
-| File | Changes |
-|------|---------|
-| `internal/config/config.go` | Add `Mode`, `Version`, `Port`, `Embedding`, `LLMClassifier`, `Remote` fields to `RoutingConfig` |
-| `internal/gateway/sidecar.go` | Add SR lifecycle startup/shutdown in `Run()` |
-| `internal/gateway/model_router_adapter.go` | Construct `RemoteRouterClient` (managed or remote endpoint) |
-
----
-
-## Error Handling & Observability
-
-| Scenario | Behavior |
-|----------|----------|
-| SR binary download fails | Log error, routing disabled, gateway starts normally |
-| SR fails to start | Log error, routing disabled, fall through to default |
-| SR crashes mid-operation | RemoteRouterClient gets connection error → returns nil → default path |
-| SR responds slowly (> timeout) | Request cancelled → nil → default path |
-| SR returns unknown backend | Log warning, fall through to default |
-| Config validation fails | Refuse to write bad config, keep previous |
-
-Observability:
-- `[routing] sr started (pid={pid}, version={ver}, port={port})`
-- `[routing] sr stopped (reason={reason})`
-- `[routing] route: decision={name} → backend={backend} model={model} latency={ms}ms`
-- `[routing] sr unreachable: falling back to default provider`
-- `X-Semantic-Router: routed` / `X-Semantic-Router-Reason: ...` response headers
-
----
-
-## Testing Strategy
-
-| Test type | What | How |
-|-----------|------|-----|
-| Unit | Config translation | Assert generated YAML matches expected structure |
-| Unit | Remote client | httptest mock of SR API, verify request/response parsing |
-| Unit | Lifecycle | Mock exec.Command, verify PID tracking, kill signals |
-| Integration | Full flow | Start real SR binary (if available), route through it |
-| E2E | End-to-end | Send curl to DefenseClaw → verify correct model selected |
-
----
-
-## Deployment Options
-
-| Environment | How SR runs |
-|------------|------------|
-| Developer laptop | Managed subprocess (default) |
-| Docker Compose | Separate container, DefenseClaw connects via network |
-| Kubernetes | Sidecar container in same pod |
-| Enterprise (air-gapped) | Pre-install SR binary in image, skip download |
-
-For Docker/K8s, `routing.mode: remote` + `routing.remote.endpoint` can point to an external SR instance instead of managing a subprocess.
-
----
-
-## Estimated Effort
-
-| Task | Effort |
-|------|--------|
-| SR binary manager (download, version, checksum) | 2 days |
-| SR lifecycle manager (start/stop/health/restart) | 2 days |
-| Config translator (DefenseClaw → SR native format) | 1 day |
-| Remote router client + fallback | 1 day |
-| Feedback loop integration | 0.5 day |
-| CLI command (`setup routing`) | 1 day |
-| Sidecar wiring (startup/shutdown) | 0.5 day |
-| Config schema expansion | 0.5 day |
-| Tests | 2 days |
-| **Total** | **~10 days** |
-
----
-
-## Modes (No Local Fallback)
-
-When `routing.enabled: true`, DefenseClaw **always** uses the semantic router. There is no local keyword-only fallback mode.
-
-| Mode | When | Behavior |
-|------|------|----------|
-| `managed` (default) | `routing.enabled: true` | DefenseClaw downloads SR binary, manages lifecycle, routes through it |
-| `remote` | `routing.remote.endpoint` is set | DefenseClaw connects to an externally managed SR instance (Docker/K8s) |
-
-If the SR is unavailable (crash, network error, timeout), the request **falls through to the default provider** (no routing override applied) — this is graceful degradation, not a "local routing mode". The user's configured `llm.model` or Bifrost default takes over until SR recovers.
-
-### Migration
-
-1. `routing.enabled: false` (or absent) — routing is off, zero overhead, all requests go to default provider
-2. `routing.enabled: true` — SR is required; DefenseClaw downloads and starts it automatically
-3. `routing.remote.endpoint: http://...` — uses external SR instead of managed subprocess
+| `internal/gateway/model_router_adapter.go` | NewRemoteModelRouter factory |
+| `internal/gateway/sidecar.go` | Startup/shutdown wiring |
+| `internal/config/config.go` | RoutingConfig types |
+| `cli/defenseclaw/commands/cmd_setup.py` | setup routing CLI command |
+| `cli/defenseclaw/config.py` | Python RoutingConfig model |
