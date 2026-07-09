@@ -1,0 +1,207 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package ipc
+
+import (
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	pb "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1"
+)
+
+// Retention bounds for the notifier ring buffer used to replay
+// HISTORY / TRANSIENT_AND_HISTORY records to freshly-connected
+// subscribers.
+const (
+	notifierRetentionMax = 10
+	notifierRetentionTTL = 15 * time.Minute
+	subscriberBufferSize = 32
+)
+
+// retainedRecord pairs a wire-ready NotificationRecord with the wall-
+// clock time it was published so we can evict records older than
+// notifierRetentionTTL at replay time.
+type retainedRecord struct {
+	record   *pb.NotificationRecord
+	receipts time.Time
+}
+
+// broadcast is the in-process fan-out for user-visible notifications.
+// Subscribers receive live records on a bounded buffered channel and
+// (at subscribe time) a replay of retained HISTORY records. Slow
+// subscribers are dropped, never blocked.
+//
+// Every record fanned out from here is stamped with:
+//   - a fresh per-process UUID in NotificationRecord.notification_id
+//   - a monotonically increasing sequence in NotificationRecord.sequence
+//
+// so reconnecting clients can dedup replayed retained records against
+// records they have already seen within the same process lifetime.
+// Stamping is done under b.mu at publish time so the retained ring
+// and live subscribers observe the same identifiers.
+type broadcast struct {
+	nowFn func() time.Time
+	// idFn mints per-record identifiers; production wiring uses
+	// uuid.NewString. Tests replace it to keep assertions
+	// deterministic without touching the production allocator.
+	idFn func() string
+
+	mu          sync.Mutex
+	subscribers []*subscriber
+	retained    []retainedRecord
+	// nextSeq is the next value to stamp on NotificationRecord.sequence.
+	// Starts at 1 and increments under b.mu.
+	nextSeq uint64
+}
+
+type subscriber struct {
+	ch chan *pb.NotificationRecord
+}
+
+func newBroadcast() *broadcast {
+	return &broadcast{
+		nowFn:   time.Now,
+		idFn:    uuid.NewString,
+		nextSeq: 1,
+	}
+}
+
+// subscribe returns a channel that receives live NotificationRecords,
+// pre-filled with any retained HISTORY / TRANSIENT_AND_HISTORY
+// records still within the retention window. Callers MUST invoke
+// cancel exactly once when the subscriber exits.
+func (b *broadcast) subscribe() (<-chan *pb.NotificationRecord, func()) {
+	sub := &subscriber{ch: make(chan *pb.NotificationRecord, subscriberBufferSize)}
+
+	b.mu.Lock()
+	b.evictExpiredLocked()
+	// Snapshot retained records under lock, then replay after unlock
+	// so we do not hold b.mu during the initial fill (avoids blocking
+	// concurrent publishers when the buffer is well-sized).
+	replay := make([]*pb.NotificationRecord, 0, len(b.retained))
+	for _, r := range b.retained {
+		replay = append(replay, r.record)
+	}
+	b.subscribers = append(b.subscribers, sub)
+	b.mu.Unlock()
+
+	for _, r := range replay {
+		select {
+		case sub.ch <- r:
+		default:
+			// Subscriber's buffer already full during replay — the
+			// tail is more important than the head for a warm start,
+			// so drop the oldest and try again.
+			select {
+			case <-sub.ch:
+			default:
+			}
+			select {
+			case sub.ch <- r:
+			default:
+			}
+		}
+	}
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			// Hold b.mu across both slice mutation and channel
+			// close so a concurrent publish cannot pick up this
+			// subscriber and then send on its channel after
+			// close. Also allocate a fresh backing array so any
+			// reader that already copied the slice header sees
+			// its own snapshot instead of a mutated one.
+			b.mu.Lock()
+			next := make([]*subscriber, 0, len(b.subscribers))
+			for _, existing := range b.subscribers {
+				if existing != sub {
+					next = append(next, existing)
+				}
+			}
+			b.subscribers = next
+			close(sub.ch)
+			b.mu.Unlock()
+		})
+	}
+	return sub.ch, cancel
+}
+
+// publish fans out one record to every current subscriber and
+// (when the presentation says so) records it in the retention ring.
+// Slow subscribers are dropped by non-blocking send — the block
+// path must never stall on a full IPC buffer.
+//
+// The fan-out runs under b.mu so a concurrent cancel cannot close
+// a subscriber channel between our decision to send and the send
+// itself. That serializes with subscribe/cancel but the per-send
+// select is non-blocking, so publish still returns in bounded time
+// even with dozens of subscribers.
+func (b *broadcast) publish(rec *pb.NotificationRecord) {
+	if rec == nil {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.evictExpiredLocked()
+
+	// Stamp identity + sequence under the lock so the retained ring
+	// and every live subscriber see the same values. notification_id
+	// and sequence take precedence over anything the caller pre-set —
+	// the broadcast is the single source of truth for both.
+	rec.NotificationId = b.idFn()
+	rec.Sequence = b.nextSeq
+	b.nextSeq++
+
+	if isRetained(rec.Presentation) {
+		b.retained = append(b.retained, retainedRecord{record: rec, receipts: b.nowFn()})
+		if len(b.retained) > notifierRetentionMax {
+			// Drop the oldest to stay within the cap.
+			b.retained = b.retained[len(b.retained)-notifierRetentionMax:]
+		}
+	}
+	for _, s := range b.subscribers {
+		select {
+		case s.ch <- rec:
+		default:
+			// Slow subscriber — drop this record for that subscriber
+			// only. Contract explicitly allows "consumer stops
+			// receiving records and reconnects with bounded backoff".
+		}
+	}
+}
+
+// evictExpiredLocked drops retained records older than the TTL.
+// Called under b.mu.
+func (b *broadcast) evictExpiredLocked() {
+	if len(b.retained) == 0 {
+		return
+	}
+	cutoff := b.nowFn().Add(-notifierRetentionTTL)
+	keep := b.retained[:0]
+	for _, r := range b.retained {
+		if r.receipts.After(cutoff) {
+			keep = append(keep, r)
+		}
+	}
+	b.retained = keep
+}
+
+// isRetained reports whether a record's presentation intent means it
+// should be kept for reconnect replay. TRANSIENT-only records
+// (approval prompts) are not replayed — they are ephemeral by design.
+func isRetained(p pb.NotificationPresentation) bool {
+	return p == pb.NotificationPresentation_NOTIFICATION_PRESENTATION_HISTORY ||
+		p == pb.NotificationPresentation_NOTIFICATION_PRESENTATION_TRANSIENT_AND_HISTORY
+}

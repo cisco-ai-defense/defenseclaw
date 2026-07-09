@@ -139,3 +139,10 @@ outputs/
 
 # Local native-Windows manual acceptance walkthrough.
 /WINDOWS_NATIVE_MANUAL_TEST.md
+
+# Protoc-gen-* tool binaries used by `make proto` (pinned locally so
+# regeneration does not depend on the operator's global GOPATH/bin).
+.tools/
+
+# UDS sockets created by the local IPC server or its e2e tests.
+*.sock

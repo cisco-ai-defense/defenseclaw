@@ -231,6 +231,10 @@ type Config struct {
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
+	// Managed configures the local UDS gRPC server consumed by AVC
+	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
+	// returns true — see managed.go.
+	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries

@@ -664,6 +664,20 @@
       "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
     },
     {
+      "name": "DEFENSECLAW_IPC_SOCKET",
+      "category": "runtime_path",
+      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server. Test rigs and out-of-tree clients use this to point at a scratch socket without editing config.yaml.",
+      "default": "unset (resolver picks per-mode default: <dirname(data_dir)>/ipc/defenseclaw_ipc.sock for managed_enterprise, otherwise <data_dir>/ipc/defenseclaw_ipc.sock)",
+      "accepted_values": ["any-absolute-path", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/ipc/paths.go", "description": "ResolveSocketPath consults this before falling back to the deployment-mode default"}
+      ],
+      "since": "0.8.4",
+      "security_note": "Local-only socket path override — the resolved path is created with mode 0666 (managed_enterprise) or 0600 (unmanaged); managed_enterprise refuses to boot when the resolved mode is world-writable and managed.allowed_uids is empty."
+    },
+    {
       "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",
       "category": "runtime_path",
       "purpose": "Systemd template override naming the connector reconciled by an enterprise hook guardian instance.",

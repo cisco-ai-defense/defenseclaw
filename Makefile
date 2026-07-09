@@ -56,6 +56,7 @@ OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
         upgrade-smoke upgrade-smoke-matrix \
         set-version \
         _bundle-data \
+        proto proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -307,6 +308,35 @@ dev-pycli: pycli
 	@echo "Done. Activate the environment and run:"
 	@echo "  source $(VENV)/bin/activate"
 	@echo "  defenseclaw --help"
+
+# ---------------------------------------------------------------------------
+# Protobuf regeneration
+# ---------------------------------------------------------------------------
+# `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
+# Client) contract at proto/defenseclaw/secureclient/v1/*.proto.
+# Tool binaries are installed under .tools/bin so contributors do not
+# need protoc-gen-go in their global $GOPATH/bin, and the versions
+# are pinned to what the generated files were produced against.
+# The generated .pb.go files are committed, so `make gateway` /
+# `make build` never invoke `proto` — you only run it when the .proto
+# changes.
+PROTO_TOOLS_DIR := $(CURDIR)/.tools
+PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
+PROTOC_GEN_GO_VERSION      := v1.36.5
+PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+
+proto-tools:
+	@mkdir -p $(PROTO_TOOLS_BIN)
+	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+
+proto: proto-tools
+	@command -v protoc >/dev/null 2>&1 || { echo "protoc not found — brew install protobuf (or apt install protobuf-compiler)"; exit 1; }
+	@cd proto/defenseclaw/secureclient/v1 && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		secureclient.proto
+	@echo "Regenerated proto/defenseclaw/secureclient/v1/*.pb.go"
 
 gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
