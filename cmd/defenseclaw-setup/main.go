@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -113,9 +114,11 @@ func main() {
 
 	code, err := run(opts)
 	if err != nil {
-		if !opts.Quiet {
-			fmt.Fprintf(os.Stderr, "DefenseClaw setup failed: %v\n", err)
-		}
+		// Silent mode suppresses interactive UI, not diagnostics. Automation and
+		// enterprise deployment tools need the concrete failure on their captured
+		// stderr stream; a windowsgui process still receives redirected standard
+		// handles when its parent explicitly provides them.
+		fmt.Fprintf(os.Stderr, "DefenseClaw setup failed: %v\n", err)
 		if code != 0 {
 			os.Exit(code)
 		}
@@ -1286,13 +1289,21 @@ func validateManagedRoot(path string) error {
 }
 
 func safeJoin(root, rel string) (string, error) {
-	if rel == "" || filepath.IsAbs(rel) || strings.Contains(rel, "\x00") {
+	if rel == "" || strings.Contains(rel, "\x00") {
 		return "", fmt.Errorf("unsafe payload path: %q", rel)
 	}
-	clean := filepath.Clean(filepath.FromSlash(rel))
-	if clean == "." || filepath.VolumeName(clean) != "" || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) || clean == ".." {
+
+	// ZIP entry names use forward slashes, but untrusted archives can contain
+	// backslashes too. Normalize both forms before validating so Windows drive,
+	// UNC, rooted, traversal, and alternate-data-stream paths are rejected on
+	// every build host rather than only when tests execute on Windows.
+	normalized := strings.ReplaceAll(rel, `\`, "/")
+	cleanSlash := path.Clean(normalized)
+	if path.IsAbs(normalized) || strings.Contains(normalized, ":") ||
+		cleanSlash == "." || cleanSlash == ".." || strings.HasPrefix(cleanSlash, "../") {
 		return "", fmt.Errorf("payload path escapes destination: %q", rel)
 	}
+	clean := filepath.FromSlash(cleanSlash)
 	full := filepath.Join(root, clean)
 	rootFull, err := filepath.Abs(root)
 	if err != nil {

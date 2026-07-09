@@ -94,20 +94,41 @@ func TestParseArgsConnectorLaterNormalizesToNone(t *testing.T) {
 
 func TestSafeJoinRejectsTraversalAndAbsolutePaths(t *testing.T) {
 	root := t.TempDir()
-	if _, err := safeJoin(root, "../escape.txt"); err == nil {
-		t.Fatal("safeJoin accepted parent traversal")
+	unsafePaths := []string{
+		"../escape.txt",
+		`..\escape.txt`,
+		filepath.Join(root, "absolute.txt"),
+		"/rooted/payload.txt",
+		`\rooted\payload.txt`,
+		`C:payload\file.txt`,
+		`C:\payload\file.txt`,
+		"C:/payload/file.txt",
+		`\\server\share\payload.txt`,
+		"//server/share/payload.txt",
+		"payload/file.txt:stream",
 	}
-	if _, err := safeJoin(root, filepath.Join(root, "absolute.txt")); err == nil {
-		t.Fatal("safeJoin accepted absolute path")
-	}
-	if _, err := safeJoin(root, `C:payload\file.txt`); err == nil {
-		t.Fatal("safeJoin accepted drive-qualified path")
+	for _, unsafePath := range unsafePaths {
+		if _, err := safeJoin(root, unsafePath); err == nil {
+			t.Fatalf("safeJoin accepted unsafe path %q", unsafePath)
+		}
 	}
 }
 
 func TestSafeJoinAcceptsNestedPayloadPath(t *testing.T) {
 	root := t.TempDir()
 	got, err := safeJoin(root, "payload/nested/file.txt")
+	if err != nil {
+		t.Fatalf("safeJoin returned error: %v", err)
+	}
+	want := filepath.Join(root, "payload", "nested", "file.txt")
+	if got != want {
+		t.Fatalf("safeJoin = %q, want %q", got, want)
+	}
+}
+
+func TestSafeJoinAcceptsNestedBackslashPayloadPath(t *testing.T) {
+	root := t.TempDir()
+	got, err := safeJoin(root, `payload\nested\file.txt`)
 	if err != nil {
 		t.Fatalf("safeJoin returned error: %v", err)
 	}
