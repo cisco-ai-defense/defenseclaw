@@ -15,8 +15,8 @@ func TestLifecycle_NewDefaults(t *testing.T) {
 		// Port not specified
 	})
 
-	if lc.port != 8888 {
-		t.Errorf("expected default port 8888, got %d", lc.port)
+	if lc.port != 8080 {
+		t.Errorf("expected default port 8080, got %d", lc.port)
 	}
 	if lc.configPath != "/etc/sr/config.yaml" {
 		t.Errorf("expected configPath /etc/sr/config.yaml, got %s", lc.configPath)
@@ -98,7 +98,7 @@ func TestLifecycle_WaitForHealth_Timeout(t *testing.T) {
 		t.Error("expected WaitForHealth to timeout, got nil error")
 	}
 
-	expectedErrMsg := "routing: vllm-sr health check timed out"
+	expectedErrMsg := "routing: router health check timed out"
 	if err != nil && len(err.Error()) > 0 {
 		if !contains(err.Error(), expectedErrMsg) {
 			t.Errorf("expected error message to contain '%s', got: %v", expectedErrMsg, err)
