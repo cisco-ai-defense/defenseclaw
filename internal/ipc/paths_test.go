@@ -64,12 +64,16 @@ func TestResolveSocketPath(t *testing.T) {
 			want: "/opt/dc/ipc/" + SocketFileName,
 		},
 		{
-			name: "managed_enterprise falls back to dirname(data_dir)/ipc/…",
+			name: "managed_enterprise falls back to dirname(data_dir)/ipc/… (macOS installer layout)",
 			cfg: &config.Config{
-				DataDir:        "/Library/Application Support/DefenseClaw/runtime",
+				// Matches packaging/macos/install.sh:
+				//   SUPPORT_DIR = /opt/cisco/secureclient/defenseclaw
+				//   data_dir    = ${SUPPORT_DIR}/runtime
+				// so the socket lands at ${SUPPORT_DIR}/ipc/<file>.
+				DataDir:        "/opt/cisco/secureclient/defenseclaw/runtime",
 				DeploymentMode: managed.DeploymentModeManagedEnterprise,
 			},
-			want: "/Library/Application Support/DefenseClaw/ipc/" + SocketFileName,
+			want: "/opt/cisco/secureclient/defenseclaw/ipc/" + SocketFileName,
 		},
 		{
 			name: "unmanaged falls back to data_dir/ipc/…",
