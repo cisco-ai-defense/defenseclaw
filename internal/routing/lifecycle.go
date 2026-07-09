@@ -59,13 +59,14 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	args := []string{
 		"run", "-d",
 		"--name", srContainerName,
-		"--network", "host",
 		"-v", fmt.Sprintf("%s:/app/config", configDir),
-		"-e", fmt.Sprintf("CONFIG_FILE=/app/config/%s", configFile),
-		"-p", fmt.Sprintf("%d:8080", l.port),
-		"-p", "9190:9190",
+		"-p", fmt.Sprintf("%d:%d", l.port, l.port),
+		"--entrypoint", "/usr/local/bin/router",
 		srRouterImage,
-		"/app/start-router.sh", fmt.Sprintf("/app/config/%s", configFile),
+		fmt.Sprintf("-config=/app/config/%s", configFile),
+		"-port=50051",
+		"-enable-api=true",
+		fmt.Sprintf("-api-port=%d", l.port),
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
