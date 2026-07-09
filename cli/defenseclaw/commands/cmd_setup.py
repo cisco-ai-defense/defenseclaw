@@ -10143,16 +10143,55 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         return
 
     if enable:
+        import shutil
+        import subprocess as _sp
+
         app.cfg.routing.enabled = True
         if not app.cfg.routing.version:
             app.cfg.routing.version = "0.3.0"
         if not app.cfg.routing.port:
             app.cfg.routing.port = 8888
+
+        click.echo()
+        click.echo("  Setting up semantic model routing...")
+        click.echo()
+
+        # 1. Check/install vllm-sr
+        if shutil.which("vllm-sr"):
+            ver = _sp.run(["vllm-sr", "--version"], capture_output=True, text=True).stdout.strip()
+            click.echo(f"  ✓ vllm-sr already installed ({ver})")
+        else:
+            click.echo("  Installing vllm-sr...")
+            pkg = f"vllm-sr=={app.cfg.routing.version}" if app.cfg.routing.version else "vllm-sr"
+            result = _sp.run(["pip", "install", pkg], capture_output=True, text=True)
+            if result.returncode != 0:
+                click.echo(f"  ✗ pip install failed: {result.stderr.strip()}")
+                click.echo("    Install manually: pip install vllm-sr")
+                click.echo("    Then re-run: defenseclaw setup routing --enable")
+                return
+            if shutil.which("vllm-sr"):
+                ver = _sp.run(["vllm-sr", "--version"], capture_output=True, text=True).stdout.strip()
+                click.echo(f"  ✓ vllm-sr installed ({ver})")
+            else:
+                click.echo("  ✗ vllm-sr not found on PATH after install")
+                click.echo("    You may need to add pip's bin directory to PATH")
+                return
+
+        # 2. Check Docker
+        docker_ok = _sp.run(["docker", "info"], capture_output=True).returncode == 0
+        if docker_ok:
+            click.echo("  ✓ Docker is running")
+        else:
+            click.echo("  ⚠ Docker is not running (required for vllm-sr serve)")
+            click.echo("    Start Docker before restarting the gateway.")
+
+        # 3. Save config
         app.cfg.save()
         click.echo()
         click.echo("  ✓ Semantic routing enabled")
         click.echo(f"    Version: {app.cfg.routing.version}")
         click.echo(f"    Port:    {app.cfg.routing.port}")
+        click.echo(f"    Endpoint: http://127.0.0.1:{app.cfg.routing.port}/v1/chat/completions")
         click.echo()
         click.echo("  The router will start automatically with the gateway.")
         if not yes:
