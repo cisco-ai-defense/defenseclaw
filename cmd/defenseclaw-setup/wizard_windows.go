@@ -177,6 +177,13 @@ var (
 )
 
 func runInteractiveWizard(opts options, installRoot, dataRoot string) (int, error) {
+	// A Win32 window and its message queue belong to the OS thread that
+	// creates them. Keep creation, GetMessage, and DispatchMessage on that
+	// thread; otherwise the Go scheduler may resume this goroutine on another
+	// thread whose empty queue never receives the wizard's window messages.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	if opts.Action == "install" && !opts.StartGateway {
 		opts.StartGateway = true
 	}
