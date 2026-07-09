@@ -27,7 +27,7 @@ You can run that control plane in either of two ways:
 </Cards>
 
 <Callout title="Agent Control is not in the enforcement request path">
-The synchronizer fetches the target-effective **policy snapshot** through the Agent Control SDK. In watch mode it asynchronously reports final blocks for Agent Control-managed rules after DefenseClaw has already decided. The Agent Control integration includes the exact unredacted blocked input, raw request body, and enforcement reason by default so the Monitor tab can show the complete denied span. DefenseClaw remains the runtime enforcement authority, and its last-known-good local policy keeps serving when the control plane is temporarily unavailable.
+The synchronizer fetches the target-effective **policy snapshot** through the Agent Control SDK. In watch mode it asynchronously reports final blocks for Agent Control-managed rules after DefenseClaw has already decided. Every Monitor event includes the matched rule IDs, rule bucket, decision, severity, and correlation metadata. Blocked content follows DefenseClaw's global redaction policy: redacted placeholders are the default, while exact inputs and raw request bodies appear only when an operator explicitly disables redaction. DefenseClaw remains the runtime enforcement authority, and its last-known-good local policy keeps serving when the control plane is temporarily unavailable.
 </Callout>
 
 ## Architecture
@@ -46,7 +46,7 @@ The synchronizer fetches the target-effective **policy snapshot** through the Ag
   <Node id="rules" kind="policy">Managed rule overlay</Node>
   <Node id="gateway" kind="gateway">DefenseClaw gateway</Node>
   <Node id="agents" kind="agent">Protected AI agents</Node>
-  <Node id="events" kind="connector">Private exact-content spool</Node>
+  <Node id="events" kind="connector">Redacted or private exact-content spool</Node>
   <Node id="monitor" kind="policy">Agent Control Monitor</Node>
   <Edge from="operator" to="self" label="author + target" />
   <Edge from="operator" to="cloud" label="author + target" />
@@ -108,6 +108,14 @@ Execution history is member-owned as well as bucket-filtered. Two members with
 a grant to the same bucket do not gain access to each other's exact blocked
 content.
 
+![Agent Control administrator view for creating users and API keys](/images/agent-control/access-management-scoped-keys.png)
+
+Each credential is assigned independently. This local integration run grants
+the imported DefenseClaw buckets to both the UI/demo key and the separate
+runtime key without exposing either secret after its one-time display:
+
+![Agent Control access management showing bucket-scoped DefenseClaw API keys](/images/agent-control/access-management-bucket-grants.png)
+
 Store the runtime key through DefenseClaw's protected credential flow:
 
 ```bash
@@ -163,7 +171,7 @@ The endpoint running the synchronizer needs:
 - an Agent Control URL and bucket-scoped member credential;
 - `DEFENSECLAW_GATEWAY_TOKEN` for automatic local reload or restart;
 - a policy directory writable by the synchronizer service identity and readable by the gateway;
-- the gateway and synchronizer running as the same OS service identity when exact-content visibility is enabled;
+- the gateway and synchronizer running as the same OS service identity when global redaction is disabled and exact-content visibility is enabled;
 - a process supervisor when automatic rule-pack restart activation is enabled.
 - enough protected local storage for the private, rotated Agent Control event spool.
 
@@ -199,7 +207,7 @@ For Agent Control managed or Hybrid, setup asks for:
 - a stable installation ID, defaulting to `defenseclaw-<hostname>`;
 - the environment-variable name that holds the API key;
 - whether Agent Control manages OPA thresholds;
-- whether exact blocked content is sent to Monitor (enabled by default).
+- whether blocked content is sent to Monitor (enabled by default; global redaction still applies).
 
 The same flow is available non-interactively:
 
@@ -236,6 +244,13 @@ defenseclaw agent-control status
 custom name), `doctor` checks that the managed source, deployment, URL,
 installation, and rule lane agree, and `agent-control status` reports snapshot,
 activation, and Monitor-delivery health.
+
+The DefenseClaw TUI **Overview → Configuration** panel shows the same posture
+continuously: resolved regex source, Agent Control sync state and effective
+control count, deployment type, endpoint, installation ID, OPA ownership,
+Monitor content level, and delivery counters. The status is refreshed from the
+local synchronizer state file without a network request and never displays the
+API key.
 
 <Callout type="info" title="What Agent Control managed replaces">
 Agent Control managed replaces only regex detection. Local judges,
@@ -335,21 +350,49 @@ defenseclaw agent-control status
 
 Wait for `status: active` and matching published/active rule digests. Replaying the identical prompt now matches `LOCAL-INJECTION-014` at CRITICAL severity, returns a DefenseClaw block response with `X-DefenseClaw-Blocked: true`, and does not contact the upstream model. CRITICAL is deliberate: DefenseClaw's prompt UX contract demotes HIGH prompt decisions to alerts, while CRITICAL findings remain hard blocks.
 
-Keep `sync --watch` running while replaying the blocked prompt. Sign back into
-Agent Control with the **member** key and open the `defenseclaw-policy-sync`
-agent's **Monitor** tab. The member can see history for its granted buckets but
-cannot edit them. The enabled prompt-injection bucket appears as a matched
-`deny` execution with the DefenseClaw request/trace correlation. By default,
-the newest execution also contains the exact unredacted blocked input,
-enforcement reason, and raw request body.
+Keep `sync --watch` running while replaying the blocked prompt and open the
+`defenseclaw-policy-sync` agent's **Monitor** tab. An administrator sees every
+enforcement action in the namespace. A member sees only actions owned by that
+member, even when another member has a grant to the same bucket. Both views
+show the decision, exact matched rule IDs, owning rule bucket, and correlation
+metadata. Neither role gains access to content that DefenseClaw redacted.
 
-![Agent Control Monitor overview showing deny executions for the DefenseClaw prompt-injection control](/images/agent-control/monitor-overview.jpg)
+With redaction enabled, the administrator's namespace-wide view shows an
+explicit **Redacted by DefenseClaw** badge and placeholders while retaining the
+matched `LOCAL-INJECTION-014` rule and `defenseclaw-local-prompt-injection`
+bucket:
 
-The newest span opens automatically and exposes the exact DefenseClaw trace, span, request, rule, duration, input, reason, and raw request body:
+![Administrator Monitor view showing a DefenseClaw-redacted deny span with the matched rule and bucket](/images/agent-control/monitor-admin-redacted-span.png)
 
-![Expanded Agent Control execution showing the exact unredacted prompt blocked by DefenseClaw](/images/agent-control/monitor-exact-blocked-span.jpg)
+For a trusted single-tenant recording, explicitly disable redaction before the request. The newest span then opens automatically and exposes the exact DefenseClaw trace, span, request, rule, duration, input, reason, and raw request body:
 
-Exact unredacted content is the Agent Control integration default. To send only decision and correlation metadata, opt out and restart the gateway and synchronizer:
+```bash
+defenseclaw setup redaction off --yes
+```
+
+The same bucket-scoped member key used by the SDK can sign in to the UI. Its
+member-owned view exposes the exact blocked input only for events DefenseClaw
+sent while global redaction was disabled:
+
+![Member Monitor view showing the exact unredacted prompt blocked by DefenseClaw and its matched rule ID](/images/agent-control/monitor-member-exact-span.png)
+
+Restore the safe default immediately after the trusted recording:
+
+```bash
+defenseclaw setup redaction on
+```
+
+For broader validation, replay benign requests alongside synthetic attacks
+that exercise several managed buckets. In the local recording, arithmetic,
+travel, roadmap, science, and meeting-reminder prompts all reached the mock
+upstream. Prompt injection, metadata-service SSRF, download-and-execute,
+sensitive-path access, synthetic API-key material, and a synthetic patient ID
+were blocked locally. Monitor grouped the resulting denies under their owning
+controls while the administrator retained the namespace-wide view:
+
+![Administrator Monitor view showing enforcement actions across multiple DefenseClaw rule buckets](/images/agent-control/monitor-admin-multi-bucket.png)
+
+To send only decision and correlation metadata, opt out of content and restart the gateway and synchronizer:
 
 ```yaml
 agent_control:
@@ -358,14 +401,14 @@ agent_control:
     include_content: false
 ```
 
-<Callout type="warn" title="Agent Control receives workload content by default">
-Enabling the Agent Control integration creates a local-only raw spool at `<data_dir>/agent-control/gateway-events-unredacted.jsonl` with directory mode `0700`, file mode `0600`, size rotation, and seven-day retention. This integration-private lane is intentionally unredacted when `include_content: true`, independent of the global redaction switch. The synchronizer forwards only final blocks owned by effective Agent Control rule-pack controls. Before using self-hosted Agent Control or Cisco Cloud Control with production traffic, confirm authorization, data residency, access control, retention, and deletion requirements. Set `include_content: false` when exact content is not approved.
+<Callout type="warn" title="Exact Monitor content follows the global redaction switch">
+With the safe default `privacy.disable_redaction: false`, the watcher reads the standard redacted gateway stream and Agent Control receives placeholders plus rule and correlation metadata. When `include_content: true` **and** global redaction is explicitly disabled, DefenseClaw creates a local-only exact-content spool at `<data_dir>/agent-control/gateway-events-unredacted.jsonl` with directory mode `0700`, file mode `0600`, size rotation, and seven-day retention. Before using self-hosted Agent Control or Cisco Cloud Control with production traffic, confirm authorization, data residency, access control, retention, and deletion requirements.
 </Callout>
 
 The `0700`/`0600` boundary intentionally requires the gateway writer and synchronizer reader to use the same OS account. The packaged systemd services both use `defenseclaw`; the Cisco Secure Client launchd jobs both use the default root identity. Custom deployments must preserve that same-identity model; DefenseClaw does not weaken the spool permissions for cross-user sharing.
 
-<Callout type="info" title="Other DefenseClaw sinks keep the standard redaction behavior">
-The Agent Control private spool does not change global redaction. Audit storage, normal gateway JSONL, OTLP, webhooks, and Splunk are redacted while `privacy.disable_redaction: false`; they remain unredacted when the operator explicitly sets `privacy.disable_redaction: true`. If global redaction is disabled, both the Agent Control span and those standard sinks contain exact content.
+<Callout type="info" title="One redaction policy for every sink">
+Audit storage, normal gateway JSONL, OTLP, webhooks, Splunk, and Agent Control are redacted while `privacy.disable_redaction: false`. They become unredacted only when the operator explicitly sets `privacy.disable_redaction: true`. Set redaction back on immediately after a trusted demo with `defenseclaw setup redaction on`.
 </Callout>
 
 <Callout type="warn" title="This is an isolated demonstration">
@@ -426,7 +469,7 @@ The SDK owns network refresh and fail-stale cache behavior. The DefenseClaw proc
 
 ### Enforcement visibility in Agent Control Monitor
 
-By default, the continuous watcher tails new records from the protected `<data_dir>/agent-control/gateway-events-unredacted.jsonl` spool. Only final `block` verdicts whose rule IDs belong to an effective `defenseclaw.rule_pack` control are sent through the SDK observability sink. The event is recorded as:
+By default, the continuous watcher tails new records from the redacted `<data_dir>/gateway.jsonl` stream. When global redaction is disabled and Monitor content is enabled, it instead uses the protected exact-content spool. Only final `block` verdicts whose rule IDs belong to an effective `defenseclaw.rule_pack` control are sent through the SDK observability sink. The event is recorded as:
 
 | Agent Control field | DefenseClaw source |
 | --- | --- |
@@ -435,7 +478,7 @@ By default, the continuous watcher tails new records from the protected `<data_d
 | Action / matched | `deny` / `true` |
 | Applies to | `llm_call` or `tool_call` from the verdict direction |
 | Trace / span | Gateway trace when available plus a deterministic derived span |
-| Metadata | Rule IDs, severity, direction, latency, request/evaluation IDs, connector, exact blocked input, enforcement reason, and raw request body |
+| Metadata | Rule IDs, severity, direction, latency, request/evaluation IDs, connector, and blocked content/reason/body at the redaction level selected by DefenseClaw |
 
 The source cursor is persisted with the Agent Control state. First enablement starts at the end of the current log, so historical endpoint activity is not uploaded. Retries reuse a deterministic control-execution ID, which Agent Control stores idempotently. Rotation and truncation are detected; unsafe source files are refused.
 
@@ -447,7 +490,7 @@ agent_control:
     enabled: false
 ```
 
-With `include_content: false`, the watcher falls back to the standard `<data_dir>/gateway.jsonl`, which follows global redaction; `DEFENSECLAW_JSONL_DISABLE=1` disables that metadata-only source. SDK or event-log failures are reported as degraded visibility and never change or delay local enforcement.
+With `include_content: false`, the watcher still uses `<data_dir>/gateway.jsonl` but forwards only decision and correlation metadata. `DEFENSECLAW_JSONL_DISABLE=1` disables that source. SDK or event-log failures are reported as degraded visibility and never change or delay local enforcement.
 
 Check local activation readback:
 
