@@ -28,6 +28,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import click
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
@@ -259,6 +261,208 @@ class TestSkillScan(SkillCommandTestBase):
             self.app.store.has_action("skill", "dirty-skill", "install", "block", "codex")
         )
         self.assertFalse(self.app.store.has_action("skill", "dirty-skill", "install", "block"))
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_hook_connector_records_all_scoped_actions(
+        self, mock_admission, mock_quarantine, mock_client,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+        mock_quarantine.return_value = os.path.join(self.tmp_dir, "quarantined")
+        skill_dir = os.path.join(self.tmp_dir, "dirty-skill")
+        os.makedirs(skill_dir)
+        result = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        _apply_scan_enforcement(
+            self.app, PolicyEngine(self.app.store), "dirty-skill", skill_dir, result,
+            connector="codex",
+        )
+
+        mock_client.assert_not_called()
+        self.assertTrue(self.app.store.has_action(
+            "skill", "dirty-skill", "runtime", "disable", "codex",
+        ))
+        self.assertTrue(self.app.store.has_action(
+            "skill", "dirty-skill", "install", "block", "codex",
+        ))
+        self.assertIsNone(self.app.store.get_action("skill", "dirty-skill", "claudecode"))
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_claude_alias_is_canonical_and_never_uses_gateway(
+        self, mock_admission, mock_client,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="none", runtime="disable", install="block"),
+        )
+        skill_dir = os.path.join(self.tmp_dir, "alias-skill")
+        os.makedirs(skill_dir)
+        result = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        _apply_scan_enforcement(
+            self.app, PolicyEngine(self.app.store), "alias-skill", skill_dir, result,
+            connector="claude-code",
+        )
+
+        mock_client.assert_not_called()
+        self.assertTrue(self.app.store.has_action(
+            "skill", "alias-skill", "runtime", "disable", "claudecode",
+        ))
+        self.assertTrue(self.app.store.has_action(
+            "skill", "alias-skill", "install", "block", "claudecode",
+        ))
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_openclaw_runtime_disable_remains_rpc_backed(
+        self, mock_admission, mock_client,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="none", runtime="disable", install="none"),
+        )
+        skill_dir = os.path.join(self.tmp_dir, "openclaw-skill")
+        os.makedirs(skill_dir)
+        result = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        _apply_scan_enforcement(
+            self.app, PolicyEngine(self.app.store), "openclaw-skill", skill_dir, result,
+            connector="openclaw",
+        )
+
+        mock_client.return_value.disable_skill.assert_called_once_with("openclaw-skill")
+        self.assertTrue(self.app.store.has_action(
+            "skill", "openclaw-skill", "runtime", "disable", "openclaw",
+        ))
+
+    @patch("defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance", return_value=None)
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_partial_failure_raises_after_other_actions(
+        self, mock_admission, _mock_quarantine,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+        skill_dir = os.path.join(self.tmp_dir, "partial-skill")
+        os.makedirs(skill_dir)
+        result = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        pe = PolicyEngine(self.app.store)
+
+        with self.assertRaises(click.ClickException):
+            _apply_scan_enforcement(
+                self.app, pe, "partial-skill", skill_dir, result, connector="codex",
+            )
+
+        self.assertTrue(self.app.store.has_action(
+            "skill", "partial-skill", "runtime", "disable", "codex",
+        ))
+        self.assertTrue(self.app.store.has_action(
+            "skill", "partial-skill", "install", "block", "codex",
+        ))
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_scan_action_policy_persistence_failures_preserve_other_action(
+        self, mock_admission,
+    ):
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="none", runtime="disable", install="block"),
+        )
+        result = ScanResult(
+            scanner="skill-scanner", target="inert",
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        runtime_skill = "runtime-persistence-failure"
+        runtime_dir = os.path.join(self.tmp_dir, runtime_skill)
+        os.makedirs(runtime_dir)
+        runtime_pe = PolicyEngine(self.app.store)
+        with patch.object(
+            runtime_pe, "disable_for_connector", side_effect=OSError("runtime db unavailable"),
+        ), self.assertRaises(click.ClickException):
+            _apply_scan_enforcement(
+                self.app, runtime_pe, runtime_skill, runtime_dir, result, connector="codex",
+            )
+        self.assertTrue(self.app.store.has_action(
+            "skill", runtime_skill, "install", "block", "codex",
+        ))
+
+        install_skill = "install-persistence-failure"
+        install_dir = os.path.join(self.tmp_dir, install_skill)
+        os.makedirs(install_dir)
+        install_pe = PolicyEngine(self.app.store)
+        with patch.object(
+            install_pe, "block_for_connector", side_effect=OSError("install db unavailable"),
+        ), self.assertRaises(click.ClickException):
+            _apply_scan_enforcement(
+                self.app, install_pe, install_skill, install_dir, result, connector="codex",
+            )
+        self.assertTrue(self.app.store.has_action(
+            "skill", install_skill, "runtime", "disable", "codex",
+        ))
+
+    @patch("defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance", return_value=None)
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_scan_action_partial_failure_returns_nonzero(
+        self, mock_scan, mock_admission, _mock_quarantine,
+    ):
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_admission.return_value = MagicMock(
+            verdict="blocked",
+            action=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+        skill_dir = os.path.join(self.tmp_dir, "cli-partial-skill")
+        os.makedirs(skill_dir)
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+
+        result = self.invoke([
+            "scan", "cli-partial-skill", "--path", skill_dir,
+            "--connector", "codex", "--action", "--no-use-llm",
+        ])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("configured enforcement incomplete", result.output)
+        self.assertTrue(self.app.store.has_action(
+            "skill", "cli-partial-skill", "runtime", "disable", "codex",
+        ))
+        self.assertTrue(self.app.store.has_action(
+            "skill", "cli-partial-skill", "install", "block", "codex",
+        ))
 
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
