@@ -44,17 +44,23 @@ func (a *semanticRouterAdapter) Route(ctx context.Context, input *ModelRouterInp
 }
 
 // NewSemanticModelRouter creates a ModelRouter from the config routing block.
-// Returns nil when routing is disabled.
+// Returns nil when routing is disabled or when remote mode is configured
+// (the sidecar wiring handles managed mode lifecycle separately).
 func NewSemanticModelRouter(cfg config.RoutingConfig) (ModelRouter, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	rcfg := convertRoutingConfig(cfg)
-	sr, err := routing.NewSemanticRouter(rcfg)
-	if err != nil {
-		return nil, fmt.Errorf("semantic router init: %w", err)
+	// If remote endpoint is set, use that directly (external SR)
+	if cfg.Remote.Endpoint != "" {
+		return nil, nil
 	}
-	return &semanticRouterAdapter{sr: sr}, nil
+	// Otherwise return nil — the sidecar wiring handles managed mode lifecycle
+	return nil, nil
+}
+
+// NewRemoteModelRouter creates a ModelRouter pointing at the given SR endpoint.
+func NewRemoteModelRouter(endpoint string, timeoutMs int) ModelRouter {
+	return NewRemoteRouterClient(endpoint, timeoutMs)
 }
 
 func convertRoutingConfig(cfg config.RoutingConfig) routing.RoutingConfig {
