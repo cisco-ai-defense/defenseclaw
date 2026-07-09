@@ -8,6 +8,7 @@ import logging
 import random
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
@@ -141,7 +142,7 @@ class AgentControlSynchronizer:
         self.event_bridge: EnforcementEventBridge | None = None
         if self.settings.observability.enabled:
             event_log_path = Path(cfg.data_dir) / "gateway.jsonl"
-            if self.settings.observability.include_content:
+            if self.settings.observability.include_content and cfg.privacy.disable_redaction:
                 event_log_path = Path(cfg.data_dir) / "agent-control" / "gateway-events-unredacted.jsonl"
             try:
                 self.event_bridge = EnforcementEventBridge(
@@ -518,7 +519,7 @@ class AgentControlSynchronizer:
         self.state.status = (
             "critical_disk_runtime_divergence" if isinstance(error, RollbackDivergenceError) else "error_lkg_preserved"
         )
-        safe = _safe_error(error)
+        safe = _safe_error(error, extra_secrets=(self.sdk_api_key,))
         if self.settings.installation_id:
             safe = safe.replace(self.settings.installation_id, "<installation-id-redacted>")
         self.state.last_error = safe
@@ -556,7 +557,7 @@ class AgentControlSynchronizer:
             logger.exception("Agent Control audit event failed")
 
 
-def _safe_error(error: Exception) -> str:
+def _safe_error(error: Exception, *, extra_secrets: Sequence[str] = ()) -> str:
     message = str(error).replace("\r", " ").replace("\n", " ")
     for secret_name in (
         "AGENT_CONTROL_API_KEY",
@@ -566,6 +567,9 @@ def _safe_error(error: Exception) -> str:
         import os
 
         secret = os.getenv(secret_name, "")
+        if secret:
+            message = message.replace(secret, "<redacted>")
+    for secret in extra_secrets:
         if secret:
             message = message.replace(secret, "<redacted>")
     return message[:1000]

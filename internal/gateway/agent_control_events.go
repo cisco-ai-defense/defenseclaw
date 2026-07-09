@@ -38,7 +38,7 @@ func newAgentControlEventWriter(
 	validator *gatewaylog.Validator,
 ) (*gatewaylog.Writer, error) {
 	if cfg == nil || !cfg.AgentControl.Enabled || !cfg.AgentControl.Observability.Enabled ||
-		!cfg.AgentControl.Observability.IncludeContent {
+		!cfg.AgentControl.Observability.IncludeContent || !cfg.Privacy.DisableRedaction {
 		return nil, nil
 	}
 

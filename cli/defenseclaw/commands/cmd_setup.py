@@ -3639,7 +3639,10 @@ def _prompt_regex_policy_source(
     )
     api_key_env = _prompt_env_var_name(settings.api_key_env or "AGENT_CONTROL_API_KEY")
     manage_opa = click.confirm("  Manage OPA thresholds through Agent Control?", default=False)
-    monitor_content = click.confirm("  Send exact blocked prompts to Agent Control Monitor?", default=True)
+    monitor_content = click.confirm(
+        "  Send blocked content to Agent Control Monitor (DefenseClaw redaction still applies)?",
+        default=True,
+    )
     _configure_agent_control_values(
         app,
         gc,
@@ -3689,7 +3692,13 @@ def _render_guardrail_review(app: AppContext, gc) -> None:
         ux.kv("OPA thresholds", "Agent Control" if settings.opa.enabled else "local")
         ux.kv(
             "Monitor content",
-            "exact / unredacted" if settings.observability.include_content else "metadata only",
+            (
+                "exact / unredacted"
+                if settings.observability.include_content and app.cfg.privacy.disable_redaction
+                else "redacted by DefenseClaw"
+                if settings.observability.include_content
+                else "metadata only"
+            ),
         )
         ux.kv("Failure behavior", "last-known-good managed policy")
 
@@ -3715,7 +3724,7 @@ def _preflight_guardrail_agent_control(
         manage_opa=settings.opa.enabled,
         include_content=settings.observability.include_content,
         require_rules=gc.regex_source == "agent_control",
-        save_config=True,
+        save_config=False,
         api_key_override=api_key_override,
     )
 
@@ -4453,8 +4462,13 @@ def setup_guardrail(
     # Interactive secrets are intentionally persisted only after the final
     # review was accepted and the first managed snapshot validated. Declining
     # either confirmation leaves both config.yaml and .env byte-for-byte alone.
-    for env_name, secret in pending_agent_control_secrets.items():
-        _save_secret_to_dotenv(env_name, secret, app.cfg.data_dir)
+    try:
+        for env_name, secret in pending_agent_control_secrets.items():
+            _save_secret_to_dotenv(env_name, secret, app.cfg.data_dir)
+    except Exception:
+        app.cfg.guardrail = original_guardrail
+        app.cfg.agent_control = original_agent_control
+        raise
 
     ok, warnings = execute_guardrail_setup(app, save_config=True, workspace_dir=workspace_dir)
     if not ok:

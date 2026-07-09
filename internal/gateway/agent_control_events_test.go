@@ -21,6 +21,9 @@ import (
 func agentControlEventTestConfig(dataDir string) *config.Config {
 	return &config.Config{
 		DataDir: dataDir,
+		Privacy: config.PrivacyConfig{
+			DisableRedaction: true,
+		},
 		AgentControl: config.AgentControlConfig{
 			Enabled: true,
 			Observability: config.AgentControlObservabilityConfig{
@@ -68,6 +71,18 @@ func TestNewAgentControlEventWriterDisabledWithoutRawContent(t *testing.T) {
 	}
 	if writer != nil {
 		t.Fatal("writer must be disabled when include_content=false")
+	}
+}
+
+func TestNewAgentControlEventWriterUsesStandardStreamWhenRedactionEnabled(t *testing.T) {
+	cfg := agentControlEventTestConfig(t.TempDir())
+	cfg.Privacy.DisableRedaction = false
+	writer, err := newAgentControlEventWriter(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer != nil {
+		t.Fatal("raw writer must be disabled while global redaction is enabled")
 	}
 }
 

@@ -2354,6 +2354,8 @@ class AgentControlConfig:
                 host_is_loopback = host_is_loopback or ipaddress.ip_address(parsed.hostname).is_loopback
             except ValueError:
                 pass
+            if self.deployment == "cisco_cloud" and parsed.scheme != "https":
+                raise ValueError("Cisco Enterprise Cloud requires an HTTPS URL")
             if parsed.scheme != "https" and not host_is_loopback:
                 raise ValueError("agent_control.server_url requires HTTPS except for loopback development")
         if not _ENV_VAR_NAME_RE.fullmatch(self.api_key_env):

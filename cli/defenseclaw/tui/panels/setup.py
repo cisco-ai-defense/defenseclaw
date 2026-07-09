@@ -4426,13 +4426,16 @@ def _guardrail_wizard_fields_for(
             visible_when=agent_control_source,
         ),
         WizardFormField(
-            "Send Exact Monitor Content",
+            "Send Monitor Content",
             "bool",
             "--agent-control-monitor-content",
             "--no-agent-control-monitor-content",
             value=agent_control_monitor_content,
             default=agent_control_monitor_content,
-            hint="Send the exact blocked span to Agent Control Monitor (default: yes).",
+            hint=(
+                "Send the blocked span to Agent Control Monitor (default: yes). "
+                "DefenseClaw redaction still applies unless globally disabled."
+            ),
             visible_when=agent_control_source,
         ),
         WizardFormField(

@@ -1044,7 +1044,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Guardrail configuration", result.output)
         self.assertIn("Regex policy source:", result.output)
         self.assertIn("Agent Control managed", result.output)
-        self.assertIn("exact / unredacted", result.output)
+        self.assertIn("redacted by DefenseClaw", result.output)
         self.assertIn("last-known-good managed policy", result.output)
         restart_services.assert_called_once()
 

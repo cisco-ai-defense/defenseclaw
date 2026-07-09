@@ -546,9 +546,9 @@ def test_guardrail_wizard_managed_source_shows_complete_secret_free_agent_contro
         "Installation ID",
         "Agent Control API Key Env",
         "Manage OPA Thresholds",
-        "Send Exact Monitor Content",
+        "Send Monitor Content",
     } <= labels
-    assert wizard_field_value(fields, "Send Exact Monitor Content") == "yes"
+    assert wizard_field_value(fields, "Send Monitor Content") == "yes"
     assert not any(field.kind == "password" and field.label.startswith("Agent Control") for field in fields)
     key_field = next(field for field in fields if field.label == "Agent Control API Key Env")
     assert "defenseclaw keys set <ENV_NAME>" in key_field.hint

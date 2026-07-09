@@ -2446,8 +2446,13 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
         cfg.guardrail = original_guardrail
         cfg.agent_control = original_agent_control
         raise
-    for env_name, secret in pending_agent_control_secrets.items():
-        _save_secret_to_dotenv(env_name, secret, cfg.data_dir)
+    try:
+        for env_name, secret in pending_agent_control_secrets.items():
+            _save_secret_to_dotenv(env_name, secret, cfg.data_dir)
+    except Exception:
+        cfg.guardrail = original_guardrail
+        cfg.agent_control = original_agent_control
+        raise
     ok, warnings = execute_guardrail_setup(app, save_config=False)
 
     if warnings:

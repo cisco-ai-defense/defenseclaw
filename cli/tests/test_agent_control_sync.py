@@ -47,6 +47,7 @@ from defenseclaw.agent_control.publisher import (
 from defenseclaw.agent_control.sync import (
     AgentControlSynchronizer,
     SynchronizationError,
+    _safe_error,
     _watch_retry_delay,
     configured_rule_pack_base_dirs,
 )
@@ -346,6 +347,15 @@ class PublisherTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_safe_error_redacts_resolved_custom_api_key(self) -> None:
+        secret = "ac_custom_secret_loaded_from_dotenv"
+        rendered = _safe_error(
+            RuntimeError(f"request rejected for {secret}"),
+            extra_secrets=(secret,),
+        )
+        self.assertNotIn(secret, rendered)
+        self.assertIn("<redacted>", rendered)
+
     def test_gateway_client_formats_ipv6_loopback(self) -> None:
         client = GatewayClient(bind="::1", port=43123, token="test-token")
         self.assertEqual(client.base_url, "http://[::1]:43123")
@@ -401,6 +411,7 @@ class ConfigTests(unittest.TestCase):
     def test_agent_control_requires_https_outside_loopback(self) -> None:
         value = AgentControlConfig(
             enabled=True,
+            deployment="self_hosted",
             installation_id="installation-1",
             server_url="http://agent-control.example.test",
         )
@@ -420,6 +431,16 @@ class ConfigTests(unittest.TestCase):
                     installation_id="installation-1",
                     server_url=server_url,
                 ).validate()
+
+    def test_cisco_cloud_requires_https_even_for_loopback(self) -> None:
+        value = AgentControlConfig(
+            enabled=True,
+            deployment="cisco_cloud",
+            installation_id="installation-1",
+            server_url="http://127.0.0.1:8000",
+        )
+        with self.assertRaisesRegex(ValueError, "Cisco Enterprise Cloud requires"):
+            value.validate()
 
     def test_agent_control_rejects_url_credentials_and_invalid_env_name(self) -> None:
         value = AgentControlConfig(
@@ -471,7 +492,7 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "agent_name"):
             value.validate()
 
-    def test_unredacted_observability_uses_private_spool_without_global_privacy_opt_out(self) -> None:
+    def test_redacted_observability_uses_standard_spool_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             policy = root / "policies"
@@ -481,6 +502,24 @@ class ConfigTests(unittest.TestCase):
             cfg.agent_control.installation_id = "installation-1"
             cfg.agent_control.server_url = "https://agent-control.example.test"
             self.assertFalse(cfg.privacy.disable_redaction)
+            synchronizer = AgentControlSynchronizer(
+                cfg,
+                sdk=FakeSDK([]),
+                gateway=FakeGateway(),
+                validator=FakeValidator(),
+            )
+            self.assertEqual(synchronizer.event_bridge.event_log_path, root / "gateway.jsonl")
+
+    def test_global_redaction_opt_out_uses_private_exact_content_spool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = root / "policies"
+            (policy / "rego").mkdir(parents=True)
+            cfg = Config(data_dir=str(root), policy_dir=str(policy))
+            cfg.agent_control.enabled = True
+            cfg.agent_control.installation_id = "installation-1"
+            cfg.agent_control.server_url = "https://agent-control.example.test"
+            cfg.privacy.disable_redaction = True
             synchronizer = AgentControlSynchronizer(
                 cfg,
                 sdk=FakeSDK([]),

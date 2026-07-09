@@ -258,9 +258,9 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		return
 	}
 	stampEventCorrelation(&e, ctx)
-	// Agent Control's private spool is the sole raw-content exception. It is
-	// written before copy-on-write redaction, has no downstream fanout, and is
-	// created only when the integration's include_content setting is enabled.
+	// Agent Control's private spool exists only when the operator globally
+	// disables redaction and also enables Monitor content. Otherwise Agent
+	// Control tails the standard copy-on-write redacted event stream.
 	if agentControlWriter != nil {
 		agentControlWriter.EmitContext(ctx, e)
 	}
