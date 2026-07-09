@@ -46,6 +46,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -79,6 +80,14 @@ type Sidecar struct {
 	appProtection *applicationProtectionController
 	osNotifier    *notifier.Dispatcher
 	configMgr     *ConfigManager
+
+	// ipcRunner is a lazily-injected runner for the local UDS gRPC
+	// server that serves the AVC contract. Started only when
+	// cfg.ManagedIPCEnabled() is true; the sidecar goroutine
+	// short-circuits when nil. Not embedded directly to avoid an
+	// import cycle (gateway ← ipc ← gateway); the CLI layer supplies
+	// a factory during construction.
+	ipcRunner IPCRunner
 
 	otelMu             sync.RWMutex
 	webhooksMu         sync.RWMutex
@@ -127,6 +136,21 @@ type Sidecar struct {
 	// for the sidecar's lifetime. Managed-mode wiring only.
 	cmidProviderMu   sync.Mutex
 	cmidProviderInst cloudreg.Provider
+}
+
+// osToastSenderFor returns the sender the OS-toast lane of the
+// notifier should use. In managed_enterprise the Secure Client GUI
+// is the intended surface for user-visible notifications (routed
+// via the internal/ipc UDS observer), so the daemon's own
+// osascript / notify-send calls would double-deliver. This helper
+// swaps in a silent no-op for that lane; the observer lane
+// (feeding IPC subscribers) is unaffected because notifier.dispatch
+// fires observers independently of whether the sender was invoked.
+func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return func(notify.Notification) error { return nil }
+	}
+	return notify.SendNotification
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -223,7 +247,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// when the operator hasn't opted in (or is on a platform without
 	// a display server). The setup wizard flips Enabled=true after
 	// asking the user — see cli/defenseclaw/commands/cmd_setup.py.
-	osNotifier := notifier.New(cfg.Notifications)
+	//
+	// managed_enterprise routes user-visible notifications through
+	// the local UDS IPC surface (Cisco Secure Client GUI is the
+	// presentation layer) so we suppress the daemon's own OS toasts
+	// to avoid double-delivery. Observers (the IPC bridge) keep
+	// firing regardless — see osToastSenderFor.
+	osNotifier := notifier.NewWithSender(cfg.Notifications, osToastSenderFor(cfg))
 
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
@@ -655,7 +685,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.attachApplicationProtectionObserver(runCtx, apiToken)
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 6)
+	errCh := make(chan error, 7)
 
 	configPath := s.currentConfig().ConfigFilePath
 	if strings.TrimSpace(configPath) == "" {
@@ -726,6 +756,20 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
+
+	// Goroutine 6: local UDS gRPC IPC server for AVC (opt-in via
+	// managed.enabled or deployment_mode=managed_enterprise). No-op
+	// when no IPCRunner has been installed by the CLI wiring layer.
+	if s.ipcRunner != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.ipcRunner.Run(runCtx); err != nil && runCtx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] ipc server exited with error: %v\n", err)
+				errCh <- err
+			}
+		}()
+	}
 
 	// Report telemetry (OTel) health — not a goroutine, just state
 	s.reportTelemetryHealth()
@@ -1218,7 +1262,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
-		s.osNotifier = notifier.New(appliedCfg.Notifications)
+		s.osNotifier = notifier.NewWithSender(appliedCfg.Notifications, osToastSenderFor(appliedCfg))
 		if s.hilt != nil {
 			s.hilt.SetNotifier(s.osNotifier)
 		}
@@ -1595,7 +1639,12 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			continue
 		}
 
-		if tel := s.otelSnapshot(); !firstConnect && tel != nil {
+		// Capture the boot-vs-reconnect status BEFORE clearing
+		// firstConnect so the block below can still distinguish the
+		// two. Suppresses a spurious "protection restored" toast on
+		// process boot.
+		reconnected := !firstConnect
+		if tel := s.otelSnapshot(); reconnected && tel != nil {
 			tel.RecordWatcherRestart(ctx)
 		}
 		firstConnect = false
@@ -1626,6 +1675,12 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		s.health.SetGateway(StateRunning, "", map[string]interface{}{
 			"protocol": hello.Protocol,
 		})
+		if reconnected && s.osNotifier != nil {
+			s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
+				State:  notifier.ServiceStateReconnected,
+				Reason: fmt.Sprintf("gateway ready (protocol=%d)", hello.Protocol),
+			})
+		}
 
 		s.subscribeToSessions(ctx)
 
@@ -1639,6 +1694,12 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
 			_ = s.logger.LogAction(string(audit.ActionSidecarDisconnected), "", "connection lost, reconnecting")
 			s.health.SetGateway(StateReconnecting, "connection lost", nil)
+			if s.osNotifier != nil {
+				s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
+					State:  notifier.ServiceStateDisconnected,
+					Reason: "connection lost, reconnecting",
+				})
+			}
 		}
 	}
 }
