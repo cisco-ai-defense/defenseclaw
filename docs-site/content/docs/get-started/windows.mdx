@@ -1,23 +1,24 @@
 ---
 title: Native Windows
-description: Install and operate DefenseClaw on certified native Windows x64 with PowerShell. WSL is unsupported.
+description: Install and operate DefenseClaw on certified native Windows x64 with the native setup executable. WSL is unsupported.
 keywords:
   - DefenseClaw Windows
-  - DefenseClaw PowerShell
+  - DefenseClaw setup exe
   - native Windows agent hooks
   - DefenseClaw Windows install
   - DefenseClaw Windows x64
 ---
 
-DefenseClaw's certified Windows release runs directly on native Windows x64. Certified agents send lifecycle events
-to the local DefenseClaw gateway through their Windows hook surfaces. Observe
-mode records decisions; action mode can return blocking or approval decisions
-before supported actions run.
+DefenseClaw's certified Windows release runs directly on native Windows x64.
+Certified agents send lifecycle events to the local DefenseClaw gateway through
+their Windows hook surfaces. Observe mode records decisions; action mode can
+return blocking or approval decisions before supported actions run.
 
 <Callout>
-This is a **native Windows x64** integration. **WSL is unsupported.** DefenseClaw
-does not install, configure, or protect agents inside WSL. The certified hook
-path does not require Git Bash, `jq`, or a POSIX shell.
+This is a **native Windows x64** integration. **WSL is unsupported.**
+`DefenseClawSetup-x64.exe` is a native Windows installer executable. The
+installed CLI and TUI keep using DefenseClaw's audited Python application, run
+from an embedded managed Python runtime installed with the product.
 </Callout>
 
 ## Connector support
@@ -25,8 +26,8 @@ path does not require Git Bash, `jq`, or a POSIX shell.
 | Agent | Setup name | Release status on native Windows x64 | Important detail |
 | --- | --- | --- | --- |
 | Codex CLI | `codex` | certified | Native Codex hooks. |
-| Claude Code | `claudecode` | certified | Follow Claude Code's Git for Windows prerequisite. |
-| Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity, OpenCode, Hermes | — | not certified | Separate Windows certification is required. |
+| Claude Code | `claudecode` | certified | DefenseClaw setup does not require Git; follow the agent's own requirements. |
+| Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity, OpenCode, Hermes | - | not certified | Separate Windows certification is required. |
 
 OpenHands, OmniGent, OpenClaw, and ZeptoClaw are not supported on native
 Windows. OpenHands is WSL-only; OmniGent has no supported native terminal and
@@ -37,13 +38,13 @@ from Windows pickers and rejected by scripted setup.
 ## Requirements
 
 - Native Windows x64 (`amd64`). Windows ARM64 requires separate certification; x86 is unsupported.
-- Windows PowerShell 5.1+ or PowerShell 7+.
-- Internet access to GitHub Releases and the `uv` installer.
 - A supported agent installed natively for the same Windows user.
+- No separate Python, `uv`, Go, Node.js, Git, or PowerShell install command is required for the native setup path.
 
-DefenseClaw installs per user. Use a normal PowerShell session; Administrator
-rights are not required. The installer adds `%USERPROFILE%\.local\bin` to the
-user `PATH`, installs `uv` when needed, and provisions Python 3.12 for the CLI.
+DefenseClaw installs per user by default under
+`%LOCALAPPDATA%\Programs\DefenseClaw`. Administrator rights are not required.
+Runtime state, configuration, connector backups, and audit history remain under
+`%USERPROFILE%\.defenseclaw`.
 
 ## Install and initialize
 
@@ -51,23 +52,28 @@ user `PATH`, installs `uv` when needed, and provisions Python 3.12 for the CLI.
 
 <Step>
 
-### Download the release installer
+### Download the setup executable
 
-Downloading to a file lets you inspect the script and pass PowerShell
-parameters directly. Keep the installer tag and `-Version` value the same.
+Download `DefenseClawSetup-x64.exe` from the GitHub release page. Production
+release artifacts are Authenticode signed by the DefenseClaw publisher and have
+matching release checksums. Local or pull-request artifacts may be unsigned and
+must be treated as test builds.
+
+Double-click the file for the graphical setup wizard, or run a silent per-user
+install:
 
 ```powershell
-$Version = "<release-version>"
-$Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"
-$InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
-
-Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
-& $Installer -Version $Version
+.\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
 ```
 
-The installer downloads `defenseclaw_<version>_windows_amd64.zip`, verifies release
-checksums when a matching entry is available, installs the CLI and gateway, and
-offers a native connector picker.
+Use `CONNECTOR=claudecode` for Claude Code, or `CONNECTOR=none` to configure
+later. The setup executable contains the gateway, native hook launcher, Python
+wheel, pinned Python runtime, and required Python packages, so installation does
+not need network access after the file has been downloaded.
+
+The finish screen directs you to `defenseclaw init` and `defenseclaw tui`. It
+can open a terminal in the installed command directory, but it does not install
+or claim a separate native DefenseClaw GUI application.
 
 </Step>
 
@@ -75,7 +81,7 @@ offers a native connector picker.
 
 ### Configure one or more agents
 
-For guided setup of certified installed connectors:
+If you installed with `CONNECTOR=none`, run the wizard after setup:
 
 ```powershell
 defenseclaw init
@@ -88,24 +94,14 @@ subset, if any, should use action mode. For one explicit connector:
 defenseclaw init --connector codex
 ```
 
-You can also combine installation and zero-prompt observe-mode setup:
-
-```powershell
-& $Installer `
-  -Version $Version `
-  -Connector codex `
-  -Quickstart `
-  -QuickstartMode observe `
-  -Yes
-```
-
 </Step>
 
 <Step>
 
 ### Verify the gateway and hook launcher
 
-Open a new PowerShell window so the updated user `PATH` is loaded, then run:
+Open a new PowerShell or cmd window so the updated user `PATH` is loaded, then
+run:
 
 ```powershell
 Get-Command defenseclaw
@@ -138,6 +134,43 @@ defenseclaw alerts
 
 </Steps>
 
+## Repair, upgrade, and uninstall
+
+Repair reinstalls the exact packaged files and keeps user configuration:
+
+```powershell
+.\DefenseClawSetup-x64.exe /repair /quiet /norestart INSTALLSCOPE=user
+```
+
+For normal upgrades, use the CLI. Native Windows installs download the setup
+executable, verify the signed upgrade manifest, SHA-256 checksum, and
+Authenticode publisher, then hand off to the setup executable so the running CLI
+does not overwrite itself:
+
+```powershell
+defenseclaw upgrade --yes
+```
+
+Administrators can instead deploy the release installer through their managed
+software channel. Managed update policy is respected so the self-updater does
+not fight Intune or SCCM rollout. This setup executable is per-user only and
+rejects `INSTALLSCOPE=machine`; this release path does not publish an MSI.
+
+Uninstall removes product-owned application files, the installer cache,
+Installed Apps registration, and the setup-owned user `PATH` entry. User data is preserved by
+default:
+
+```powershell
+.\DefenseClawSetup-x64.exe /uninstall /quiet
+```
+
+Delete user data only when you explicitly want to remove configuration, audit
+history, and connector backups:
+
+```powershell
+.\DefenseClawSetup-x64.exe /uninstall /quiet DELETEUSERDATA=1
+```
+
 ## Observe, action, and multiple connectors
 
 Observe mode is the safe starting point: findings are recorded without
@@ -156,8 +189,8 @@ defenseclaw setup codex --mode action
 defenseclaw setup remove codex
 ```
 
-One gateway can protect both certified native hook connectors. For scripted setup,
-repeat `--connector`:
+One gateway can protect both certified native hook connectors. For scripted
+setup, repeat `--connector`:
 
 ```powershell
 defenseclaw setup `
@@ -177,21 +210,27 @@ home directories, and hook files; do not mix their configurations.
 
 | Location | Purpose |
 | --- | --- |
-| `%USERPROFILE%\.local\bin\defenseclaw.cmd` | Python CLI shim. |
-| `%USERPROFILE%\.local\bin\defenseclaw-gateway.exe` | Local gateway and sidecar. |
-| `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` | No-console native hook launcher. |
+| `%LOCALAPPDATA%\Programs\DefenseClaw\bin\defenseclaw.exe` | Stable native command launcher for the embedded Python CLI/TUI. |
+| `%LOCALAPPDATA%\Programs\DefenseClaw\bin\defenseclaw-gateway.exe` | Native gateway and sidecar. |
+| `%LOCALAPPDATA%\Programs\DefenseClaw\bin\defenseclaw-hook.exe` | No-console native hook launcher. |
+| `%LOCALAPPDATA%\Programs\DefenseClaw\runtime\python\` | Embedded managed Python runtime and site packages. |
+| `%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe` | Maintenance copy used for repair, uninstall, and installer-based upgrades. |
 | `%USERPROFILE%\.defenseclaw\config.yaml` | Primary configuration. |
 | `%USERPROFILE%\.defenseclaw\audit.db` | Audit history and policy state. |
 | `%USERPROFILE%\.defenseclaw\gateway.jsonl` | JSONL runtime events. |
-| `%USERPROFILE%\.defenseclaw\.venv` | Managed Python environment. |
 
-Set `DEFENSECLAW_HOME` before installation and on later CLI/gateway runs to move
-the state directory. Executables remain in `%USERPROFILE%\.local\bin` so
-[`defenseclaw upgrade`](/docs/get-started/upgrade) can replace them in place.
+Setup uses the Windows profile Known Folder for `%USERPROFILE%\.defenseclaw`
+and does not accept an environment-controlled install or data path. Executables remain in the product command directory so
+[`defenseclaw upgrade`](/docs/get-started/upgrade) can hand off file replacement
+to the installer transaction.
 
-Hermes defaults to `$env:LOCALAPPDATA\hermes\config.yaml` on native Windows. If
-an older DefenseClaw version wrote `$HOME\.hermes\config.yaml`, `doctor` reports
-both paths but does not copy, merge, or delete either file.
+## Safe manual testing
+
+Use a disposable Windows user account or VM when testing installer builds. The
+installer writes HKCU Installed Apps entries and updates that user's `PATH`;
+testing in a throwaway profile avoids overwriting an active DefenseClaw
+installation. Unsigned local artifacts should be labeled as test builds and
+never treated as production releases.
 
 ## Operations and limits
 
@@ -211,9 +250,9 @@ Education. Docker Desktop per-user and WSL-only installations are outside this
 no-WSL certification. Both controllers invoke `docker.exe compose` directly;
 they do not require Bash, WSL, MSYS, Git Bash, `.cmd`, or `.bat` lifecycle
 shims. Remote observability sinks remain available independently. Inventory,
-scanners, audit storage, alerts, and the TUI remain available. The TUI accepts Windows
-arrow-key sequences and falls back to numbered prompts when a console cannot
-redraw safely.
+scanners, audit storage, alerts, and the TUI remain available. The TUI accepts
+Windows arrow-key sequences and falls back to numbered prompts when a console
+cannot redraw safely.
 
 ```powershell
 defenseclaw setup splunk `
@@ -233,14 +272,14 @@ defenseclaw setup splunk --disable --logs
 
 <Accordions>
   <Accordion title="defenseclaw is not recognized">
-    Open a new PowerShell window. To repair only the current session, run
-    `$env:Path = "$HOME\.local\bin;$env:Path"`, then `Get-Command defenseclaw`.
+    Open a new PowerShell or cmd window. To repair only the current session,
+    run `$env:Path = "$env:LOCALAPPDATA\Programs\DefenseClaw\bin;$env:Path"`,
+    then `Get-Command defenseclaw`.
   </Accordion>
-  <Accordion title="PowerShell blocks the downloaded installer">
-    Inspect it with `Get-Content $Installer`, then run `Unblock-File $Installer`
-    and retry. If an organization-managed policy still blocks it, follow your
-    administrator's approved signing or execution-policy process; do not weaken
-    machine-wide policy for the install.
+  <Accordion title="Windows reports an unknown publisher">
+    Local and pull-request artifacts may be unsigned. Production release
+    artifacts must validate as Authenticode signed by the DefenseClaw publisher
+    and match the release checksum before installation or upgrade.
   </Accordion>
   <Accordion title="The gateway runs but hooks do not fire">
     Run `defenseclaw-gateway restart`, `defenseclaw doctor`, and `defenseclaw
@@ -254,8 +293,8 @@ defenseclaw setup splunk --disable --logs
   </Accordion>
   <Accordion title="Scanner commands are reported missing">
     Re-run `defenseclaw init`, then `defenseclaw doctor`. DefenseClaw checks the
-    managed environment's `Scripts` directory before the system `PATH`, so the
-    bundled scanners do not need a separate global installation.
+    managed runtime's command directory before the system `PATH`, so the bundled
+    scanners do not need a separate global installation.
   </Accordion>
 </Accordions>
 

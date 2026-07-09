@@ -46,6 +46,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _enforce_upgrade_source_contract,
     _execute_hard_cut_rollback,
     _expected_release_artifacts,
+    _enforce_windows_self_update_policy,
     _fetch_release_asset_digests,
     _fill_missing_checksums_from_release_assets,
     _fsync_hard_cut_recovery_custody,
@@ -61,6 +62,8 @@ from defenseclaw.commands.cmd_upgrade import (
     _mark_hard_cut_bundle_mutation_intent,
     _materialize_bridge_source_wheel_for_preflight,
     _materialize_protected_artifact,
+    _handoff_windows_setup_upgrade,
+    _native_windows_install_state,
     _normalize_target_version,
     _parse_release_provenance,
     _poll_health,
@@ -102,6 +105,8 @@ from defenseclaw.commands.cmd_upgrade import (
     _verify_restored_bridge_artifacts,
     _verify_sha256,
     _write_hard_cut_recovery_journal,
+    _verify_windows_setup_authenticode,
+    _version_tuple,
     upgrade,
 )
 from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
@@ -309,6 +314,9 @@ class TestUpgradeVersionValidation(unittest.TestCase):
     def test_accepts_plain_or_v_prefixed_semver(self):
         self.assertEqual(_normalize_target_version("9.9.9"), "9.9.9")
         self.assertEqual(_normalize_target_version("v9.9.9"), "9.9.9")
+
+    def test_semver_tuple_orders_downgrades(self):
+        self.assertLess(_version_tuple("1.9.9"), _version_tuple("2.0.0"))
 
     def test_rejects_versions_that_would_be_unsafe_in_paths_or_urls(self):
         with self.assertRaises(SystemExit) as ctx:
@@ -4593,6 +4601,37 @@ class TestChecksumVerification(unittest.TestCase):
         warn_mock.assert_called_once()
         self.assertIn("continuing with checksum verification only", warn_mock.call_args.args[0])
 
+    def test_native_setup_upgrade_requires_embedded_cosign(self):
+        with TemporaryDirectory() as tmp:
+            checksums = os.path.join(tmp, "checksums.txt")
+            sig = os.path.join(tmp, "checksums.txt.sig")
+            cert = os.path.join(tmp, "checksums.txt.pem")
+            for path in (checksums, sig, cert):
+                with open(path, "wb") as stream:
+                    stream.write(b"release asset")
+
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_optional_release_asset",
+                    side_effect=[sig, cert],
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._managed_cosign_path",
+                    return_value=None,
+                ),
+                patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run_mock,
+                self.assertRaises(SystemExit) as ctx,
+            ):
+                _verify_checksums_sigstore(
+                    "9.9.9",
+                    tmp,
+                    checksums,
+                    require_embedded_verifier=True,
+                )
+
+        self.assertEqual(ctx.exception.code, 1)
+        run_mock.assert_not_called()
+
     def test_download_checksums_accepts_signed_manifest_without_cosign(self):
         """Regression for 0.8.0 -> 0.8.1: signed release assets must not
         require cosign to be installed before checksum validation can proceed."""
@@ -5538,6 +5577,271 @@ class TestUpgradeManifest(unittest.TestCase):
 
         self.assertEqual(manifest["migration_failure_policy"], "fail")
         self.assertEqual(manifest["required_cli_migrations"], ["9.9.9"])
+
+    def test_validate_accepts_windows_installer_policy(self):
+        payload = {
+            "schema_version": 2,
+            "runtime_config_version": 8,
+            "release_version": "9.9.9",
+            "min_upgrade_protocol": 2,
+            "controller_upgrade_protocol": 2,
+            "migration_failure_policy": "fail",
+            "required_cli_migrations": ["9.9.9"],
+            "minimum_source_version": "0.8.4",
+            "required_bridge_version": "0.8.4",
+            "auto_bridge_from": [],
+            "tested_source_versions": ["0.8.4"],
+            "platform_tested_source_versions": {"windows": ["0.8.4"]},
+            "release_artifacts": _expected_release_artifacts("9.9.9"),
+            "windows_installer": {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": True,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+
+        manifest = _validate_upgrade_manifest(payload, "9.9.9")
+
+        self.assertEqual(manifest["windows_installer"]["asset"], "DefenseClawSetup-x64.exe")
+        self.assertTrue(manifest["windows_installer"]["authenticode"]["required"])
+
+    def test_validate_rejects_wrong_windows_installer_asset(self):
+        payload = {
+            "schema_version": 2,
+            "runtime_config_version": 8,
+            "release_version": "9.9.9",
+            "min_upgrade_protocol": 2,
+            "controller_upgrade_protocol": 2,
+            "migration_failure_policy": "warn",
+            "required_cli_migrations": [],
+            "minimum_source_version": "0.8.4",
+            "required_bridge_version": "0.8.4",
+            "auto_bridge_from": [],
+            "tested_source_versions": ["0.8.4"],
+            "platform_tested_source_versions": {"windows": ["0.8.4"]},
+            "release_artifacts": _expected_release_artifacts("9.9.9"),
+            "windows_installer": {
+                "asset": "DefenseClawSetup-latest.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": True,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+
+        with self.assertRaises(SystemExit) as ctx:
+            _validate_upgrade_manifest(payload, "9.9.9")
+
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_native_windows_install_state_reads_marker_and_normalizes_paths(self):
+        with TemporaryDirectory() as temp:
+            local_appdata = os.path.join(temp, "LocalAppData")
+            profile = os.path.join(temp, "Profile")
+            os.makedirs(local_appdata)
+            os.makedirs(profile)
+            root = os.path.join(local_appdata, "Programs", "DefenseClaw")
+            installer = os.path.join(root, "installer")
+            os.makedirs(installer)
+            state = {
+                "install_kind": "native-windows-exe",
+                "connector": "codex",
+                "mode": "action",
+                "data_root": os.path.join(profile, ".defenseclaw"),
+            }
+            with open(os.path.join(installer, "install-state.json"), "w", encoding="utf-8") as stream:
+                json.dump(state, stream)
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                side_effect=[local_appdata, profile],
+            ):
+                loaded = _native_windows_install_state("windows")
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["connector"], "codex")
+        self.assertTrue(
+            loaded["setup_path"].endswith(
+                os.path.join("DefenseClaw", "InstallerCache", "DefenseClawSetup-x64.exe"),
+            ),
+        )
+
+    def test_native_windows_install_state_ignores_environment_install_root(self):
+        with TemporaryDirectory() as temp:
+            local_appdata = os.path.join(temp, "LocalAppData")
+            profile = os.path.join(temp, "Profile")
+            installer = os.path.join(local_appdata, "Programs", "DefenseClaw", "installer")
+            os.makedirs(installer)
+            os.makedirs(profile)
+            with open(os.path.join(installer, "install-state.json"), "w", encoding="utf-8") as stream:
+                json.dump({"install_kind": "native-windows-exe"}, stream)
+
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_INSTALL_ROOT": os.path.join(temp, "Untrusted")}),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ),
+            ):
+                loaded = _native_windows_install_state("windows")
+
+        self.assertTrue(loaded["install_root"].startswith(os.path.realpath(local_appdata)))
+
+    def test_native_windows_install_state_rejects_corrupt_marker(self):
+        with TemporaryDirectory() as temp:
+            local_appdata = os.path.join(temp, "LocalAppData")
+            profile = os.path.join(temp, "Profile")
+            installer = os.path.join(local_appdata, "Programs", "DefenseClaw", "installer")
+            os.makedirs(installer)
+            os.makedirs(profile)
+            with open(os.path.join(installer, "install-state.json"), "w", encoding="utf-8") as stream:
+                stream.write("not json")
+
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ),
+                self.assertRaises(SystemExit) as ctx,
+            ):
+                _native_windows_install_state("windows")
+
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_authenticode_verification_requires_valid_publisher(self):
+        installer = {
+            "authenticode": {
+                "required": True,
+                "publisher": "Cisco Systems, Inc.",
+            },
+        }
+        signed = json.dumps(
+            {
+                "Status": "Valid",
+                "Publisher": "Cisco Systems, Inc.",
+            }
+        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade._system_powershell_path",
+                return_value="powershell.exe",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                return_value=Mock(returncode=0, stdout=signed, stderr=""),
+            ),
+        ):
+            _verify_windows_setup_authenticode("setup.exe", installer)
+
+    def test_authenticode_verification_rejects_unsigned_setup(self):
+        installer = {
+            "authenticode": {
+                "required": True,
+                "publisher": "Cisco Systems, Inc.",
+            },
+        }
+        unsigned = json.dumps({"Status": "NotSigned", "Publisher": ""})
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade._system_powershell_path",
+                return_value="powershell.exe",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                return_value=Mock(returncode=0, stdout=unsigned, stderr=""),
+            ),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            _verify_windows_setup_authenticode("setup.exe", installer)
+
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_authenticode_verification_rejects_publisher_lookalike(self):
+        installer = {
+            "authenticode": {
+                "required": True,
+                "publisher": "Cisco Systems, Inc.",
+            },
+        }
+        signed = json.dumps(
+            {
+                "Status": "Valid",
+                "Publisher": "Fake Cisco Systems, Inc.",
+            }
+        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade._system_powershell_path",
+                return_value="powershell.exe",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                return_value=Mock(returncode=0, stdout=signed, stderr=""),
+            ),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            _verify_windows_setup_authenticode("setup.exe", installer)
+
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_windows_setup_handoff_uses_silent_upgrade_shape(self):
+        runner = CliRunner()
+        manifest = {
+            "windows_installer": {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": True,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+        with TemporaryDirectory() as temp:
+            source = os.path.join(temp, "download", "DefenseClawSetup-x64.exe")
+            cache = os.path.join(temp, "cache", "DefenseClawSetup-x64.exe")
+            os.makedirs(os.path.dirname(source))
+            with open(source, "wb") as stream:
+                stream.write(b"verified setup")
+            state = {
+                "connector": "claudecode",
+                "mode": "action",
+                "maintenance_path": cache,
+            }
+            with patch("defenseclaw.commands.cmd_upgrade.subprocess.Popen") as popen_mock:
+                with runner.isolation():
+                    _handoff_windows_setup_upgrade(
+                        source,
+                        "DefenseClawSetup-x64.exe",
+                        "9.9.9",
+                        state,
+                        manifest,
+                        yes=True,
+                    )
+
+        args = popen_mock.call_args.args[0]
+        self.assertEqual(args[0], cache)
+        self.assertIn("/upgrade", args)
+        self.assertIn("/quiet", args)
+        self.assertIn("/norestart", args)
+        self.assertIn("INSTALLSCOPE=user", args)
+        self.assertIn("CONNECTOR=claudecode", args)
+        self.assertIn("MODE=action", args)
+        self.assertTrue(any(arg.startswith("WAITPID=") for arg in args))
+
+    def test_machine_install_self_update_is_rejected(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _enforce_windows_self_update_policy({"install_scope": "machine"})
+        self.assertEqual(ctx.exception.code, 1)
 
     def test_required_migration_check_fails_when_cursor_missing_entry(self):
         manifest = {

@@ -13,6 +13,9 @@ extensions/defenseclaw/src/providers.json
 internal/gateway/connector/openclaw_extension/*
 !internal/gateway/connector/openclaw_extension/.placeholder
 
+# Generated only while building DefenseClawSetup-x64.exe.
+cmd/defenseclaw-setup/payload/*.zip
+
 # Editor and IDE metadata
 .idea/
 .vscode/
