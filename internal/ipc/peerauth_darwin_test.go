@@ -8,20 +8,20 @@ package ipc
 
 import (
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestFirstSubmatch_ParsesCodesignFixtures exercises the two regex
-// extractors against real codesign(1) output shapes. Full-fat sample
-// captured from `codesign -dv --verbose=4 /bin/zsh` and a synthetic
-// Team-ID-signed record.
+// TestFirstSubmatch_ParsesCodesignFixtures exercises the three
+// regex extractors against real codesign(1) output shapes.
 func TestFirstSubmatch_ParsesCodesignFixtures(t *testing.T) {
 	cases := []struct {
 		name        string
 		stderr      string
+		wantExe     string
 		wantTeam    string
 		wantSigning string
 	}{
@@ -33,27 +33,31 @@ Format=pid diskrep
 CodeDirectory v=20400 size=5382 flags=0x0(none) hashes=163+2 location=embedded
 Platform identifier=26
 TeamIdentifier=not set`,
+			wantExe:     "/bin/zsh",
 			wantTeam:    "", // collapsed from "not set" → ""
 			wantSigning: "com.apple.zsh",
 		},
 		{
-			name: "third-party developer-ID signed app",
-			stderr: `Executable=/Applications/Cisco/SecureClient.app/Contents/MacOS/SecureClient
-Identifier=com.cisco.secureclient
+			name: "third-party developer-ID signed app (bundle path)",
+			stderr: `Executable=/Applications/Cisco/Cisco Secure Client.app/Contents/MacOS/SecureClient
+Identifier=com.cisco.secureclient.gui
 Format=app bundle with Mach-O universal
-TeamIdentifier=ABC12345XY`,
-			wantTeam:    "ABC12345XY",
-			wantSigning: "com.cisco.secureclient",
+TeamIdentifier=DE8Y96K9QP`,
+			wantExe:     "/Applications/Cisco/Cisco Secure Client.app/Contents/MacOS/SecureClient",
+			wantTeam:    "DE8Y96K9QP",
+			wantSigning: "com.cisco.secureclient.gui",
 		},
 		{
 			name:        "no signature at all",
 			stderr:      `Error: /tmp/unsigned: code object is not signed at all`,
+			wantExe:     "",
 			wantTeam:    "",
 			wantSigning: "",
 		},
 		{
 			name:        "empty stderr",
 			stderr:      "",
+			wantExe:     "",
 			wantTeam:    "",
 			wantSigning: "",
 		},
@@ -61,11 +65,15 @@ TeamIdentifier=ABC12345XY`,
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			exe := firstSubmatch(executableRe, []byte(tc.stderr))
 			team := firstSubmatch(teamIDRe, []byte(tc.stderr))
 			signing := firstSubmatch(signingIDRe, []byte(tc.stderr))
 			// Apply the same "not set" collapse the real reader does.
 			if strings.EqualFold(strings.TrimSpace(team), "not") {
 				team = ""
+			}
+			if exe != tc.wantExe {
+				t.Errorf("exe: got %q, want %q", exe, tc.wantExe)
 			}
 			if team != tc.wantTeam {
 				t.Errorf("teamID: got %q, want %q", team, tc.wantTeam)
@@ -77,113 +85,206 @@ TeamIdentifier=ABC12345XY`,
 	}
 }
 
+// TestBundleIDFromExecutable_WalksToApp verifies the ".app
+// ancestor" walk against a synthetic path tree with plutil stubbed
+// out. plutil is invoked only after the walk finds a `.app` dir,
+// so a non-bundle exe path exits before plutilBinary is ever run.
+func TestBundleIDFromExecutable_WalksToApp(t *testing.T) {
+	// Test-scope stub: instead of the real plutil, run a shell
+	// that echoes a canned bundle id back on stdout so we can
+	// verify the resolver plumbs args correctly without depending
+	// on a real Info.plist on disk.
+	tmp := t.TempDir()
+	stubBundleID := "com.cisco.secureclient.gui"
+	stub := filepath.Join(tmp, "fake_plutil.sh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho "+stubBundleID+"\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	orig := plutilBinary
+	plutilBinary = stub
+	t.Cleanup(func() { plutilBinary = orig })
+
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "walks up to Cisco Secure Client.app",
+			path: "/Applications/Cisco/Cisco Secure Client.app/Contents/MacOS/SecureClient",
+			want: stubBundleID,
+		},
+		{
+			name: "walks up multiple levels",
+			path: "/Applications/Foo.app/Contents/Frameworks/Bar.framework/Versions/A/Bar",
+			// First .app ancestor is Foo.app.
+			want: stubBundleID,
+		},
+		{
+			name: "non-bundle CLI exe → empty",
+			path: "/usr/bin/grpcurl",
+			want: "",
+		},
+		{
+			name: "empty path → empty",
+			path: "",
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bundleIDFromExecutable(tc.path); got != tc.want {
+				t.Errorf("bundleIDFromExecutable(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestReadCodesignForPID_LivesShellsToCodesign smoke-runs the real
-// darwin implementation against the test process itself. Skipped
-// when /usr/bin/codesign is unavailable (should never happen on a
-// real Mac, but keeps the test hermetic on stripped CI images).
+// darwin implementation against launchd (PID 1), which is always
+// signed with Identifier=com.apple.xpc.launchd. Skipped when
+// /usr/bin/codesign is unavailable (should never happen on a real
+// Mac, but keeps the test hermetic on stripped CI images).
 func TestReadCodesignForPID_LivesShellsToCodesign(t *testing.T) {
 	if _, err := exec.LookPath("codesign"); err != nil {
 		t.Skip("codesign not on PATH")
 	}
-	// Read our own PID's codesign metadata. Signing ID will exist
-	// (Go test binaries are ad-hoc signed on darwin); Team ID is
-	// almost always "not set" for these, i.e. empty after collapse.
-	pid := int32(1) // launchd is always signed, always PID 1 on darwin
-	_, signing, err := readCodesignForPID(pid)
+	_, signing, _, exePath, err := readCodesignForPID(1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// launchd is always signed with Identifier=com.apple.xpc.launchd.
 	if signing == "" {
 		t.Errorf("expected non-empty signing identifier for PID 1 (launchd)")
 	}
+	if exePath == "" {
+		t.Errorf("expected non-empty exe path for PID 1")
+	}
 }
 
-// TestCodesignValidatingListener_AllowlistMatch exercises the
-// accept-time allow() decision without opening a real socket. We
-// use a small stub net.Listener + net.Conn to feed synthetic
-// peerIdentity values through the wrapper. This is the layer that
-// enforces the reviewer-agreed "TeamID OR SigningID" semantics.
-func TestCodesignValidatingListener_AllowlistMatch(t *testing.T) {
+// TestCodesignValidatingListener_ANDSemantics exercises the
+// accept-time allow() decision under the new AND-with-precondition
+// policy: peer must clear every configured check.
+func TestCodesignValidatingListener_ANDSemantics(t *testing.T) {
+	// Cisco Secure Client GUI reference identity.
+	const (
+		team    = "DE8Y96K9QP"
+		signing = "com.cisco.secureclient.gui"
+		bundle  = "com.cisco.secureclient.gui"
+	)
+	unixPeer := peerIdentity{
+		Kind: KindUnixPeer, TeamID: team, SigningID: signing, BundleID: bundle,
+	}
+
 	cases := []struct {
-		name          string
-		teamAllowlist []string
-		signAllowlist []string
-		id            peerIdentity
-		wantAllow     bool
+		name         string
+		team         []string
+		sign         []string
+		bundleIDs    []string
+		reqUnix      bool
+		reqSigningMd bool
+		id           peerIdentity
+		wantAccept   bool
+		wantReason   string // substring; ignored when wantAccept
 	}{
 		{
-			name:          "both allowlists empty → wrapper is not applied",
-			teamAllowlist: nil,
-			signAllowlist: nil,
-			id:            peerIdentity{TeamID: "ANYTHING", SigningID: "any"},
-			wantAllow:     true, // wrapper returns inner; every accept passes
+			name:         "all three fields present + all match → accept",
+			team:         []string{team},
+			sign:         []string{signing},
+			bundleIDs:    []string{bundle},
+			reqUnix:      true,
+			reqSigningMd: true,
+			id:           unixPeer,
+			wantAccept:   true,
 		},
 		{
-			name:          "match via TeamID",
-			teamAllowlist: []string{"ABC12345XY"},
-			id:            peerIdentity{TeamID: "ABC12345XY", SigningID: "com.cisco.secureclient"},
-			wantAllow:     true,
+			name:         "missing bundle id → incomplete",
+			team:         []string{team},
+			sign:         []string{signing},
+			bundleIDs:    []string{bundle},
+			reqUnix:      true,
+			reqSigningMd: true,
+			id:           peerIdentity{Kind: KindUnixPeer, TeamID: team, SigningID: signing},
+			wantAccept:   false,
+			wantReason:   "peer signing metadata incomplete",
 		},
 		{
-			name:          "match via SigningID (no team allowlist)",
-			signAllowlist: []string{"com.cisco.secureclient"},
-			id:            peerIdentity{TeamID: "", SigningID: "com.cisco.secureclient"},
-			wantAllow:     true,
+			name:         "wrong bundle id → bundle id ... not allowed",
+			team:         []string{team},
+			sign:         []string{signing},
+			bundleIDs:    []string{bundle},
+			reqUnix:      true,
+			reqSigningMd: true,
+			id: peerIdentity{
+				Kind: KindUnixPeer, TeamID: team, SigningID: signing, BundleID: "com.rando.app",
+			},
+			wantAccept: false,
+			wantReason: "bundle id",
 		},
 		{
-			name:          "unsigned peer + allowlist configured → reject",
-			teamAllowlist: []string{"ABC12345XY"},
-			id:            peerIdentity{TeamID: "", SigningID: ""},
-			wantAllow:     false,
+			name:         "wrong team + correct bundle → team id ... not allowed",
+			team:         []string{team},
+			sign:         []string{signing},
+			bundleIDs:    []string{bundle},
+			reqUnix:      true,
+			reqSigningMd: true,
+			id: peerIdentity{
+				Kind: KindUnixPeer, TeamID: "ZZZZZZZZZZ", SigningID: signing, BundleID: bundle,
+			},
+			wantAccept: false,
+			wantReason: "team id",
 		},
 		{
-			name:          "signed but wrong Team + no signing match → reject",
-			teamAllowlist: []string{"ABC12345XY"},
-			signAllowlist: []string{"com.cisco.secureclient"},
-			id:            peerIdentity{TeamID: "ZZZZZZZZZZ", SigningID: "com.rando.app"},
-			wantAllow:     false,
+			name:         "empty Kind + requireUnixPeer → peer kind must be UnixPeer",
+			team:         []string{team},
+			sign:         []string{signing},
+			bundleIDs:    []string{bundle},
+			reqUnix:      true,
+			reqSigningMd: true,
+			id: peerIdentity{
+				TeamID: team, SigningID: signing, BundleID: bundle,
+			},
+			wantAccept: false,
+			wantReason: "peer kind must be UnixPeer",
 		},
 		{
-			name:          "empty-string entries are ignored",
-			teamAllowlist: []string{"", ""},
-			signAllowlist: []string{"", ""},
-			id:            peerIdentity{TeamID: "anything", SigningID: "anything"},
-			wantAllow:     true, // wrapper degrades to no-op when everything is empty
+			name:       "nothing configured → wrapper bypassed (inner returned)",
+			id:         unixPeer,
+			wantAccept: true,
+		},
+		{
+			name:         "empty-string entries alone still bypass wrapper",
+			team:         []string{"", ""},
+			sign:         []string{""},
+			bundleIDs:    []string{""},
+			id:           unixPeer,
+			wantAccept:   true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			inner := &nopListener{}
-			var logged bool
-			logFn := func(peerIdentity, string) { logged = true }
-			wrapped := newCodesignValidatingListener(inner, tc.teamAllowlist, tc.signAllowlist, logFn)
+			wrapped := newCodesignValidatingListener(inner,
+				tc.team, tc.sign, tc.bundleIDs,
+				tc.reqUnix, tc.reqSigningMd,
+				func(peerIdentity, string) {})
 
-			// If the wrapper returned inner verbatim (empty
-			// allowlist branch), the allow decision is "always
-			// allow" — we assert that by identity, since
-			// codesignValidatingListener.allow is unreachable.
 			if wrapped == inner {
-				if !tc.wantAllow {
-					t.Fatalf("wrapper degraded to no-op but test expected reject")
+				// Bypassed → every accept passes.
+				if !tc.wantAccept {
+					t.Fatalf("wrapper bypassed but test expected reject")
 				}
 				return
 			}
-
-			// Real wrapper — assert allow() directly. Peeking
-			// past the interface into the concrete type is fine
-			// in a same-package test.
 			l := wrapped.(*codesignValidatingListener)
-			got := l.allow(tc.id)
-			if got != tc.wantAllow {
-				t.Errorf("allow(%+v) = %v, want %v", tc.id, got, tc.wantAllow)
+			reason := l.allow(tc.id)
+			gotAccept := reason == ""
+			if gotAccept != tc.wantAccept {
+				t.Errorf("allow: gotAccept=%v reason=%q, wantAccept=%v", gotAccept, reason, tc.wantAccept)
 			}
-			if !tc.wantAllow && logged {
-				// allow() does not log; reject() does. Passing
-				// the id through allow() alone should not touch
-				// the log callback.
-				t.Errorf("logRejectFn fired during allow() — unexpected")
+			if !tc.wantAccept && !strings.Contains(reason, tc.wantReason) {
+				t.Errorf("reason %q does not contain %q", reason, tc.wantReason)
 			}
 		})
 	}

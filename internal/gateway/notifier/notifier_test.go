@@ -140,6 +140,66 @@ func TestDispatcher_ServiceStateReachesObserversWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestDispatcher_NoOpSenderStillFansOutToObservers asserts that
+// swapping the OS sender for a silent no-op (the managed_enterprise
+// posture — Secure Client GUI is the presentation surface) leaves
+// the observer lane fully functional. Regression guard for
+// osToastSenderFor's contract.
+func TestDispatcher_NoOpSenderStillFansOutToObservers(t *testing.T) {
+	cfg := enabledConfig()
+	cfg.BlockWouldBlock = true // default is false; enable so all four categories reach the observer path
+	noopSender := func(notify.Notification) error { return nil }
+	d := NewWithSender(cfg, noopSender)
+
+	var observed []Observation
+	var mu sync.Mutex
+	d.AddObserver(func(o Observation) {
+		mu.Lock()
+		defer mu.Unlock()
+		observed = append(observed, o)
+	})
+
+	d.OnBlock(BlockEvent{
+		Source: SourceHook, Target: "Bash", Reason: "dangerous",
+	})
+	d.OnWouldBlock(BlockEvent{
+		Source: SourceGuardrail, Target: "gpt-4o", Reason: "prompt injection",
+	})
+	d.OnApprovalPending(ApprovalEvent{
+		Source: SourceHook, Subject: "git push", Reason: "network",
+	})
+	d.OnServiceState(ServiceStateEvent{
+		State: ServiceStateDisconnected, Reason: "connection lost",
+	})
+
+	// Observer fan-out is goroutine-based; wait for four events.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(observed)
+		mu.Unlock()
+		if n >= 4 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observed) != 4 {
+		t.Fatalf("expected 4 observations across the four categories, got %d", len(observed))
+	}
+	// Sanity: each category came through.
+	seen := map[Category]bool{}
+	for _, o := range observed {
+		seen[o.Category] = true
+	}
+	for _, want := range []Category{CategoryBlock, CategoryWouldBlock, CategoryApproval, CategoryServiceState} {
+		if !seen[want] {
+			t.Errorf("category %q never observed", want)
+		}
+	}
+}
+
 func TestDispatcher_CategoryGate(t *testing.T) {
 	rec := &recorder{}
 	cfg := enabledConfig()

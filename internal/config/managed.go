@@ -13,8 +13,8 @@ package config
 import "github.com/defenseclaw/defenseclaw/internal/managed"
 
 // ManagedIPCConfig controls the local UDS gRPC server that external
-// consumers use to observe DefenseClaw health, aggregate stats, and
-// user-visible notifications.
+// consumers (Cisco Secure Client GUI) use to observe DefenseClaw
+// health, aggregate stats, and user-visible notifications.
 //
 // The server only starts when Config.ManagedIPCEnabled() returns
 // true. In v1 that requires deployment_mode == managed_enterprise
@@ -30,13 +30,17 @@ import "github.com/defenseclaw/defenseclaw/internal/managed"
 //     all. Non-staff callers are rejected by the kernel before any
 //     bytes are read.
 //
-//  2. Codesign peer-auth at accept-time: when either allowlist below
-//     is non-empty, every incoming connection has its peer executable
-//     resolved (LOCAL_PEERPID → proc_pidpath) and inspected with
-//     `codesign -dv --verbose=4`; the peer passes only if its Team ID
-//     or its signing identifier is on the allowlist. When both
-//     allowlists are empty the peer-auth layer is off and access is
-//     enforced by fs perms alone.
+//  2. Codesign peer-auth at accept-time: managed_enterprise ships a
+//     strict Secure-Client allowlist by default (see
+//     DefaultSecureClientPolicy). Every incoming connection has its
+//     peer identity extracted (LOCAL_PEERPID / LOCAL_PEERCRED) and
+//     enriched with codesign metadata (Team ID, signing identifier,
+//     bundle id). A peer passes only when ALL three identity fields
+//     match the allowlists AND the peer connected via a real UDS
+//     (Kind == "UnixPeer"). Any missing field, wrong value, or
+//     non-UDS transport is rejected. Operator config can override
+//     one or more of the three allowlists per-list; unset lists
+//     fall back to the compiled defaults.
 //
 // Socket path and mode are resolved at server start when left empty;
 // the resolver in internal/ipc/paths.go picks per-platform defaults
@@ -56,18 +60,24 @@ type ManagedIPCConfig struct {
 	// cannot re-open the world-writable path.
 	SocketMode string `mapstructure:"socket_mode" yaml:"socket_mode,omitempty"`
 
-	// AllowedTeamIDs is the codesign Team-ID allowlist. A peer whose
-	// codesign TeamIdentifier is on this list passes the peer-auth
-	// check. Both AllowedTeamIDs and AllowedSigningIDs empty disables
-	// the codesign check entirely (fs perms are then the only gate).
+	// AllowedTeamIDs is the codesign Team-ID allowlist. Empty in
+	// managed_enterprise means "use DefaultSecureClientPolicy's
+	// team id"; non-empty replaces the default entirely.
 	AllowedTeamIDs []string `mapstructure:"allowed_team_ids" yaml:"allowed_team_ids,omitempty"`
 
 	// AllowedSigningIDs is the codesign signing-identifier allowlist
-	// (the `Identifier=` line from `codesign -dv`). Complements
-	// AllowedTeamIDs; a peer passes when its signing-id is on this
-	// list, so operators can pin a specific bundle even from an
-	// otherwise-unrestricted Team ID.
+	// (the `Identifier=` line from `codesign -dv`). Empty in
+	// managed_enterprise means "use DefaultSecureClientPolicy's
+	// signing id"; non-empty replaces the default entirely.
 	AllowedSigningIDs []string `mapstructure:"allowed_signing_ids" yaml:"allowed_signing_ids,omitempty"`
+
+	// AllowedBundleIDs is the CFBundleIdentifier allowlist (read
+	// from the peer app's Info.plist via plutil). Empty in
+	// managed_enterprise means "use DefaultSecureClientPolicy's
+	// bundle id"; non-empty replaces the default entirely. Only
+	// applied on darwin — Linux peers have no bundle id concept
+	// and the check is skipped there.
+	AllowedBundleIDs []string `mapstructure:"allowed_bundle_ids" yaml:"allowed_bundle_ids,omitempty"`
 }
 
 // ManagedIPCEnabled reports whether the local UDS gRPC server should
@@ -79,4 +89,34 @@ func (c *Config) ManagedIPCEnabled() bool {
 		return false
 	}
 	return managed.IsManagedEnterprise(c.DeploymentMode)
+}
+
+// SecureClientTeamID is the Cisco Team Identifier under which the
+// Cisco Secure Client GUI is signed. Compiled-in default for the
+// strict peer-auth policy applied in managed_enterprise.
+const SecureClientTeamID = "DE8Y96K9QP"
+
+// SecureClientSigningID is the codesign `Identifier=` value the
+// Secure Client GUI ships with. Doubles as the CFBundleIdentifier
+// value (see SecureClientBundleID), which is expected for a
+// bundle-signed app.
+const SecureClientSigningID = "com.cisco.secureclient.gui"
+
+// SecureClientBundleID is the CFBundleIdentifier of the Cisco
+// Secure Client GUI. Extracted from the peer executable's
+// enclosing .app / Contents/Info.plist at accept time.
+const SecureClientBundleID = "com.cisco.secureclient.gui"
+
+// DefaultSecureClientPolicy is the compiled-in peer-auth allowlist
+// applied to every managed_enterprise install that has not
+// overridden AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs
+// in config.yaml. Only the Cisco Secure Client GUI matches all
+// three fields; every other codesign identity is rejected at
+// accept-time.
+func DefaultSecureClientPolicy() ManagedIPCConfig {
+	return ManagedIPCConfig{
+		AllowedTeamIDs:    []string{SecureClientTeamID},
+		AllowedSigningIDs: []string{SecureClientSigningID},
+		AllowedBundleIDs:  []string{SecureClientBundleID},
+	}
 }

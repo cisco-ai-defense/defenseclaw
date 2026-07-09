@@ -46,6 +46,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -135,6 +136,21 @@ type Sidecar struct {
 	// for the sidecar's lifetime. Managed-mode wiring only.
 	cmidProviderMu   sync.Mutex
 	cmidProviderInst cloudreg.Provider
+}
+
+// osToastSenderFor returns the sender the OS-toast lane of the
+// notifier should use. In managed_enterprise the Secure Client GUI
+// is the intended surface for user-visible notifications (routed
+// via the internal/ipc UDS observer), so the daemon's own
+// osascript / notify-send calls would double-deliver. This helper
+// swaps in a silent no-op for that lane; the observer lane
+// (feeding IPC subscribers) is unaffected because notifier.dispatch
+// fires observers independently of whether the sender was invoked.
+func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return func(notify.Notification) error { return nil }
+	}
+	return notify.SendNotification
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -231,7 +247,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// when the operator hasn't opted in (or is on a platform without
 	// a display server). The setup wizard flips Enabled=true after
 	// asking the user — see cli/defenseclaw/commands/cmd_setup.py.
-	osNotifier := notifier.New(cfg.Notifications)
+	//
+	// managed_enterprise routes user-visible notifications through
+	// the local UDS IPC surface (Cisco Secure Client GUI is the
+	// presentation layer) so we suppress the daemon's own OS toasts
+	// to avoid double-delivery. Observers (the IPC bridge) keep
+	// firing regardless — see osToastSenderFor.
+	osNotifier := notifier.NewWithSender(cfg.Notifications, osToastSenderFor(cfg))
 
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
@@ -1240,7 +1262,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
-		s.osNotifier = notifier.New(appliedCfg.Notifications)
+		s.osNotifier = notifier.NewWithSender(appliedCfg.Notifications, osToastSenderFor(appliedCfg))
 		if s.hilt != nil {
 			s.hilt.SetNotifier(s.osNotifier)
 		}

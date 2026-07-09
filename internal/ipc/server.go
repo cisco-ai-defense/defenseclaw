@@ -63,6 +63,18 @@ type Server struct {
 	// have the group can still boot (staffGID stays 0 and the chown
 	// path is skipped). On real macOS every host has staff.
 	staffGID uint32
+
+	// Effective peer-auth policy. Under managed_enterprise these are
+	// seeded from DefaultSecureClientPolicy() when the operator has
+	// not overridden them in config.yaml; require-flags are always
+	// on. Under non-managed builds the require-flags stay false and
+	// the three lists mirror whatever the operator configured
+	// (empty by default → wrapper bypassed).
+	allowedTeamIDs         []string
+	allowedSigningIDs      []string
+	allowedBundleIDs       []string
+	requireUnixPeer        bool
+	requireSigningMetadata bool
 }
 
 // NewServer prepares the IPC server. It does not touch the filesystem
@@ -104,6 +116,31 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		}
 	}
 
+	// Resolve the effective peer-auth policy. In managed_enterprise
+	// we seed the strict Secure-Client defaults for any list the
+	// operator did not populate in config.yaml, then always require
+	// UnixPeer transport + full signing metadata. Non-managed
+	// builds keep operator config verbatim and leave the require
+	// flags off so a completely-empty config disables the check.
+	allowedTeamIDs := opts.Config.Managed.AllowedTeamIDs
+	allowedSigningIDs := opts.Config.Managed.AllowedSigningIDs
+	allowedBundleIDs := opts.Config.Managed.AllowedBundleIDs
+	var requireUnixPeer, requireSigningMetadata bool
+	if managed.IsManagedEnterprise(opts.Config.DeploymentMode) {
+		def := config.DefaultSecureClientPolicy()
+		if len(allowedTeamIDs) == 0 {
+			allowedTeamIDs = def.AllowedTeamIDs
+		}
+		if len(allowedSigningIDs) == 0 {
+			allowedSigningIDs = def.AllowedSigningIDs
+		}
+		if len(allowedBundleIDs) == 0 {
+			allowedBundleIDs = def.AllowedBundleIDs
+		}
+		requireUnixPeer = true
+		requireSigningMetadata = true
+	}
+
 	bcast := newBroadcast()
 	svc := &service{
 		health:     opts.Health,
@@ -124,12 +161,17 @@ func NewServer(opts ServerOptions) (*Server, error) {
 	}
 
 	return &Server{
-		opts:       opts,
-		bcast:      bcast,
-		svc:        svc,
-		staffGID:   staffGID,
-		socketPath: sockPath,
-		socketMode: sockMode,
+		opts:                   opts,
+		bcast:                  bcast,
+		svc:                    svc,
+		staffGID:               staffGID,
+		socketPath:             sockPath,
+		socketMode:             sockMode,
+		allowedTeamIDs:         allowedTeamIDs,
+		allowedSigningIDs:      allowedSigningIDs,
+		allowedBundleIDs:       allowedBundleIDs,
+		requireUnixPeer:        requireUnixPeer,
+		requireSigningMetadata: requireSigningMetadata,
 	}, nil
 }
 
@@ -218,21 +260,28 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	lis := newCodesignValidatingListener(inner,
-		s.opts.Config.Managed.AllowedTeamIDs,
-		s.opts.Config.Managed.AllowedSigningIDs,
+		s.allowedTeamIDs,
+		s.allowedSigningIDs,
+		s.allowedBundleIDs,
+		s.requireUnixPeer,
+		s.requireSigningMetadata,
 		s.logReject)
 
 	s.grpcSrv = grpc.NewServer()
 	pb.RegisterDefenseClawSecureClientServiceServer(s.grpcSrv, s.svc)
 
 	codesignState := "disabled"
-	if len(s.opts.Config.Managed.AllowedTeamIDs) > 0 || len(s.opts.Config.Managed.AllowedSigningIDs) > 0 {
+	if s.requireUnixPeer || s.requireSigningMetadata ||
+		len(s.allowedTeamIDs) > 0 || len(s.allowedSigningIDs) > 0 || len(s.allowedBundleIDs) > 0 {
 		codesignState = "enabled"
 	}
-	s.opts.Logf("listening on %s (mode=%#o codesign_peer_auth=%s team_ids=%v signing_ids=%v version=%s)",
+	s.opts.Logf("listening on %s (mode=%#o codesign_peer_auth=%s team_ids=%v signing_ids=%v bundle_ids=%v require_unix_peer=%v require_signing_metadata=%v version=%s)",
 		s.socketPath, s.socketMode, codesignState,
-		s.opts.Config.Managed.AllowedTeamIDs,
-		s.opts.Config.Managed.AllowedSigningIDs,
+		s.allowedTeamIDs,
+		s.allowedSigningIDs,
+		s.allowedBundleIDs,
+		s.requireUnixPeer,
+		s.requireSigningMetadata,
 		s.opts.Version)
 	s.setHealth(gateway.StateRunning, "")
 
@@ -297,10 +346,13 @@ func (s *Server) setHealth(state gateway.SubsystemState, lastErr string) {
 		return
 	}
 	details := map[string]interface{}{
-		"socket_path":         s.socketPath,
-		"socket_mode":         fmt.Sprintf("%#o", s.socketMode),
-		"allowed_team_ids":    s.opts.Config.Managed.AllowedTeamIDs,
-		"allowed_signing_ids": s.opts.Config.Managed.AllowedSigningIDs,
+		"socket_path":              s.socketPath,
+		"socket_mode":              fmt.Sprintf("%#o", s.socketMode),
+		"allowed_team_ids":         s.allowedTeamIDs,
+		"allowed_signing_ids":      s.allowedSigningIDs,
+		"allowed_bundle_ids":       s.allowedBundleIDs,
+		"require_unix_peer":        s.requireUnixPeer,
+		"require_signing_metadata": s.requireSigningMetadata,
 	}
 	s.opts.Health.SetManaged(state, lastErr, details)
 }

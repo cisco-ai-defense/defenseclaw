@@ -17,15 +17,23 @@ import (
 	"net"
 )
 
+// KindUnixPeer mirrors the unix constant so cross-platform tests
+// can reference the value unconditionally. On Windows nothing
+// ever assigns this string because the IPC server refuses to run.
+const KindUnixPeer = "UnixPeer"
+
 // peerIdentity mirrors the unix shape so cross-platform callers can
 // reference the type unconditionally. On Windows the fields stay
 // zero because peer-credential-over-UDS is not supported.
 type peerIdentity struct {
+	Kind      string
 	PID       int32
 	UID       uint32
 	GID       uint32
+	ExePath   string
 	TeamID    string
 	SigningID string
+	BundleID  string
 }
 
 // extractPeerIdentity is a stub — the UDS gRPC server is not
@@ -38,6 +46,11 @@ func extractPeerIdentity(c net.Conn) (peerIdentity, error) {
 
 // newCodesignValidatingListener is a stub — always returns the
 // inner listener. The Server refuses to start on Windows regardless.
-func newCodesignValidatingListener(inner net.Listener, teamIDs, signingIDs []string, logReject func(peerIdentity, string)) net.Listener {
+func newCodesignValidatingListener(
+	inner net.Listener,
+	teamIDs, signingIDs, bundleIDs []string,
+	requireUnixPeer, requireSigningMetadata bool,
+	logReject func(peerIdentity, string),
+) net.Listener {
 	return inner
 }

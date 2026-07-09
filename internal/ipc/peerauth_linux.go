@@ -29,4 +29,9 @@ func init() {
 		id.GID = cred.Gid
 		return nil
 	}
+	// readCodesignFn is left nil on linux — the platform has no
+	// bundle / codesign concept. When peer-auth is nevertheless
+	// configured on linux (e.g. an operator sets AllowedTeamIDs
+	// in config.yaml), the empty-fields peer identity is rejected
+	// by allow() as expected.
 }

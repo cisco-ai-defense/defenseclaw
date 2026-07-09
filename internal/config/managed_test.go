@@ -10,6 +10,48 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// TestDefaultSecureClientPolicy locks the compiled-in strict
+// peer-auth allowlist to the Cisco Secure Client GUI identity.
+// Any change to these values needs an explicit review because
+// they are the sole gate between an arbitrary local process and
+// the IPC surface in managed_enterprise installs.
+func TestDefaultSecureClientPolicy(t *testing.T) {
+	got := DefaultSecureClientPolicy()
+	if want := []string{"DE8Y96K9QP"}; !stringSliceEqual(got.AllowedTeamIDs, want) {
+		t.Errorf("AllowedTeamIDs = %v, want %v", got.AllowedTeamIDs, want)
+	}
+	if want := []string{"com.cisco.secureclient.gui"}; !stringSliceEqual(got.AllowedSigningIDs, want) {
+		t.Errorf("AllowedSigningIDs = %v, want %v", got.AllowedSigningIDs, want)
+	}
+	if want := []string{"com.cisco.secureclient.gui"}; !stringSliceEqual(got.AllowedBundleIDs, want) {
+		t.Errorf("AllowedBundleIDs = %v, want %v", got.AllowedBundleIDs, want)
+	}
+	// Sanity: the exported string constants must match the returned
+	// values so callers that read them directly stay in lockstep
+	// with the policy helper.
+	if SecureClientTeamID != "DE8Y96K9QP" {
+		t.Errorf("SecureClientTeamID drifted: %q", SecureClientTeamID)
+	}
+	if SecureClientSigningID != "com.cisco.secureclient.gui" {
+		t.Errorf("SecureClientSigningID drifted: %q", SecureClientSigningID)
+	}
+	if SecureClientBundleID != "com.cisco.secureclient.gui" {
+		t.Errorf("SecureClientBundleID drifted: %q", SecureClientBundleID)
+	}
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestManagedIPCEnabled(t *testing.T) {
 	cases := []struct {
 		name string
