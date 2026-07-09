@@ -1046,6 +1046,21 @@
       "since": "0.2.0"
     },
     {
+      "name": "DEFENSECLAW_INSTALL_ROOT",
+      "category": "runtime_path",
+      "purpose": "Native Windows installer root injected by the stable defenseclaw.exe launcher so the managed Python CLI can locate the owning packaged install for installer-based upgrade handoff.",
+      "default": "unset (set by DefenseClawSetup-x64.exe launcher)",
+      "accepted_values": ["any-absolute-path", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-launcher/main.go:99", "description": "Launcher appends the verified install root to the managed Python process environment"},
+        {"location": "cli/tests/test_cmd_upgrade.py:1185", "description": "Windows native-upgrade tests cover rejection of an untrusted injected install root"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Installer root selection — upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
+    },
+    {
       "name": "MIGRATION_DEFENSECLAW_HOME",
       "category": "runtime_path",
       "purpose": "Passed by scripts/upgrade.sh to the migration step. Identifies the data dir the migration should operate on.",
