@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.commands.cmd_doctor import (
     _active_connector,
+    _check_codex_hooks,
     _check_connector_hooks,
     _check_connector_inventory,
     _check_cursor_configured_runtime,
@@ -484,6 +485,7 @@ class TestCheckHookContractLock(unittest.TestCase):
 
     def test_known_contract_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            runtime_path = os.path.join(tmp, "hooks", "inspect-tool.sh")
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
                     {
@@ -497,6 +499,61 @@ class TestCheckHookContractLock(unittest.TestCase):
                                 "locations": {
                                     "workspace_dir": "/tmp/repo",
                                     "hook_config_paths": ["/home/test/.codex/config.toml"],
+                                    "hook_script_paths": [runtime_path],
+                                },
+                            }
+                        }
+                    },
+                    fh,
+                )
+            for platform_name in ("linux", "darwin"):
+                with self.subTest(platform_name=platform_name):
+                    r = _DoctorResult()
+                    _check_hook_contract_lock(
+                        self._cfg(tmp),
+                        "codex",
+                        r,
+                        platform_name=platform_name,
+                    )
+                    check = r.checks[-1]
+                    self.assertEqual(check["status"], "pass")
+                    self.assertIn("codex-hooks-v1", check["detail"])
+                    self.assertIn("0.30.0", check["detail"])
+                    self.assertIn("workspace=/tmp/repo", check["detail"])
+                    self.assertIn("hook_path=/home/test/.codex/config.toml", check["detail"])
+                    self.assertIn(f"runtime_path={runtime_path}", check["detail"])
+
+    def test_posix_missing_runtime_help_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            for platform_name in ("linux", "darwin"):
+                with self.subTest(platform_name=platform_name):
+                    r = _DoctorResult()
+                    _check_codex_hooks(cfg, r, platform_name=platform_name)
+                    hook_script = os.path.join(tmp, "hooks", "codex-hook.sh")
+                    self.assertEqual(
+                        r.checks[-1]["detail"],
+                        f"hook script not found at {hook_script}",
+                    )
+
+    def test_windows_contract_does_not_mislabel_portable_shell_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = os.path.join(tmp, "hooks", "cursor-hook.ps1")
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "cursor": {
+                                "contract_id": "cursor-hooks-v1",
+                                "compatibility_status": "known",
+                                "hook_script_version": "v8",
+                                "locations": {
+                                    "hook_config_paths": [os.path.join(tmp, "hooks.json")],
+                                    "hook_script_paths": [
+                                        os.path.join(tmp, "hooks", "inspect-tool.sh"),
+                                        os.path.join(tmp, "hooks", "cursor-hook.sh"),
+                                        adapter,
+                                    ],
                                 },
                             }
                         }
@@ -505,13 +562,16 @@ class TestCheckHookContractLock(unittest.TestCase):
                 )
 
             r = _DoctorResult()
-            _check_hook_contract_lock(self._cfg(tmp), "codex", r)
-            check = r.checks[-1]
-            self.assertEqual(check["status"], "pass")
-            self.assertIn("codex-hooks-v1", check["detail"])
-            self.assertIn("0.30.0", check["detail"])
-            self.assertIn("workspace=/tmp/repo", check["detail"])
-            self.assertIn("hook_path=/home/test/.codex/config.toml", check["detail"])
+            _check_hook_contract_lock(
+                self._cfg(tmp),
+                "cursor",
+                r,
+                platform_name="nt",
+            )
+            detail = r.checks[-1]["detail"]
+            self.assertEqual(r.checks[-1]["status"], "pass")
+            self.assertIn(f"runtime_path={adapter}", detail)
+            self.assertNotRegex(detail.lower(), r"inspect-tool\.sh|cursor-hook\.sh")
 
     def test_discovered_version_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -532,7 +592,12 @@ class TestCheckHookContractLock(unittest.TestCase):
                 json.dump({"agents": {"claudecode": {"version": "1.2.4"}}}, fh)
 
             r = _DoctorResult()
-            _check_hook_contract_lock(self._cfg(tmp), "claudecode", r)
+            _check_hook_contract_lock(
+                self._cfg(tmp),
+                "claudecode",
+                r,
+                platform_name="linux",
+            )
             check = r.checks[-1]
             self.assertEqual(check["status"], "fail")
             self.assertIn("drift", check["detail"])

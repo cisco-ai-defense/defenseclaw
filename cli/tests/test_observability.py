@@ -899,6 +899,30 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         self.assertNotIn("verify_tls", hec)
         self.assertEqual(_read_dotenv(tmp).get("DEFENSECLAW_SPLUNK_HEC_TOKEN"), "hec-token")
 
+    def test_http_jsonl_uses_destination_token_env_override(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        preset = Preset(
+            id="authenticated-webhook",
+            display_name="Authenticated webhook",
+            target="audit_sinks",
+            description="test preset",
+            sink_kind="http_jsonl",
+            token_env="DEFAULT_WEBHOOK_TOKEN",
+            prompts=(("url", "https://example.test/events", "url", ""),),
+        )
+        with patch.dict(PRESETS, {preset.id: preset}):
+            apply_preset(
+                preset.id,
+                {"url": "https://example.test/events"},
+                tmp,
+                secret_value="override-secret",
+                secret_env_name="DESTINATION_WEBHOOK_TOKEN",
+            )
+
+        sink = _read_yaml(tmp)["audit_sinks"][0]["http_jsonl"]
+        self.assertEqual(sink["bearer_env"], "DESTINATION_WEBHOOK_TOKEN")
+        self.assertEqual(_read_dotenv(tmp)["DESTINATION_WEBHOOK_TOKEN"], "override-secret")
+
     def test_set_destination_enabled_roundtrip(self) -> None:
         _, tmp = _make_tmp_ctx()
         apply_preset(
@@ -1141,7 +1165,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
     def test_add_splunk_hec_then_disable(self) -> None:
         with patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
             return_value=True,
         ):
             r1 = self._invoke(
@@ -1162,7 +1186,7 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertEqual(r1.exit_code, 0, r1.output)
 
         with patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
             return_value=True,
         ):
             r2 = self._invoke(["disable", "splunk-hec-local"])

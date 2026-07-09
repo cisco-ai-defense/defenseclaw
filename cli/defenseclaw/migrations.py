@@ -1065,7 +1065,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
         if os.name == "nt" and mode > 0o600 and os.path.exists(path):
             copy_windows_dacl(path, tmp_path)
         else:
-            set_file_mode(fd, tmp_path, effective_mode)
+            set_file_mode(fd, tmp_path, effective_mode, set_owner=True)
         # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
         # translation), so a caller that preserved a file's CRLF endings
         # does not get them doubled to \r\r\n on Windows.

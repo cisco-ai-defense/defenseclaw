@@ -33,6 +33,12 @@ func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gate
 	}
 }
 
+func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
+	if defaultStartReadinessTimeout != 60*time.Second {
+		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
+	}
+}
+
 func TestWaitForGatewayReadinessWaitsForDelayedGuardrailRunning(t *testing.T) {
 	var probes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -66,7 +72,7 @@ func TestWaitForGatewayReadinessWaitsForDelayedGuardrailRunning(t *testing.T) {
 	}
 }
 
-func TestWaitForGatewayReadinessLeavesSlowLiveProcessStarting(t *testing.T) {
+func TestWaitForGatewayReadinessFailsWhenSlowLiveProcessMissesDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
 	}))
@@ -80,8 +86,8 @@ func TestWaitForGatewayReadinessLeavesSlowLiveProcessStarting(t *testing.T) {
 		daemonReadinessRequirements{guardrailEnabled: true},
 		func() bool { return true },
 	)
-	if err != nil {
-		t.Fatalf("waitForGatewayReadiness() error = %v, want nil", err)
+	if err == nil || !strings.Contains(err.Error(), "remained STARTING") {
+		t.Fatalf("waitForGatewayReadiness() error = %v, want readiness timeout", err)
 	}
 	if ready {
 		t.Fatal("waitForGatewayReadiness() ready = true, want false")
@@ -99,6 +105,15 @@ type fakeReadinessProcess struct {
 	stoppedPID int
 }
 
+type fakeStrongReadinessProcess struct {
+	*fakeReadinessProcess
+	identityOK bool
+}
+
+func (p *fakeStrongReadinessProcess) HasManagedProcessIdentity(int) bool {
+	return p.identityOK
+}
+
 func (p *fakeReadinessProcess) IsRunning() (bool, int) {
 	return p.running, p.pid
 }
@@ -114,7 +129,7 @@ func (p *fakeReadinessProcess) StopStarted(pid int, _ time.Duration) error {
 	return p.stopErr
 }
 
-func TestWaitForStartedDaemonDoesNotStopSlowLiveProcess(t *testing.T) {
+func TestWaitForStartedDaemonStopsSlowLiveProcessAfterDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
 	}))
@@ -130,11 +145,14 @@ func TestWaitForStartedDaemonDoesNotStopSlowLiveProcess(t *testing.T) {
 		5*time.Millisecond,
 		daemonReadinessRequirements{guardrailEnabled: true},
 	)
-	if err != nil || ready {
-		t.Fatalf("waitForStartedDaemon() ready = %v, error = %v", ready, err)
+	if err == nil || !strings.Contains(err.Error(), "remained STARTING") || ready {
+		t.Fatalf("waitForStartedDaemon() ready = %v, error = %v, want timeout", ready, err)
 	}
-	if process.stopCalls != 0 {
-		t.Fatalf("scoped stop calls = %d, want none", process.stopCalls)
+	if process.stopCalls != 1 {
+		t.Fatalf("scoped stop calls = %d, want 1", process.stopCalls)
+	}
+	if process.stoppedPID != 42 {
+		t.Fatalf("StopStarted() PID = %d, want only launched PID 42", process.stoppedPID)
 	}
 }
 
@@ -167,12 +185,37 @@ func TestWaitForStartedDaemonStopsProcessOnFatalReadinessError(t *testing.T) {
 	}
 }
 
-func TestPrintDaemonStartResultUsesActualTimeout(t *testing.T) {
+func TestWaitForStartedDaemonRejectsReadyProcessWithoutStrongIdentity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL,
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+	)
+	if err == nil || !strings.Contains(err.Error(), "process start identity") || ready {
+		t.Fatalf("waitForStartedDaemon() ready = %v, error = %v, want strong identity failure", ready, err)
+	}
+	if base.stopCalls != 1 || base.stoppedPID != 42 {
+		t.Fatalf("scoped cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestPrintDaemonStartResultOnlyRendersReadySuccess(t *testing.T) {
 	out := captureStdout(t, func() {
-		printDaemonStartResult(42, gateway.HealthSnapshot{}, false, 3*time.Second)
+		printDaemonStartResult(42, readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
 	})
-	if !strings.Contains(out, "still starting after 3s") {
-		t.Fatalf("output = %q, want actual timeout", out)
+	if !strings.Contains(out, "OK (PID 42)") || strings.Contains(out, "STARTING") {
+		t.Fatalf("output = %q, want READY-only success rendering", out)
 	}
 }
 
@@ -267,6 +310,22 @@ func TestWaitForGatewayReadinessAcceptsConfiguredDisabledGuardrail(t *testing.T)
 	)
 	if err != nil || !ready {
 		t.Fatalf("disabled guardrail readiness = %v, error = %v", ready, err)
+	}
+}
+
+func TestWaitForGatewayReadinessAcceptsRunningHooksWithProxyDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: false},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("connector-native hook readiness = %v, error = %v", ready, err)
 	}
 }
 

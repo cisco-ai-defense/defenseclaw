@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from defenseclaw.platform_support import local_shell_stacks_supported
+from defenseclaw.platform_support import local_observability_stack_supported
 from defenseclaw.tui.registry_data import GO_PARITY_REGISTRY
 
 CliBinary = Literal["defenseclaw", "defenseclaw-gateway"]
@@ -42,7 +42,7 @@ def build_registry(os_name: str | None = None) -> tuple[CmdEntry, ...]:
             arg_hint=arg_hint,
         )
         for tui_name, cli_binary, cli_args, description, category, needs_arg, arg_hint in GO_PARITY_REGISTRY
-        if local_shell_stacks_supported(os_name)
+        if local_observability_stack_supported(os_name)
         or tuple(cli_args[:2]) != ("setup", "local-observability")
     )
 

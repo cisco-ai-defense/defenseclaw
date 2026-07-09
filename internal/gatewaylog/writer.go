@@ -216,6 +216,11 @@ func (w *Writer) EmitContext(ctx context.Context, e Event) {
 			e.TraceID = sp.SpanContext().TraceID().String()
 		}
 	}
+	// Canonicalize the shared agent-phase vocabulary before validation and
+	// fanout. Unknown current phases remain untouched so malformed events fail
+	// closed; the optional previous phase is omitted when unsupported so one
+	// stale/sentinel value cannot discard an otherwise valid correlated event.
+	normalizeEventAgentPhases(&e)
 	StampAgentWatchContext(&e)
 	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
 	// payload using the per-boot device-key-derived HMAC key. No-op

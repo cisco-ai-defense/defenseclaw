@@ -19,6 +19,7 @@ from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
+UPGRADE_SH = ROOT / "scripts" / "upgrade.sh"
 
 
 def test_sandbox_installer_fallback_uses_selected_release() -> None:
@@ -67,3 +68,18 @@ def test_release_installers_track_known_connector_choices() -> None:
     windows_choices = tuple(supported_connectors(CONNECTOR_CHOICES, "windows"))
     assert ps_choices == (*windows_choices, "none")
     assert hook_choices == ()
+
+
+def test_posix_install_and_upgrade_validate_tui_before_launcher_publication() -> None:
+    install_text = INSTALL_SH.read_text(encoding="utf-8")
+    install_cli = install_text.split("install_python_cli()", 1)[1].split(
+        "# ── Install: OpenClaw Plugin", 1
+    )[0]
+    assert install_cli.index("pip check") < install_cli.index("app.run_test(size=(80, 24))")
+    assert install_cli.index("app.run_test(size=(80, 24))") < install_cli.index("ln -sf")
+
+    upgrade_text = UPGRADE_SH.read_text(encoding="utf-8")
+    install_start = upgrade_text.index('VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"')
+    launcher = upgrade_text.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', install_start)
+    upgrade_install = upgrade_text[install_start:launcher]
+    assert upgrade_install.index("pip check") < upgrade_install.index("app.run_test(size=(80, 24))")

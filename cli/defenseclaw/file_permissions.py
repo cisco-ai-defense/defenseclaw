@@ -78,7 +78,7 @@ def open_regular_file_no_follow(path: str | os.PathLike[str]) -> int:
     return fd
 
 
-def set_file_mode(fd: int, path: str, mode: int) -> None:
+def set_file_mode(fd: int, path: str, mode: int, *, set_owner: bool = False) -> None:
     """Apply *mode* to the open file described by *fd* and *path*.
 
     POSIX uses the descriptor so the permission change cannot be redirected
@@ -89,11 +89,13 @@ def set_file_mode(fd: int, path: str, mode: int) -> None:
 
     The caller must keep *fd* open for the duration of this call. Windows CRT
     descriptors deny delete sharing, which keeps *path* bound to that file
-    while ``SetFileSecurityW`` applies the DACL.
+    while ``SetFileSecurityW`` applies the DACL. ``set_owner`` is reserved for
+    a DefenseClaw-managed path opened for creation or an authorized rewrite;
+    operator-selected existing paths must leave it disabled.
     """
     if os.name == "nt":
         if mode & 0o077 == 0:
-            _set_windows_owner_only_acl(path)
+            _set_windows_owner_only_acl(path, set_owner=set_owner)
         else:
             os.chmod(path, mode)
         return
@@ -137,7 +139,7 @@ def atomic_write_text_secure(
     tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
-        set_file_mode(fd, tmp, target_mode)
+        set_file_mode(fd, tmp, target_mode, set_owner=True)
         stream = os.fdopen(fd, "w")
         fd = -1
         with stream:
@@ -400,7 +402,7 @@ def atomic_write_private(
                 suffix=".tmp",
                 dir=parent,
             )
-            set_file_mode(fd, tmp, 0o600)
+            set_file_mode(fd, tmp, 0o600, set_owner=True)
             write(fd)
             os.fsync(fd)
             os.close(fd)
@@ -546,7 +548,7 @@ def _make_private_directories(path: str) -> None:
     local_free.restype = wintypes.HLOCAL
 
     descriptor = wintypes.LPVOID()
-    sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
+    sddl = _windows_private_directory_sddl()
     if not convert(sddl, 1, ctypes.byref(descriptor), None):
         raise ctypes.WinError(ctypes.get_last_error())
     attributes = _SecurityAttributes(ctypes.sizeof(_SecurityAttributes), descriptor, False)
@@ -560,6 +562,12 @@ def _make_private_directories(path: str) -> None:
             _protect_private_directory(directory)
     finally:
         local_free(descriptor)
+
+
+def _windows_private_directory_sddl() -> str:
+    """Build the creation descriptor for a current-user-owned directory."""
+    owner_sid = _windows_current_user_sid()
+    return f"O:{owner_sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
 
 
 @contextmanager
@@ -611,11 +619,7 @@ def _windows_acl_has_required_access(path: str | os.PathLike[str]) -> bool:
     allowed = {
         sid for permissions, access_mode, _inheritance, sid in entries if access_mode in (1, 2) and permissions != 0
     }
-    denied = {
-        sid
-        for permissions, access_mode, _inheritance, sid in entries
-        if access_mode == 3 and permissions != 0
-    }
+    denied = {sid for permissions, access_mode, _inheritance, sid in entries if access_mode == 3 and permissions != 0}
     required_owner_sids = {current_sid, "S-1-3-4"}
     return (
         "S-1-5-18" in allowed
@@ -818,7 +822,7 @@ def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, in
             local_free(descriptor)
 
 
-def _set_windows_owner_only_acl(path: str) -> None:
+def _set_windows_owner_only_acl(path: str, *, set_owner: bool = False) -> None:
     """Replace inherited access with the protected owner/SYSTEM policy DACL."""
     import ctypes
     from ctypes import wintypes
@@ -827,7 +831,15 @@ def _set_windows_owner_only_acl(path: str) -> None:
     dacl_security_information = 0x00000004
     # D:P protects the DACL from inheritance. OW is the Windows Owner Rights
     # SID; SY retains LocalSystem access required by the product policy.
-    owner_only_sddl = "D:P(A;;FA;;;SY)(A;;FA;;;OW)"
+    # Private directories must propagate the same policy to existing and new
+    # descendants. Without OI/CI, Windows recalculates an existing child's
+    # inherited ACL against a parent with no inheritable ACEs and can leave the
+    # child with an empty DACL (the managed venv became inaccessible after init).
+    inheritance = "OICI" if os.path.isdir(path) else ""
+    owner_only_sddl = f"D:P(A;{inheritance};FA;;;SY)(A;{inheritance};FA;;;OW)"
+
+    if set_owner:
+        _set_windows_current_user_owner(path)
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -866,3 +878,48 @@ def _set_windows_owner_only_acl(path: str) -> None:
             raise ctypes.WinError(ctypes.get_last_error())
     finally:
         local_free(descriptor)
+
+
+def _set_windows_current_user_owner(path: str) -> None:
+    """Assign a DefenseClaw-managed path to the current token user."""
+    import ctypes
+    from ctypes import wintypes
+
+    se_file_object = 1
+    owner_security_information = 0x00000001
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    convert = advapi32.ConvertStringSidToSidW
+    convert.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.LPVOID)]
+    convert.restype = wintypes.BOOL
+    set_security = advapi32.SetNamedSecurityInfoW
+    set_security.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    set_security.restype = wintypes.DWORD
+    local_free = ctypes.WinDLL("kernel32", use_last_error=True).LocalFree
+    local_free.argtypes = [wintypes.HLOCAL]
+    local_free.restype = wintypes.HLOCAL
+
+    owner = wintypes.LPVOID()
+    if not convert(_windows_current_user_sid(), ctypes.byref(owner)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        result = set_security(
+            path,
+            se_file_object,
+            owner_security_information,
+            owner,
+            None,
+            None,
+            None,
+        )
+        if result:
+            raise ctypes.WinError(result)
+    finally:
+        local_free(owner)

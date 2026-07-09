@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -216,19 +217,31 @@ def refresh_local_observability_stack(
         bundle_source=str(bundle),
     )
 
+    try:
+        _assert_safe_bundle_destination(Path(data_dir), Path(dest))
+    except OSError as exc:
+        result.errors.append(f"unsafe observability destination: {exc}")
+        return result
+
     if not bundle.is_dir():
         result.skipped_reason = f"bundled source missing ({bundle})"
         return result
 
     if not os.path.isdir(dest):
         try:
-            shutil.copytree(str(bundle), dest)
+            Path(dest).mkdir(parents=False)
         except OSError as exc:
             result.errors.append(f"initial seed: {exc}")
             return result
+        refreshed, _preserved, errors = _rsync_overwrite(
+            src=Path(bundle), dest=Path(dest), preserve=()
+        )
+        result.errors.extend(errors)
+        if errors:
+            return result
         _ensure_observability_executables(dest)
         result.refreshed = True
-        result.refreshed_paths.append("(initial seed)")
+        result.refreshed_paths.extend(refreshed or ["(initial seed)"])
         return result
 
     preserve: tuple[str, ...] = ()
@@ -264,6 +277,10 @@ def _remove_retired_paths(
     """Remove explicit bundle tombstones while preserving custom files."""
     removed: list[str] = []
     errors: list[str] = []
+    try:
+        _assert_safe_bundle_destination(dest, dest)
+    except OSError as exc:
+        return removed, [f"unsafe retired-path root: {exc}"]
     root = dest.resolve()
     for rel in retired_paths:
         rel_path = Path(rel)
@@ -278,8 +295,11 @@ def _remove_retired_paths(
             continue
         if not candidate.exists() and not candidate.is_symlink():
             continue
+        if _is_reparse_or_symlink(candidate):
+            errors.append(f"refused retired reparse/symlink path: {rel}")
+            continue
         try:
-            if candidate.is_dir() and not candidate.is_symlink():
+            if candidate.is_dir():
                 shutil.rmtree(candidate)
             else:
                 candidate.unlink()
@@ -389,6 +409,11 @@ def _rsync_overwrite(
 
     preserve_norm = tuple(p.replace("\\", "/").strip("/") for p in preserve if p)
 
+    try:
+        _assert_safe_bundle_destination(dest, dest)
+    except OSError as exc:
+        return refreshed, preserved, [f"unsafe destination root: {exc}"]
+
     for root, dirs, files in os.walk(src):
         rel_root = os.path.relpath(root, src)
         if rel_root == ".":
@@ -399,6 +424,10 @@ def _rsync_overwrite(
         # caller can show what survived.
         kept_dirs: list[str] = []
         for d in dirs:
+            source_dir = Path(root) / d
+            if _is_reparse_or_symlink(source_dir):
+                errors.append(f"refused reparse/symlink source directory: {source_dir}")
+                continue
             rel_dir = Path(os.path.join(rel_root, d) if rel_root else d).as_posix()
             if _path_is_preserved(rel_dir, preserve_norm):
                 preserved.append(rel_dir)
@@ -415,8 +444,12 @@ def _rsync_overwrite(
             src_path = os.path.join(root, fname)
             dest_path = os.path.join(str(dest), rel_file)
             try:
+                if _is_reparse_or_symlink(Path(src_path)):
+                    raise OSError(f"refused reparse/symlink source file: {src_path}")
+                _assert_safe_bundle_destination(dest, Path(dest_path))
                 os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
-                _atomic_copy_file(src_path, dest_path)
+                _assert_safe_bundle_destination(dest, Path(dest_path))
+                _atomic_copy_file(src_path, dest_path, root=dest)
             except OSError as exc:
                 errors.append(f"{rel_file}: {exc}")
                 continue
@@ -436,7 +469,7 @@ def _path_is_preserved(rel: str, preserve: tuple[str, ...]) -> bool:
     return False
 
 
-def _atomic_copy_file(src_path: str, dest_path: str) -> None:
+def _atomic_copy_file(src_path: str, dest_path: str, *, root: Path) -> None:
     """``shutil.copy2`` to a same-directory tmp file, then ``os.replace``.
 
     Preserves mode bits via ``copy2``. Same-directory tmp file is
@@ -445,12 +478,15 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
     on Linux when ``data_dir`` is on an external volume.
     """
     dest_dir = os.path.dirname(dest_path) or "."
+    _assert_safe_bundle_destination(root, Path(dest_path))
     fd, tmp_path = tempfile.mkstemp(
         prefix=".refresh-", dir=dest_dir,
     )
     os.close(fd)
     try:
+        _assert_safe_bundle_destination(root, Path(dest_path))
         shutil.copy2(src_path, tmp_path)
+        _assert_safe_bundle_destination(root, Path(dest_path))
         os.replace(tmp_path, dest_path)
     except OSError:
         # Best-effort cleanup of the orphan tmp; re-raise so the
@@ -460,6 +496,48 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
         except OSError:
             pass
         raise
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    """Recognize POSIX links and Windows junction/reparse points via lstat."""
+    try:
+        mode = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISLNK(mode.st_mode) or bool(
+        getattr(mode, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _assert_safe_bundle_destination(root: Path, candidate: Path) -> None:
+    """Reject lexical escapes and every existing reparse ancestor under root."""
+    root_abs = Path(os.path.abspath(root))
+    candidate_abs = Path(os.path.abspath(candidate))
+    try:
+        relative = candidate_abs.relative_to(root_abs)
+    except ValueError as exc:
+        raise OSError(f"path escapes bundle root: {candidate_abs}") from exc
+
+    try:
+        resolved_root = root_abs.resolve(strict=True)
+    except OSError as exc:
+        raise OSError(f"bundle root cannot be resolved: {root_abs}") from exc
+    resolved_candidate = candidate_abs.resolve(strict=False)
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(
+            f"resolved path escapes canonical bundle root: {resolved_candidate}"
+        ) from exc
+
+    current = root_abs
+    if _is_reparse_or_symlink(current):
+        raise OSError(f"bundle root is a reparse/symlink: {current}")
+    for part in relative.parts:
+        current = current / part
+        if _is_reparse_or_symlink(current):
+            raise OSError(f"destination contains a reparse/symlink: {current}")
 
 
 __all__ = [

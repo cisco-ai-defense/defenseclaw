@@ -3851,7 +3851,7 @@ func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
 	}
 }
 
-func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
+func TestZeptoClaw_Setup_UsesRuntimeFailModeForSharedHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -3882,8 +3882,98 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read inspect-tool.sh: %v", err)
 	}
-	if !strings.Contains(string(body), `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`) {
-		t.Fatalf("inspect-tool.sh did not render closed fail mode:\n%s", string(body))
+	if !strings.Contains(string(body), `defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR"`) {
+		t.Fatalf("inspect-tool.sh does not resolve fail mode at runtime:\n%s", string(body))
+	}
+	opts.HookFailMode = "open"
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("open-mode Setup: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "hooks", "inspect-tool.sh"))
+	if err != nil {
+		t.Fatalf("read open-mode inspect-tool.sh: %v", err)
+	}
+	if !bytes.Equal(after, body) {
+		t.Fatal("shared inspect hook changed when one connector changed fail mode")
+	}
+}
+
+func TestSharedInspectHookResolvesSingleConnectorRuntimeState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	for _, tc := range []struct {
+		mode     string
+		wantCode int
+	}{
+		{mode: "open", wantCode: 0},
+		{mode: "closed", wantCode: 2},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			type requestHeaders struct {
+				connector     string
+				authorization string
+			}
+			headers := make(chan requestHeaders, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				headers <- requestHeaders{
+					connector:     r.Header.Get("X-DefenseClaw-Connector"),
+					authorization: r.Header.Get("Authorization"),
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte("not-json"))
+			}))
+			defer srv.Close()
+			dir := t.TempDir()
+			hookDir := filepath.Join(dir, "hooks")
+			opts := SetupOpts{
+				DataDir:            dir,
+				APIAddr:            strings.TrimPrefix(srv.URL, "http://"),
+				HookFailMode:       tc.mode,
+				HookAPIToken:       "scoped-runtime-fixture",
+				HookAPITokenScoped: true,
+			}
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewZeptoClawConnector()); err != nil {
+				t.Fatalf("write shared hooks: %v", err)
+			}
+			// The parser-independent flat record must remain authoritative even
+			// when persistent/transient lock files and unrelated prefix matches
+			// are present. Those files must not become phantom connectors.
+			if err := os.WriteFile(filepath.Join(hookDir, ".hookcfg.lock"), nil, 0o600); err != nil {
+				t.Fatalf("write lock fixture: %v", err)
+			}
+			if err := os.WriteFile(
+				filepath.Join(hookDir, ".hookcfg.unrelated"),
+				[]byte("DEFENSECLAW_CONNECTOR=someone-else\nDEFENSECLAW_FAIL_MODE=closed\n"),
+				0o600,
+			); err != nil {
+				t.Fatalf("write unrelated sidecar fixture: %v", err)
+			}
+			cmd := exec.Command("bash", filepath.Join(hookDir, "inspect-request.sh"))
+			cmd.Stdin = strings.NewReader(`{"content":"hello"}`)
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + dir,
+				"DEFENSECLAW_HOME=" + dir,
+			}
+			err := cmd.Run()
+			code := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("run shared hook: %v", err)
+			}
+			if code != tc.wantCode {
+				t.Fatalf("shared hook exit=%d want %d", code, tc.wantCode)
+			}
+			got := <-headers
+			if got.connector != "zeptoclaw" {
+				t.Fatalf("connector header=%q", got.connector)
+			}
+			if got.authorization != "Bearer scoped-runtime-fixture" {
+				t.Fatalf("authorization header did not use scoped runtime token")
+			}
+		})
 	}
 }
 
@@ -4096,11 +4186,11 @@ func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read generic hook %s: %v", name, err)
 		}
-		if !strings.Contains(string(body), ".hook-openclaw.token") {
-			t.Errorf("generic hook %s does not reference connector-scoped token sidecar", name)
+		if strings.Contains(string(body), ".hook-openclaw.token") || strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
+			t.Errorf("generic hook %s embeds OpenClaw-specific runtime state", name)
 		}
-		if !strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
-			t.Errorf("generic hook %s does not bind scoped token to OpenClaw", name)
+		if !strings.Contains(string(body), "defenseclaw_shared_hook_token_file") || !strings.Contains(string(body), "RUNTIME_CONNECTOR") {
+			t.Errorf("generic hook %s does not resolve connector state at runtime", name)
 		}
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
@@ -5508,19 +5598,10 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailOpenOnUnreachable_Default asserts the post-PR
-// behavior: when the gateway is unreachable (transport failure), the
-// hook ALWAYS allows the agent to proceed by default — regardless of
-// FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
-// Operators who want strict availability must opt in explicitly via
-// DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
-//
-// NOTE on fail_mode in the failure log: this is metadata recording
-// the configured response-layer fail mode at write time, not the
-// transport-layer behavior under test. Post-, the safer default
-// for response-layer failures is "closed", so the metadata reflects
-// that. The transport-layer fail-open behavior remains unchanged.
-func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
+// TestHookScript_FailClosedOnUnreachable_Default asserts that the secure
+// low-level default applies consistently to transport and response failures.
+// Existing observe-only installs explicitly resolve "open" before setup.
+func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5543,8 +5624,10 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("hook error = %v, want fail-closed exit 2", err)
 	}
 
 	// Even though the hook allowed, a structured failure record must
@@ -5561,10 +5644,6 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		// The response-layer default is "closed", so the failure log
-		// metadata reflects that. The functional invariant under test
-		// (hook exits 0 / allows agent on transport failure) is
-		// unchanged — that is the `category=transport` dimension above.
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
@@ -5617,10 +5696,8 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 // TestHookScript_FailClosedOnUnreachable_StrictAvailability covers
 // the operator opt-in for strict availability: when
 // DEFENSECLAW_STRICT_AVAILABILITY=1 is set, the hook MUST exit 2 on
-// transport failures even though the response-layer FAIL_MODE
-// default is "open". This is the escape hatch for sites that prefer
-// to take the agent down rather than miss policy enforcement during
-// a gateway outage.
+// transport failures independently of the configured fail mode. This is the
+// force-closed escape hatch for sites that require strict availability.
 //
 // Also pins the operator-facing stderr contract: the verb the hook
 // prints MUST match what it actually does on exit. The pre-fix code
@@ -5744,12 +5821,8 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 }
 
 // TestHookScript_FailOpen_Override covers the legacy operator
-// override: DEFENSECLAW_FAIL_MODE=open forces the response-layer
-// handler to allow even if the baked-in template default was
-// "closed". Transport failures are NOT routed through this — they
-// have their own DEFENSECLAW_STRICT_AVAILABILITY toggle — but
-// response-layer failures (which won't fire here against an
-// unreachable gateway) would respect this override.
+// override: DEFENSECLAW_FAIL_MODE=open allows both response and transport
+// failures even if the baked-in template default was "closed".
 func TestHookScript_FailOpen_Override(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5776,7 +5849,7 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 //
 // Contract:
 //   - Explicit "closed" stays closed when the connector supports it.
-//   - Empty / invalid HookFailMode normalizes to "open".
+//   - Empty / invalid HookFailMode normalizes to the secure "closed" default.
 func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5911,6 +5984,19 @@ func TestManagedEnterpriseHookIgnoresUserControlledHomeAndDisableSentinel(t *tes
 	if !strings.Contains(rendered, "DEFENSECLAW_MANAGED_HOOK=1") {
 		t.Fatal("managed hook does not force fail-closed transport and missing-token behavior")
 	}
+	sharedBody, err := os.ReadFile(filepath.Join(dir, "inspect-request.sh"))
+	if err != nil {
+		t.Fatalf("read managed shared hook: %v", err)
+	}
+	shared := string(sharedBody)
+	if strings.Contains(shared, `DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"`) ||
+		strings.Contains(shared, `[ -f "${DEFENSECLAW_HOME}/.disabled" ]`) {
+		t.Fatal("managed shared hook retained a user-controlled home or disable sentinel")
+	}
+	if !strings.Contains(shared, `DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"`) ||
+		!strings.Contains(shared, "DEFENSECLAW_MANAGED_HOOK=1") {
+		t.Fatal("managed shared hook did not retain enterprise hardening")
+	}
 }
 
 func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
@@ -5944,7 +6030,44 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	}
 }
 
-func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
+func TestManagedEnterpriseSharedHookIgnoresFailModeEnvOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{
+		DataDir:            dir,
+		APIAddr:            strings.TrimPrefix(srv.URL, "http://"),
+		HookFailMode:       "closed",
+		HookAPIToken:       "managed-scoped-fixture",
+		HookAPITokenScoped: true,
+		ManagedEnterprise:  true,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewZeptoClawConnector()); err != nil {
+		t.Fatalf("write managed shared hooks: %v", err)
+	}
+
+	cmd := exec.Command("bash", filepath.Join(hookDir, "inspect-request.sh"))
+	cmd.Stdin = strings.NewReader(`{"content":"hello"}`)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"DEFENSECLAW_FAIL_MODE=open",
+	}
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("managed shared hook error = %v, want fail-closed exit 2", err)
+	}
+}
+
+func TestCodexHookScript_FailClosed_DefaultWithoutResolvedObserveMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5964,8 +6087,10 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("observability Codex hook should fail-open by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("Codex hook error = %v, want fail-closed exit 2", err)
 	}
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
 	if err != nil {
@@ -5981,10 +6106,6 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		// Response-layer default is "closed" — transport-layer
-		// fail-open behavior under test here is unchanged (the hook
-		// still exits 0 and the agent still proceeds when the gateway
-		// is unreachable).
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {

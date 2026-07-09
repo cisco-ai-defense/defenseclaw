@@ -90,6 +90,12 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
         self._local_stack_support.start()
         self.addCleanup(self._local_stack_support.stop)
+        self._native_local_splunk = patch(
+            "defenseclaw.commands.cmd_setup._native_windows_local_splunk",
+            return_value=False,
+        )
+        self._native_local_splunk.start()
+        self.addCleanup(self._native_local_splunk.stop)
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
 
@@ -126,16 +132,18 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "splunk_web_url": "http://127.0.0.1:8000",
-                "hec_url": "http://127.0.0.1:8088/services/collector/event",
-                "hec_token": "bootstrap-token",
-                "license_group": "Free",
-                "web_login_required": False,
-                "index": "defenseclaw_local",
-                "source": "defenseclaw",
-                "sourcetype": "defenseclaw:json",
-            }),
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
             stderr="",
         )
 
@@ -182,16 +190,18 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
 
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "splunk_web_url": "http://127.0.0.1:8000",
-                "hec_url": "http://127.0.0.1:8088/services/collector/event",
-                "hec_token": "bootstrap-token",
-                "license_group": "Free",
-                "web_login_required": False,
-                "index": "defenseclaw_local",
-                "source": "defenseclaw",
-                "sourcetype": "defenseclaw:json",
-            }),
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
             stderr="",
         )
 
@@ -260,10 +270,12 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         self.assertTrue(result.stopped)
         # The down call must precede the refresh call. Pull the
         # subprocess args to confirm we asked the bridge for `down`.
-        self.assertTrue(any(
-            call.args[0] == ["/fake/bin/splunk-claw-bridge", "down", "--env-file", env_file]
-            for call in mock_run.call_args_list
-        ))
+        self.assertTrue(
+            any(
+                call.args[0] == ["/fake/bin/splunk-claw-bridge", "down", "--env-file", env_file]
+                for call in mock_run.call_args_list
+            )
+        )
         mock_refresh.assert_called_once_with("/data")
 
     @patch(
@@ -300,7 +312,7 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         mock_refresh.assert_called_once_with("/data")
 
 
-class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
+class LegacySetupLocalObservabilityRefreshWiring:
     def setUp(self) -> None:
         self._local_stack_support = patch(
             "defenseclaw.commands.cmd_setup_local_observability.local_shell_stacks_supported",
@@ -317,8 +329,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
+        "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
     )
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
@@ -335,8 +346,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
+        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_audit_sink",
     )
     def test_up_default_calls_refresh_helper(
         self,
@@ -375,8 +385,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
 
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
+        "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
     )
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
@@ -393,8 +402,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
+        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_audit_sink",
     )
     def test_up_no_refresh_bundle_skips_refresh(
         self,
@@ -425,8 +433,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         mock_refresh.assert_not_called()
 
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
+        "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
     )
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
@@ -443,8 +450,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
+        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_audit_sink",
     )
     def test_up_refresh_config_propagates_flag(
         self,
@@ -476,8 +482,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
 
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
+        "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
     )
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
@@ -494,8 +499,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
+        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_audit_sink",
     )
     def test_up_no_refresh_config_preserves_local_config(
         self,
@@ -527,16 +531,14 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
 
 
-class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
+class LegacyRefreshAndMaybeRestartLocalObservability:
     """Direct coverage for local-observability refresh messaging."""
 
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        ".refresh_local_observability_stack",
+        "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack",
     )
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        ".is_compose_project_running",
+        "defenseclaw.commands.cmd_setup_local_observability.is_compose_project_running",
         return_value=False,
     )
     def test_preserved_config_hint_is_printed(
@@ -567,6 +569,132 @@ class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
         self.assertIn("Preserved local observability config", output.getvalue())
         self.assertIn("--refresh-config", output.getvalue())
         self.assertIn("--no-refresh-config", output.getvalue())
+
+
+class TestPythonControllerRefreshWiring(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runner = CliRunner()
+        self.app, self.tmp_dir = _make_app()
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_up_refreshes_before_shared_controller_start(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import local_observability
+        from defenseclaw.observability.local_stack import CONTRACT, UpResult
+
+        controller = MagicMock()
+        controller.up.return_value = UpResult(dict(CONTRACT), readiness_verified=False)
+        refresh = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest=os.path.join(self.tmp_dir, "observability-stack"),
+            bundle_source="/bundle",
+        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
+                return_value=refresh,
+            ) as refresh_call,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up", "--no-wait", "--no-config"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        controller.preflight.assert_called_once_with()
+        controller.up.assert_called_once_with(timeout=180, wait=False)
+        refresh_call.assert_called_once()
+        self.assertTrue(refresh_call.call_args.kwargs["refresh_config"])
+
+    def test_no_refresh_bundle_skips_refresh(self) -> None:
+        from defenseclaw.commands.cmd_setup_local_observability import local_observability
+        from defenseclaw.observability.local_stack import CONTRACT, UpResult
+
+        controller = MagicMock()
+        controller.up.return_value = UpResult(dict(CONTRACT), readiness_verified=False)
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability"
+            ) as refresh_call,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up", "--no-wait", "--no-config", "--no-refresh-bundle"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        refresh_call.assert_not_called()
+
+    def test_refresh_stop_uses_controller_and_preserves_config_hint(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            _refresh_and_maybe_restart_local_observability,
+        )
+
+        controller = MagicMock()
+        controller.is_running.return_value = True
+        refreshed = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest="/dest",
+            bundle_source="/src",
+            preserved_paths=["grafana", "prometheus"],
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack",
+            return_value=refreshed,
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = _refresh_and_maybe_restart_local_observability(
+                    "/data", refresh_config=False, controller=controller
+                )
+
+        self.assertTrue(result.was_running)
+        self.assertTrue(result.stopped)
+        controller.down.assert_called_once_with()
+        self.assertIn("Preserved local observability config", output.getvalue())
+
+    def test_refresh_failure_restores_previously_running_stack(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            _refresh_and_maybe_restart_local_observability,
+        )
+
+        controller = MagicMock()
+        controller.is_running.return_value = True
+        failed = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest="/dest",
+            bundle_source="/src",
+            errors=["copy failed"],
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack",
+            return_value=failed,
+        ):
+            result = _refresh_and_maybe_restart_local_observability(
+                "/data", refresh_config=False, controller=controller
+            )
+
+        self.assertEqual(result.errors, ["copy failed"])
+        controller.down.assert_called_once_with()
+        controller.up.assert_called_once_with(timeout=180, wait=False)
 
 
 if __name__ == "__main__":

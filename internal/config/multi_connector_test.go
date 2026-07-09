@@ -197,8 +197,8 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	if got := g.EffectiveMode(""); got != "observe" {
 		t.Errorf("EffectiveMode empty = %q, want observe", got)
 	}
-	// Observe mode always resolves fail-open: findings remain visible but an
-	// internal hook error cannot become enforcement.
+	// An observe-only connector with no explicit override retains the
+	// historical fail-open behavior on every platform.
 	if got := g.EffectiveHookFailModeFor(""); got != "open" {
 		t.Errorf("EffectiveHookFailModeFor empty = %q, want open", got)
 	}
@@ -216,6 +216,23 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	}
 	if got := nilG.EffectiveHILT("x"); got != (HILTConfig{}) {
 		t.Errorf("nil EffectiveHILT = %+v, want zero", got)
+	}
+}
+
+func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
+	g := &GuardrailConfig{
+		Mode:         "observe",
+		HookFailMode: "closed",
+		Connectors: map[string]PerConnectorGuardrailConfig{
+			"codex":      {HookFailMode: "closed"},
+			"claudecode": {},
+		},
+	}
+	if got := g.EffectiveHookFailModeFor("codex"); got != "closed" {
+		t.Fatalf("explicit connector fail mode = %q, want closed", got)
+	}
+	if got := g.EffectiveHookFailModeFor("claudecode"); got != "open" {
+		t.Fatalf("unoverridden observe connector fail mode = %q, want open", got)
 	}
 }
 

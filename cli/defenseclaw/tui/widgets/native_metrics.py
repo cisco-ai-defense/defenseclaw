@@ -169,14 +169,9 @@ class MetricTile(Vertical):
             self.tooltip = None
 
     def _apply_class_map(self, classes: dict[str, bool]) -> None:
-        """Apply a class map across Textual 7.x and 8.x."""
+        """Apply a class map atomically using the Textual 8 API."""
 
-        update_classes = getattr(self, "update_classes", None)
-        if callable(update_classes):
-            update_classes(classes)
-            return
-        for class_name, enabled in classes.items():
-            self.set_class(enabled, class_name)
+        self.update_classes(classes)
 
     def on_click(self, event: events.Click) -> None:
         if not self.metric.target_panel:

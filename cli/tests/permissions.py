@@ -36,15 +36,11 @@ def grant_everyone(path: str | os.PathLike[str], perm: str = "F") -> None:
 
 def set_known_windows_directory_acl(path: str | os.PathLike[str], *, everyone_write: bool = False) -> None:
     """Replace inheritance with a deterministic disposable-directory DACL."""
-    grants = ["*S-1-3-4:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"]
+    from defenseclaw.file_permissions import _set_windows_owner_only_acl
+
+    _set_windows_owner_only_acl(os.fspath(path), set_owner=True)
     if everyone_write:
-        grants.append("*S-1-1-0:(OI)(CI)F")
-    subprocess.run(
-        ["icacls", os.fspath(path), "/inheritance:r", "/grant:r", *grants],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+        grant_everyone(path)
 
 
 def assert_owner_only_file(path: str | os.PathLike[str]) -> None:

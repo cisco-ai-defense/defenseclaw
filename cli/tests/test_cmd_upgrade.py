@@ -1,7 +1,10 @@
 import hashlib
+import importlib.metadata
 import io
 import json
 import os
+import subprocess
+import sys
 import tarfile
 import unittest
 import zipfile
@@ -11,6 +14,7 @@ from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_upgrade import (
+    _TUI_SMOKE_CODE,
     _api_bind_host,
     _assert_required_cli_migrations,
     _check_post_upgrade_drift,
@@ -99,6 +103,26 @@ class TestUpgradeBackup(unittest.TestCase):
 
 
 class TestUpgradeWheelInstall(unittest.TestCase):
+    def test_tui_smoke_code_mounts_real_app_with_textual8(self):
+        self.assertEqual(importlib.metadata.version("textual").split(".", 1)[0], "8")
+        managed_env = os.environ.copy()
+        managed_env.pop("PYTHONHOME", None)
+        managed_env.pop("PYTHONPATH", None)
+        with TemporaryDirectory() as cwd:
+            completed = subprocess.run(
+                [sys.executable, "-I", "-c", _TUI_SMOKE_CODE],
+                cwd=cwd,
+                env=managed_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_install_wheel_uses_managed_venv_python_after_creating_venv(self):
         with TemporaryDirectory() as home, patch.dict(os.environ, isolated_home_env(home)), \
              patch("shutil.which", return_value="/usr/bin/uv"), \
@@ -116,9 +140,25 @@ class TestUpgradeWheelInstall(unittest.TestCase):
 
             _install_wheel("/tmp/defenseclaw.whl", "darwin")
 
-        pip_call = run_mock.call_args_list[-1].args[0]
+        pip_call = next(
+            call.args[0]
+            for call in run_mock.call_args_list
+            if call.args[0][2:4] == ["pip", "install"]
+        )
         self.assertEqual(pip_call[:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
         self.assertEqual(os.path.normcase(os.path.normpath(pip_call[5])), os.path.normcase(venv_python))
+        self.assertIn("--reinstall", pip_call)
+        self.assertIn("--strict", pip_call)
+        check_call = next(
+            call.args[0]
+            for call in run_mock.call_args_list
+            if call.args[0][2:4] == ["pip", "check"]
+        )
+        self.assertEqual(check_call[:4], ["/usr/bin/uv", "--no-config", "pip", "check"])
+        tui_call = run_mock.call_args_list[-1].args[0]
+        self.assertEqual(os.path.normcase(os.path.normpath(tui_call[0])), os.path.normcase(venv_python))
+        self.assertEqual(tui_call[1:3], ["-I", "-c"])
+        self.assertEqual(tui_call[3], _TUI_SMOKE_CODE)
 
     @staticmethod
     def _seed_windows_install(home):
@@ -204,6 +244,113 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             with open(shim) as stream:
                 self.assertEqual(stream.read(), "existing shim")
             self.assertIn("Cannot remove shadowing CLI launcher", err.call_args.args[0])
+
+    def test_windows_pip_check_failure_preserves_existing_launcher(self):
+        with TemporaryDirectory() as home:
+            _venv, install_dir = self._seed_windows_install(home)
+            shim = os.path.join(install_dir, "defenseclaw.cmd")
+            with open(shim, "w") as stream:
+                stream.write("existing launcher")
+
+            def fail_check(args, **kwargs):
+                if args[2:4] == ["pip", "check"]:
+                    raise subprocess.CalledProcessError(
+                        1,
+                        args,
+                        output="scanner requires compatible-runtime",
+                        stderr="dependency check failed",
+                    )
+                return Mock(returncode=0)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run", side_effect=fail_check), \
+                 patch("defenseclaw.commands.cmd_upgrade._publish_windows_cli_launcher") as publish, \
+                 patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(ctx.exception.code, 1)
+            publish.assert_not_called()
+            with open(shim) as stream:
+                self.assertEqual(stream.read(), "existing launcher")
+            self.assertIn("Managed CLI dependency validation failed", err.call_args.args[0])
+
+    def test_windows_pip_check_timeout_reports_captured_output(self):
+        with TemporaryDirectory() as home:
+            self._seed_windows_install(home)
+
+            def timeout_check(args, **_kwargs):
+                if args[2:4] == ["pip", "check"]:
+                    raise subprocess.TimeoutExpired(
+                        args,
+                        60,
+                        output=b"resolver still running",
+                        stderr=b"dependency lock timeout",
+                    )
+                return Mock(returncode=0)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run", side_effect=timeout_check), \
+                 patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(ctx.exception.code, 1)
+            message = err.call_args.args[0]
+            self.assertIn("resolver still running", message)
+            self.assertIn("dependency lock timeout", message)
+
+    def test_windows_tui_failure_preserves_existing_launcher(self):
+        with TemporaryDirectory() as home:
+            venv, install_dir = self._seed_windows_install(home)
+            shim = os.path.join(install_dir, "defenseclaw.cmd")
+            with open(shim, "w") as stream:
+                stream.write("existing launcher")
+            venv_python = os.path.join(venv, "Scripts", "python.exe")
+            failing_tui_smoke = """
+import asyncio
+import tempfile
+from defenseclaw.tui.app import DefenseClawTUI
+
+class FailingTUI(DefenseClawTUI):
+    def compose(self):
+        raise RuntimeError("deliberate TUI mount failure")
+
+async def smoke():
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-tui-smoke-") as data_dir:
+        app = FailingTUI(data_dir=data_dir)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+asyncio.run(smoke())
+"""
+            real_run = subprocess.run
+
+            def fail_tui(args, **kwargs):
+                if (
+                    os.path.normcase(os.path.normpath(args[0])) == os.path.normcase(venv_python)
+                    and args[1:3] == ["-I", "-c"]
+                ):
+                    self.assertEqual(args[3], failing_tui_smoke)
+                    return real_run([sys.executable, *args[1:]], **kwargs)
+                return Mock(returncode=0)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("defenseclaw.commands.cmd_upgrade._TUI_SMOKE_CODE", failing_tui_smoke), \
+                 patch("subprocess.run", side_effect=fail_tui), \
+                 patch("defenseclaw.commands.cmd_upgrade._publish_windows_cli_launcher") as publish, \
+                 patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(ctx.exception.code, 1)
+            publish.assert_not_called()
+            with open(shim) as stream:
+                self.assertEqual(stream.read(), "existing launcher")
+            self.assertIn("Managed TUI launch validation failed", err.call_args.args[0])
 
     def test_windows_launcher_publication_is_idempotent_without_exe_shadow(self):
         with TemporaryDirectory() as home:

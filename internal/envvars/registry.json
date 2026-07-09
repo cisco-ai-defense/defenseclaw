@@ -717,6 +717,20 @@
       "since": "0.2.0"
     },
     {
+      "name": "DEFENSECLAW_OBSERVABILITY_BIN",
+      "category": "runtime_path",
+      "purpose": "Override the executable used by the backward-compatible POSIX local-observability bridge.",
+      "default": "defenseclaw-observability (resolved via PATH)",
+      "accepted_values": ["executable name or absolute path", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "bundles/local_observability_stack/bin/openclaw-observability-bridge:7", "description": "POSIX compatibility bridge selects the lifecycle-controller executable"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Executable selection — a non-default value changes which local program the compatibility bridge launches."
+    },
+    {
       "name": "DEFENSECLAW_OVERLAY_ROOT",
       "category": "runtime_path",
       "purpose": "Extra provider-catalog overlay dir merged on top of the built-in catalog.",
@@ -818,6 +832,20 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh:22", "description": "Each hook exports this"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_CONNECTOR",
+      "category": "hook_internal",
+      "purpose": "Runtime selector for the connector that owns an invocation of the shared hook scripts. Managed installations read the installer-owned connector sidecar; non-managed shells may set this explicitly.",
+      "default": "unset",
+      "accepted_values": ["normalized connector identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/hooks/_hardening.sh:175", "description": "Selects one unambiguous connector runtime record for shared hooks"},
+        {"location": "internal/gateway/connector/subprocess.go:664", "description": "Writes and validates the connector-scoped runtime sidecar"}
+      ],
+      "since": "0.7.0"
     },
     {
       "name": "DEFENSECLAW_HOOK_NAME",
@@ -1049,6 +1077,20 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "cli/defenseclaw/credentials.py", "description": "Credentials registry"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+      "category": "credential",
+      "purpose": "Generated HEC token for the owned bundled Local Splunk sink. Kept separate from remote Splunk Enterprise credentials.",
+      "default": "unset",
+      "accepted_values": ["cryptographically random HEC token", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/observability/local_splunk.py", "description": "Native Local Splunk credential contract"},
+        {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Owned local-splunk audit sink wiring"}
+      ],
+      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
@@ -1565,6 +1607,45 @@
         {"location": "cli/defenseclaw/tui/__init__.py:53", "description": "Gates the interactive first-run setup prompt"}
       ],
       "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_EXE",
+      "category": "test_fixture",
+      "purpose": "Absolute path to the temporary gateway executable invoked by the native Windows daemon executable tests.",
+      "default": "unset",
+      "accepted_values": ["absolute temporary executable path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness invokes the isolated gateway executable"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_COMMAND",
+      "category": "test_fixture",
+      "purpose": "Gateway subcommand selected by the native Windows daemon executable test harness.",
+      "default": "unset",
+      "accepted_values": ["start", "status", "restart", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness passes the selected gateway lifecycle command"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_PROCESS_HELPER",
+      "category": "test_fixture",
+      "purpose": "Activate the isolated subprocess entry point used by native Windows process-snapshot tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/inventory/process_snapshot_windows_test.go:148", "description": "Native Windows test binary enters its named-process helper mode"}
+      ],
+      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_CLAWHUB_LAUNCHER",

@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import defenseclaw.envvars as envvars_module
 from defenseclaw.envvars import (
     ALLOWED_CATEGORIES,
     ALLOWED_SECURITY_IMPACT,
@@ -22,6 +24,23 @@ from defenseclaw.envvars import (
     active_security_overrides,
     load_registry,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _entries_by_name(path: Path) -> dict[str, dict[str, object]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {entry["name"]: entry for entry in payload["entries"]}
+
+
+def _doc_rows_by_name(path: Path) -> dict[str, list[str]]:
+    rows: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| `DEFENSECLAW_"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        rows[cells[0].strip("`")] = cells
+    return rows
 
 
 class RegistryStructureTests(unittest.TestCase):
@@ -65,11 +84,152 @@ class RegistryStructureTests(unittest.TestCase):
         names = [e.name for e in self.registry.entries]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_bundled_registry_matches_source_registry(self) -> None:
-        root = Path(__file__).resolve().parents[2]
-        source = root / "internal" / "envvars" / "registry.json"
-        bundled = root / "cli" / "defenseclaw" / "_data" / "envvars" / "registry.json"
-        self.assertEqual(json.loads(bundled.read_text()), json.loads(source.read_text()))
+    def test_source_registry_precedes_generated_bundle(self) -> None:
+        source = _REPO_ROOT / "internal" / "envvars" / "registry.json"
+        with mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}):
+            self.assertEqual(envvars_module._registry_path(), source)
+
+    def test_installed_package_below_checkout_prefers_its_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "checkout"
+            source = checkout / "internal" / "envvars" / "registry.json"
+            package = (
+                checkout
+                / ".venv"
+                / "Lib"
+                / "site-packages"
+                / "defenseclaw"
+            )
+            bundled = package / "_data" / "envvars" / "registry.json"
+            module = package / "envvars.py"
+            source.parent.mkdir(parents=True)
+            bundled.parent.mkdir(parents=True)
+            source.write_text("source", encoding="utf-8")
+            bundled.write_text("bundle", encoding="utf-8")
+            module.write_text("", encoding="utf-8")
+
+            with (
+                mock.patch.object(envvars_module, "__file__", str(module)),
+                mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}),
+            ):
+                self.assertEqual(envvars_module._registry_path(), bundled)
+
+    def test_new_windows_envvar_contract_is_pinned(self) -> None:
+        expected_registry = {
+            "DEFENSECLAW_CLAWHUB_CWD": {
+                "category": "hook_internal",
+                "default": "unset (set by the ClawHub launcher adapter on Windows)",
+                "accepted_values": ["absolute directory path"],
+                "security_impact": "none",
+                "surface_in_doctor": False,
+            },
+            "DEFENSECLAW_CLAWHUB_LAUNCHER": {
+                "category": "hook_internal",
+                "default": "unset (set by the ClawHub launcher adapter on Windows)",
+                "accepted_values": ["absolute path to a .cmd or .bat launcher"],
+                "security_impact": "none",
+                "surface_in_doctor": False,
+            },
+            "DEFENSECLAW_OBSERVABILITY_BIN": {
+                "category": "runtime_path",
+                "default": "defenseclaw-observability (resolved via PATH)",
+                "accepted_values": ["executable name or absolute path", "unset"],
+                "security_impact": "low",
+                "surface_in_doctor": False,
+            },
+            "DEFENSECLAW_TEST_COMMAND": {
+                "category": "test_fixture",
+                "default": "unset",
+                "accepted_values": ["start", "status", "restart", "unset"],
+                "security_impact": "none",
+                "surface_in_doctor": False,
+            },
+            "DEFENSECLAW_TEST_EXE": {
+                "category": "test_fixture",
+                "default": "unset",
+                "accepted_values": ["absolute temporary executable path", "unset"],
+                "security_impact": "none",
+                "surface_in_doctor": False,
+            },
+            "DEFENSECLAW_TEST_MARKER": {
+                "category": "test_fixture",
+                "default": "unset",
+                "accepted_values": ["absolute file path", "unset"],
+                "security_impact": "none",
+                "surface_in_doctor": False,
+            },
+            "DEFENSECLAW_WINDOWS_PROCESS_HELPER": {
+                "category": "test_fixture",
+                "default": "unset",
+                "accepted_values": ["1", "unset"],
+                "security_impact": "none",
+                "surface_in_doctor": False,
+            },
+        }
+        fields = tuple(next(iter(expected_registry.values())))
+        registry_paths = (
+            _REPO_ROOT / "internal" / "envvars" / "registry.json",
+        )
+        for path in registry_paths:
+            entries = _entries_by_name(path)
+            actual = {
+                name: {field: entries[name][field] for field in fields}
+                for name in expected_registry
+            }
+            self.assertEqual(actual, expected_registry, path)
+
+        expected_doc_cells = {
+            "DEFENSECLAW_CLAWHUB_CWD": (
+                "—",
+                "`unset` (set by the ClawHub launcher adapter on Windows)",
+                "`absolute directory path`",
+            ),
+            "DEFENSECLAW_CLAWHUB_LAUNCHER": (
+                "—",
+                "`unset` (set by the ClawHub launcher adapter on Windows)",
+                "`absolute path to a .cmd or .bat launcher`",
+            ),
+            "DEFENSECLAW_OBSERVABILITY_BIN": (
+                "low",
+                "defenseclaw-observability (resolved via PATH)",
+                "`executable name or absolute path`, `unset`",
+            ),
+            "DEFENSECLAW_TEST_COMMAND": (
+                "—",
+                "`unset`",
+                "`start`, `status`, `restart`, `unset`",
+            ),
+            "DEFENSECLAW_TEST_EXE": (
+                "—",
+                "`unset`",
+                "`absolute temporary executable path`, `unset`",
+            ),
+            "DEFENSECLAW_TEST_MARKER": (
+                "—",
+                "`unset`",
+                "`absolute file path`, `unset`",
+            ),
+            "DEFENSECLAW_WINDOWS_PROCESS_HELPER": (
+                "—",
+                "`unset`",
+                "`1`, `unset`",
+            ),
+        }
+        doc_paths = (
+            _REPO_ROOT / "docs" / "ENV-VARS.md",
+            _REPO_ROOT
+            / "docs-site"
+            / "content"
+            / "docs"
+            / "reference"
+            / "env-vars.mdx",
+        )
+        for path in doc_paths:
+            rows = _doc_rows_by_name(path)
+            actual = {
+                name: tuple(rows[name][1:4]) for name in expected_doc_cells
+            }
+            self.assertEqual(actual, expected_doc_cells, path)
 
     def test_names_use_canonical_prefix(self) -> None:
         for e in self.registry.entries:

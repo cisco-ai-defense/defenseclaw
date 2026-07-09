@@ -5,22 +5,22 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
-# SPDX-License-Identifier: Apache-2.0
 
-"""Native-Windows capability gates for Bash-backed local telemetry stacks."""
+"""Windows capability matrix: both bundled stacks use native controllers."""
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 from defenseclaw import config
 from defenseclaw.context import AppContext
-from defenseclaw.platform_support import LOCAL_SHELL_STACKS_UNSUPPORTED_REASON
+from defenseclaw.observability.local_splunk import ENV_FILE_REL, _credential_values
+from defenseclaw.paths import bundled_splunk_bridge_dir
 
 
 def _app(data_dir: Path) -> AppContext:
@@ -31,316 +31,91 @@ def _app(data_dir: Path) -> AppContext:
     return app
 
 
-def _snapshot(root: Path) -> dict[str, bytes]:
-    return {
-        str(path.relative_to(root)): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        (),
-        ("up",),
-        ("down", "--disable-config"),
-        ("reset", "--yes"),
-        ("status",),
-        ("logs", "--service", "otel-collector"),
-        ("url", "--json"),
-    ],
-)
-def test_local_observability_cli_gates_every_route_before_helpers_and_writes(
-    tmp_path: Path, args: tuple[str, ...]
-) -> None:
+def test_local_observability_routes_are_available_on_windows(tmp_path: Path) -> None:
     from defenseclaw.commands.cmd_setup_local_observability import local_observability
 
-    data_dir = tmp_path / "state with spaces"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
+    app = _app(tmp_path / "state with spaces Ω")
+    with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+        url = CliRunner().invoke(local_observability, ["url", "--json"], obj=app)
+        env = CliRunner().invoke(local_observability, ["env", "--json"], obj=app)
+    assert url.exit_code == 0, url.output
+    assert json.loads(url.output)["otlp_endpoint"] == "127.0.0.1:4317"
+    assert env.exit_code == 0, env.output
+    assert json.loads(env.output)["OTEL_EXPORTER_OTLP_PROTOCOL"] == "grpc"
+    assert "unsupported" not in (url.output + env.output).lower()
+
+
+def test_local_otlp_preset_is_available_on_windows(tmp_path: Path) -> None:
+    from defenseclaw.commands.cmd_setup_observability import observability
+
+    app = _app(tmp_path / "preset state")
     with (
-        patch(
-            "defenseclaw.commands.cmd_setup_local_observability.local_shell_stacks_supported",
-            return_value=False,
-        ),
-        patch("defenseclaw.commands.cmd_setup_local_observability._resolve_bridge") as resolve,
-        patch("defenseclaw.commands.cmd_setup_local_observability.subprocess.run") as run,
-        patch(
-            "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack"
-        ) as refresh,
+        patch("defenseclaw.platform_support.host_os", return_value="windows"),
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
     ):
-        result = CliRunner().invoke(local_observability, list(args), obj=app)
-
-    assert result.exit_code != 0
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    assert "Traceback" not in result.output
-    resolve.assert_not_called()
-    run.assert_not_called()
-    refresh.assert_not_called()
-    assert _snapshot(data_dir) == before
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        ("splunk", "--logs", "--non-interactive", "--accept-splunk-license"),
-        ("splunk", "--s3-export", "--s3-bucket", "bucket", "--non-interactive", "--accept-splunk-license"),
-        ("splunk", "--disable", "--logs"),
-        (
-            "splunk",
-            "--o11y",
-            "--logs",
-            "--access-token",
-            "remote-token",
-            "--non-interactive",
-            "--accept-splunk-license",
-        ),
-    ],
-)
-def test_local_splunk_cli_gates_before_remote_or_local_side_effects(
-    tmp_path: Path, args: tuple[str, ...]
-) -> None:
-    from defenseclaw.commands.cmd_setup import setup
-
-    data_dir = tmp_path / "state with spaces"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
-    with (
-        patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=False),
-        patch("defenseclaw.commands.cmd_setup._setup_o11y") as o11y,
-        patch("defenseclaw.commands.cmd_setup._preflight_docker") as preflight,
-        patch("defenseclaw.commands.cmd_setup._ensure_private_splunk_bridge_env") as env_file,
-        patch("defenseclaw.commands.cmd_setup._resolve_bridge_bin") as resolve,
-        patch("defenseclaw.commands.cmd_setup.subprocess.run") as run,
-    ):
-        result = CliRunner().invoke(setup, list(args), obj=app)
-
-    assert result.exit_code != 0
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    assert "Traceback" not in result.output
-    o11y.assert_not_called()
-    preflight.assert_not_called()
-    env_file.assert_not_called()
-    resolve.assert_not_called()
-    run.assert_not_called()
-    assert _snapshot(data_dir) == before
-
-
-def test_splunk_show_credentials_remains_read_only_on_windows(tmp_path: Path) -> None:
-    from defenseclaw.commands.cmd_setup import setup
-
-    data_dir = tmp_path / "read only credentials"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
-    with patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=False):
-        result = CliRunner().invoke(setup, ["splunk", "--show-credentials"], obj=app)
-
+        result = CliRunner().invoke(observability, ["add", "local-otlp", "--non-interactive"], obj=app)
     assert result.exit_code == 0, result.output
-    assert "Splunk credentials not found" in result.output
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON not in result.output
-    assert _snapshot(data_dir) == before
+    apply_preset.assert_called_once()
 
 
-def test_interactive_splunk_hides_local_choice_but_keeps_remote_choices(tmp_path: Path) -> None:
+def test_local_splunk_routes_to_setup_on_windows(tmp_path: Path) -> None:
     from defenseclaw.commands.cmd_setup import setup
 
-    data_dir = tmp_path / "interactive state"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
+    app = _app(tmp_path / "splunk state")
     with (
-        patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=False),
-        patch("defenseclaw.commands.cmd_setup._interactive_logs") as local_logs,
-        patch("defenseclaw.commands.cmd_setup._preflight_docker") as preflight,
-    ):
-        result = CliRunner().invoke(setup, ["splunk"], obj=app, input="n\nn\n")
-
-    assert result.exit_code == 0, result.output
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    assert "Enable local Splunk" not in result.output
-    local_logs.assert_not_called()
-    preflight.assert_not_called()
-    assert _snapshot(data_dir) == before
-
-
-@pytest.mark.parametrize(
-    "args, helper",
-    [
-        (("splunk", "--o11y", "--access-token", "token", "--non-interactive"), "_setup_o11y"),
-        (
-            (
-                "splunk",
-                "--enterprise",
-                "--hec-endpoint",
-                "https://splunk.example.test:8088/services/collector/event",
-                "--hec-token",
-                "token",
-                "--non-interactive",
-                "--skip-test",
-            ),
-            "_setup_enterprise",
-        ),
-    ],
-)
-def test_remote_splunk_routes_remain_available_on_windows(
-    tmp_path: Path, args: tuple[str, ...], helper: str
-) -> None:
-    from defenseclaw.commands.cmd_setup import setup
-
-    app = _app(tmp_path / "remote state")
-    with (
-        patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=False),
-        patch(f"defenseclaw.commands.cmd_setup.{helper}") as remote,
+        patch("defenseclaw.platform_support.host_os", return_value="windows"),
+        patch("defenseclaw.commands.cmd_setup._preflight_docker") as legacy_preflight,
+        patch("defenseclaw.commands.cmd_setup._setup_logs", return_value=True) as setup_logs,
         patch("defenseclaw.commands.cmd_setup._print_splunk_status"),
         patch("defenseclaw.commands.cmd_setup.print_redaction_status_hint"),
-    ):
-        result = CliRunner().invoke(setup, list(args), obj=app)
-
-    assert result.exit_code == 0, result.output
-    remote.assert_called_once()
-    assert "Traceback" not in result.output
-
-
-def test_generic_local_otlp_preset_gates_before_prompt_or_write(tmp_path: Path) -> None:
-    from defenseclaw.commands.cmd_setup_observability import observability
-
-    data_dir = tmp_path / "preset state"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
-    with (
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
-            return_value=False,
-        ),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply,
+        patch("defenseclaw.commands.cmd_setup._print_splunk_next_steps"),
     ):
         result = CliRunner().invoke(
-            observability,
-            ["add", "local-otlp", "--non-interactive"],
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
             obj=app,
         )
-
-    assert result.exit_code != 0
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    assert "Traceback" not in result.output
-    apply.assert_not_called()
-    assert _snapshot(data_dir) == before
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        ("enable", "local-observability"),
-        ("disable", "local-observability"),
-        ("remove", "local-observability", "--yes"),
-        ("test", "local-observability"),
-    ],
-)
-def test_generic_observability_management_gates_existing_local_destination(
-    tmp_path: Path, args: tuple[str, ...]
-) -> None:
-    from defenseclaw.commands.cmd_setup_observability import observability
-
-    data_dir = tmp_path / "existing local state"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
-    destination = SimpleNamespace(
-        name="local-observability",
-        preset_id="local-otlp",
-        kind="otlp",
-        target="otel",
-        enabled=True,
-        signals={"traces": True},
-        endpoint="127.0.0.1:4317",
-        protocol="grpc",
-    )
-    with (
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
-            return_value=False,
-        ),
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.list_destinations",
-            return_value=[destination],
-        ),
-        patch("defenseclaw.commands.cmd_setup_observability.set_destination_enabled") as enable,
-        patch("defenseclaw.commands.cmd_setup_observability.remove_destination") as remove,
-        patch("defenseclaw.commands.cmd_setup_observability._test_otel") as probe,
-    ):
-        result = CliRunner().invoke(observability, list(args), obj=app)
-
-    assert result.exit_code != 0
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    assert "Traceback" not in result.output
-    enable.assert_not_called()
-    remove.assert_not_called()
-    probe.assert_not_called()
-    assert _snapshot(data_dir) == before
-
-
-def test_observability_json_status_labels_local_unsupported_and_remote_supported(
-    tmp_path: Path,
-) -> None:
-    from defenseclaw.commands.cmd_setup_observability import observability
-
-    app = _app(tmp_path / "json status")
-    local = SimpleNamespace(
-        name="local-observability",
-        preset_id="local-otlp",
-        kind="otlp",
-        target="otel",
-        enabled=True,
-        signals={"traces": True},
-        endpoint="127.0.0.1:4317",
-        protocol="grpc",
-    )
-    remote = SimpleNamespace(
-        name="remote-otlp",
-        preset_id="otlp",
-        kind="otlp",
-        target="otel",
-        enabled=True,
-        signals={"traces": True},
-        endpoint="collector.example.test:4317",
-        protocol="grpc",
-    )
-    with (
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
-            return_value=False,
-        ),
-        patch(
-            "defenseclaw.platform_support.local_shell_stacks_supported",
-            return_value=False,
-        ),
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.list_destinations",
-            return_value=[local, remote],
-        ),
-    ):
-        result = CliRunner().invoke(observability, ["list", "--json"], obj=app)
-
     assert result.exit_code == 0, result.output
-    assert '"name": "local-observability"' in result.output
-    assert '"platform_status": "unsupported"' in result.output
-    assert '"platform_status": "supported"' in result.output
+    legacy_preflight.assert_not_called()
+    setup_logs.assert_called_once()
 
 
-def test_generic_observability_local_splunk_endpoint_gates_before_secret_or_write(
+def test_explicit_show_credentials_explains_free_mode_and_reveals_generated_values(
     tmp_path: Path,
 ) -> None:
+    from defenseclaw.commands.cmd_setup import setup
+
+    data_dir = tmp_path / "credentials Ω"
+    app = _app(data_dir)
+    bridge = data_dir / "splunk-bridge"
+    shutil.copytree(bundled_splunk_bridge_dir(), bridge)
+    values = _credential_values(
+        {"SPLUNK_IMAGE": "example.invalid/splunk:test"},
+        {},
+        index="defenseclaw_local",
+        source="defenseclaw",
+        sourcetype="defenseclaw:json",
+    )
+    (bridge / ENV_FILE_REL).write_text(
+        "".join(f"{key}={value}\n" for key, value in sorted(values.items())),
+        encoding="utf-8",
+    )
+    with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+        result = CliRunner().invoke(setup, ["splunk", "--show-credentials"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "Web auth:  disabled in Splunk Free mode" in result.output
+    assert values["DEFENSECLAW_HEC_TOKEN"] in result.output
+    assert values["SPLUNK_PASSWORD"] in result.output
+    assert "it is not a Web login" in result.output
+
+
+def test_loopback_splunk_hec_preset_is_available(tmp_path: Path) -> None:
     from defenseclaw.commands.cmd_setup_observability import observability
 
-    data_dir = tmp_path / "local splunk preset"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
+    app = _app(tmp_path / "hec state")
     with (
-        patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
-            return_value=False,
-        ),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply,
-        patch("defenseclaw.commands.cmd_setup_observability._prompt_secret") as secret_prompt,
+        patch("defenseclaw.platform_support.host_os", return_value="windows"),
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
     ):
         result = CliRunner().invoke(
             observability,
@@ -349,32 +124,54 @@ def test_generic_observability_local_splunk_endpoint_gates_before_secret_or_writ
                 "splunk-hec",
                 "--endpoint",
                 "http://127.0.0.1:8088/services/collector/event",
+                "--token",
+                "test-token",
                 "--non-interactive",
             ],
             obj=app,
         )
-
-    assert result.exit_code != 0
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    secret_prompt.assert_not_called()
-    apply.assert_not_called()
-    assert _snapshot(data_dir) == before
+    assert result.exit_code == 0, result.output
+    apply_preset.assert_called_once()
 
 
-def test_generic_observability_resolves_local_splunk_defaults_before_gate(
+def test_remote_splunk_hec_remains_available(tmp_path: Path) -> None:
+    from defenseclaw.commands.cmd_setup_observability import observability
+
+    app = _app(tmp_path / "remote state")
+    with (
+        patch("defenseclaw.platform_support.host_os", return_value="windows"),
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
+    ):
+        result = CliRunner().invoke(
+            observability,
+            [
+                "add",
+                "splunk-hec",
+                "--endpoint",
+                "https://splunk.example.test:8088/services/collector/event",
+                "--token",
+                "test-token",
+                "--non-interactive",
+            ],
+            obj=app,
+        )
+    assert result.exit_code == 0, result.output
+    apply_preset.assert_called_once()
+
+
+def test_local_splunk_defaults_are_resolved_before_an_unavailable_stack_gate(
     tmp_path: Path,
 ) -> None:
     from defenseclaw.commands.cmd_setup_observability import observability
+    from defenseclaw.platform_support import LOCAL_SPLUNK_UNSUPPORTED_REASON
 
-    data_dir = tmp_path / "default local splunk preset"
-    app = _app(data_dir)
-    before = _snapshot(data_dir)
+    app = _app(tmp_path / "default local splunk preset")
     with (
         patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
             return_value=False,
         ),
-        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply,
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
     ):
         result = CliRunner().invoke(
             observability,
@@ -383,22 +180,20 @@ def test_generic_observability_resolves_local_splunk_defaults_before_gate(
         )
 
     assert result.exit_code != 0
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    apply.assert_not_called()
-    assert _snapshot(data_dir) == before
+    assert LOCAL_SPLUNK_UNSUPPORTED_REASON in result.output
+    apply_preset.assert_not_called()
 
 
-def test_splunk_enterprise_loopback_is_not_treated_as_bundled_local_stack(
-    tmp_path: Path,
-) -> None:
+def test_splunk_enterprise_loopback_is_not_the_bundled_local_stack(tmp_path: Path) -> None:
     from defenseclaw.commands.cmd_setup_observability import observability
-    from defenseclaw.observability import list_destinations
 
-    data_dir = tmp_path / "loopback enterprise"
-    app = _app(data_dir)
-    with patch(
-        "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
-        return_value=False,
+    app = _app(tmp_path / "loopback enterprise")
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_observability.local_splunk_stack_supported",
+            return_value=False,
+        ),
+        patch("defenseclaw.commands.cmd_setup_observability.apply_preset") as apply_preset,
     ):
         result = CliRunner().invoke(
             observability,
@@ -415,81 +210,91 @@ def test_splunk_enterprise_loopback_is_not_treated_as_bundled_local_stack(
         )
 
     assert result.exit_code == 0, result.output
-    destinations = list_destinations(str(data_dir))
-    assert len(destinations) == 1
-    assert destinations[0].preset_id == "splunk-enterprise"
+    apply_preset.assert_called_once()
 
 
-def test_legacy_local_splunk_migration_is_gated_before_config_write(tmp_path: Path) -> None:
+def test_destination_classifier_keeps_loopback_enterprise_remote() -> None:
+    from defenseclaw.platform_support import destination_platform_unsupported
+
+    assert not destination_platform_unsupported(
+        preset_id="splunk-enterprise",
+        kind="splunk_hec",
+        endpoint="http://localhost:8088/services/collector/event",
+        os_name="plan9",
+    )
+    assert destination_platform_unsupported(
+        preset_id="splunk-hec",
+        kind="splunk_hec",
+        endpoint="http://localhost:8088/services/collector/event",
+        os_name="plan9",
+    )
+
+
+def test_json_status_marks_both_local_stacks_supported(
+    tmp_path: Path,
+) -> None:
     from defenseclaw.commands.cmd_setup_observability import observability
 
-    data_dir = tmp_path / "legacy local splunk"
-    data_dir.mkdir(parents=True)
-    config_bytes = (
-        b"config_version: 4\n"
-        b"splunk:\n"
-        b"  enabled: true\n"
-        b"  hec_endpoint: http://127.0.0.1:8088/services/collector/event\n"
+    app = _app(tmp_path / "json state")
+    local = SimpleNamespace(
+        name="local-observability",
+        preset_id="local-otlp",
+        kind="otlp",
+        target="otel",
+        enabled=True,
+        signals={"traces": True},
+        endpoint="127.0.0.1:4317",
+        protocol="grpc",
+        scope="global",
+        connector="",
     )
-    (data_dir / "config.yaml").write_bytes(config_bytes)
-    app = AppContext()
-    app.cfg = config.Config(data_dir=str(data_dir))
+    splunk = SimpleNamespace(
+        name="local-splunk",
+        preset_id="splunk-hec",
+        kind="splunk_hec",
+        target="audit_sinks",
+        enabled=True,
+        signals={},
+        endpoint="http://127.0.0.1:8088/services/collector/event",
+        protocol="http",
+        scope="global",
+        connector="",
+    )
     with (
+        patch("defenseclaw.platform_support.host_os", return_value="windows"),
         patch(
-            "defenseclaw.commands.cmd_setup_observability.local_shell_stacks_supported",
-            return_value=False,
+            "defenseclaw.commands.cmd_setup_observability.list_destinations",
+            return_value=[local, splunk],
         ),
-        patch("defenseclaw.commands.cmd_setup_observability.write_config_yaml_secure") as write,
     ):
-        result = CliRunner().invoke(
-            observability,
-            ["migrate-splunk", "--apply"],
-            obj=app,
-        )
-
-    assert result.exit_code != 0
-    assert LOCAL_SHELL_STACKS_UNSUPPORTED_REASON in result.output
-    write.assert_not_called()
-    assert (data_dir / "config.yaml").read_bytes() == config_bytes
+        result = CliRunner().invoke(observability, ["list", "--json"], obj=app)
+    assert result.exit_code == 0, result.output
+    payload = {item["name"]: item["platform_status"] for item in json.loads(result.output)}
+    assert payload == {"local-observability": "supported", "local-splunk": "supported"}
 
 
-def test_tui_disables_local_actions_and_preserves_remote_options() -> None:
+def test_tui_capabilities_are_split_on_windows() -> None:
     from defenseclaw.tui.panels.setup import (
         SetupPanelModel,
         SetupWizard,
         observability_wizard_fields,
         splunk_wizard_fields,
-        wizard_goals,
     )
     from defenseclaw.tui.registry import build_registry
 
     model = SetupPanelModel(os_name="windows")
     info = next(item for item in model.wizard_infos() if item.wizard == SetupWizard.LOCAL_OBSERVABILITY)
-    assert info.status == "unsupported"
-    assert model.wizard_available(SetupWizard.LOCAL_OBSERVABILITY) is False
-    model.active_wizard = SetupWizard.LOCAL_OBSERVABILITY
-    assert model.active_wizard_info().status == "unsupported"
-    assert model.open_goal_menu(SetupWizard.LOCAL_OBSERVABILITY) is False
-    assert model.form_active is False
+    assert info.status != "unsupported"
+    assert model.wizard_available(SetupWizard.LOCAL_OBSERVABILITY) is True
+    assert any(entry.cli_args[:2] == ("setup", "local-observability") for entry in build_registry("windows"))
 
-    splunk_fields = splunk_wizard_fields("windows")
-    mode = next(field for field in splunk_fields if field.label == "Mode")
-    assert "local-docker" not in mode.options
-    assert "enterprise" in mode.options
-    assert "splunk-o11y" in mode.options
-    assert not any(field.label == "Enable Local Logs" for field in splunk_fields)
-    with patch("defenseclaw.tui.panels.setup.local_shell_stacks_supported", return_value=False):
-        assert all(goal.id != "local-docker" for goal in wizard_goals(SetupWizard.SPLUNK))
-        presets = next(field for field in observability_wizard_fields("splunk-o11y") if field.label == "Preset")
-        assert "local-otlp" not in presets.options
-        assert "otlp" in presets.options
-
-    registry = build_registry("windows")
-    assert not any(entry.cli_args[:2] == ("setup", "local-observability") for entry in registry)
-    assert any(entry.cli_args[:2] == ("setup", "splunk") for entry in registry)
+    mode = next(field for field in splunk_wizard_fields("windows") if field.label == "Mode")
+    assert "local-docker" in mode.options
+    preset = next(field for field in observability_wizard_fields("splunk-o11y") if field.label == "Preset")
+    assert "local-otlp" in preset.options
 
 
-def test_tui_existing_local_state_is_unsupported_while_remote_stays_enabled() -> None:
+def test_overview_state_marks_both_local_stacks_enabled() -> None:
     from defenseclaw.tui.services.overview_state import (
         HealthSnapshot,
         OverviewConfig,
@@ -501,12 +306,7 @@ def test_tui_existing_local_state_is_unsupported_while_remote_stays_enabled() ->
     model.set_health(
         HealthSnapshot(
             telemetry=SubsystemHealth(
-                details={
-                    "destinations": [
-                        {"name": "local-observability", "preset": "local-otlp", "enabled": True},
-                        {"name": "remote-otlp", "preset": "otlp", "enabled": True},
-                    ]
-                }
+                details={"destinations": [{"name": "local-observability", "preset": "local-otlp", "enabled": True}]}
             ),
             sinks=SubsystemHealth(
                 details={
@@ -516,75 +316,25 @@ def test_tui_existing_local_state_is_unsupported_while_remote_stays_enabled() ->
                             "kind": "splunk_hec",
                             "enabled": True,
                             "endpoint": "http://127.0.0.1:8088/services/collector/event",
-                        },
-                        {
-                            "name": "remote-splunk",
-                            "kind": "splunk_hec",
-                            "enabled": True,
-                            "endpoint": "https://splunk.example.test:8088/services/collector/event",
-                        },
+                        }
                     ]
                 }
             ),
         )
     )
-    with patch(
-        "defenseclaw.tui.services.overview_state.local_shell_stacks_supported",
-        return_value=False,
-    ):
+    with patch("defenseclaw.platform_support.host_os", return_value="windows"):
         states = {row.name: row.state for row in model.observability_destination_rows()}
-
-    assert states == {
-        "local-observability": "unsupported",
-        "remote-otlp": "enabled",
-        "local-splunk": "unsupported",
-        "remote-splunk": "enabled",
-    }
+    assert states == {"local-observability": "enabled", "local-splunk": "enabled"}
 
 
-def test_cli_status_labels_existing_local_state_unsupported(capsys) -> None:
-    from defenseclaw.commands.cmd_status import _print_observability_status
+def test_platform_capability_truth_table() -> None:
+    from defenseclaw.platform_support import (
+        local_observability_stack_supported,
+        local_splunk_stack_supported,
+    )
 
-    destinations = [
-        SimpleNamespace(
-            name="local-observability",
-            preset_id="local-otlp",
-            kind="otlp",
-            target="otel",
-            enabled=True,
-            signals={"traces": True},
-            endpoint="127.0.0.1:4317",
-        ),
-        SimpleNamespace(
-            name="remote-otlp",
-            preset_id="otlp",
-            kind="otlp",
-            target="otel",
-            enabled=True,
-            signals={"traces": True},
-            endpoint="collector.example.test:4317",
-        ),
-    ]
-    with (
-        patch("defenseclaw.observability.list_destinations", return_value=destinations),
-        patch("defenseclaw.platform_support.local_shell_stacks_supported", return_value=False),
-    ):
-        _print_observability_status(SimpleNamespace(data_dir="unused"))
-
-    output = capsys.readouterr().out
-    assert "local-observability" in output
-    assert "unsupported on native Windows" in output
-    assert "remote-otlp" in output
-    assert "enabled" in output
-
-
-@pytest.mark.parametrize("os_name", ["linux", "darwin"])
-def test_supported_platform_capability_and_tui_routes_are_unchanged(os_name: str) -> None:
-    from defenseclaw.platform_support import local_shell_stacks_supported
-    from defenseclaw.tui.panels.setup import splunk_wizard_fields
-    from defenseclaw.tui.registry import build_registry
-
-    assert local_shell_stacks_supported(os_name) is True
-    mode = next(field for field in splunk_wizard_fields(os_name) if field.label == "Mode")
-    assert "local-docker" in mode.options
-    assert any(entry.cli_args[:2] == ("setup", "local-observability") for entry in build_registry(os_name))
+    assert local_observability_stack_supported("windows") is True
+    assert local_splunk_stack_supported("windows") is True
+    for os_name in ("linux", "darwin"):
+        assert local_observability_stack_supported(os_name) is True
+        assert local_splunk_stack_supported(os_name) is True

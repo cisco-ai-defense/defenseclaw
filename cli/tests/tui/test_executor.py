@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import defenseclaw.tui.app as app_module
+import defenseclaw.tui.windows_process as windows_process
 import pytest
 from defenseclaw.tui.executor import (
     CommandExecutor,
@@ -164,6 +165,16 @@ def test_managed_subprocess_is_suspended_only_on_windows() -> None:
         assert kwargs == {}
 
 
+def test_windows_job_allows_only_explicit_managed_breakaway() -> None:
+    baseline = windows_process._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE  # noqa: SLF001
+    explicit = baseline | windows_process._JOB_OBJECT_LIMIT_BREAKAWAY_OK  # noqa: SLF001
+
+    assert windows_process._TUI_JOB_LIMIT_FLAGS == baseline  # noqa: SLF001
+    assert windows_process._job_limit_flags(allow_breakaway=False) == baseline  # noqa: SLF001
+    assert windows_process._job_limit_flags(allow_breakaway=True) == explicit  # noqa: SLF001
+    assert explicit & 0x00001000 == 0  # no silent breakaway.
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows console allocation behavior")
 @pytest.mark.asyncio
 async def test_executor_captured_child_has_no_windows_console() -> None:
@@ -277,6 +288,21 @@ async def test_cancel_after_exit_is_a_noop() -> None:
     assert accepted is False
     assert len([event for event in events if event.kind == "done"]) == 1
     assert events[-1].cancelled is False
+    assert events[-1].exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_redirected_subprocess_output_is_decoded_as_utf8() -> None:
+    payload = "café — 防御 🛡️"
+    encoded_line = (payload + "\n").encode("utf-8")
+    executor = CommandExecutor(use_pty=False)
+
+    events = await _collect(
+        executor,
+        ("-c", f"import sys; sys.stdout.buffer.write({encoded_line!r}); sys.stdout.buffer.flush()"),
+    )
+
+    assert [event.text for event in events if event.kind == "output"] == [payload]
     assert events[-1].exit_code == 0
 
 

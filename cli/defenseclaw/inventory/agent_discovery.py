@@ -122,6 +122,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
     """
     local_app_data = os.environ.get("LOCALAPPDATA", "")
     roaming_app_data = os.environ.get("APPDATA", "")
+    system_root = os.environ.get("SYSTEMROOT", "") or os.environ.get("WINDIR", "")
     home = os.path.expanduser("~")
     program_roots = tuple(
         path
@@ -149,6 +150,9 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                     "venv",
                     "Scripts",
                 ),
+                # Hermes/uv installs the native uvx.exe launcher here. Keep
+                # the prefix product-specific; never trust all LOCALAPPDATA.
+                os.path.join(local_app_data, "hermes", "bin"),
                 os.path.join(local_app_data, "agy", "bin"),
                 os.path.join(local_app_data, "Programs", "antigravity"),
                 os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
@@ -170,11 +174,20 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
     for root in program_roots:
         candidates.extend(
             (
+                # The official Node.js MSI installs npx.cmd beside node.exe.
+                # MCP scanning resolves only that exact wrapper and still
+                # applies the owner/DACL chain checks below.
+                os.path.join(root, "nodejs"),
                 os.path.join(root, "OpenAI", "Codex", "bin"),
                 os.path.join(root, "cursor", "resources", "app", "bin"),
                 os.path.join(root, "Windsurf", "bin"),
             )
         )
+    if system_root:
+        # npx.cmd requires the native command processor because CreateProcess
+        # cannot execute a batch wrapper as an image. Trust only System32 and
+        # retain the same owner/DACL checks as every other executable prefix.
+        candidates.append(os.path.join(system_root, "System32"))
     return tuple(candidates)
 
 

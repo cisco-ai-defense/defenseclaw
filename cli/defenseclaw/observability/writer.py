@@ -39,6 +39,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+import stat
 import tempfile
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
@@ -48,7 +49,7 @@ from urllib.parse import urlparse
 import yaml
 
 from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import reject_reparse_path, set_file_mode
 from defenseclaw.observability.presets import Preset, Signal, resolve_preset
 from defenseclaw.safety import sanitize_dotenv_value
 
@@ -140,6 +141,7 @@ def apply_preset(
     enabled: bool = True,
     signals: tuple[Signal, ...] | None = None,
     secret_value: str | None = None,
+    secret_env_name: str | None = None,
     target_override: str | None = None,
     dry_run: bool = False,
 ) -> WriteResult:
@@ -171,6 +173,10 @@ def apply_preset(
         ``preset.token_env``. Must not be empty when the preset declares
         a ``token_env`` and no value already exists. Callers are
         responsible for prompting/redacting.
+    secret_env_name:
+        Optional destination-specific environment variable override. This is
+        used by bundled Local Splunk so its generated token cannot overwrite a
+        separately configured remote Splunk Enterprise token.
     target_override:
         For presets that support multiple targets (``otlp`` →
         ``otel`` | ``audit_sinks``), force one. Ignored for all other
@@ -184,6 +190,9 @@ def apply_preset(
         On unknown preset / missing required inputs.
     """
     preset = resolve_preset(preset_id)
+    effective_secret_env = secret_env_name or preset.token_env
+    if effective_secret_env and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", effective_secret_env):
+        raise ValueError("secret_env_name must be an uppercase environment variable name")
     effective_target = _resolve_target(preset, target_override)
     resolved_inputs = _resolve_inputs(preset, inputs)
     dest_name = _destination_name(preset, name, resolved_inputs)
@@ -217,6 +226,7 @@ def apply_preset(
                 resolved_inputs,
                 name=dest_name,
                 enabled=enabled,
+                token_env=effective_secret_env,
                 warnings=warnings,
             )
 
@@ -225,6 +235,7 @@ def apply_preset(
             data_dir,
             preset,
             secret_value,
+            token_env=effective_secret_env,
             dry_run=dry_run,
         )
 
@@ -882,6 +893,7 @@ def _apply_audit_sink_preset(
     *,
     name: str,
     enabled: bool,
+    token_env: str | None = None,
     warnings: list[str],
 ) -> None:
     sinks = raw.setdefault("audit_sinks", [])
@@ -890,7 +902,13 @@ def _apply_audit_sink_preset(
         sinks = []
         raw["audit_sinks"] = sinks
 
-    entry = _build_sink_entry(preset, inputs, name=name, enabled=enabled)
+    entry = _build_sink_entry(
+        preset,
+        inputs,
+        name=name,
+        enabled=enabled,
+        token_env=token_env or preset.token_env,
+    )
     existing_idx = -1
     for i, s in enumerate(sinks):
         if isinstance(s, dict) and s.get("name") == name:
@@ -915,6 +933,7 @@ def _build_sink_entry(
     *,
     name: str,
     enabled: bool,
+    token_env: str | None = None,
 ) -> dict[str, Any]:
     kind = preset.sink_kind or ""
     # The generic ``otlp`` preset declares target=otel and sink_kind=None
@@ -969,7 +988,7 @@ def _build_sink_entry(
             )
         block: dict[str, Any] = {
             "endpoint": endpoint,
-            "token_env": preset.token_env,
+            "token_env": token_env or preset.token_env,
             "index": inputs.get("index", "defenseclaw"),
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
@@ -1011,8 +1030,9 @@ def _build_sink_entry(
             "url": url,
             "method": method,
         }
-        if preset.token_env:
-            block["bearer_env"] = preset.token_env
+        effective_token_env = token_env or preset.token_env
+        if effective_token_env:
+            block["bearer_env"] = effective_token_env
         headers = dict(preset.otel_headers)  # usually empty for webhook
         if headers:
             block["headers"] = headers
@@ -1206,27 +1226,29 @@ def _apply_secret(
     preset: Preset,
     secret_value: str | None,
     *,
+    token_env: str | None = None,
     dry_run: bool,
 ) -> list[str]:
-    if not preset.token_env:
+    token_env = token_env or preset.token_env
+    if not token_env:
         return []
     if not secret_value:
         # No new value — caller may have passed the secret through the
         # environment or dotenv already. Emit an advisory.
         dotenv = _load_dotenv(os.path.join(data_dir, DOTENV_FILE_NAME))
-        if preset.token_env not in dotenv and not os.environ.get(preset.token_env):
+        if token_env not in dotenv and not os.environ.get(token_env):
             return [
-                f"{preset.token_env}: not set — sink/exporter will fail until exported or added to ~/.defenseclaw/.env",
+                f"{token_env}: not set — sink/exporter will fail until exported or added to ~/.defenseclaw/.env",
             ]
         return []
     if dry_run:
-        return [f"{preset.token_env}: (would write to ~/.defenseclaw/.env)"]
+        return [f"{token_env}: (would write to ~/.defenseclaw/.env)"]
     path = os.path.join(data_dir, DOTENV_FILE_NAME)
     existing = _load_dotenv(path)
-    existing[preset.token_env] = secret_value
+    existing[token_env] = secret_value
     _write_dotenv(path, existing)
-    os.environ[preset.token_env] = secret_value
-    return [f"{preset.token_env}: written to ~/.defenseclaw/.env"]
+    os.environ[token_env] = secret_value
+    return [f"{token_env}: written to ~/.defenseclaw/.env"]
 
 
 # ---------------------------------------------------------------------------
@@ -1334,8 +1356,18 @@ def _is_remote_splunk_endpoint(endpoint: str) -> bool:
 
 def _load_dotenv(path: str) -> dict[str, str]:
     out: dict[str, str] = {}
+    reject_reparse_path(path)
+    descriptor = -1
     try:
-        with open(path) as f:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"dotenv path is not a regular file: {path}")
+        stream = os.fdopen(descriptor, encoding="utf-8")
+        descriptor = -1
+        with stream as f:
             for raw_line in f:
                 line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -1348,20 +1380,24 @@ def _load_dotenv(path: str) -> dict[str, str]:
                     out[k] = v
     except FileNotFoundError:
         pass
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
     return out
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     lines = [f"{k}={sanitize_dotenv_value(v, key=k)}\n" for k, v in sorted(entries.items())]
+    reject_reparse_path(path)
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     fd = -1
     tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(prefix=".dotenv.", suffix=".tmp", dir=directory)
-        set_file_mode(fd, tmp, 0o600)
+        set_file_mode(fd, tmp, 0o600, set_owner=True)
         stream = os.fdopen(fd, "w", encoding="utf-8")
-        fd = -1  # ownership transferred; stream closes on every with-path
+        fd = -1
         with stream as f:
             f.writelines(lines)
             f.flush()

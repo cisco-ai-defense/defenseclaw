@@ -29,6 +29,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1827,11 +1828,9 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Transport-layer failures (gateway unreachable / 5xx) are
-    # handled separately by each hook's ``fail_unreachable`` helper
-    # and ALWAYS allow unless the operator opts into strict
-    # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
-    # regardless of this field's value. Mirrors
+    # Transport-layer failures (gateway unreachable / timeout / 5xx)
+    # follow this same mode. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    # remains an unconditional force-closed override. Mirrors
     # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
     hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
@@ -1916,13 +1915,19 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Observe always opens; action uses per-connector > global."""
-        if self.effective_mode(connector).strip().lower() != "action":
-            return "open"
+        """Explicit connector posture > observe compatibility > global.
+
+        Existing observe-only installs remain fail-open when they only carry
+        the legacy global value.  A connector-scoped value is an explicit
+        runtime response-integrity choice, however, and must not be collapsed
+        back to open merely because policy findings are being observed.
+        """
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":
                 return "closed"
+            return "open"
+        if self.effective_mode(connector).strip().lower() != "action":
             return "open"
         if self.hook_fail_mode.strip().lower() == "closed":
             return "closed"
@@ -2652,6 +2657,45 @@ class Config:
                 owned_base=self._loaded_owned_nested_values,
             )
             write_config_yaml_secure(path, merged)
+
+    def save_verified(self, verify: Callable[[str], None]) -> None:
+        """Persist atomically, verify the written file, and roll back on failure.
+
+        ``verify`` runs while the existing per-config lock is still held, so a
+        successful return proves the exact generation written by this call was
+        inspected.  If verification fails after the atomic replace, the prior
+        YAML document is atomically restored before the error is re-raised.
+        Callers should mutate a copy of the live :class:`Config` and publish
+        that copy back to their in-memory state only after this method returns.
+        """
+        path = str(config_path_for_data_dir(self.data_dir))
+        dataclass_data = _config_to_dict(self)
+        owned_keys = _owned_top_level_keys(self)
+        with locked_config_yaml(path):
+            existed = os.path.exists(path)
+            existing = _load_existing_config_yaml(path)
+            merged = _merge_preserving_unmodeled(
+                existing,
+                dataclass_data,
+                owned_keys,
+                authoritative_base=self._loaded_authoritative_dicts,
+                owned_base=self._loaded_owned_nested_values,
+            )
+            write_config_yaml_secure(path, merged)
+            try:
+                verify(path)
+            except Exception as verify_error:
+                try:
+                    if existed:
+                        write_config_yaml_secure(path, existing)
+                    else:
+                        os.unlink(path)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "config verification failed and the previous configuration "
+                        f"could not be restored: {rollback_error}"
+                    ) from verify_error
+                raise
 
 
 # ---------------------------------------------------------------------------

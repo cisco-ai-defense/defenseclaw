@@ -79,7 +79,7 @@ func agentPhaseCodePointer(meta llmEventMeta) *int {
 	if strings.TrimSpace(meta.Phase) == "" {
 		return nil
 	}
-	value := telemetry.AgentPhaseCode(meta.Phase)
+	value := gatewaylog.AgentPhaseCode(meta.Phase)
 	return &value
 }
 
@@ -882,6 +882,11 @@ type hookSessionTrace struct {
 type hookPhaseState struct {
 	phase    string
 	sequence int64
+	// meta is the last normalized lifecycle snapshot for this execution.
+	// Unlike hookSessionTraces, it exists even when OTel is disabled, so the
+	// later hook-decision and SQLite audit paths retain identical phase and
+	// correlation fields.
+	meta llmEventMeta
 }
 
 func hookPhaseStateKey(meta llmEventMeta) string {
@@ -966,6 +971,9 @@ func (a *APIServer) enrichHookPhase(meta llmEventMeta) llmEventMeta {
 	if meta.Phase == "" {
 		meta.Phase = hookLifecyclePhase("", meta.LifecycleEvent, meta.LifecycleState)
 	}
+	if phase, ok := gatewaylog.NormalizeAgentPhase(meta.Phase); ok {
+		meta.Phase = phase
+	}
 	if meta.OperationID == "" {
 		meta.OperationID = hookOperationID(meta)
 	}
@@ -987,12 +995,51 @@ func (a *APIServer) enrichHookPhase(meta llmEventMeta) llmEventMeta {
 		}
 		a.hookPhaseStateOrder = append(a.hookPhaseStateOrder, key)
 	}
-	meta.PreviousPhase = firstNonEmpty(state.phase, "unknown")
+	// The previous phase is optional. A new execution has no predecessor, and
+	// unsupported historical values are not useful enough to invalidate the
+	// whole event; omit both instead of inventing a non-contract sentinel.
+	meta.PreviousPhase = ""
+	if previous, ok := gatewaylog.NormalizeAgentPhase(state.phase); exists && ok {
+		meta.PreviousPhase = previous
+	}
 	state.sequence++
 	state.phase = meta.Phase
 	meta.Sequence = state.sequence
+	state.meta = meta
 	a.hookPhaseStates[key] = state
 	return meta
+}
+
+func (a *APIServer) hookPhaseSnapshot(meta llmEventMeta) (llmEventMeta, bool) {
+	if a == nil {
+		return llmEventMeta{}, false
+	}
+	key := hookPhaseStateKey(meta)
+	if key == "" {
+		return llmEventMeta{}, false
+	}
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	state, ok := a.hookPhaseStates[key]
+	if ok {
+		return state.meta, true
+	}
+	// Session/subagent starts rotate ExecutionID before phase enrichment. A
+	// later decision/audit projection reconstructs the stable base identity and
+	// therefore cannot know that random execution ID. Fall back to the newest
+	// cursor for the same connector/session/agent; phase-state order is append-
+	// ordered by execution and bounded with the same eviction policy as the map.
+	for i := len(a.hookPhaseStateOrder) - 1; i >= 0; i-- {
+		candidate, exists := a.hookPhaseStates[a.hookPhaseStateOrder[i]]
+		if !exists || candidate.meta.Source != meta.Source || candidate.meta.SessionID != meta.SessionID {
+			continue
+		}
+		if meta.AgentID != "" && candidate.meta.AgentID != meta.AgentID {
+			continue
+		}
+		return candidate.meta, true
+	}
+	return llmEventMeta{}, false
 }
 
 const hookSessionStartedOutput = "Live session started. Child operations stream as they complete."
