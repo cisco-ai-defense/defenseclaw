@@ -304,23 +304,82 @@ func (d *Dispatcher) OnApprovalPending(ev ApprovalEvent) {
 	d.dispatch(CategoryApproval, ev.Source, ev.Subject, ev.Reason, n, ev)
 }
 
-// OnServiceState fires when the DefenseClaw ↔ OpenClaw gateway
-// connection transitions between disconnected and reconnected. Unlike
-// the block/approval categories this is not user-scoped triage —
-// it is a coarse "protection is down" / "protection restored" signal
-// that the OS toast surface currently emits via watchdog code, and
-// that the AVC IPC bridge consumes to keep the Secure Client status
-// live.
+// OnServiceState fires when the gateway connection transitions
+// between disconnected and reconnected. Unlike the block/approval
+// categories this is not user-scoped triage — it is a coarse
+// "protection is down" / "protection restored" signal that the OS
+// toast surface emits and that non-toast observers (e.g. the local
+// IPC bridge) consume to keep downstream UIs in sync with live
+// protection state.
 //
-// Gated by the master switch and, when reused for OS toasts, respects
-// the same rate/dedup rules as block notifications so a flapping
-// gateway does not spam.
+// The two lanes are gated independently:
+//
+//   - Observers ALWAYS see every service-state transition, even
+//     when notifications.enabled is false. Downstream consumers
+//     need these events to model current availability correctly —
+//     a disconnected event silenced by the master switch would
+//     leave them stuck on a stale "connected" view.
+//
+//   - The OS toast lane respects notifications.enabled + the same
+//     dedup / rate-limit rules as block notifications, so a
+//     flapping gateway cannot spam the user tray.
 func (d *Dispatcher) OnServiceState(ev ServiceStateEvent) {
-	if d == nil || !d.cfg.Enabled {
+	if d == nil {
 		return
 	}
 	n := serviceStateNotification(ev)
-	d.dispatch(CategoryServiceState, "", string(ev.State), ev.Reason, n, ev)
+
+	// Observer lane: unconditional, non-blocking. Fires even when
+	// notifications are globally disabled so IPC consumers still
+	// see the transition.
+	d.notifyObservers(Observation{
+		Category:     CategoryServiceState,
+		Notification: n,
+		Event:        ev,
+	})
+
+	// OS-toast lane: gated by the master switch, then subject to
+	// the standard dedup + rate-limit path.
+	if !d.cfg.Enabled {
+		return
+	}
+	d.dispatchToastOnly(CategoryServiceState, "", string(ev.State), ev.Reason, n)
+}
+
+// dispatchToastOnly runs the OS-toast half of dispatch (dedup +
+// rate-limit + sender fan-out) without invoking notifyObservers.
+// Used by OnServiceState so the observer lane can be fired
+// unconditionally before the toast lane's master switch runs.
+func (d *Dispatcher) dispatchToastOnly(cat Category, src Source, target, reason string, n notify.Notification) {
+	if d == nil || d.sender == nil {
+		return
+	}
+	now := d.now()
+	key := dedupKey(cat, src, target, reason)
+	dedupWindow := d.cfg.EffectiveDedupWindow()
+	maxPerMin := d.cfg.EffectiveMaxPerMinute()
+
+	d.mu.Lock()
+	d.sweepLocked(now, dedupWindow)
+	if last, ok := d.seen[key]; ok && now.Sub(last) < dedupWindow {
+		d.mu.Unlock()
+		return
+	}
+	d.seen[key] = now
+
+	d.advanceBucketLocked(now, maxPerMin)
+	if d.bucketRemaining <= 0 {
+		d.suppressedInWin++
+		if !d.rollupAnnounced && d.suppressedInWin == 1 {
+			d.rollupAnnounced = true
+		}
+		d.mu.Unlock()
+		return
+	}
+	d.bucketRemaining--
+	d.mu.Unlock()
+
+	go d.send(n)
 }
 
 // AddObserver registers a non-OS sink for every observation that

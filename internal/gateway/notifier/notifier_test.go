@@ -91,6 +91,55 @@ func TestDispatcher_DisabledIsNoOp(t *testing.T) {
 	}
 }
 
+// TestDispatcher_ServiceStateReachesObserversWhenDisabled asserts
+// that service-state transitions reach non-OS observers (e.g. the
+// local IPC bridge) even when notifications are globally disabled.
+// Downstream consumers need every up/down transition to model
+// current availability; the master switch controls only the OS
+// toast lane.
+func TestDispatcher_ServiceStateReachesObserversWhenDisabled(t *testing.T) {
+	rec := &recorder{}
+	cfg := config.DefaultNotificationsConfig()
+	cfg.Enabled = false
+	d := NewWithSender(cfg, rec.Send)
+
+	var observed []Observation
+	var obsMu sync.Mutex
+	d.AddObserver(func(o Observation) {
+		obsMu.Lock()
+		defer obsMu.Unlock()
+		observed = append(observed, o)
+	})
+
+	d.OnServiceState(ServiceStateEvent{State: ServiceStateDisconnected, Reason: "flake"})
+	d.OnServiceState(ServiceStateEvent{State: ServiceStateReconnected, Reason: "ok"})
+
+	// OS toast lane must stay silent (master switch off).
+	if got := rec.Drain(1, 50*time.Millisecond); len(got) != 0 {
+		t.Fatalf("disabled dispatcher fired OS toast: %#v", got)
+	}
+
+	// Observers must see both transitions.
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		obsMu.Lock()
+		n := len(observed)
+		obsMu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	obsMu.Lock()
+	defer obsMu.Unlock()
+	if len(observed) != 2 {
+		t.Fatalf("observer got %d service-state events, want 2", len(observed))
+	}
+	if observed[0].Category != CategoryServiceState || observed[1].Category != CategoryServiceState {
+		t.Errorf("observed categories: %v %v", observed[0].Category, observed[1].Category)
+	}
+}
+
 func TestDispatcher_CategoryGate(t *testing.T) {
 	rec := &recorder{}
 	cfg := enabledConfig()
