@@ -236,10 +236,9 @@ func Translate(input TranslateInput) *SRConfig {
 		rules := SRRules{Operator: op}
 		for _, c := range d.Conditions {
 			rules.Conditions = append(rules.Conditions, SRCondition{
-				Type:          "keyword",
-				Name:          c.Signal,
+				Type:          c.Signal,
+				Name:          c.Value,
 				MinConfidence: c.MinConfidence,
-				Value:         c.Value,
 			})
 		}
 
