@@ -784,7 +784,7 @@ type ToolPayload struct {
 //     populated -- they carry no raw paths or unhashed values, only
 //     sha256:* digests and category/vendor/product strings drawn from
 //     the operator-curated catalog.
-//   - The "extended" set (Component, Runtime, Detector, IdentityScore,
+//   - The "extended" set (Component, Model, Runtime, Detector, IdentityScore,
 //     PresenceScore, IdentityFactors, PresenceFactors, Evidence,
 //     RawPaths) is populated *only* when the gateway sees
 //     `privacy.disable_redaction = true`. RawPath inside each
@@ -814,6 +814,7 @@ type AIDiscoveryPayload struct {
 	// payload must check the same flag.
 	Detector        string                `json:"detector,omitempty"`
 	Component       *AIDiscoveryComponent `json:"component,omitempty"`
+	Model           *AIDiscoveryModel     `json:"model,omitempty"`
 	Runtime         *AIDiscoveryRuntime   `json:"runtime,omitempty"`
 	LastActiveAt    string                `json:"last_active_at,omitempty"`
 	IdentityScore   float64               `json:"identity_score,omitempty"`
@@ -834,6 +835,22 @@ type AIDiscoveryComponent struct {
 	Name      string `json:"name,omitempty"`
 	Version   string `json:"version,omitempty"`
 	Framework string `json:"framework,omitempty"`
+}
+
+// AIDiscoveryModel mirrors inventory.LocalModelInfo. It is part of the
+// privacy-gated extended payload because model IDs can contain user-chosen or
+// private repository names. Local `/api/v1/ai-usage` responses still carry the
+// model block regardless of outbound sink redaction.
+type AIDiscoveryModel struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Format    string `json:"format,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Recipe    string `json:"recipe,omitempty"`
+	Modality  string `json:"modality,omitempty"`
+	Device    string `json:"device,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Pinned    bool   `json:"pinned,omitempty"`
 }
 
 // AIDiscoveryRuntime mirrors inventory.ProcessRuntime.

@@ -24,6 +24,7 @@ import ipaddress
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,11 @@ import requests
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
 from defenseclaw.inventory import agent_discovery, ai_signatures
+
+
+def _mapping_block(value: Any) -> Mapping[str, Any]:
+    """Return JSON object-like values and safely discard malformed blocks."""
+    return value if isinstance(value, Mapping) else {}
 
 
 @click.group()
@@ -191,7 +197,7 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "active", "gone")
     "components",
     multiple=True,
     help=(
-        "Filter by component/SDK name from the parsed manifest "
+        "Filter by component/SDK name or discovered local model ID "
         "(repeatable, case-insensitive substring). Falls back to "
         "matching against product when a signal has no component block."
     ),
@@ -2286,10 +2292,10 @@ def _filter_ai_usage_signals(
       type ``--product claude`` and catch both ``Claude Code`` and
       ``Claude Desktop`` without memorising the exact catalog spelling.
     * ``components`` — case-insensitive substring match against
-      ``signal.component.name`` (or ``signal.product`` for legacy
-      signatures that don't carry a component block). Lets the
+      ``signal.component.name`` or ``signal.model.id`` (then
+      ``signal.product`` for legacy signatures that carry neither block). Lets the
       operator type ``--component openai`` and pick out every
-      OpenAI-named SDK install across npm/pypi/go.
+      OpenAI-named SDK install across npm/pypi/go, or type a local model ID.
     """
     state_set = {s.lower() for s in states} if states else set()
     category_set = {c.lower() for c in categories} if categories else set()
@@ -2311,9 +2317,13 @@ def _filter_ai_usage_signals(
             if not any(needle in product for needle in product_needles):
                 continue
         if component_needles:
-            comp = sig.get("component") or {}
+            comp = _mapping_block(sig.get("component"))
+            model = _mapping_block(sig.get("model"))
             comp_name = str(comp.get("name", "")).lower()
-            haystack = comp_name or str(sig.get("product", "")).lower()
+            model_id = str(model.get("id", "")).lower()
+            haystack = " ".join(item for item in (comp_name, model_id) if item)
+            if not haystack:
+                haystack = str(sig.get("product", "")).lower()
             if not any(needle in haystack for needle in component_needles):
                 continue
         out.append(sig)
@@ -2383,10 +2393,12 @@ def _summarize_ai_usage_signals_full(
     # axes to fold into the key.
     groups: dict[tuple, dict[str, Any]] = {}
     for sig in signals:
-        comp = sig.get("component") or {}
+        comp = _mapping_block(sig.get("component"))
+        model = _mapping_block(sig.get("model"))
         ecosystem = str(comp.get("ecosystem", "")).lower()
         comp_name = str(comp.get("name", "")).lower()
         version = str(comp.get("version", "") or sig.get("version", "") or "")
+        model_id = str(model.get("id", ""))
         category = str(sig.get("category", ""))
         detector = str(sig.get("detector", ""))
         if by_detector:
@@ -2399,6 +2411,7 @@ def _summarize_ai_usage_signals_full(
                 ecosystem,
                 comp_name,
                 version,
+                model_id.lower(),
             )
         else:
             # Drop category and detector from the key -- "Claude
@@ -2412,6 +2425,7 @@ def _summarize_ai_usage_signals_full(
                 ecosystem,
                 comp_name,
                 version,
+                model_id.lower(),
             )
         slot = groups.get(key)
         if slot is None:
@@ -2435,6 +2449,9 @@ def _summarize_ai_usage_signals_full(
                 "component": comp.get("name", ""),
                 "framework": comp.get("framework", ""),
                 "version": version,
+                "model": model_id,
+                "model_statuses": [],
+                "model_formats": [],
                 "last_active_at": "",
                 # Aggregated lists -- we always populate these so
                 # downstream renderers can show a "Categories" /
@@ -2464,6 +2481,12 @@ def _summarize_ai_usage_signals_full(
             slot["categories"].append(category)
         if detector and detector not in slot["detectors"]:
             slot["detectors"].append(detector)
+        model_status = str(model.get("status", ""))
+        if model_status and model_status not in slot["model_statuses"]:
+            slot["model_statuses"].append(model_status)
+        model_format = str(model.get("format", ""))
+        if model_format and model_format not in slot["model_formats"]:
+            slot["model_formats"].append(model_format)
         # Preserve insertion order so the sample reflects what the
         # detector saw first; dedupe so we do not show the same file
         # twice for groups that span multiple matching signatures.
@@ -2508,6 +2531,7 @@ def _summarize_ai_usage_signals_full(
             -row["count"],
             row["key"][1],
             row["key"][2],
+            row.get("model", ""),
         )
     )
     return rows
@@ -2689,9 +2713,10 @@ def _render_ai_usage_table(
         # actually has them. Keeps the legacy detail view compact for
         # operators on signature packs that haven't been promoted to
         # the v2 component schema yet.
-        has_component = any((sig.get("component") or {}).get("name") for sig in displayed)
+        has_component = any(_mapping_block(sig.get("component")).get("name") for sig in displayed)
+        has_model = any(_mapping_block(sig.get("model")).get("id") for sig in displayed)
         has_version = any(
-            ((sig.get("component") or {}).get("version") or sig.get("version"))
+            (_mapping_block(sig.get("component")).get("version") or sig.get("version"))
             for sig in displayed
         )
         has_runtime = any(sig.get("runtime") for sig in displayed)
@@ -2712,6 +2737,10 @@ def _render_ai_usage_table(
         table.add_column("State")
         table.add_column("Category")
         table.add_column("Product")
+        if has_model:
+            table.add_column("Model")
+            table.add_column("Model status")
+            table.add_column("Format")
         if has_component:
             table.add_column("Component")
         if has_version:
@@ -2736,11 +2765,13 @@ def _render_ai_usage_table(
         # Falls back to product/vendor for legacy signals that
         # have no Component block so we still dedup something
         # sensible there too.
-        def _conf_group_key(s: dict[str, Any]) -> tuple[str, str, str, str]:
-            c = s.get("component") or {}
+        def _conf_group_key(s: dict[str, Any]) -> tuple[str, str, str, str, str]:
+            c = _mapping_block(s.get("component"))
+            model = _mapping_block(s.get("model"))
             return (
                 str(c.get("ecosystem", "")),
                 str(c.get("name", "")),
+                str(model.get("id", "")),
                 str(s.get("product", "")),
                 str(s.get("vendor", "")),
             )
@@ -2749,15 +2780,22 @@ def _render_ai_usage_table(
         # caller's incoming state/category ordering inside each
         # group so the rest of the table still reads naturally.
         displayed = sorted(displayed, key=_conf_group_key)
-        prev_conf_key: tuple[str, str, str, str] | None = None
+        prev_conf_key: tuple[str, str, str, str, str] | None = None
         for sig in displayed:
-            comp = sig.get("component") or {}
-            runtime = sig.get("runtime") or {}
+            comp = _mapping_block(sig.get("component"))
+            model = _mapping_block(sig.get("model"))
+            runtime = _mapping_block(sig.get("runtime"))
             row: list[str] = [
                 str(sig.get("state", "")),
                 str(sig.get("category", "")),
                 str(sig.get("product", "")),
             ]
+            if has_model:
+                row.extend([
+                    str(model.get("id", "")),
+                    str(model.get("status", "")),
+                    str(model.get("format", "")),
+                ])
             if has_component:
                 ecosystem = str(comp.get("ecosystem", ""))
                 comp_name = str(comp.get("name", ""))
@@ -2816,6 +2854,7 @@ def _render_ai_usage_table(
     full_groups = _summarize_ai_usage_signals_full(filtered, by_detector=by_detector)
     displayed_full = full_groups[:limit] if limit > 0 else full_groups
     has_component = any(g.get("component") for g in displayed_full)
+    has_model = any(g.get("model") for g in displayed_full)
     has_version = any(g.get("version") for g in displayed_full)
     has_last_active = any(g.get("last_active_at") for g in displayed_full)
     # Surface confidence in the default grouped view so operators
@@ -2839,6 +2878,10 @@ def _render_ai_usage_table(
         cat_header, det_header = "Categories", "Detectors"
     table.add_column(cat_header)
     table.add_column("Product")
+    if has_model:
+        table.add_column("Model")
+        table.add_column("Model status")
+        table.add_column("Format")
     if has_component:
         table.add_column("Component")
     if has_version:
@@ -2867,6 +2910,12 @@ def _render_ai_usage_table(
             cat_cell = category_join
             det_cell = detector_join
         row: list[str] = [state, cat_cell, product]
+        if has_model:
+            row.extend([
+                str(g.get("model", "")),
+                _format_csv_truncated(g.get("model_statuses") or [], limit=2),
+                _format_csv_truncated(g.get("model_formats") or [], limit=2),
+            ])
         if has_component:
             ecosystem = str(g.get("ecosystem", ""))
             comp_name = str(g.get("component", ""))
@@ -2901,7 +2950,7 @@ def _render_ai_usage_table(
     footer += (
         " Use --detail for per-signal rows, --by-detector to split by "
         "category/detector, --json for raw, --state/--category/--product"
-        "/--component to filter."
+        "/--component to filter (component also matches local model IDs)."
     )
     console.print(footer)
     return stream.getvalue()
@@ -2932,9 +2981,11 @@ def _render_ai_usage_plain(
 
     if detail:
         rows = signals[:limit] if limit > 0 else signals
+        has_model = any(_mapping_block(sig.get("model")).get("id") for sig in rows)
         for sig in rows:
-            comp = sig.get("component") or {}
-            runtime = sig.get("runtime") or {}
+            comp = _mapping_block(sig.get("component"))
+            model = _mapping_block(sig.get("model"))
+            runtime = _mapping_block(sig.get("runtime"))
             ver = str(comp.get("version", "") or sig.get("version", "") or "")
             comp_name = str(comp.get("name", ""))
             ecosystem = str(comp.get("ecosystem", ""))
@@ -2948,6 +2999,14 @@ def _render_ai_usage_plain(
                 str(sig.get("state", "")),
                 str(sig.get("category", "")),
                 str(sig.get("product", "")),
+            ]
+            if has_model:
+                fields.extend([
+                    str(model.get("id", "")),
+                    str(model.get("status", "")),
+                    str(model.get("format", "")),
+                ])
+            fields.extend([
                 comp_label,
                 ver,
                 str(sig.get("vendor", "")),
@@ -2957,11 +3016,12 @@ def _render_ai_usage_plain(
                 _format_runtime(runtime),
                 _format_relative_time(sig.get("last_active_at", "")),
                 evidence_cell,
-            ]
+            ])
             lines.append(" | ".join(fields))
     else:
         full_groups = _summarize_ai_usage_signals_full(signals, by_detector=by_detector)
         rows_full = full_groups[:limit] if limit > 0 else full_groups
+        has_model = any(g.get("model") for g in rows_full)
         for g in rows_full:
             state, category_join, product, vendor, detector_join = g["key"]
             ecosystem = str(g.get("ecosystem", ""))
@@ -2970,10 +3030,18 @@ def _render_ai_usage_plain(
             # Plain renderer keeps the joined string format -- it is
             # log-scrape friendly and operators piping through awk
             # already handle commas inside fields.
-            lines.append(" | ".join([
+            fields = [
                 state,
                 category_join,
                 product,
+            ]
+            if has_model:
+                fields.extend([
+                    str(g.get("model", "")),
+                    ", ".join(g.get("model_statuses") or []),
+                    ", ".join(g.get("model_formats") or []),
+                ])
+            fields.extend([
                 comp_label,
                 str(g.get("version", "")),
                 vendor,
@@ -2981,7 +3049,8 @@ def _render_ai_usage_plain(
                 str(g["count"]),
                 _format_relative_time(g.get("last_active_at", "")),
                 _format_evidence_sample(g["basenames"]),
-            ]))
+            ])
+            lines.append(" | ".join(fields))
 
     lines.append(
         f"active={summary.get('active_signals', 0)} "
@@ -3022,7 +3091,7 @@ def _render_ai_processes_table(
     table.add_column("Comm")
     table.add_column("Last active")
     for sig in displayed:
-        runtime = sig.get("runtime") or {}
+        runtime = _mapping_block(sig.get("runtime"))
         table.add_row(
             str(runtime.get("pid", "") or ""),
             str(runtime.get("ppid", "") or ""),
@@ -3046,7 +3115,7 @@ def _render_ai_processes_table(
 def _render_ai_processes_plain(process_signals: list[dict[str, Any]]) -> str:
     lines = [f"AI processes ({len(process_signals)} live)"]
     for sig in process_signals:
-        runtime = sig.get("runtime") or {}
+        runtime = _mapping_block(sig.get("runtime"))
         lines.append(
             " | ".join([
                 str(runtime.get("pid", "") or ""),

@@ -1115,16 +1115,60 @@ scope); per-connector guardrail policy is enforced inside the gateway above it.
    active processes, installed desktop apps, editor extensions, MCP
    files, skills, rules, plugins, package dependencies, provider env
    var names, shell-history signature matches, provider-domain
-   references, and loopback-only local AI endpoints. Process monitoring
-   matches executable names only, not argv. Endpoint probes only target
-   cataloged `localhost` / `127.0.0.1` URLs, send no credentials, and
-   discard response bodies after a small bounded read. Results are
-   available from `GET /api/v1/ai-usage` and emitted as sanitized
-   `event_type=ai_discovery` gateway events, OTel logs, metrics, and
-   spans. Outbound telemetry includes low-cardinality product/category
-   metadata, basenames, and `sha256:` hashes only; raw paths, shell
-   commands, process arguments, prompt text, file contents, local
-   endpoint URLs, and env var values are not emitted.
+   references, loopback-only local AI endpoints, and the `local_model`
+   inventory described below. Process monitoring matches executable names
+   only, not argv.
+
+   Endpoint presence probes prefer `HEAD` and only fall back to `GET` for an
+   explicitly allow-listed, read-only metadata path. Local model inventory
+   performs a separate bounded `GET` against vetted loopback metadata routes;
+   it never calls inference, embedding, audio, pull/load/delete, or other
+   control endpoints. For [Lemonade Server](https://lemonade-server.ai/docs/guide/configuration/),
+   the built-in signature recognizes `lemonade` / `lemond`, the desktop app,
+   documented config locations, relevant env-var names, and port `13305`.
+   [`/v1/models`](https://lemonade-server.ai/docs/api/openai/) supplies
+   downloaded models and [`/v1/health`](https://lemonade-server.ai/docs/api/lemonade/)
+   supplies loaded models; `/api/v1/...` compatibility routes are accepted.
+   Each decoded response is capped at 1 MiB (after decompression), one pass
+   emits at most 256 model items and considers at most 24 endpoints, each
+   request has a 650 ms timeout, and the whole detector has a 3 s budget.
+   Per-source item cursors and rotating origins give later models/providers a
+   bounded turn on subsequent passes instead of permanently truncating them.
+   Authenticated Lemonade discovery uses only the least-privileged
+   `LEMONADE_API_KEY`, never `LEMONADE_ADMIN_API_KEY`. It sends that credential
+   only when the loopback origin came from explicit `LEMONADE_HOST` /
+   `LEMONADE_PORT` settings or Lemonade's config and a credential-free `/live`
+   check succeeds; the value is never persisted or emitted.
+
+   The filesystem model detector emits at most
+   `ai_discovery.max_files_per_scan` matching artifacts and also applies
+   separate global/per-root traversal budgets. It recognizes GGUF/GGML, safetensors,
+   ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama
+   manifests/blob stores. Shards and cache entries are aggregated into model
+   rows; generic `.pt`, `.pth`, `.ckpt`, and `.bin` files require a strong
+   model context. Model binaries are never opened. Only small Ollama manifest
+   JSON is read, under `ai_discovery.max_file_bytes`, to strengthen change
+   evidence for the model identity derived from its manifest path; the blob
+   store is represented by one bounded fallback row rather than one row per
+   content-addressed blob. Bounded root pages are reconciled as a logical scan
+   cycle so shard hashes/sizes and removal decisions use a complete snapshot.
+
+   Results are available from `GET /api/v1/ai-usage` and emitted as sanitized
+   `event_type=ai_discovery` gateway events, OTel logs, metrics, and spans.
+   Every `local_model` signal carries dynamic identity in a dedicated `model`
+   block (`id`, `status`, optional format/provider/recipe/modality/device/size/
+   pinned fields), not in low-cardinality `product` or `component` labels. The
+   local API retains that block for `defenseclaw agent usage`, and local
+   `inventory.db` history stores it as `model_json`. Outbound gateway events,
+   OTel logs, and webhooks follow the existing privacy gate: normal
+   redaction omits extended model metadata, model basenames, and model path
+   hashes, while retaining lifecycle correlation through an installation-scoped
+   HMAC pseudonym; `privacy.disable_redaction=true`
+   allows it, while raw paths still additionally require
+   `ai_discovery.store_raw_local_paths=true`. Under the default redaction
+   policy raw paths are not emitted; shell commands, process arguments, prompt
+   text, model-binary contents, endpoint URLs, and env-var values are never
+   emitted.
 
    The AI signature catalog is extensible. DefenseClaw always loads the
    built-in catalog first, then merges operator-managed packs from

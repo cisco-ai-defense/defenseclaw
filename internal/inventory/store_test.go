@@ -5,15 +5,16 @@ package inventory
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 // TestInventoryStoreInitMigrates is a smoke test for the schema
-// migration framework: opening a fresh DB must run the v1 migration
-// and end at SchemaVersion()==1. Running a second open must be a
-// no-op (no extra migrations applied).
+// migration framework: opening a fresh DB must run every append-only
+// migration and end at the current schema version. Reopening is a no-op.
 func TestInventoryStoreInitMigrates(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "inventory.db")
@@ -160,6 +161,50 @@ func TestInventoryStoreRecordScanRoundTrip(t *testing.T) {
 	}
 	if h.IdentityBand == "" || h.PresenceBand == "" {
 		t.Errorf("bands must be non-empty; got %+v", h)
+	}
+}
+
+func TestInventoryStorePersistsLocalModelMetadata(t *testing.T) {
+	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	scanned := time.Now().UTC()
+	want := &LocalModelInfo{
+		ID: "org/private-model", Status: "loaded", Format: "gguf",
+		Provider: "lemonade", Recipe: "llamacpp", Modality: "llm",
+		Device: "gpu", SizeBytes: 1234, Pinned: true,
+	}
+	report := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{
+			ScanID: "model-scan", ScannedAt: scanned, Source: "sidecar",
+			PrivacyMode: "balanced", Result: "ok", TotalSignals: 1, ActiveSignals: 1,
+		},
+		Signals: []AISignal{{
+			Fingerprint: "model-fp", SignalID: "model-signal", SignatureID: "lemonade",
+			Name: "Lemonade", Vendor: "Lemonade", Product: "Lemonade Server",
+			Category: SignalLocalModel, Detector: "model_runtime", State: AIStateNew,
+			Confidence: 0.95, LastSeen: scanned, Model: want,
+		}},
+	}
+	if err := st.RecordScan(context.Background(), report, ConfidenceParams{}); err != nil {
+		t.Fatalf("record scan: %v", err)
+	}
+	var raw sql.NullString
+	if err := st.db.QueryRow(`SELECT model_json FROM ai_signals WHERE scan_id = ? AND fingerprint = ?`,
+		"model-scan", "model-fp").Scan(&raw); err != nil {
+		t.Fatalf("query model_json: %v", err)
+	}
+	if !raw.Valid || raw.String == "" {
+		t.Fatal("model_json was not persisted")
+	}
+	var got LocalModelInfo
+	if err := json.Unmarshal([]byte(raw.String), &got); err != nil {
+		t.Fatalf("unmarshal model_json: %v", err)
+	}
+	if got != *want {
+		t.Fatalf("model round trip = %+v, want %+v", got, *want)
 	}
 }
 

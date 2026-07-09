@@ -475,6 +475,145 @@ class AiUsageRendererTests(unittest.TestCase):
             [],
         )
 
+    def test_local_models_group_by_id_and_render_status(self):
+        from defenseclaw.commands import cmd_agent
+
+        signals = [
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Lemonade Server",
+                "vendor": "Lemonade",
+                "detector": "model_api",
+                "model": {
+                    "id": "Qwen3-0.6B-GGUF",
+                    "status": "installed",
+                    "format": "gguf",
+                    "provider": "lemonade",
+                },
+                "basenames": [],
+            },
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Lemonade Server",
+                "vendor": "Lemonade",
+                "detector": "model_runtime",
+                "model": {
+                    "id": "Qwen3-0.6B-GGUF",
+                    "status": "loaded",
+                    "format": "gguf",
+                    "provider": "lemonade",
+                    "device": "gpu",
+                },
+                "runtime": {"pid": 1234},
+                "basenames": [],
+            },
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Lemonade Server",
+                "vendor": "Lemonade",
+                "detector": "model_api",
+                "model": {"id": "Whisper-Tiny", "status": "installed", "format": "onnx"},
+                "basenames": [],
+            },
+        ]
+
+        groups = cmd_agent._summarize_ai_usage_signals_full(signals)
+        self.assertEqual(len(groups), 2)
+        qwen = next(group for group in groups if group["model"] == "Qwen3-0.6B-GGUF")
+        self.assertEqual(qwen["count"], 2)
+        self.assertEqual(set(qwen["model_statuses"]), {"installed", "loaded"})
+        self.assertEqual(qwen["model_formats"], ["gguf"])
+
+        filtered = cmd_agent._filter_ai_usage_signals(
+            signals,
+            states=(),
+            categories=(),
+            products=(),
+            components=("qwen3",),
+            show_gone=False,
+        )
+        self.assertEqual(len(filtered), 2)
+        product_only = cmd_agent._filter_ai_usage_signals(
+            signals,
+            states=(),
+            categories=(),
+            products=(),
+            components=("lemonade",),
+            show_gone=False,
+        )
+        self.assertEqual(product_only, [])
+
+        payload = {"enabled": True, "summary": {"active_signals": 3}, "signals": signals}
+        rendered = cmd_agent._render_ai_usage_table(payload)
+        # Rich may wrap the two-word header at 120 columns.
+        self.assertIn("Model", rendered)
+        self.assertIn("status", rendered)
+        self.assertIn("Qwen3", rendered)
+        self.assertIn("Whisper", rendered)
+        self.assertIn("installed", rendered)
+        self.assertIn("loaded", rendered)
+
+        plain = cmd_agent._render_ai_usage_plain(payload)
+        self.assertIn("Qwen3-0.6B-GGUF", plain)
+        self.assertIn("installed, loaded", plain)
+
+    def test_plain_renderer_keeps_legacy_non_model_field_positions(self):
+        from defenseclaw.commands import cmd_agent
+
+        payload = {
+            "summary": {"active_signals": 1},
+            "signals": [
+                {
+                    "state": "seen",
+                    "category": "ai_cli",
+                    "product": "Codex",
+                    "vendor": "OpenAI",
+                    "detector": "binary",
+                    "basenames": ["codex"],
+                },
+            ],
+        }
+        grouped = cmd_agent._render_ai_usage_plain(payload)
+        grouped_fields = grouped.splitlines()[1].split(" | ")
+        self.assertEqual(len(grouped_fields), 10, grouped)
+        self.assertEqual(grouped_fields[:3], ["seen", "ai_cli", "Codex"])
+
+        detail = cmd_agent._render_ai_usage_plain(payload, detail=True)
+        detail_fields = detail.splitlines()[1].split(" | ")
+        self.assertEqual(len(detail_fields), 12, detail)
+        self.assertEqual(detail_fields[:3], ["seen", "ai_cli", "Codex"])
+
+    def test_malformed_structured_blocks_do_not_crash_usage_rendering(self):
+        from defenseclaw.commands import cmd_agent
+
+        signals = [
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Local Model Artifact",
+                "vendor": "Local",
+                "detector": "model_file",
+                "component": ["not", "an", "object"],
+                "model": "not-an-object",
+                "runtime": 42,
+            },
+        ]
+        filtered = cmd_agent._filter_ai_usage_signals(
+            signals,
+            states=(),
+            categories=(),
+            products=(),
+            components=("local model",),
+            show_gone=False,
+        )
+        self.assertEqual(filtered, signals)
+        payload = {"summary": {"active_signals": 1}, "signals": signals}
+        self.assertIn("Local Model Artifact", cmd_agent._render_ai_usage_table(payload, detail=True))
+        self.assertIn("Local Model Artifact", cmd_agent._render_ai_usage_plain(payload, detail=True))
+
     def test_summary_sort_orders_by_state_then_count(self):
         from defenseclaw.commands import cmd_agent
 

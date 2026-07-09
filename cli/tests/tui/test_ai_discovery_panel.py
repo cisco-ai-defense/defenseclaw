@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from defenseclaw.tui.panels.ai_discovery import (
     AIDiscoveryPanelModel,
     AIUsageComponent,
+    AIUsageModel,
     AIUsageRuntime,
     AIUsageSignal,
     AIUsageSnapshot,
@@ -166,6 +167,95 @@ def test_ai_discovery_detail_toggle_noop_on_empty_table() -> None:
     panel.set_snapshot(AIUsageSnapshot(enabled=True))
     panel.toggle_detail()
     assert panel.detail_open is False
+
+
+def test_ai_discovery_groups_and_details_local_models() -> None:
+    now = datetime.now(timezone.utc)
+    base = dict(
+        state="seen",
+        category="local_model",
+        product="Lemonade Server",
+        vendor="Lemonade",
+        first_seen=now,
+        last_seen=now,
+    )
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="installed",
+                    detector="model_api",
+                    model=AIUsageModel(
+                        id="Qwen3-0.6B-GGUF",
+                        status="installed",
+                        format="gguf",
+                        provider="lemonade",
+                        size_bytes=400_000_000,
+                    ),
+                    **base,
+                ),
+                AIUsageSignal(
+                    signal_id="loaded",
+                    detector="model_runtime",
+                    model=AIUsageModel(
+                        id="Qwen3-0.6B-GGUF",
+                        status="loaded",
+                        format="gguf",
+                        provider="lemonade",
+                        recipe="llamacpp",
+                        device="gpu",
+                        pinned=True,
+                    ),
+                    runtime=AIUsageRuntime(pid=4321),
+                    **base,
+                ),
+            ),
+        )
+    )
+
+    assert len(panel.rows) == 1
+    row = panel.rows[0]
+    assert row.model == "Qwen3-0.6B-GGUF"
+    assert set(row.model_statuses) == {"installed", "loaded"}
+    assert row.model_formats == ("gguf",)
+    assert "Model status" in panel.data_table_columns()
+    model_index = panel.data_table_columns().index("Model")
+    assert panel.data_table_rows()[0][model_index] == "Qwen3-0.6B-GGUF"
+
+    panel.set_filter("qwen3")
+    assert len(panel.filtered) == 1
+    panel.toggle_detail()
+    detail = "\n".join(panel.detail_lines(now=now))
+    assert "status=installed" in detail
+    assert "status=loaded" in detail
+    assert "recipe=llamacpp" in detail
+    assert "runtime: pid=4321" in detail
+
+
+def test_ai_usage_model_metadata_is_safely_coerced() -> None:
+    signal = AIUsageSignal.from_mapping(
+        {
+            "category": "local_model",
+            "model": {
+                "id": "private-model",
+                "status": "installed",
+                "size_bytes": "not-a-number",
+                "pinned": "false",
+            },
+        }
+    )
+    assert signal.model is not None
+    assert signal.model.size_bytes == 0
+    assert signal.model.pinned is False
+
+    numeric = AIUsageSignal.from_mapping(
+        {"category": "local_model", "model": {"id": "other", "size_bytes": -42, "pinned": "true"}}
+    )
+    assert numeric.model is not None
+    assert numeric.model.size_bytes == 0
+    assert numeric.model.pinned is True
 
 
 def test_ai_discovery_header_churn_rules() -> None:

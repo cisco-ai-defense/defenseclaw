@@ -93,8 +93,18 @@ The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every s
 | `workspace_artifact` | `.openclaw/`, `.claude/`, `.cursor/` directories in active workspaces |
 | `desktop_app` | Claude Desktop, Cursor, Windsurf macOS / Windows app installs |
 | `local_ai_endpoint` | Ollama, LM Studio, vLLM, llama.cpp listening sockets |
+| `local_model` | Models installed on disk or reported as loaded by a vetted loopback model server |
 
 Every signal carries `state ∈ {new, changed, gone}` with `last_seen` / `first_seen` timestamps so the dashboards can show drift over time, not just point-in-time snapshots.
+
+### Local model inventory
+
+Full continuous scans inventory local models through two metadata-only paths:
+
+- **Vetted loopback APIs.** Presence checks prefer `HEAD`; model inventory uses bounded, read-only `GET` requests only for explicitly allow-listed metadata routes. For [Lemonade Server](https://lemonade-server.ai/models.html), the built-in signature recognizes the `lemonade` / `lemond` binaries and processes, the desktop app, [documented configuration locations](https://lemonade-server.ai/docs/guide/configuration/), environment-variable names, and the default loopback port `13305`. [`GET /v1/models`](https://lemonade-server.ai/docs/api/openai/) reports downloaded models, while [`GET /v1/health`](https://lemonade-server.ai/docs/api/lemonade/) reports loaded models; the `/api/v1/...` compatibility forms are also accepted. The same detector understands vetted Ollama installed/loaded-model metadata routes. It never calls completion, embedding, audio, pull, load, delete, or other inference/control endpoints.
+- **Bounded filesystem metadata.** The scanner recognizes GGUF/GGML, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama manifests/blob stores. It groups sharded weights and model-cache directories into model rows instead of reporting every shard or blob. Generic PyTorch extensions such as `.pt`, `.pth`, `.ckpt`, and `.bin` count only inside a strong model context. The scan emits at most `max_files_per_scan` matching artifacts and also enforces separate global and per-root traversal budgets; it never opens model binaries. Small Ollama manifest JSON is the only model-store content read, and that read is regular-file checked and bounded by the configured file-size limit.
+
+Each `local_model` signal keeps its potentially high-cardinality identity under a dedicated `model` block (`id`, `status`, and optional format/provider/recipe/modality/device/size/pinned metadata). The ID is not copied into `product` or `component`, which keeps product and telemetry labels bounded. `status=installed` means the model was found on disk or in an installed-model list; `status=loaded` means a runtime health/status endpoint reported it in memory.
 
 ## Continuous discovery (gateway)
 
@@ -141,7 +151,7 @@ Stops the scanner and clears the `ai_discovery.*` block. Existing audit events a
 | `--include-shell-history` / `--no-include-shell-history` | Read `~/.bash_history`, `~/.zsh_history` for AI invocations. |
 | `--include-package-manifests` / `--no-include-package-manifests` | Look at `package.json`, `pyproject.toml`, `requirements.txt`. |
 | `--include-env-var-names` / `--no-include-env-var-names` | Enumerate process env *names* (values are never read). |
-| `--include-network-domains` / `--no-include-network-domains` | Watch DNS for provider endpoints (Anthropic, OpenAI, Bedrock, …). |
+| `--include-network-domains` / `--no-include-network-domains` | Inspect provider-domain signals and probe vetted loopback model metadata APIs. |
 | `--scan-interval-min` | Minutes between rescans. Defaults inherit from `ai_discovery.scan_interval_min`. |
 
 Signature packs are managed separately under `defenseclaw agent signatures` (see below); there is no `--signature-pack` flag on `discovery enable`.
@@ -196,11 +206,13 @@ These three queries hit the **gateway's** AI usage view (built from continuous d
   <Tab value="Usage">
 ```bash
 defenseclaw agent usage --state new --state changed --json
+defenseclaw agent usage --category local_model
+defenseclaw agent usage --component Qwen3
 ```
 
-Top-level rollup — what categories are present, how many of each, when each was last seen.
+Top-level rollup — what categories are present, how many of each, and when each was last seen. Local-model rows add model ID, installed/loaded status, and format columns when available.
 
-Useful flags: `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`.
+Useful flags: `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring.
   </Tab>
   <Tab value="Processes">
 ```bash
@@ -313,7 +325,10 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
 
 <Steps>
   <Step>
-    **No raw values.** Env var *names* are recorded, never values. File paths are hashed (`config_path_hash`, `binary_path_hash`) — only basenames are kept.
+    **No raw values by default.** Env var *names* are recorded, never values. File paths are hashed (`config_path_hash`, `binary_path_hash`) and only basenames are kept in the default redacted output.
+  </Step>
+  <Step>
+    **Metadata-only model discovery.** Model binaries are never opened, and API discovery never calls inference or model-control routes. API discovery caps each decoded response at 1 MiB, emits at most 256 model items, considers at most 24 endpoints, and has both per-request and whole-pass time budgets. Per-source cursors and rotating origins give later models/providers a bounded turn on subsequent passes. Authenticated Lemonade discovery uses only the least-privileged `LEMONADE_API_KEY`—never `LEMONADE_ADMIN_API_KEY`—and sends it only when the loopback origin came from explicit `LEMONADE_HOST`/`LEMONADE_PORT` settings or Lemonade's config and its credential-free `/live` check succeeds. The value is never stored in a signal, log, or event.
   </Step>
   <Step>
     **Trusted-prefix binary probing.** Version probes (`<binary> --version`) only run inside an allow-listed set of prefixes (`/usr/bin`, `/opt/homebrew`, …) plus anything in `DEFENSECLAW_TRUSTED_BIN_PREFIXES`. Untrusted binaries are recorded as present but not executed — `defenseclaw agent discover` prints the offending directory and the command to trust it. Manage the allow-list with `defenseclaw setup trusted-paths list|add|remove` (or the TUI's Trusted Paths panel): `add` validates the directory (refusing world-writable or relative paths unless `--force`) and persists it to `~/.defenseclaw/.env`; built-in defaults can never be removed.
@@ -325,9 +340,11 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     **Sanitized on-demand reports.** `defenseclaw agent discover --emit-otel` builds a `_sanitized_discovery_report` before posting to the gateway. The full unredacted report stays on the operator's machine.
   </Step>
   <Step>
-    **Off by default for the network-y bits.** DNS, shell history, and process scanning are individually toggleable. The defaults are conservative — opt in to the broader scan modes once you've cleared them with your privacy team.
+    **Scoped controls for broader surfaces.** Provider-domain and vetted loopback API checks follow `include_network_domains`; shell-history and environment-name collection have their own settings. Process discovery matches executable names without reading argv. Review these controls with your privacy team and disable any surface your deployment does not need.
   </Step>
 </Steps>
+
+The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; outbound gateway events, OTel logs, and webhooks apply the existing privacy gate: with normal redaction enabled, extended model metadata plus model basenames/path hashes are omitted, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Full metadata can be included only when `privacy.disable_redaction=true`; raw filesystem paths remain separately gated by `ai_discovery.store_raw_local_paths`.
 
 ## Use it alongside Registry
 
