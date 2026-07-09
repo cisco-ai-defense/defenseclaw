@@ -773,27 +773,24 @@ async def test_large_table_commit_yields_to_latest_tab_input(
     monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
     monkeypatch.setattr(app, "_periodic_refresh", lambda: None)
     original_append = app._append_panel_table_row  # noqa: SLF001
+    appended_rows = 0
+    rows_before_yield: list[int] = []
+
+    def record_yield(scheduled_at: int) -> None:
+        rows_before_yield.append(appended_rows - scheduled_at)
 
     def slow_append(*args: object, **kwargs: object) -> None:
+        nonlocal appended_rows
         original_append(*args, **kwargs)
+        appended_rows += 1
+        if appended_rows % 16 == 1:
+            asyncio.get_running_loop().call_soon(record_yield, appended_rows)
         sleep(0.0004)
 
     monkeypatch.setattr(app, "_append_panel_table_row", slow_append)
 
     async with app.run_test(size=(160, 48)):
         table = app.query_one("#panel-table", DataTable)
-        loop_gaps: list[float] = []
-        stop = False
-
-        async def heartbeat() -> None:
-            last = perf_counter()
-            while not stop:
-                await asyncio.sleep(0.005)
-                now = perf_counter()
-                loop_gaps.append((now - last) * 1_000)
-                last = now
-
-        heartbeat_task = asyncio.create_task(heartbeat())
         await asyncio.sleep(0)
         app.action_switch_panel("logs")
         await _wait_until(lambda: 0 < table.row_count < len(expected))
@@ -805,13 +802,11 @@ async def test_large_table_commit_yields_to_latest_tab_input(
         acknowledgement_ms = (perf_counter() - started) * 1_000
         await _wait_for_panel(app, "overview")
         await _wait_until(lambda: "logs" not in app._panel_render_running)  # noqa: SLF001
-        stop = True
-        await heartbeat_task
 
         assert 0 < partial_count < len(expected)
         assert acknowledgement_ms < 150
-        assert loop_gaps
-        assert max(loop_gaps) < 150
+        assert rows_before_yield
+        assert max(rows_before_yield) <= 16
         assert app.active_panel == "overview"
         assert app.query_one("#tabs").active == "tab-overview"
         assert table.has_class("hidden")
