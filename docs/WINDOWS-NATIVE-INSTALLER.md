@@ -68,7 +68,21 @@ builder then embeds:
 An internal manifest hashes every embedded file with SHA-256. Setup validates
 that manifest before staging, bounds ZIP entry count and expanded size, rejects
 absolute/traversal paths and reparse points, and publishes from a same-volume
-staging directory.
+staging directory. The manifest, external provenance record, and installed
+state also carry the exact 40-character Git source commit and distribution
+flavor, so an installer cannot silently lose its build identity between the
+release inputs and the installed product.
+
+The public Windows build is explicitly the `oss` distribution flavor. Passing
+`-DistributionFlavor managed-enterprise` fails before artifact processing or
+dependency downloads. A managed-enterprise Windows artifact requires a private
+CMID provider overlay, a pinned private module version, and authorized private
+dependency credentials. The repository currently implements that overlay
+contract only for the macOS bundle pipeline; compiling the public
+`provider_cisco.go` stub with the `cmid` tag would still fail closed and is not
+treated as a managed release. An OSS Windows install configured as
+`managed_enterprise` therefore fails closed when managed cloud credentials are
+requested instead of silently degrading to an unusable provider.
 
 Local and pull-request builds are unsigned and are labeled as such in Installed
 Apps. Release builds require real Authenticode credentials. The build imports

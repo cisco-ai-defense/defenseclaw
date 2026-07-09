@@ -39,12 +39,10 @@ DOC_INSTALL_COMMANDS = {
     ),
     "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES
     + (
-        f'$Version = "{CURRENT_RELEASE}"',
-        '$Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"',
-        '$InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"',
-        "Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing",
-        "& $Installer -Version $Version",
-        "& $Installer -Version $Version -Connector codex -Quickstart -Yes",
+        ".\\DefenseClawSetup-x64.exe",
+        ".\\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1",
+        "after download it does not require Python, `uv`, Go, Node.js, Git, or a",
+        "PowerShell installation command.",
     ),
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
         f"VERSION={CURRENT_RELEASE}",

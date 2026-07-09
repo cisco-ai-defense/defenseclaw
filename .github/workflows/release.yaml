@@ -360,7 +360,7 @@ jobs:
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
           WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
-        run: ./scripts/build-windows-installer.ps1 -DistRoot dist -OutRoot dist -Version $env:RELEASE_TAG
+        run: ./scripts/build-windows-installer.ps1 -DistRoot dist -OutRoot dist -Version $env:RELEASE_TAG -DistributionFlavor oss
       - name: Upload native Windows installer artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

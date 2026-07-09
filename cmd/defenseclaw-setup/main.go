@@ -54,24 +54,28 @@ type options struct {
 }
 
 type payloadManifest struct {
-	SchemaVersion   int               `json:"schema_version"`
-	Version         string            `json:"version"`
-	PythonVersion   string            `json:"python_version"`
-	GatewayArchive  string            `json:"gateway_archive"`
-	Wheel           string            `json:"wheel"`
-	PythonEmbed     string            `json:"python_embed"`
-	UpgradeManifest string            `json:"upgrade_manifest"`
-	SitePackages    string            `json:"site_packages"`
-	Launcher        string            `json:"launcher"`
-	CosignVerifier  string            `json:"cosign_verifier"`
-	Unsigned        bool              `json:"unsigned"`
-	Toolchain       map[string]string `json:"toolchain"`
-	Files           map[string]string `json:"files"`
+	SchemaVersion      int               `json:"schema_version"`
+	Version            string            `json:"version"`
+	SourceCommit       string            `json:"source_commit"`
+	DistributionFlavor string            `json:"distribution_flavor"`
+	PythonVersion      string            `json:"python_version"`
+	GatewayArchive     string            `json:"gateway_archive"`
+	Wheel              string            `json:"wheel"`
+	PythonEmbed        string            `json:"python_embed"`
+	UpgradeManifest    string            `json:"upgrade_manifest"`
+	SitePackages       string            `json:"site_packages"`
+	Launcher           string            `json:"launcher"`
+	CosignVerifier     string            `json:"cosign_verifier"`
+	Unsigned           bool              `json:"unsigned"`
+	Toolchain          map[string]string `json:"toolchain"`
+	Files              map[string]string `json:"files"`
 }
 
 type installState struct {
 	SchemaVersion          int               `json:"schema_version"`
 	Version                string            `json:"version"`
+	SourceCommit           string            `json:"source_commit"`
+	DistributionFlavor     string            `json:"distribution_flavor"`
 	InstallKind            string            `json:"install_kind"`
 	InstallScope           string            `json:"install_scope"`
 	InstallRoot            string            `json:"install_root"`
@@ -658,6 +662,8 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	state := installState{
 		SchemaVersion:          1,
 		Version:                payload.Manifest.Version,
+		SourceCommit:           payload.Manifest.SourceCommit,
+		DistributionFlavor:     payload.Manifest.DistributionFlavor,
 		InstallKind:            "native-windows-exe",
 		InstallScope:           "user",
 		InstallRoot:            installRoot,
@@ -975,6 +981,15 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 	if !validPayloadVersion(manifest.Version) {
 		return fmt.Errorf("invalid payload version %q", manifest.Version)
 	}
+	if !validSourceCommit(manifest.SourceCommit) {
+		return fmt.Errorf("invalid payload source commit %q", manifest.SourceCommit)
+	}
+	if manifest.DistributionFlavor != "oss" {
+		return fmt.Errorf(
+			"unsupported payload distribution flavor %q; managed-enterprise requires the private Windows CMID release overlay",
+			manifest.DistributionFlavor,
+		)
+	}
 	required := []string{
 		manifest.GatewayArchive,
 		manifest.Wheel,
@@ -1012,6 +1027,14 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		}
 	}
 	return nil
+}
+
+func validSourceCommit(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func extractZipFile(path, dest string) error {
