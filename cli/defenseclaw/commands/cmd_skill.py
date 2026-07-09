@@ -1903,6 +1903,7 @@ def _apply_scan_enforcement(
 
     enforcement_reason = f"post-scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
+    failed_actions: list[str] = []
 
     if action_cfg.file == "quarantine":
         dest = _quarantine_skill_with_provenance(
@@ -1917,25 +1918,46 @@ def _apply_scan_enforcement(
             applied_actions.append("quarantined")
         else:
             click.echo(f"[scan] quarantine failed for {skill_name!r}", err=True)
+            failed_actions.append("quarantine")
 
     if action_cfg.runtime == "disable":
+        target_connector = _normalize_runtime_connector(connector or eval_connector)
         try:
-            client = _sidecar_client(app)
-            client.disable_skill(skill_name)
-            applied_actions.append("disabled via gateway")
+            if target_connector == "openclaw":
+                client = _sidecar_client(app)
+                client.disable_skill(skill_name)
             if connector:
-                pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
+                pe.disable_for_connector(
+                    "skill", skill_name, target_connector, enforcement_reason,
+                )
             else:
                 pe.disable("skill", skill_name, enforcement_reason)
-        except Exception:
-            click.echo(f"[scan] gateway disable failed for {skill_name!r} — skipping runtime disable", err=True)
+            if target_connector == "openclaw":
+                applied_actions.append("disabled via gateway")
+            else:
+                applied_actions.append(
+                    f"runtime disable recorded for connector={target_connector}"
+                )
+        except Exception as exc:  # noqa: BLE001 - report persistence/RPC failures uniformly.
+            label = "gateway disable" if target_connector == "openclaw" else "runtime policy persistence"
+            click.echo(f"[scan] {label} failed for {skill_name!r}: {exc}", err=True)
+            failed_actions.append("runtime disable")
 
     if action_cfg.install == "block":
-        if connector:
-            pe.block_for_connector("skill", skill_name, connector, enforcement_reason)
-        else:
-            pe.block("skill", skill_name, enforcement_reason)
-        applied_actions.append("added to block list")
+        try:
+            if connector:
+                pe.block_for_connector(
+                    "skill", skill_name, _normalize_runtime_connector(connector), enforcement_reason,
+                )
+            else:
+                pe.block("skill", skill_name, enforcement_reason)
+            applied_actions.append("added to block list")
+        except Exception as exc:  # noqa: BLE001 - preserve other defense-in-depth actions.
+            click.echo(
+                f"[scan] install-block persistence failed for {skill_name!r}: {exc}",
+                err=True,
+            )
+            failed_actions.append("install block")
 
     if applied_actions:
         actions_str = ", ".join(applied_actions)
@@ -1943,6 +1965,12 @@ def _apply_scan_enforcement(
         if app.logger:
             detail = f"severity={sev} findings={len(result.findings)}"
             app.logger.log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
+
+    if failed_actions:
+        failed = ", ".join(failed_actions)
+        raise click.ClickException(
+            f"configured enforcement incomplete for {skill_name!r}: {failed} failed"
+        )
 
 
 def _enable_skill_via_gateway(app: AppContext, skill_name: str) -> bool:
@@ -2189,6 +2217,8 @@ def _scan_all(
             hint("View alerts:       defenseclaw alerts")
         else:
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
+    if errors:
+        raise SystemExit(1)
     return json_rows
 
 
@@ -3608,7 +3638,8 @@ _SKILL_RUNTIME_PROBE_CONNECTORS = {"codex", "claudecode"}
 
 def _normalize_runtime_connector(connector: str) -> str:
     from defenseclaw import connector_paths
-    return connector_paths.normalize(connector or "openclaw")
+    from defenseclaw.connector_contracts import normalize_connector
+    return connector_paths.normalize(normalize_connector(connector or "openclaw"))
 
 
 def _active_connector_name(app: AppContext) -> str:
