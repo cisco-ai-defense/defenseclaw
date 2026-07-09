@@ -10,6 +10,7 @@ keywords:
   - VIRUSTOTAL_API_KEY
   - SPLUNK_ACCESS_TOKEN
   - GALILEO_API_KEY
+  - AGENT_CONTROL_API_KEY
   - DefenseClaw credentials registry
   - dotenv
 ---
@@ -85,12 +86,20 @@ Every credential the gateway and CLI know about is registered in `cli/defensecla
 | `OPENCLAW_GATEWAY_TOKEN` | `gateway` | Always (the gateway needs an auth token to talk to OpenClaw). | Auto-detected from `~/.openclaw/openclaw.json` when the file exists. Marked REQUIRED but auto-detected. |
 | `JUDGE_API_KEY` | `guardrail.judge` | The judge is enabled and `guardrail.judge.llm.api_key_env` overrides the default. | Only tracked when there's a custom override. Otherwise the judge falls through to `DEFENSECLAW_LLM_KEY`. |
 | `CISCO_AI_DEFENSE_API_KEY` | `guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner. |
+| `AGENT_CONTROL_API_KEY` | `agent_control` | Agent Control policy synchronization is enabled. | Use a bucket-scoped, database-managed member key. The same key authenticates the SDK and read-only UI; never use the unscoped bootstrap administrator key on an endpoint. The displayed env name follows `agent_control.api_key_env` when customized. |
 | `VIRUSTOTAL_API_KEY` | `skill-scanner.virustotal` | `scanners.skill_scanner.use_virustotal=true`. | Required when the skill scanner is wired up to ask VirusTotal. |
 | `SPLUNK_ACCESS_TOKEN` | `observability.splunk` | A Splunk audit sink is enabled. | The HEC token. |
 | `GALILEO_API_KEY` | `observability.galileo` | An enabled OTLP destination named `galileo` is configured. | Required for Galileo Cloud and authenticated self-hosted trace export. Use `setup observability list` for the destination inventory. |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | `skill-scanner.llm` | The skill scanner uses LLM and has a custom `llm.api_key_env` override. | Only tracked when there's a custom override; otherwise falls through to `DEFENSECLAW_LLM_KEY`. |
 
 The names you see in `keys list` are the **effective** ones. If you set `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY`, the table shows `MY_JUDGE_KEY` — not the canonical `JUDGE_API_KEY` — because that's the env var the running gateway will actually read.
+
+For Agent Control, prefer the hidden interactive prompt so the secret is not
+recorded in shell history:
+
+```bash
+defenseclaw keys set AGENT_CONTROL_API_KEY
+```
 
 ## Provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …) are NOT tracked
 
@@ -105,6 +114,7 @@ DefenseClaw routes every LLM call through Bifrost (Go gateway) or LiteLLM (Pytho
   ● OPENCLAW_GATEWAY_TOKEN      gateway                 REQUIRED     env     ✓ set
   · JUDGE_API_KEY               guardrail.judge         NOT_USED     unset   n/a
   ● CISCO_AI_DEFENSE_API_KEY    guardrail.remote        REQUIRED     env     ✓ set
+  · AGENT_CONTROL_API_KEY       agent_control            NOT_USED     unset   n/a
   · VIRUSTOTAL_API_KEY          skill-scanner.virustotal NOT_USED    unset   n/a
   · SPLUNK_ACCESS_TOKEN         observability.splunk    NOT_USED     unset   n/a
   ● GALILEO_API_KEY              observability.galileo   REQUIRED     dotenv  ✓ set
@@ -119,4 +129,5 @@ DefenseClaw routes every LLM call through Bifrost (Go gateway) or LiteLLM (Pytho
 - [`cli/defenseclaw/credentials.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/credentials.py) — the `CREDENTIALS` registry, `Requirement` enum, `Resolution` dataclass, and the `classify` / `resolve` functions.
 - [`cli/defenseclaw/commands/cmd_keys.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_keys.py) — the `list` / `set` / `fill-missing` / `check` subcommands.
 - [Setup → Unified LLM key](/docs/setup/unified-llm-key) — the guided action page.
+- [Setup → Agent Control](/docs/setup/agent-control) — scoped member keys, managed regex sources, and Monitor visibility.
 - [Reference → Env vars](/docs/reference/env-vars) — every other env var DefenseClaw reads (behavior switches, paths, telemetry).

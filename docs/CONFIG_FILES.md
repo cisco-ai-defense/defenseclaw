@@ -533,7 +533,7 @@ agent_control:
     precedence: stricter
     activation: reload
   rule_pack:
-    enabled: false
+    enabled: true
     activation: restart
     max_rules: 1000
   observability:
@@ -546,6 +546,14 @@ bundled/operator rules and disables managed rule sync; `agent_control` excludes
 all local regex contributions; `hybrid` adds managed rules after local rules.
 All modes retain local judges, suppressions, sensitive tools, HILT, connector
 topology, and failure settings.
+
+`api_key_env` names a bucket-scoped, database-managed Agent Control member key,
+not the unscoped bootstrap administrator key. Store it with
+`defenseclaw keys set AGENT_CONTROL_API_KEY`; the default interactive form uses
+a hidden prompt and does not put the value in the command line. The same member
+key authenticates the SDK and read-only Agent Control UI. Its grants limit the
+rule buckets returned to DefenseClaw and the member-owned execution history
+visible in Monitor; it cannot mutate controls.
 
 `stricter` keeps whichever local/remote threshold activates earlier and the
 stricter Cisco trust level. `remote` uses the remote threshold/trust values

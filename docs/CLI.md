@@ -537,12 +537,20 @@ defenseclaw agent-control validate SNAPSHOT.json
 
 `setup guardrail` makes the regex authority explicit: `local` uses bundled and
 operator rules, `agent_control` uses only the validated managed snapshot, and
-`hybrid` is additive. For a managed source, setup resolves the API key through
-`defenseclaw keys set`, passes the configured URL and key explicitly to the SDK,
+`hybrid` combines both sources. For a managed source, store the bucket-scoped
+member key with `defenseclaw keys set AGENT_CONTROL_API_KEY`; the command reads
+the value from a hidden prompt, so the secret is not placed in shell history.
+Setup passes the configured URL and resolved key explicitly to the SDK,
 downloads and validates an initial target-effective snapshot, saves
 last-known-good artifacts, and only then switches configuration and restarts.
 The lower-level `agent-control setup` command exposes the same preflight for
 automation and requires `--regex-source` whenever rule buckets are enabled.
+
+The same database-managed member key authenticates both the SDK and Agent
+Control UI. Its grants limit the effective rule buckets and visible execution
+history, and the UI is read-only for controls. Only the environment-provisioned
+bootstrap administrator key is unscoped and allowed to manage users, keys,
+grants, and controls; never install that key on a DefenseClaw endpoint.
 
 `sync --watch` is a separate Python process: it owns
 one Agent Control SDK session and polls that SDK's in-process cache. The Go

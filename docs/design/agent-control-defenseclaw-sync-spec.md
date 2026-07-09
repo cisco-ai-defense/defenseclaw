@@ -1,6 +1,6 @@
 # Agent Control Policy Synchronization for DefenseClaw
 
-**Status:** Proposed
+**Status:** First-release implementation contract
 
 **Target repository:** `defenseclaw`
 
@@ -18,17 +18,15 @@ Control Python SDK and DefenseClaw's native policy systems. Agent Control is
 the authoring, targeting, and distribution plane. DefenseClaw remains the
 validation, activation, and runtime enforcement plane.
 
-The integration has two independent projection lanes:
+The first release has two independent projection lanes:
 
 1. `defenseclaw.opa_policy` becomes a strictly validated supplemental OPA
-   data document consumed by stable, reviewed DefenseClaw Rego. This is the
-   first implementation phase because the OPA engine already supports atomic
-   in-memory reload through the authenticated `/policy/reload` endpoint.
-2. `defenseclaw.rule_pack` becomes a native guardrail rule file. This is a
-   later phase because the current rule-pack runtime has one base directory
-   per connector, permissive loading, and a process-lifetime cache. It must
-   gain additive overlay and strict validation support before remotely
-   managed rules can be enabled safely.
+   data document consumed by stable, reviewed DefenseClaw Rego and activated
+   through authenticated `/policy/reload`.
+2. `defenseclaw.rule_pack` becomes a strictly validated native guardrail rule
+   file. `guardrail.regex_source` selects whether local rules, managed rules,
+   or both contribute to regex detection; activation uses a supervised
+   restart because the rule-pack cache is process-lifetime state.
 
 The integration consumes the target-effective control snapshot cached by the
 Agent Control SDK, translates matching configurations, publishes deterministic
@@ -68,7 +66,7 @@ flowchart LR
     AC -->|"target-effective controls over TLS"| SDK
     SDK -->|"get_server_controls()"| SYNC
     SYNC -->|"validate, normalize, publish"| OPA
-    SYNC -.->|"Phase 2"| RULES
+    SYNC -->|"validate, normalize, publish"| RULES
     OPA -->|"authenticated hot reload"| GW
     RULES -->|"restart until hot reload exists"| GW
     GW -->|"raw local events"| LOG
@@ -155,9 +153,9 @@ excluded from remotely authored v1 values. Disabling remote policy is done by
 disabling or unbinding the Agent Control control, not by lowering a rule to
 `NONE`.
 
-## 4. Current DefenseClaw constraints
+## 4. First-release implementation constraints
 
-This design is based on the following behavior on the source baseline:
+The first release accounts for the following source-baseline constraints:
 
 - `internal/policy/engine.go` loads `data.json`, permissively merges
   `data-sandbox.json`, compiles all Rego modules, and swaps the OPA store only
@@ -181,8 +179,9 @@ This design is based on the following behavior on the source baseline:
 - DefenseClaw supports Python 3.10+, while Agent Control SDK 8.2.x requires
   Python 3.12+.
 
-These constraints make OPA a safe first phase and rule-pack projection a
-separate compatibility change.
+The implementation therefore gives OPA and rule packs independent projection
+and activation transactions while presenting both as one first-release setup
+experience.
 
 ## 5. Goals and non-goals
 
@@ -192,7 +191,8 @@ separate compatibility change.
 - Resolve direct, policy-derived, and target-bound controls for one stable
   DefenseClaw installation identity.
 - Keep Agent Control off all runtime enforcement paths.
-- Preserve the local DefenseClaw baseline and local-only safety settings.
+- Preserve all non-regex local safety settings. Preserve local regex in
+  `local` and `hybrid`; intentionally exclude it in `agent_control`.
 - Apply OPA policy-data changes without restarting the gateway.
 - Retain last-known-good policy through network, schema, disk, activation,
   and process failures.
@@ -208,10 +208,12 @@ separate compatibility change.
 - Accepting or generating arbitrary Rego.
 - Allowing Agent Control to change HILT, guardrail mode, hook fail mode,
   scanner strategy, credentials, paths, or service permissions.
-- Replacing operator-owned `data.json`, Rego, suppressions, judge prompts,
-  sensitive-tool settings, or base rule packs.
+- Rewriting or deleting operator-owned `data.json`, Rego, suppressions, judge
+  prompts, sensitive-tool settings, or base rule packs. Managed regex mode
+  excludes local regex at evaluation time without modifying those files.
 - Projecting admission, firewall, sandbox, audit, or skill-action policy in v1.
-- Adding rule-pack hot reload in the OPA phase.
+- Adding rule-pack hot reload; first-release rule activation uses a verified
+  supervised restart.
 - Supporting Windows managed service installation in v1.
 
 ## 6. Identity, targeting, and authentication
@@ -251,8 +253,19 @@ target contract.
 - Read `agent_control.server_url` from configuration and resolve the secret
   named by `agent_control.api_key_env` through DefenseClaw's credential store.
 - Pass the URL and resolved key explicitly to every SDK `init()` call.
-- Use a regular runtime credential, never an Agent Control administrator
-  credential.
+- Agent Control starts with an environment-provisioned bootstrap administrator
+  key. That key is unscoped and may create users/keys, assign control grants,
+  and mutate rules; it must never be installed on a DefenseClaw endpoint.
+- An administrator creates a database-managed member key and assigns only the
+  rule-bucket controls that endpoint may receive.
+- Use that same member key for SDK authentication and Agent Control UI login.
+  The member can read its effective controls and member-owned execution
+  history but cannot mutate controls.
+- Apply both grant and member-provenance filters to Monitor data. Two members
+  granted the same control must not see each other's exact blocked content.
+- Store the member key with
+  `defenseclaw keys set AGENT_CONTROL_API_KEY`. The normal command uses a
+  hidden prompt; never place the secret in argv or shell history.
 - Require certificate verification for non-loopback URLs.
 - Never copy an Agent Control credential into `config.yaml`, generated policy,
   state, metrics, or logs.
@@ -340,7 +353,7 @@ semantically identical policy reload. A change to local precedence must
 change the projection key and regenerate the artifact even when Agent Control
 returns the same source controls.
 
-## 8. OPA policy-data projection (phase 1)
+## 8. OPA policy-data projection
 
 ### 8.1 Agent Control source schema
 
@@ -492,7 +505,7 @@ Use a DefenseClaw-owned managed directory:
 │       └── <artifact-digest>/data-agent-control.json
 └── rule-pack/
     ├── versions/
-    └── current/rules/                  # phase 2
+    └── current/rules/
 ```
 
 The active OPA file is a concrete file at:
@@ -539,15 +552,14 @@ Activation uses the existing authenticated loopback request:
 POST /policy/reload
 ```
 
-Extend policy status additively so activation can be verified rather than
-inferred:
+Policy status must prove activation rather than infer it:
 
 - `POST /policy/reload` success includes OPA generation and the active Agent
   Control artifact digest.
 - Add token-authenticated `GET /policy/status` returning the same readback.
 - The engine calculates the digest from the exact bytes it successfully
   loaded and swaps digest/generation metadata with the OPA store.
-- Existing reload response fields remain for compatibility.
+- The reload response and status surface use one first-release digest contract.
 
 Successful activation requires the readback digest to equal the published
 digest. On reload error, timeout, process exit, or digest mismatch:
@@ -560,7 +572,7 @@ digest. On reload error, timeout, process exit, or digest mismatch:
 
 The synchronizer must not restart the gateway for an OPA-only update.
 
-## 9. Guardrail rule-pack projection (phase 2)
+## 9. Guardrail rule-pack projection
 
 ### 9.1 Source schema
 
@@ -615,16 +627,18 @@ It has `version: 1`, fixed category `agent-control`, and deterministically
 sorted rules. The synchronizer does not generate judge, suppression,
 sensitive-tool, or local-pattern files.
 
-### 9.3 Required additive overlay support
+### 9.3 Explicit regex-source support
 
-Do not point the existing `guardrail.rule_pack_dir` at the managed Agent
-Control directory. Doing so would replace the operator's selected profile and
-could discard local suppressions, judge prompts, and other rules.
+Do not point `guardrail.rule_pack_dir` at the managed Agent Control directory.
+The local pack remains the authority for judges, suppressions, sensitive tools,
+HILT-related inputs, and connector-specific settings even when local regex is
+excluded.
 
-Add a rules-only overlay field:
+Use a first-class source enum plus an internal rules-only managed artifact:
 
 ```yaml
 guardrail:
+  regex_source: agent_control  # local | agent_control | hybrid
   rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
   rule_pack_overlay_dirs:
     - ~/.defenseclaw/agent-control/rule-pack/current
@@ -632,20 +646,25 @@ guardrail:
 
 Required semantics:
 
-- Load the existing base pack exactly as today.
-- Overlay directories may contain only `rules/*.yaml` in phase 2.
-- Apply global overlay directories after each connector's effective base
-  pack, so the centrally targeted installation policy covers every enabled
-  connector.
-- Preserve per-connector base `rule_pack_dir` selection.
-- Merge overlays in configured order; later categories replace earlier
-  categories.
+- `local` loads bundled/operator regex and local pattern families only. Agent
+  Control rule synchronization is off and managed artifacts are not evaluated.
+- `agent_control` loads only the validated managed regex snapshot. It excludes
+  bundled regex, operator rule files, and local pattern families without
+  deleting or rewriting them.
+- `hybrid` loads local regex plus the managed snapshot for every connector.
+  Duplicate file-backed rule IDs are rejected; overlapping patterns with
+  different IDs may both report findings.
+- All three modes preserve per-connector local configuration, judges,
+  suppressions, sensitive tools, HILT, connector topology, guardrail mode, and
+  failure settings.
+- Managed directories may contain only `rules/*.yaml`.
 - Reserve category `agent-control` for this integration and reject it from
   other managed overlay entries.
 - Missing, malformed, or invalid managed overlays are fatal during native
   validation and activation. They must never silently fall back.
-- Existing operator base-pack permissive behavior remains unchanged for
-  backward compatibility.
+- The first managed-source transition is fetch → validate → save LKG → publish
+  → switch source → supervised restart. A failure before readback leaves local
+  regex and the prior artifacts active.
 
 Add a strict shared Go validator for managed rule files. Runtime loading and
 the pre-publication validator must share the same rule normalization,
@@ -663,7 +682,7 @@ An empty successful snapshot removes the managed category by publishing an
 empty/absent managed overlay state; it never edits the base pack.
 
 Because `RulePackCache` is process-lifetime and category state is installed at
-startup, phase 2 activation requires a gateway restart. Automatic activation
+startup, rule-pack activation requires a gateway restart. Automatic activation
 uses authenticated `POST /policy/restart`: daemon mode arranges the normal
 restart helper, while managed mode exits with an intentional restart result so
 systemd or launchd relaunches the gateway. Before publication, the synchronizer
@@ -673,8 +692,8 @@ provides the exact operator command.
 
 After restart, a health/status surface must report the active rule artifact
 digest. A failed restart or digest mismatch restores the prior overlay and
-restarts again. Phase 2 is not complete until this transaction and its
-multi-connector behavior are tested.
+restarts again. This transaction and its multi-connector behavior are required
+first-release behavior.
 
 ## 10. Synchronization lifecycle
 
@@ -713,7 +732,7 @@ gateway restart loop at the cache polling interval.
 | SDK/cache observation | Synchronizer behavior |
 |---|---|
 | `None` before first success | Preserve LKG; do not publish a disabled artifact |
-| Successful `[]` | Publish disabled/empty managed candidates and preserve local baselines |
+| Successful `[]` | Disable the remote OPA lane and publish an empty managed rule candidate. `hybrid` continues with local regex; `agent_control` intentionally has no regex rules. Non-regex local settings remain active. |
 | Successful non-empty list | Extract, validate, and process both lanes |
 | Failed refresh preserving old list | No policy change; report stale/refresh failure when metadata is available |
 | Invalid matching control | Reject that lane and preserve its LKG |
@@ -722,7 +741,7 @@ gateway restart loop at the cache polling interval.
 
 The SDK currently returns the previous cached list when manual or background
 refresh fails, so list equality alone cannot prove freshness. Production
-freshness reporting requires an additive SDK snapshot metadata API with at
+freshness reporting requires an SDK snapshot metadata surface with at
 least:
 
 ```text
@@ -784,7 +803,7 @@ agent_control:
     activation: reload    # reload | manual
 
   rule_pack:
-    enabled: false        # phase 2 feature gate
+    enabled: false        # true for agent_control or hybrid regex source
     activation: restart   # restart | manual
     max_rules: 1000
 
@@ -804,7 +823,7 @@ Validation rejects:
 - invalid or unreasonably small intervals;
 - unsupported precedence or activation values;
 - OPA reload activation without a policy directory and gateway token;
-- rule-pack enablement when the overlay capability is unavailable;
+- rule-pack enablement when strict source-aware validation is unavailable;
 - managed paths outside the DefenseClaw data root in managed mode;
 - credential values under the `agent_control` block.
 
@@ -827,7 +846,7 @@ defenseclaw agent-control validate <path>
 - checks Python and optional dependency compatibility;
 - creates or imports the stable installation ID;
 - creates managed directories and the active supplemental file;
-- adds the fixed rule overlay path only when phase 2 is enabled;
+- adds the fixed managed-rule path only when the managed rule lane is enabled;
 - validates Agent Control connectivity and authentication;
 - prints the exact agent/target identifiers for binding;
 - optionally installs the platform service.
@@ -917,23 +936,34 @@ Synchronization is fail-stale: failures preserve LKG. Event-time fail-open or
 fail-closed behavior remains the existing local DefenseClaw setting and is
 not changed by this integration.
 
-Successful empty snapshots are not failures. They intentionally remove only
-the Agent Control-managed overlay and restore local baseline behavior.
+Successful empty snapshots are not failures. They disable remote OPA input and
+remove managed regex. `hybrid` continues with local regex, while
+`agent_control` intentionally evaluates no regex until a non-empty validated
+snapshot arrives. Judges, suppressions, sensitive tools, HILT, connector
+settings, and failure behavior remain local in both modes.
 
 ### 14.3 Least privilege and privacy
 
-- Use non-admin Agent Control credentials.
+- Use database-managed member credentials scoped to the endpoint's assigned
+  rule buckets. The same key authenticates the SDK and read-only UI.
+- Reserve the unscoped environment bootstrap administrator key for user, key,
+  grant, and control administration; never deploy it to an endpoint.
+- Filter member Monitor history by both granted controls and the member that
+  ingested the event, so a shared bucket grant does not expose exact prompts
+  across members.
 - Keep gateway activation loopback-bound and token-authenticated.
 - Hash the installation/target ID in persisted status and telemetry.
 - Redact authorization headers, API keys, raw target IDs, full policies, and
   regex content from exceptions and logs.
 - Send control identity, deny decision, correlation IDs, matching rule IDs,
-  severity, direction, latency, exact blocked input, raw request body, and
-  enforcement reason to the Agent Control event sink by default.
+  severity, direction, latency, exact unredacted blocked input, raw request
+  body, and enforcement reason to the Agent Control event sink by default.
 - Keep the raw source local-only at
   `<data_dir>/agent-control/gateway-events-unredacted.jsonl`, with `0700`
   parent permissions, `0600` file permissions, size rotation, and seven-day
   retention. Do not attach any ordinary sink fanout to this writer.
+- Treat the Agent Control content lane as a deliberate scoped exception to the
+  global redaction switch whenever `include_content=true`.
 - Let every other sink keep standard global behavior: redacted while
   `privacy.disable_redaction=false`, unredacted when an operator sets it true.
 - Support `agent_control.observability.include_content=false` as the explicit
@@ -983,12 +1013,13 @@ The enforcement visibility bridge consumes only complete JSONL records where
 `event_type=verdict`, `verdict.stage=final`, and `verdict.action=block`. It
 joins `verdict.rule_ids` to the effective `defenseclaw.rule_pack` controls and
 emits one SDK `ControlExecutionEvent` per matching control with `action=deny`.
-For older v7 gateway producers that omit `rule_ids`, it may use the portion of
-a structured category before the first colon only when that exact value exists
-in the effective rule-control index. It never parses the verdict reason.
+It never derives a rule identity by parsing the free-form verdict reason.
 It uses the gateway trace ID when valid, derives a stable span ID, and derives a
 deterministic UUIDv5 `control_execution_id`. Agent Control stores that ID
 idempotently, so replay after a process crash or partial SDK delivery is safe.
+The server stamps the authenticated member provenance on ingest and applies it
+when that member queries events or statistics; the provenance field is not
+part of the public event response.
 
 The cursor records source path, device, inode, and byte offset. First enablement
 and any metadata/raw source change start at end-of-file to avoid uploading
@@ -1002,9 +1033,9 @@ enforcement.
 
 Default exact-content delivery keeps a bounded in-memory map of recent `llm_prompt`
 records keyed by request ID. On the matching final managed block it adds the
-prompt, raw request body, and enforcement reason to event metadata, with each
-string capped at 64 KiB and a truncation marker. It labels whether a redaction
-placeholder was observed. The Agent Control Monitor recent-executions panel
+unredacted prompt, raw request body, and enforcement reason to event metadata,
+with each string capped at 64 KiB and a truncation marker. The Agent Control
+Monitor recent-executions panel
 opens the newest event and renders trace, span, request, rule, decision,
 duration, content, reason, and raw body. React text escaping remains mandatory;
 the UI must not inject metadata as HTML.
@@ -1041,14 +1072,14 @@ during implementation without changing the contracts in this document.
 | `internal/policy/types.go` | Internal status types if needed; do not change public evaluation shapes |
 | `policies/rego/agent_control_guardrail.rego` | Stable precedence helpers |
 | `policies/rego/guardrail.rego` | Consume effective threshold/trust helpers |
-| `internal/gateway/api.go` | Add authenticated policy status/readback and additive reload response fields |
+| `internal/gateway/api.go` | Add authenticated policy status/readback and reload digest fields |
 | `internal/audit/actions.go` | Register sync/publish/activate/rollback actions |
-| `internal/config/config.go` | Phase 2 overlay directories and Go config validation |
+| `internal/config/config.go` | Regex-source enum, managed rule directories, and Go config validation |
 | `internal/gateway/agent_control_events.go` | Protected, rotated Agent Control-only raw event spool |
 | `internal/gateway/events.go` | Raw private-spool fanout before ordinary sink redaction |
-| `internal/guardrail/rulepack.go` | Phase 2 strict managed-overlay loading |
-| `internal/guardrail/rulepack_cache.go` | Phase 2 activation/restart status behavior |
-| `internal/gateway/rules.go` | Shared strict rule validation and deterministic overlay merge |
+| `internal/guardrail/rulepack.go` | Strict source-aware managed-rule loading |
+| `internal/guardrail/rulepack_cache.go` | Source-aware activation/restart status behavior |
+| `internal/gateway/rules.go` | Shared strict rule validation and deterministic source selection |
 | `packaging/systemd/defenseclaw-agent-control.service` | Managed Linux synchronizer |
 | `packaging/launchd/com.defenseclaw.agent-control.plist` | Managed macOS synchronizer |
 | `docs/API.md` | Policy status and reload readback contract |
@@ -1057,9 +1088,12 @@ during implementation without changing the contracts in this document.
 | `docs/GUARDRAIL_RULE_PACKS.md` | Base versus managed overlay behavior |
 | `docs/ENV-VARS.md` | Agent Control SDK environment variables and redaction rules |
 
-## 17. Implementation sequence
+## 17. First-release implementation workstreams
 
-### Phase 0: Cross-repository contract alignment
+These workstreams ship as one first-release contract; the numbering describes
+dependency order, not separately exposed product phases.
+
+### 17.1 Cross-repository contract alignment
 
 - Apply section 3.2 to the Agent Control evaluator specification.
 - Finalize the two typed schemas using section 3.3.
@@ -1067,14 +1101,14 @@ during implementation without changing the contracts in this document.
 - Verify target-bound control creation and exact cached envelope preservation.
 - Pin compatibility to Agent Control SDK 8.2.x.
 
-### Phase 1A: DefenseClaw OPA foundation
+### 17.2 DefenseClaw OPA foundation
 
 - Add strict supplemental loading and disabled defaults.
 - Add stable Rego precedence helpers and regression tests.
 - Add policy digest/generation status and authenticated readback.
 - Preserve all behavior when the integration is disabled.
 
-### Phase 1B: OPA synchronizer
+### 17.3 Synchronizer and activation
 
 - Add config, optional dependency, identity provisioning, and CLI.
 - Implement SDK initialization/recovery and cached snapshot extraction.
@@ -1082,19 +1116,23 @@ during implementation without changing the contracts in this document.
   readback, and rollback.
 - Add systemd/launchd packaging, audit, metrics, and status.
 
-### Phase 2: Rule-pack overlay
+### 17.4 Regex-source selection and managed rules
 
-- Add rules-only overlay config and strict shared Go validation.
-- Apply the global managed overlay to every connector's effective base pack.
+- Add `local | agent_control | hybrid`, managed rules storage, and strict
+  shared Go validation.
+- Apply the selected source semantics to every connector while retaining all
+  non-regex local settings.
 - Add deterministic rule projection and versioned publication.
 - Add restart/readback/rollback and multi-connector tests.
-- Remove the phase 2 feature gate only after transactional activation passes.
 
-### Phase 3: Enforcement visibility
+### 17.5 Enforcement visibility and scoped access
 
 - Correlate final native block verdicts to effective Agent Control rule
-  controls without sending content.
-- Emit deterministic SDK control events outside the request path.
+  controls and include exact unredacted blocked content by default.
+- Emit deterministic SDK control events outside the request path, stamped with
+  authenticated member provenance on ingest.
+- Enforce bucket grants and read-only control access for database-managed
+  member keys; keep only the bootstrap administrator key unscoped.
 - Persist a rotation-aware cursor and expose delivery health/counters.
 - Verify Agent Control Monitor ingestion in the local bucket demonstration.
 
@@ -1131,8 +1169,9 @@ Cover:
 - unchanged public OPA query/output shapes;
 - reload generation and exact digest readback;
 - existing reload authentication;
-- phase 2 native regex, severity, count, size, and duplicate validation;
-- base plus overlay merge for global and per-connector packs;
+- source-aware native regex, severity, count, size, and duplicate validation;
+- `local`, `agent_control`, and `hybrid` behavior for global and per-connector
+  packs;
 - process restart reporting the expected rule digest.
 
 ### 18.3 Integration tests
@@ -1141,16 +1180,21 @@ Cover:
 - Agent Control unavailable at boot, followed by successful full init retry.
 - Different target IDs receiving different effective policy.
 - Direct, policy-derived, and target-bound de-duplication.
-- Successful empty snapshot restoring local baseline.
+- Successful empty snapshot restoring the local OPA baseline, preserving local
+  regex in `hybrid`, and leaving `agent_control` with intentionally empty regex.
 - Invalid new candidate leaving disk and runtime on LKG.
 - Gateway unavailable during activation leaving candidate published but not
   active, followed by rollback.
 - Digest mismatch detection.
 - Repeated unchanged snapshots producing no write or reload.
-- Rule-pack phase 2 preserving suppressions, judge prompts, and connector base
-  selection.
-- Final managed block becoming an idempotent Agent Control `deny` event, with
-  no prompt, completion, tool payload, or verdict reason in the event body.
+- Every regex source preserving suppressions, judge prompts, sensitive tools,
+  HILT, and connector configuration.
+- Final managed block becoming an idempotent Agent Control `deny` event with
+  exact unredacted blocked input, raw request body, and verdict reason by
+  default, plus a metadata-only opt-out.
+- Two members granted the same control seeing only their own execution content;
+  member keys being unable to mutate controls; bootstrap admin access remaining
+  unscoped.
 - SDK event rejection leaving the JSONL cursor in place for retry.
 - First start skipping history, plus rotation, truncation, malformed records,
   unmapped rule IDs, oversized lines, and unsafe source-file identity.
@@ -1158,17 +1202,22 @@ Cover:
 ### 18.4 End-to-end scenario
 
 1. Start Agent Control and DefenseClaw locally.
-2. Register `defenseclaw-policy-sync` for a stable installation target.
-3. Bind a valid `defenseclaw.opa_policy` control.
+2. Authenticate with the bootstrap administrator key, create a member and key,
+   and assign the intended DefenseClaw buckets to that key.
+3. Use that member key for the `defenseclaw-policy-sync` SDK session and bind a
+   valid control to a stable installation target.
 4. Start the synchronizer and verify the cached control is projected.
 5. Verify the supplemental file and published digest.
 6. Verify hot reload without a gateway process restart.
 7. Send guardrail inputs around both thresholds and verify local merge mode.
 8. Disable/unbind the control and verify local policy is restored.
 9. Supply an invalid candidate and verify LKG remains active.
-10. Verify the Agent Control Monitor shows the enabled bucket's `deny` event
-    with the DefenseClaw request/trace correlation.
-11. Stop Agent Control and verify DefenseClaw enforcement continues while the
+10. Log in with the same member key and verify Monitor shows the enabled
+    bucket's `deny` event with exact content and DefenseClaw request/trace
+    correlation while the Controls surface remains read-only.
+11. Use a second member with the same bucket grant and verify it cannot see the
+    first member's execution content.
+12. Stop Agent Control and verify DefenseClaw enforcement continues while the
     visibility cursor reports degraded delivery and retries after recovery.
 
 ### 18.5 Expected verification commands
@@ -1189,24 +1238,22 @@ Packaging tests must also render and validate both service definitions on
 their target platforms. The final implementation PR must record the exact
 commands and observed results.
 
-## 19. Compatibility and breaking changes
+## 19. First-release boundaries
 
-- With `agent_control.enabled: false` or no supplemental file, current
-  DefenseClaw behavior must remain unchanged.
-- Adding `GET /policy/status` and fields to reload responses is additive.
-- Reserving `data.agent_control` is a new policy-data namespace; custom local
-  policies using that key must migrate before enabling the integration.
-- Phase 2 adds `guardrail.rule_pack_overlay_dirs` without changing existing
-  `rule_pack_dir` selection.
-- Remote schema version 1 is closed. Version 2 requires explicit migration and
-  dual-version compatibility rather than widening v1 silently.
+- `guardrail.regex_source` is required to express regex authority. `local` is
+  the safe default; `agent_control` and `hybrid` require Agent Control and its
+  rule lane to be enabled.
+- `data.agent_control` and category `agent-control` are reserved namespaces in
+  the first-release contract.
+- Remote schema version 1 is closed. A later schema must use a distinct
+  versioned contract rather than widening v1 silently.
 - Renaming either evaluator is a breaking cross-repository control contract.
 - Agent Control SDK major version 9 is rejected or feature-gated until its
   target and cache behavior is revalidated.
 
 ## 20. Acceptance criteria
 
-OPA phase 1 is complete when:
+The first release is complete when:
 
 1. DefenseClaw consumes target-effective controls only through the SDK cache.
 2. Agent Control is absent from event-time enforcement paths; asynchronous
@@ -1225,35 +1272,31 @@ OPA phase 1 is complete when:
 10. Activation failure restores and verifies LKG.
 11. Credentials and raw policy do not leak through files, logs, metrics, or
     status.
-12. Existing behavior is unchanged while the integration is disabled.
-13. Unit, Go, Rego, integration, end-to-end, security, and compatibility tests
+12. `local`, `agent_control`, and `hybrid` implement the documented regex
+    authority without changing local judges, suppressions, sensitive tools,
+    HILT, connectors, guardrail mode, or failure settings.
+13. Unit, Go, Rego, integration, end-to-end, and security tests
     pass with recorded results.
 14. Final blocks from Agent Control-managed rules appear as idempotent `deny`
-    events in Agent Control Monitor without content leakage.
-
-Rule-pack phase 2 is complete only when:
-
-1. `local`, `agent_control`, and `hybrid` select the regex authority explicitly;
-   managed mode contains no bundled/local regex contribution, while hybrid is
-   additive for every connector.
-2. Managed rules use strict shared native validation.
-3. Local suppressions, judge prompts, sensitive tools, HILT, and connector
-   settings remain intact in every mode; local patterns and base rule
-   categories are intentionally excluded only in `agent_control` mode.
-4. Restart activation, readback, rollback, and pending-restart states are
-   transactional and tested.
+    events with scoped exact content in Agent Control Monitor.
+15. Managed rules use strict shared native validation, and restart activation,
+    readback, rollback, and pending-restart states are transactional and tested.
+16. Database-managed member keys are bucket-scoped, cannot mutate controls,
+    authenticate both the UI and SDK, and may upload scoped execution events;
+    member history is provenance-isolated and only the bootstrap administrator
+    key is unscoped.
 
 ## 21. External readiness requirements
 
-The implementation can begin with the attached Agent Control schema/UI work,
-but production readiness depends on two additive contracts:
+Production readiness also depends on two cross-repository contracts:
 
-1. Agent Control should expose SDK snapshot generation and refresh metadata so
+1. Agent Control exposes SDK snapshot generation and refresh metadata so
    DefenseClaw can report freshness without inferring it from an unchanged
-   borrowed list. Preview status may explicitly report `unknown` until then.
-2. DefenseClaw must add authenticated active policy/rule digest readback before
-   claiming transactional activation. A reload or restart success alone is
-   not sufficient proof.
+   borrowed list; otherwise status must explicitly report freshness as
+   `unknown`.
+2. DefenseClaw exposes authenticated active policy/rule digest readback and the
+   synchronizer verifies it before claiming transactional activation. A reload
+   or restart success alone is not sufficient proof.
 
 Neither requirement changes the wire schemas or two-lane architecture.
 

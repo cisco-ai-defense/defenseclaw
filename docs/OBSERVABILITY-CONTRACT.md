@@ -163,9 +163,8 @@ Agent Control lifecycle actions: `agent-control-sync`, `agent-control-publish`, 
 When `agent_control.observability.enabled` is true, the separate Python watcher
 tails new records from the private Agent Control event spool and maps only `verdict.stage=final` plus
 `verdict.action=block` records whose `rule_ids` belong to an effective
-`defenseclaw.rule_pack` control. For older v7 producers that omit `rule_ids`, an
-exact category prefix is accepted only when it is present in that effective
-control index; the free-form verdict reason is never parsed. Each matching control produces an Agent Control
+`defenseclaw.rule_pack` control. The free-form verdict reason is never parsed
+to derive rule identity. Each matching control produces an Agent Control
 `ControlExecutionEvent` with `action=deny`, a deterministic execution ID, the
 control ID/name, trace correlation, rule IDs, severity, direction, and latency.
 The event includes exact blocked prompt, raw request body, and the
@@ -182,6 +181,15 @@ No audit, OTLP, webhook, Splunk, stderr, or normal gateway JSONL fanout is
 attached to this writer. Those sinks continue to follow the standard global
 contract: `privacy.disable_redaction: false` redacts them and `true` leaves
 them unredacted.
+
+The Agent Control private lane is intentionally unredacted whenever
+`agent_control.observability.include_content` is true; the global redaction
+switch continues to govern all standard sinks. A database-managed member API
+key may ingest and view executions only for its granted rule buckets, and
+Monitor further filters exact-content history by the member that ingested it.
+Sharing a bucket grant does not expose one member's blocked prompts to another.
+The environment-provisioned bootstrap administrator key is unscoped; it is for
+administration and must not be installed on DefenseClaw endpoints.
 
 Set `agent_control.observability.include_content: false` to use the standard
 `<data_dir>/gateway.jsonl` source (which follows global redaction) and omit

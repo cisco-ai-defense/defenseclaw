@@ -189,6 +189,26 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 
 {/* AUTOGEN-END: env-vars */}
 
+## Agent Control
+
+| Variable | Purpose |
+| --- | --- |
+| `AGENT_CONTROL_URL` | Agent Control server URL used by the optional synchronizer. |
+| `AGENT_CONTROL_API_KEY` | Bucket-scoped, database-managed member key used by both the SDK and read-only Agent Control UI. |
+| `AGENT_CONTROL_API_KEY_HEADER` | Optional API-key header override supported by the SDK. |
+
+Create the member and assign its rule-bucket grants with the unscoped bootstrap
+administrator key, but install only the member key on DefenseClaw:
+
+```bash
+defenseclaw keys set AGENT_CONTROL_API_KEY
+```
+
+The command prompts with hidden input; do not append the secret to the command
+line. The member can read its effective buckets and member-owned Monitor
+history but cannot edit controls. The synchronizer also needs
+`DEFENSECLAW_GATEWAY_TOKEN` for authenticated loopback activation and readback.
+
 ## When in doubt
 
 Run `defenseclaw doctor`. The doctor walks the same env-var resolution code paths as the running gateway and surfaces effective values plus any active opt-outs.

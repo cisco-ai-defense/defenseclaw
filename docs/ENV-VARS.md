@@ -198,10 +198,16 @@ plus any active opt-outs.
 | Variable | Purpose |
 |---|---|
 | `AGENT_CONTROL_URL` | Agent Control server URL used by the optional synchronizer |
-| `AGENT_CONTROL_API_KEY` | Regular/runtime Agent Control API key |
+| `AGENT_CONTROL_API_KEY` | Bucket-scoped, database-managed member key used by both the Agent Control SDK and read-only UI |
 | `AGENT_CONTROL_API_KEY_HEADER` | Optional API-key header override supported by the SDK |
 
 The synchronizer also needs the normal `DEFENSECLAW_GATEWAY_TOKEN` so it can
 authenticate loopback `/policy/reload`, `/policy/restart`, and `/policy/status`
 calls. Do not put these secrets in generated policy artifacts or
 `agent_control:` config.
+
+Create the member and assign its rule-bucket grants with the unscoped bootstrap
+administrator key, then store the member secret with
+`defenseclaw keys set AGENT_CONTROL_API_KEY`. The command prompts with hidden
+input; do not append the secret to the command line. Never deploy the bootstrap
+administrator key to a DefenseClaw endpoint.

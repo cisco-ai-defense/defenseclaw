@@ -13,20 +13,32 @@ DefenseClaw splits guardrail behavior across two separate layers:
 | OPA policy | Block / alert thresholds, severity-to-action behavior, enforcement rules | `defenseclaw policy activate default|strict|permissive` |
 | Guardrail rule pack | Judge prompts, PII category severity, pre-judge strips, `suppressions.yaml`, sensitive tool rules | `guardrail.rule_pack_dir` in `~/.defenseclaw/config.yaml` |
 
-### Managed rules-only overlays
+### Regex source and managed rules
 
-`guardrail.rule_pack_overlay_dirs` adds strictly validated `rules/*.yaml`
-after the selected base pack. Unlike `rule_pack_dir`, an overlay cannot replace
-judge prompts, suppressions, sensitive-tool configuration, or local patterns.
-The Agent Control integration uses this mechanism so centrally distributed
-rules remain complementary to the operator's selected profile:
+`guardrail.regex_source` chooses the regex authority explicitly. Agent Control
+stores its validated `rules/*.yaml` snapshot in
+`guardrail.rule_pack_overlay_dirs`, but that storage mechanism does not imply
+that managed rules are always added to local rules:
 
 ```yaml
 guardrail:
+  regex_source: agent_control  # local | agent_control | hybrid
   rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
   rule_pack_overlay_dirs:
     - ~/.defenseclaw/agent-control/rule-pack/current
 ```
+
+| Source | Regex behavior |
+|---|---|
+| `local` | Run bundled rules, operator rule files, and local pattern families. Managed snapshots are not evaluated. |
+| `agent_control` | Run only the validated Agent Control snapshot. Local regex contributions are excluded, including local patterns and file-backed rules. |
+| `hybrid` | Run both sources. Duplicate file-backed IDs are rejected; overlapping patterns with different IDs may both report findings. |
+
+The source switch affects only regex detection. In every mode, the selected
+local profile still owns judge prompts, suppressions, sensitive-tool
+configuration, HILT, connector settings, and failure behavior. Selecting
+`agent_control` excludes local regex at evaluation time; it does not delete or
+rewrite the local pack.
 
 Managed overlays are strict: missing directories, unexpected files, unknown
 fields, duplicate rule IDs, invalid Go/RE2 patterns, unsupported severities,

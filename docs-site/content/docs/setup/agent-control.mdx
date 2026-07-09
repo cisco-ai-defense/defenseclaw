@@ -27,7 +27,7 @@ You can run that control plane in either of two ways:
 </Cards>
 
 <Callout title="Agent Control is not in the enforcement request path">
-The synchronizer fetches the target-effective **policy snapshot** through the Agent Control SDK. In watch mode it asynchronously reports final blocks for Agent Control-managed rules after DefenseClaw has already decided. Exact blocked input, raw request body, and enforcement reason are included by default so the Monitor tab can show the complete denied span. DefenseClaw remains the runtime enforcement authority, and its last-known-good local policy keeps serving when the control plane is temporarily unavailable.
+The synchronizer fetches the target-effective **policy snapshot** through the Agent Control SDK. In watch mode it asynchronously reports final blocks for Agent Control-managed rules after DefenseClaw has already decided. The Agent Control integration includes the exact unredacted blocked input, raw request body, and enforcement reason by default so the Monitor tab can show the complete denied span. DefenseClaw remains the runtime enforcement authority, and its last-known-good local policy keeps serving when the control plane is temporarily unavailable.
 </Callout>
 
 ## Architecture
@@ -92,10 +92,21 @@ You own:
 
 Start with the official [Agent Control quickstart](https://docs.agentcontrol.dev/core/quickstart), then harden authentication and networking before connecting production DefenseClaw endpoints. The quickstart disables authentication for local development; do not expose that configuration outside an isolated development environment.
 
-Bootstrap Agent Control with an administrator key, then use **Access management**
-in the Agent Control UI to create a DefenseClaw runtime user and API key. Assign
-only the DefenseClaw rule buckets that installation may receive. The generated
-secret is shown once.
+Bootstrap Agent Control with an environment-provisioned administrator key,
+then use **Access management** in the Agent Control UI to create a DefenseClaw
+member user and API key. Assign only the DefenseClaw rule buckets and optional
+OPA control that key may receive. The generated secret is shown once.
+
+The two credential classes are intentionally different:
+
+| Credential | Scope and capabilities |
+| --- | --- |
+| Bootstrap administrator key | Unscoped break-glass/bootstrap access. Creates users and keys, assigns bucket grants, and edits controls. Do not deploy it to DefenseClaw. |
+| Database-managed member key | Limited to its assigned rule buckets. The same key authenticates the DefenseClaw SDK and the Agent Control UI. It can read its effective controls and its own execution history, but cannot create, edit, delete, enable, or disable rules. |
+
+Execution history is member-owned as well as bucket-filtered. Two members with
+a grant to the same bucket do not gain access to each other's exact blocked
+content.
 
 Store the runtime key through DefenseClaw's protected credential flow:
 
@@ -103,10 +114,12 @@ Store the runtime key through DefenseClaw's protected credential flow:
 defenseclaw keys set AGENT_CONTROL_API_KEY
 ```
 
-Use a non-administrator key whose grants contain only the intended DefenseClaw
-rule buckets. The key authorizes SDK registration, policy refresh, and
-enforcement-event upload; it cannot edit controls. Keep it in your service
-secret facility, never in `config.yaml`, generated OPA data, or a rule file.
+The command prompts for the value with hidden input; do not append the secret
+to the command line. Use a member key whose grants contain only the intended
+DefenseClaw rule buckets. The key authorizes SDK registration, policy refresh,
+enforcement-event upload, and read-only UI access; it cannot edit controls.
+Keep it in your service secret facility, never in `config.yaml`, generated OPA
+data, or a rule file.
 
 </Tab>
 
@@ -120,7 +133,10 @@ Your Cisco onboarding material supplies the tenant endpoint, credential, and ide
 defenseclaw keys set AGENT_CONTROL_API_KEY
 ```
 
-Do not guess the cloud hostname or credential header, and do not copy an administrator credential from the management UI. Use the target-scoped runtime credential provided for the deployment.
+The command prompts for the value with hidden input. Do not guess the cloud
+hostname or credential header, and do not copy an administrator credential
+from the management UI. Use the bucket-scoped member credential provided for
+the deployment.
 
 Cisco operates the cloud control plane; you still own:
 
@@ -144,7 +160,7 @@ The endpoint running the synchronizer needs:
 - Python 3.12 or newer for Agent Control SDK 8.2.x;
 - the `defenseclaw[agent-control]` optional dependency;
 - a running DefenseClaw gateway with `policy_dir` configured;
-- an Agent Control URL and non-admin runtime credential;
+- an Agent Control URL and bucket-scoped member credential;
 - `DEFENSECLAW_GATEWAY_TOKEN` for automatic local reload or restart;
 - a policy directory writable by the synchronizer service identity and readable by the gateway;
 - the gateway and synchronizer running as the same OS service identity when exact-content visibility is enabled;
@@ -207,6 +223,20 @@ failed fetch, missing credential, empty first managed rule set, validation
 failure, publication failure, or config-save failure leaves local regex and
 the previous active artifacts unchanged.
 
+After setup, verify the resolved member key and source posture without printing
+the secret:
+
+```bash
+defenseclaw keys list --missing-only
+defenseclaw doctor
+defenseclaw agent-control status
+```
+
+`keys list` resolves the configured `agent_control.api_key_env` (including a
+custom name), `doctor` checks that the managed source, deployment, URL,
+installation, and rule lane agree, and `agent-control status` reports snapshot,
+activation, and Monitor-delivery health.
+
 <Callout type="info" title="What Agent Control managed replaces">
 Agent Control managed replaces only regex detection. Local judges,
 suppressions, sensitive-tool configuration, HILT, connector topology,
@@ -264,7 +294,8 @@ uv run python scripts/import_agent_control_buckets.py \
 
 In Agent Control, open **Access management**, create a member such as
 `defenseclaw-demo`, issue a key, and assign the imported DefenseClaw buckets to
-that key. The secret appears once. Save it locally, then select managed regex:
+that key. The secret appears once. Save it through the hidden prompt, then
+select managed regex:
 
 ```bash
 defenseclaw keys set AGENT_CONTROL_API_KEY
@@ -304,7 +335,13 @@ defenseclaw agent-control status
 
 Wait for `status: active` and matching published/active rule digests. Replaying the identical prompt now matches `LOCAL-INJECTION-014` at CRITICAL severity, returns a DefenseClaw block response with `X-DefenseClaw-Blocked: true`, and does not contact the upstream model. CRITICAL is deliberate: DefenseClaw's prompt UX contract demotes HIGH prompt decisions to alerts, while CRITICAL findings remain hard blocks.
 
-Keep `sync --watch` running while replaying the blocked prompt. Open the `defenseclaw-policy-sync` agent's **Monitor** tab in Agent Control. The enabled prompt-injection bucket appears as a matched `deny` execution with the DefenseClaw request/trace correlation. By default, the newest execution also contains the exact blocked input, enforcement reason, and raw request body.
+Keep `sync --watch` running while replaying the blocked prompt. Sign back into
+Agent Control with the **member** key and open the `defenseclaw-policy-sync`
+agent's **Monitor** tab. The member can see history for its granted buckets but
+cannot edit them. The enabled prompt-injection bucket appears as a matched
+`deny` execution with the DefenseClaw request/trace correlation. By default,
+the newest execution also contains the exact unredacted blocked input,
+enforcement reason, and raw request body.
 
 ![Agent Control Monitor overview showing deny executions for the DefenseClaw prompt-injection control](/images/agent-control/monitor-overview.jpg)
 
@@ -312,7 +349,7 @@ The newest span opens automatically and exposes the exact DefenseClaw trace, spa
 
 ![Expanded Agent Control execution showing the exact unredacted prompt blocked by DefenseClaw](/images/agent-control/monitor-exact-blocked-span.jpg)
 
-Exact content is the Agent Control integration default. To send only decision and correlation metadata, opt out and restart the gateway and synchronizer:
+Exact unredacted content is the Agent Control integration default. To send only decision and correlation metadata, opt out and restart the gateway and synchronizer:
 
 ```yaml
 agent_control:
@@ -322,13 +359,13 @@ agent_control:
 ```
 
 <Callout type="warn" title="Agent Control receives workload content by default">
-Enabling the Agent Control integration creates a local-only raw spool at `<data_dir>/agent-control/gateway-events-unredacted.jsonl` with directory mode `0700`, file mode `0600`, size rotation, and seven-day retention. The synchronizer forwards only final blocks owned by effective Agent Control rule-pack controls. Before using self-hosted Agent Control or Cisco Cloud Control with production traffic, confirm authorization, data residency, access control, retention, and deletion requirements. Set `include_content: false` when exact content is not approved.
+Enabling the Agent Control integration creates a local-only raw spool at `<data_dir>/agent-control/gateway-events-unredacted.jsonl` with directory mode `0700`, file mode `0600`, size rotation, and seven-day retention. This integration-private lane is intentionally unredacted when `include_content: true`, independent of the global redaction switch. The synchronizer forwards only final blocks owned by effective Agent Control rule-pack controls. Before using self-hosted Agent Control or Cisco Cloud Control with production traffic, confirm authorization, data residency, access control, retention, and deletion requirements. Set `include_content: false` when exact content is not approved.
 </Callout>
 
 The `0700`/`0600` boundary intentionally requires the gateway writer and synchronizer reader to use the same OS account. The packaged systemd services both use `defenseclaw`; the Cisco Secure Client launchd jobs both use the default root identity. Custom deployments must preserve that same-identity model; DefenseClaw does not weaken the spool permissions for cross-user sharing.
 
 <Callout type="info" title="Other DefenseClaw sinks keep the standard redaction behavior">
-The Agent Control private spool does not change global redaction. Audit storage, normal gateway JSONL, OTLP, webhooks, and Splunk are redacted while `privacy.disable_redaction: false`; they remain unredacted when the operator explicitly sets `privacy.disable_redaction: true`.
+The Agent Control private spool does not change global redaction. Audit storage, normal gateway JSONL, OTLP, webhooks, and Splunk are redacted while `privacy.disable_redaction: false`; they remain unredacted when the operator explicitly sets `privacy.disable_redaction: true`. If global redaction is disabled, both the Agent Control span and those standard sinks contain exact content.
 </Callout>
 
 <Callout type="warn" title="This is an isolated demonstration">
