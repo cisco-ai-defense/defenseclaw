@@ -11,31 +11,27 @@ import (
 	"time"
 )
 
-// OrchestratorConfig holds everything needed to start the managed SR.
 type OrchestratorConfig struct {
-	Enabled       bool
-	Version       string
-	Port          int
-	DataDir       string // ~/.defenseclaw
-	RemoteEndpoint string // if set, skip managed lifecycle
-	TimeoutMs     int
-
-	// Config translation inputs
+	Enabled        bool
+	Version        string
+	Port           int
+	DataDir        string
+	RemoteEndpoint string
+	TimeoutMs      int
 	TranslateInput TranslateInput
 }
 
-// OrchestratorResult is returned after successful startup.
 type OrchestratorResult struct {
-	Endpoint  string     // http://127.0.0.1:{port}
-	Lifecycle *Lifecycle // nil if remote mode
+	Endpoint  string
+	Lifecycle *Lifecycle
 }
 
 // StartManagedRouter performs the full startup sequence:
-// 1. Ensure binary is downloaded
-// 2. Translate config to SR native format
-// 3. Start SR subprocess
-// 4. Wait for health
-// Returns the endpoint URL to connect to.
+// 1. Ensure vllm-sr is installed (pip)
+// 2. Check Docker is available
+// 3. Translate config to SR format
+// 4. Start vllm-sr serve
+// 5. Wait for health
 func StartManagedRouter(ctx context.Context, cfg OrchestratorConfig) (*OrchestratorResult, error) {
 	if !cfg.Enabled {
 		return nil, nil
@@ -47,46 +43,47 @@ func StartManagedRouter(ctx context.Context, cfg OrchestratorConfig) (*Orchestra
 		return &OrchestratorResult{Endpoint: cfg.RemoteEndpoint}, nil
 	}
 
-	// Managed mode
 	port := cfg.Port
 	if port == 0 {
-		port = 8080
+		port = defaultSRPort
 	}
 
+	// 1. Ensure vllm-sr is installed
+	mgr := NewManager(cfg.DataDir)
+	if err := mgr.EnsureInstalled(ctx, cfg.Version); err != nil {
+		return nil, err
+	}
+
+	// 2. Check Docker
+	if !mgr.DockerAvailable() {
+		return nil, fmt.Errorf("routing: Docker is required for vllm-sr serve but is not running")
+	}
+
+	// 3. Translate config
 	srDir := filepath.Join(cfg.DataDir, "semantic-router")
-
-	// 1. Ensure binary
-	mgr := NewBinaryManager(cfg.DataDir)
-	binPath, err := mgr.EnsureBinary(ctx, cfg.Version)
-	if err != nil {
-		return nil, fmt.Errorf("routing: ensure binary: %w", err)
-	}
-
-	// 2. Translate config
 	cfg.TranslateInput.Port = port
 	configPath, err := TranslateAndWrite(cfg.TranslateInput, srDir)
 	if err != nil {
 		return nil, fmt.Errorf("routing: translate config: %w", err)
 	}
 
-	// 3. Start subprocess
+	// 4. Start vllm-sr serve
 	lc := NewLifecycle(LifecycleConfig{
-		BinaryPath: binPath,
 		ConfigPath: configPath,
 		Port:       port,
-		DataDir:    srDir,
 	})
 	if err := lc.Start(ctx); err != nil {
-		return nil, fmt.Errorf("routing: start sr: %w", err)
+		return nil, err
 	}
 
-	// 4. Wait for health
-	healthTimeout := 10 * time.Second
+	// 5. Wait for health (Docker containers take time to start)
+	healthTimeout := 30 * time.Second
 	if err := lc.WaitForHealth(ctx, healthTimeout); err != nil {
 		lc.Stop()
-		return nil, fmt.Errorf("routing: sr health check failed: %w", err)
+		return nil, err
 	}
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+	fmt.Fprintf(os.Stderr, "[routing] semantic router ready at %s\n", endpoint)
 	return &OrchestratorResult{Endpoint: endpoint, Lifecycle: lc}, nil
 }
