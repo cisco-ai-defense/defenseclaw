@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import ctypes
 import datetime
 import email.parser
 import hashlib
@@ -132,6 +133,10 @@ _COSIGN_BOOTSTRAP_SHA256 = {
     ("linux", "arm64"): "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917",
 }
 _TARGET_CONFIG_VERSION = 8
+_WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
+_WINDOWS_INSTALL_STATE = "install-state.json"
+_CSIDL_LOCAL_APPDATA = 0x001C
+_CSIDL_PROFILE = 0x0028
 _TUI_SMOKE_CODE = """
 import asyncio
 import tempfile
@@ -457,6 +462,13 @@ def upgrade(
         # predate goreleaser's checksum publication; in that case we proceed
         # with a clear warning rather than hard-failing operators on a
         # version they could otherwise install.
+        native_windows_state = _native_windows_install_state(os_name)
+        if native_windows_state is not None and allow_unverified:
+            ux.err(
+                "--allow-unverified is not permitted for native Windows setup handoff.",
+                indent="  ",
+            )
+            raise SystemExit(1)
         checksums = _download_checksums(
             target_version,
             staging_dir,
@@ -513,7 +525,6 @@ def upgrade(
             )
         else:
             ux.ok("Checksum manifest accepted (checksums.txt)")
-
         # B-side release-provenance consumer: authenticate the hard-cut source
         # identity before interpreting target policy or preparing any mutable
         # state. 0.8.5+ cannot fall back to release-service metadata.
@@ -559,6 +570,12 @@ def upgrade(
             wheel_artifact,
             _UPGRADE_MANIFEST_FILENAME,
         ]
+        if native_windows_state is not None:
+            # The signed native Setup is the only published Windows delivery
+            # artifact. The protected raw Windows gateway remains sealed inside
+            # Setup and must not be fetched through the legacy CLI path.
+            _windows_installer_policy(upgrade_manifest)
+            artifact_names.append(_WINDOWS_SETUP_ASSET)
         if checksums is not None:
             # Resolve artifact names from authenticated release policy before
             # allowing unsigned release metadata to fill an explicitly opted-in
@@ -569,6 +586,38 @@ def upgrade(
                 artifact_names,
                 allow_unverified=effective_allow_unverified,
             )
+        if native_windows_state is not None:
+            _enforce_windows_self_update_policy(native_windows_state)
+            if not yes:
+                click.echo()
+                click.echo(f"  {ux.bold('This will:')}")
+                click.echo(f"    {ux.dim('1.')} Back up DefenseClaw state and connector backups")
+                click.echo(f"    {ux.dim('2.')} Hand off to the verified native setup executable")
+                click.echo(f"    {ux.dim('3.')} Apply required migrations and restart owned services")
+                click.echo()
+                if not click.confirm("  Proceed?", default=False):
+                    ux.subhead("Aborted.")
+                    return
+            ux.banner("Creating Backup")
+            backup_dir = _create_backup(app.cfg, data_dir=data_dir)
+            ux.ok(f"Backup saved to: {backup_dir}")
+            setup_path, setup_name = _download_windows_setup(
+                target_version,
+                staging_dir,
+                checksums,
+                upgrade_manifest,
+                allow_unverified=effective_allow_unverified,
+            )
+            _handoff_windows_setup_upgrade(
+                setup_path,
+                setup_name,
+                target_version,
+                native_windows_state,
+                upgrade_manifest,
+                yes=yes,
+            )
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            return
         _preflight_check(
             target_version,
             os_name,
@@ -1053,7 +1102,6 @@ def upgrade(
     _check_post_upgrade_drift(target_version)
     click.echo()
 
-
 def _print_hard_cut_rollback_outcome(*, succeeded: bool, backup_dir: str) -> None:
     """Emit one truthful summary for either rollback entry point."""
 
@@ -1276,12 +1324,17 @@ def _normalize_target_version(version: str) -> str:
         normalized = normalized[1:]
     if _VERSION_RE.fullmatch(normalized):
         return normalized
-
     ux.err(
         f"Invalid release version: {version!r}. Expected MAJOR.MINOR.PATCH.",
         indent="  ",
     )
     raise SystemExit(1)
+
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    normalized = _normalize_target_version(version)
+    major, minor, patch = normalized.split(".")
+    return int(major), int(minor), int(patch)
 
 
 def _fetch_latest_version() -> str | None:
@@ -1396,6 +1449,137 @@ def _detect_platform() -> tuple[str, str]:
         raise SystemExit(1)
 
     return system, arch
+
+
+def _native_windows_install_state(os_name: str) -> dict[str, object] | None:
+    """Return installer state for native Windows EXE installs, if present."""
+    if os_name != "windows":
+        return None
+
+    local_appdata = _windows_known_folder(_CSIDL_LOCAL_APPDATA)
+    profile = _windows_known_folder(_CSIDL_PROFILE)
+    if not local_appdata or not profile:
+        ux.err("Windows Known Folders could not be resolved for native upgrade detection.", indent="  ")
+        raise SystemExit(1)
+
+    install_root = _trusted_child_path(local_appdata, "Programs", "DefenseClaw")
+    state_path = os.path.join(install_root, "installer", _WINDOWS_INSTALL_STATE)
+    try:
+        with open(state_path, encoding="utf-8") as stream:
+            state = json.load(stream)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        ux.err(f"Native installer state could not be read safely: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    if not isinstance(state, dict):
+        ux.err("Native installer state must be a JSON object.", indent="  ")
+        raise SystemExit(1)
+    if state.get("install_kind") != "native-windows-exe":
+        ux.err("Native installer state has an unexpected install kind.", indent="  ")
+        raise SystemExit(1)
+
+    root = _trusted_child_path(install_root)
+    command_dir = _trusted_child_path(root, "bin")
+    expected_root = _trusted_child_path(local_appdata, "Programs", "DefenseClaw")
+    if os.path.normcase(root) != os.path.normcase(expected_root):
+        ux.err(f"Native installer state has an unexpected install root: {root}", indent="  ")
+        raise SystemExit(1)
+    setup = _trusted_child_path(
+        local_appdata,
+        "DefenseClaw",
+        "InstallerCache",
+        _WINDOWS_SETUP_ASSET,
+    )
+    recorded_setup = state.get("maintenance_path")
+    if recorded_setup and (
+        not isinstance(recorded_setup, str)
+        or os.path.normcase(os.path.realpath(recorded_setup)) != os.path.normcase(setup)
+    ):
+        ux.err("Native installer state has an unexpected maintenance path.", indent="  ")
+        raise SystemExit(1)
+    data_root = state.get("data_root")
+    expected_data_root = _trusted_child_path(profile, ".defenseclaw")
+    if data_root and (
+        not isinstance(data_root, str)
+        or os.path.normcase(os.path.realpath(data_root)) != os.path.normcase(expected_data_root)
+    ):
+        ux.err("Native installer state has an unexpected data root.", indent="  ")
+        raise SystemExit(1)
+    state["install_root"] = root
+    state["command_dir"] = command_dir
+    state["setup_path"] = setup
+    state["maintenance_path"] = setup
+    state["install_scope"] = state.get("install_scope", "user")
+    state["data_root"] = expected_data_root
+    return state
+
+
+def _windows_known_folder(csidl: int) -> str | None:
+    """Resolve a Windows shell folder without trusting process environment variables."""
+    if os.name != "nt":
+        return None
+    buffer = ctypes.create_unicode_buffer(32768)
+    sh_get_folder_path = ctypes.windll.shell32.SHGetFolderPathW
+    sh_get_folder_path.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_wchar_p,
+    ]
+    sh_get_folder_path.restype = ctypes.c_long
+    result = sh_get_folder_path(None, csidl, None, 0, buffer)
+    if result != 0 or not buffer.value:
+        return None
+    return os.path.realpath(os.path.abspath(buffer.value))
+
+
+def _trusted_child_path(root: str, *parts: str) -> str:
+    """Resolve a child path and reject traversal/reparse surprises."""
+    base = os.path.realpath(os.path.abspath(root))
+    candidate = os.path.realpath(os.path.abspath(os.path.join(base, *parts)))
+    if candidate != base and not candidate.startswith(base + os.sep):
+        ux.err(f"Installer state path escapes install root: {candidate}", indent="  ")
+        raise SystemExit(1)
+    return candidate
+
+
+def _enforce_windows_self_update_policy(state: dict[str, object]) -> None:
+    """Fail closed when a machine install or enterprise policy owns updates."""
+    if state.get("install_scope", "user") != "user":
+        ux.err(
+            "This DefenseClaw install is machine-managed; update it through MSI, Intune, or SCCM.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    try:
+        import winreg
+
+        access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Policies\Cisco\DefenseClaw",
+            0,
+            access,
+        ) as key:
+            disabled, _value_type = winreg.QueryValueEx(key, "DisableSelfUpdate")
+    except ModuleNotFoundError as exc:
+        if os.name == "nt":
+            ux.err(f"Could not load the Windows enterprise policy API: {exc}", indent="  ")
+            raise SystemExit(1) from exc
+        return
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        ux.err(f"Could not read the enterprise update policy: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    if int(disabled) != 0:
+        ux.err(
+            "DefenseClaw self-update is disabled by enterprise policy; use the managed deployment channel.",
+            indent="  ",
+        )
+        raise SystemExit(1)
 
 
 def _gateway_archive_name(version: str, os_name: str, arch: str) -> str:
@@ -1970,6 +2154,213 @@ def _download_wheel(
     return materialized, whl_name
 
 
+def _download_windows_setup(
+    version: str,
+    staging_dir: str,
+    checksums: dict[str, str] | None,
+    manifest: dict[str, object] | None,
+    allow_unverified: bool = False,
+) -> tuple[str, str]:
+    """Download, checksum, and Authenticode-verify the native setup EXE."""
+    installer = _windows_installer_policy(manifest)
+    setup_name = str(installer.get("asset", _WINDOWS_SETUP_ASSET))
+    if setup_name != _WINDOWS_SETUP_ASSET:
+        ux.err(f"Unsupported Windows installer asset: {setup_name!r}", indent="  ")
+        raise SystemExit(1)
+    url = f"{GITHUB_DL}/{version}/{setup_name}"
+    dest = os.path.join(staging_dir, setup_name)
+    click.echo(f"  {ux.dim('→')} Downloading native Windows setup executable ...")
+    _download_file(url, dest)
+    if checksums is not None:
+        _verify_sha256(dest, setup_name, checksums)
+    else:
+        ux.err("No trusted checksum manifest is available for the setup executable.", indent="  ")
+        raise SystemExit(1)
+    _verify_windows_setup_authenticode(dest, installer, allow_unverified=allow_unverified)
+    ux.ok("Native Windows setup executable downloaded")
+    return dest, setup_name
+
+
+def _windows_installer_policy(manifest: dict[str, object] | None) -> dict[str, object]:
+    if not manifest:
+        ux.err("Release manifest did not describe the native Windows installer.", indent="  ")
+        raise SystemExit(1)
+    installer = manifest.get("windows_installer")
+    if not isinstance(installer, dict):
+        ux.err("Release manifest is missing windows_installer policy.", indent="  ")
+        raise SystemExit(1)
+    return installer
+
+
+def _verify_windows_setup_authenticode(
+    setup_path: str,
+    installer: dict[str, object],
+    allow_unverified: bool = False,
+) -> None:
+    """Validate Authenticode status and publisher for the setup EXE."""
+    auth = installer.get("authenticode", {})
+    if not isinstance(auth, dict):
+        auth = {}
+    default = default_publisher()
+    publisher = auth.get("publisher", default)
+    if auth.get("required") is not True or publisher != default:
+        ux.err("Release manifest does not require the pinned DefenseClaw publisher.", indent="  ")
+        raise SystemExit(1)
+
+    powershell = _system_powershell_path()
+    if not powershell:
+        _fail_authenticode(
+            "PowerShell is required to verify Authenticode signatures on Windows.",
+        )
+        return
+    script = (
+        "$sig = Get-AuthenticodeSignature -LiteralPath $args[0]; "
+        "$publisher = ''; "
+        "if ($sig.SignerCertificate) { "
+        "$publisher = $sig.SignerCertificate.GetNameInfo("
+        "[System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) }; "
+        "[pscustomobject]@{Status=[string]$sig.Status;Publisher=$publisher} | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", script, setup_path],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _fail_authenticode(
+            f"Could not verify setup Authenticode signature: {exc}",
+        )
+        return
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        _fail_authenticode(
+            f"Could not verify setup Authenticode signature: {detail}",
+        )
+        return
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        _fail_authenticode(
+            f"Could not parse setup Authenticode status: {exc}",
+        )
+        return
+    status = payload.get("Status")
+    signer = payload.get("Publisher", "")
+    if status == "Valid" and signer == publisher:
+        ux.ok(f"Setup Authenticode signature verified ({publisher})")
+        return
+    _fail_authenticode(
+        f"Setup Authenticode signature is not trusted: status={status!r}, publisher={signer!r}",
+    )
+
+
+def default_publisher() -> str:
+    return "Cisco Systems, Inc."
+
+
+def _fail_authenticode(message: str) -> None:
+    ux.err(message, indent="  ")
+    ux.subhead("Refusing to run an unsigned or untrusted setup executable.", indent="    ")
+    raise SystemExit(1)
+
+
+def _system_powershell_path() -> str | None:
+    if os.name != "nt":
+        return shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length == 0 or length >= len(buffer):
+        return None
+    candidate = os.path.join(buffer.value, "WindowsPowerShell", "v1.0", "powershell.exe")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _handoff_windows_setup_upgrade(
+    setup_path: str,
+    setup_name: str,
+    version: str,
+    state: dict[str, object],
+    manifest: dict[str, object] | None,
+    yes: bool,
+) -> None:
+    """Launch setup from its trusted cache, then return so this runtime can exit."""
+    _windows_installer_policy(manifest)
+    connector = state.get("connector")
+    if connector not in {"codex", "claudecode", "none"}:
+        connector = "none"
+    mode = state.get("mode")
+    if mode not in {"observe", "action"}:
+        mode = "observe"
+
+    cached_setup = _cache_verified_windows_setup(setup_path, state)
+    args = [
+        cached_setup,
+        "/upgrade",
+        "/norestart",
+        "INSTALLSCOPE=user",
+        f"CONNECTOR={connector}",
+        f"MODE={mode}",
+        f"WAITPID={os.getpid()}",
+        f"FROMVERSION={state.get('version', version)}",
+    ]
+    if yes:
+        args.insert(2, "/quiet")
+    click.echo(f"  {ux.dim('→')} Handing off to {setup_name} ...")
+    try:
+        subprocess.Popen(
+            args,
+            close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.err(f"Could not run native Windows setup executable: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    ux.ok(f"Verified setup handoff started for DefenseClaw {version}")
+    click.echo(f"  {ux.dim('→')} This command will now exit so setup can replace the managed runtime.")
+
+
+def _cache_verified_windows_setup(setup_path: str, state: dict[str, object]) -> str:
+    target = state.get("maintenance_path")
+    if not isinstance(target, str) or not target:
+        ux.err("Native installer state has no trusted maintenance path.", indent="  ")
+        raise SystemExit(1)
+    parent = os.path.dirname(target)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    if os.path.islink(parent) or (os.path.lexists(target) and os.path.islink(target)):
+        ux.err("Refusing to publish setup through a symbolic-link path.", indent="  ")
+        raise SystemExit(1)
+    staged = f"{target}.new.{os.getpid()}"
+    try:
+        with open(setup_path, "rb") as source, open(staged, "xb") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if _file_sha256(staged) != _file_sha256(setup_path):
+            raise OSError("maintenance copy checksum mismatch")
+        os.replace(staged, target)
+    except OSError as exc:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        ux.err(f"Could not publish the verified setup handoff: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    return target
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 # Filename the GitHub release exposes for the SHA-256 manifest. Mirrors
 # .goreleaser.yaml ``checksum.name_template``.
 _CHECKSUMS_FILENAME = "checksums.txt"
@@ -1979,6 +2370,7 @@ def _download_checksums(
     version: str,
     staging_dir: str,
     allow_unverified: bool = False,
+    require_sigstore: bool = False,
 ) -> dict[str, str] | None:
     """Download ``checksums.txt`` for the target release and parse it.
 
@@ -2240,6 +2632,7 @@ def _verify_checksums_sigstore(
     staging_dir: str,
     checksums_path: str,
     allow_unverified: bool = False,
+    require_embedded_verifier: bool = False,
 ) -> None:
     """Verify checksums.txt with its Sigstore cert/signature.
 
@@ -2325,6 +2718,16 @@ def _verify_checksums_sigstore(
         raise SystemExit(1)
 
     ux.ok("Checksum signature verified (Sigstore)")
+
+
+def _managed_cosign_path() -> str | None:
+    """Return the installer-owned verifier path without consulting PATH or environment roots."""
+    local_appdata = _windows_known_folder(_CSIDL_LOCAL_APPDATA)
+    if not local_appdata:
+        return None
+    install_root = _trusted_child_path(local_appdata, "Programs", "DefenseClaw")
+    candidate = _trusted_child_path(install_root, "runtime", "tools", "cosign.exe")
+    return candidate if os.path.isfile(candidate) and not os.path.islink(candidate) else None
 
 
 def _download_optional_release_asset(
@@ -2862,6 +3265,10 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
             )
             raise SystemExit(1)
 
+    windows_installer = payload.get("windows_installer")
+    if windows_installer is not None:
+        windows_installer = _validate_windows_installer_policy(windows_installer)
+
     manifest = {
         "schema_version": schema_version,
         "release_version": release_version,
@@ -2869,6 +3276,7 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
         "controller_upgrade_protocol": controller_protocol,
         "migration_failure_policy": policy,
         "required_cli_migrations": required,
+        "windows_installer": windows_installer,
     }
     if expected_schema == 2:
         manifest.update(
@@ -2888,6 +3296,65 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
             }
         )
     return manifest
+
+
+def _validate_windows_installer_policy(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        ux.err(f"{_UPGRADE_MANIFEST_FILENAME} windows_installer must be an object.", indent="  ")
+        raise SystemExit(1)
+    asset = value.get("asset")
+    if asset != _WINDOWS_SETUP_ASSET:
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.asset must be {_WINDOWS_SETUP_ASSET!r}.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    architectures = value.get("architectures", [])
+    if not isinstance(architectures, list) or "amd64" not in architectures:
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.architectures must include amd64.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    auth = value.get("authenticode")
+    if not isinstance(auth, dict):
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.authenticode must be an object.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    required = auth.get("required", True)
+    publisher = auth.get("publisher")
+    if required is not True or publisher != default_publisher():
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.authenticode must require "
+            f"the pinned publisher {default_publisher()!r}.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    if value.get("managed_policy") != "respect":
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.managed_policy must be 'respect'.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    expected_handoff = ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"]
+    if value.get("handoff_args") != expected_handoff:
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.handoff_args is invalid.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    return {
+        "asset": asset,
+        "architectures": architectures,
+        "handoff_args": value.get("handoff_args", []),
+        "authenticode": {
+            "required": required,
+            "publisher": publisher,
+        },
+        "managed_policy": value.get("managed_policy", "respect"),
+    }
 
 
 def _validate_manifest_source_versions(
@@ -3463,7 +3930,9 @@ def _verify_sha256(
 def _stage_upgrade_binary(source: str, install_dir: str, label: str) -> str:
     """Copy *source* to a same-filesystem staging path for atomic replace."""
     fd, staged = tempfile.mkstemp(
-        prefix=f".{label}.", suffix=".tmp", dir=install_dir,
+        prefix=f".{label}.",
+        suffix=".tmp",
+        dir=install_dir,
     )
     os.close(fd)
     try:
@@ -3491,18 +3960,24 @@ def _install_windows_gateway_pair(
 ) -> None:
     """Replace the Windows gateway and hook launcher as one recoverable pair."""
     staged_gateway = _stage_upgrade_binary(
-        gateway_source, install_dir, "defenseclaw-gateway",
+        gateway_source,
+        install_dir,
+        "defenseclaw-gateway",
     )
     staged_hook = ""
     previous_hook = ""
     hook_existed = os.path.isfile(hook_target)
     try:
         staged_hook = _stage_upgrade_binary(
-            hook_source, install_dir, "defenseclaw-hook",
+            hook_source,
+            install_dir,
+            "defenseclaw-hook",
         )
         if hook_existed:
             previous_hook = _stage_upgrade_binary(
-                hook_target, install_dir, "defenseclaw-hook-rollback",
+                hook_target,
+                install_dir,
+                "defenseclaw-hook-rollback",
             )
 
         # Replace the hook first because it is the file most likely to be held
@@ -3602,7 +4077,11 @@ def _install_gateway(
     if os_name == "windows":
         assert hook_source is not None and hook_target is not None
         _install_windows_gateway_pair(
-            binary_path, target, hook_source, hook_target, install_dir,
+            binary_path,
+            target,
+            hook_source,
+            hook_target,
+            install_dir,
         )
     else:
         # Publish from a fully copied, flushed same-directory file. A power
@@ -3861,6 +4340,7 @@ def _run_managed_validation(
             env=env,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+
         def output_text(value: str | bytes | None) -> str:
             if isinstance(value, bytes):
                 return value.decode("utf-8", errors="replace")

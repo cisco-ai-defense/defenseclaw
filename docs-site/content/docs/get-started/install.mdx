@@ -1,10 +1,10 @@
 ---
 title: Install
-description: Install DefenseClaw with curl on macOS/Linux or build it from source. Windows release binaries are temporarily unavailable.
+description: Install DefenseClaw with curl on macOS/Linux or build it from source. Native Windows Setup is planned for 0.8.6; 0.8.5 remains POSIX-only.
 keywords:
   - install DefenseClaw
   - defenseclaw curl install
-  - defenseclaw PowerShell install
+  - defenseclaw setup exe
   - defenseclaw source build
   - defenseclaw make all
 ---
@@ -12,14 +12,23 @@ keywords:
 DefenseClaw currently ships pre-built release binaries for macOS and Linux. The installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`.
 
 <Callout title="Windows release temporarily unavailable">
-The current release publishes no Windows gateway, rollback, or SBOM binaries.
+Release `0.8.5` publishes no Windows gateway, rollback, or SBOM binaries.
 Do not run the PowerShell installer or copy POSIX artifacts onto Windows. The
 signed PowerShell upgrade resolver remains only as a fail-closed preflight
 surface for existing installations; it cannot cross the `0.8.5` hard cut.
 </Callout>
 
+<Callout title="Native Windows Setup targets 0.8.6">
+The planned `DefenseClawSetup-x64.exe` will provide a graphical wizard and
+silent mode for the CLI/TUI, native gateway, no-console hook launcher, and an
+embedded managed Python runtime. Application files will live under
+`%LOCALAPPDATA%\Programs\DefenseClaw`; user state will remain under
+`%USERPROFILE%\.defenseclaw`. These instructions prepare the `0.8.6` release
+and do not mean that a Windows Setup artifact exists in `0.8.5`.
+</Callout>
+
 <Callout title="Installers are for fresh hosts only">
-Both release installers stop without changing the host when they detect an
+Release installers stop without changing the host when they detect an
 existing DefenseClaw CLI, gateway, or managed virtual environment. Use the
 release-owned [upgrade path](/docs/get-started/upgrade) for an existing
 installation; it enforces the signed manifest, any required bridge release,
@@ -45,6 +54,10 @@ Cosign `2.6.3` into its owner-only staging directory, validates a hard-coded
 platform SHA-256 before executing it, verifies the DefenseClaw release, and
 retires the temporary verifier. Nothing is installed globally.
 
+The planned `0.8.6` native Windows Setup bundles its managed runtime. A
+packaged Windows install will not require Python, `uv`, Go, Node.js, Git, or a
+PowerShell installation command after the signed Setup artifact is downloaded.
+
 ## What's bundled (LLM backends)
 
 The base install ships everything DefenseClaw needs to talk to the major LLM backends out of the box:
@@ -59,7 +72,7 @@ The base install ships everything DefenseClaw needs to talk to the major LLM bac
 
 ## Pick an install path
 
-<Tabs items={['macOS/Linux curl', 'Windows unavailable', 'From source']}>
+<Tabs items={['macOS/Linux curl', 'Windows Setup (0.8.6)', 'From source']}>
 
 <Tab value="macOS/Linux curl">
 
@@ -87,12 +100,39 @@ defenseclaw quickstart --connector codex
 
 </Tab>
 
-<Tab value="Windows unavailable">
+<Tab value="Windows Setup (0.8.6)">
 
-No supported Windows release installation is published for this cut. Keep an
-existing Windows installation unchanged. Source builds remain developer
-tooling and are not a substitute for the missing release, upgrade, or rollback
-contract.
+<Callout title="Not available in 0.8.5">
+Use the commands below only after the `0.8.6` release publishes and authenticates
+`DefenseClawSetup-x64.exe`. Keep an existing Windows installation unchanged in
+the meantime. Source builds are developer tooling and are not a substitute for
+a missing release, upgrade, or rollback contract.
+</Callout>
+
+```powershell
+.\DefenseClawSetup-x64.exe
+```
+
+Starting with the planned `0.8.6` release, double-click the authenticated
+artifact for the graphical setup wizard. It will install the CLI/TUI, gateway,
+hook launcher, and managed runtime for the current Windows user. The finish
+screen will point to `defenseclaw init` and `defenseclaw tui`; Setup does not
+install a separate native DefenseClaw GUI application.
+
+For non-interactive installs, pass properties directly:
+
+```powershell
+.\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
+```
+
+Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure
+later. The setup executable contains the offline payload required for install;
+after download it does not require Python, `uv`, Go, Node.js, Git, or a
+PowerShell installation command.
+
+Native Windows uses agent hooks rather than the OpenClaw/ZeptoClaw proxy path.
+See [Native Windows](/docs/get-started/windows) for the planned connector
+matrix, repair, servicing, uninstall, file locations, and troubleshooting.
 
 </Tab>
 
@@ -162,7 +202,17 @@ not the normal repeated-development path.
   </Folder>
 </Files>
 
-On Windows, read the same tree under `%USERPROFILE%`: `%USERPROFILE%\.defenseclaw\` for config, audit state, hooks, and the virtualenv; `%USERPROFILE%\.local\bin\` for `defenseclaw.cmd` and `defenseclaw-gateway.exe`.
+Release `0.8.5` has no release-managed Windows tree. Developer/source installs
+use `%USERPROFILE%\.defenseclaw\` for config, audit state, hooks, and the
+virtualenv, and `%USERPROFILE%\.local\bin\` for `defenseclaw.cmd` and
+`defenseclaw-gateway.exe`.
+
+When native Setup is published for `0.8.6`, application files will instead live
+under `%LOCALAPPDATA%\Programs\DefenseClaw`: `bin\defenseclaw.exe` launches the
+embedded Python CLI/TUI, `bin\defenseclaw-gateway.exe` is the native gateway,
+`bin\defenseclaw-hook.exe` is the no-console hook launcher, and
+`runtime\python\` contains the managed Python runtime. User configuration,
+audit state, hooks, and backups remain under `%USERPROFILE%\.defenseclaw\`.
 
 ## Verify
 
@@ -184,9 +234,21 @@ defenseclaw uninstall --all --binaries --yes   # full nuke, no confirm prompt
 
 The default tears down connector integrations (restores `~/.codex/config.toml`, `~/.claude/settings.json`, etc. from byte-for-byte backups) but **leaves `~/.defenseclaw/` and the installed binaries on disk** so a subsequent `defenseclaw setup guardrail` can pick up where you left off. Use `--all` and/or `--binaries` to make the removal total. `--dry-run` previews the plan.
 
+Starting with the planned `0.8.6` native package, use the setup executable for
+product uninstall:
+
+```powershell
+.\DefenseClawSetup-x64.exe /uninstall /quiet
+.\DefenseClawSetup-x64.exe /uninstall /quiet DELETEUSERDATA=1
+```
+
+The first command preserves `%USERPROFILE%\.defenseclaw`; the second explicitly
+removes user data.
+
 ## Next
 
 <Cards>
+  <Card title="Native Windows (0.8.6)" href="/docs/get-started/windows" description="Planned Setup wizard, silent install, native hook connectors, verification, and troubleshooting." />
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt setup that gets you a guardrail in two minutes." />
   <Card title="Upgrade safely" href="/docs/get-started/upgrade" description="Verified artifacts, automatic migrations, backups, health checks, and observability schema compatibility." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface for the central command." />

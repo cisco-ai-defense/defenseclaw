@@ -180,6 +180,37 @@ The migration cursor records success only after the atomic write. Retrying an
 interrupted upgrade is idempotent: it does not duplicate destinations, routes,
 comments, environment entries, or schema work.
 
+## Planned native Windows servicing in 0.8.6
+
+<Callout title="0.8.5 is not a Windows upgrade baseline">
+Release `0.8.5` publishes no native Windows runtime. The first signed Setup
+release therefore qualifies fresh install, repair, same-version servicing, and
+uninstall on Windows; it does not advertise an upgrade from `0.8.5`. A later
+manifest may enable cross-release Windows upgrades only for source versions
+whose exact published Setup artifacts passed the native lifecycle matrix.
+</Callout>
+
+`DefenseClawSetup-x64.exe` is planned as the graphical and silent installation
+and servicing surface for `0.8.6`. It installs the existing CLI/TUI, gateway,
+no-console hook launcher, and embedded managed Python runtime; it is not a
+separate native DefenseClaw GUI application.
+
+For a future manifest-authorized native Windows upgrade, `defenseclaw upgrade`
+will download the exact Setup artifact named by the signed manifest, verify its
+release checksum and exact Authenticode publisher, create the normal managed
+state backup, copy Setup to its trusted maintenance cache, and start it with the
+preserved install scope, connector, and mode. The CLI exits before replacement
+so its embedded runtime is not locked. Setup then validates and stops only the
+owned gateway/watchdog process, replaces product-owned files, applies and
+verifies required migrations with the new embedded runtime, rolls application
+files back on failure, and restarts only services that were already running or
+explicitly requested.
+
+Enterprise-managed Windows deployments can service through their software
+channel instead. Managed update policy prevents the self-updater from competing
+with Intune or SCCM rollout. The planned per-user Setup does not publish an MSI
+or accept machine scope.
+
 ## What changes in config v8
 
 V8 replaces the separate `otel`, `audit_sinks`, and global redaction controls with

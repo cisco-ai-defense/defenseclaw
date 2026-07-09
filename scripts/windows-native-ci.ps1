@@ -12,13 +12,14 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('stage-package-data', 'build-artifacts', 'acceptance', 'contract', 'capture', 'cleanup', 'self-test')]
+    [ValidateSet('stage-package-data', 'build-artifacts', 'build-installer', 'acceptance', 'setup-acceptance', 'contract', 'capture', 'cleanup', 'self-test')]
     [string]$Operation = 'self-test',
     [string]$WorkspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) 'defenseclaw-windows-native-ci'),
     [string]$ArtifactRoot = '',
     [string]$DiagnosticsRoot = '',
     [ValidateSet('codex', 'claudecode')][string]$Connector = 'codex',
+    [switch]$AllowCurrentUserSetupAcceptance,
     [switch]$NoRun
 )
 
@@ -386,6 +387,14 @@ function Invoke-BuildArtifacts {
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for build-artifacts' }
     $dist = Assert-SafeStateRoot $ArtifactRoot
     [IO.Directory]::CreateDirectory($root) | Out-Null
+    $projectText = Get-Content -LiteralPath (Join-Path $WorkspaceRoot 'pyproject.toml') -Raw -Encoding UTF8
+    if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+        throw 'Could not resolve project version from pyproject.toml'
+    }
+    $packageVersion = $Matches[1]
+    if ($packageVersion -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
+        throw "Invalid package version for Windows artifacts: $packageVersion"
+    }
     if (Test-Path -LiteralPath $dist) {
         Remove-SafeDisposableTree -Path $dist -Root $dist
     }
@@ -397,14 +406,14 @@ function Invoke-BuildArtifacts {
     $previousCgo = $env:CGO_ENABLED
     try {
         $env:CGO_ENABLED = '0'
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-s -w -X main.version=0.0.0-windows-native', '-o', (Join-Path $stage 'defenseclaw.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 | Out-Null
-        Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-s -w -H=windowsgui -X main.version=0.0.0-windows-native', '-o', (Join-Path $stage 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
+        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -X main.version=$packageVersion", '-o', (Join-Path $stage 'defenseclaw.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 | Out-Null
+        Invoke-WindowsNativeProcess $go @('build', '-ldflags', "-s -w -H=windowsgui -X main.version=$packageVersion", '-o', (Join-Path $stage 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 | Out-Null
     } finally {
         if ($null -eq $previousCgo) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
         else { $env:CGO_ENABLED = $previousCgo }
     }
     Compress-Archive -LiteralPath (Join-Path $stage 'defenseclaw.exe'), (Join-Path $stage 'defenseclaw-hook.exe') `
-        -DestinationPath (Join-Path $dist 'defenseclaw_0.0.0-windows-native_windows_amd64.zip') -Force
+        -DestinationPath (Join-Path $dist "defenseclaw_${packageVersion}_windows_amd64.zip") -Force
 
     $packageStage = Join-Path $root 'package-source'
     if (Test-Path -LiteralPath $packageStage) {
@@ -440,6 +449,27 @@ function Invoke-BuildArtifacts {
         }
     } finally { $archive.Dispose() }
     Remove-Item -LiteralPath (Join-Path $dist '.gitignore') -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-BuildInstaller {
+    Assert-NativeWindowsX64
+    if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for build-installer' }
+    $root = Assert-SafeStateRoot $StateRoot
+    $artifacts = Assert-SafeStateRoot $ArtifactRoot
+    [IO.Directory]::CreateDirectory($root) | Out-Null
+    $projectText = Get-Content -LiteralPath (Join-Path $WorkspaceRoot 'pyproject.toml') -Raw -Encoding UTF8
+    if ($projectText -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+        throw 'Could not resolve project version from pyproject.toml'
+    }
+    $version = $Matches[1]
+    $uv = Get-RequiredCommand 'uv.exe'
+    Invoke-WindowsNativeProcess $uv @(
+        'run', '--frozen', 'python', (Join-Path $WorkspaceRoot 'scripts\generate-upgrade-manifest.py'),
+        '--out', (Join-Path $artifacts 'upgrade-manifest.json')
+    ) -TimeoutSeconds 120 | Out-Null
+    & (Join-Path $WorkspaceRoot 'scripts\build-windows-installer.ps1') `
+        -DistRoot $artifacts -OutRoot $artifacts -StateRoot (Join-Path $root 'installer-build') `
+        -SkipSigning
 }
 
 function Initialize-IsolatedProfile([string]$Root) {
@@ -1158,6 +1188,168 @@ function Invoke-Acceptance {
     Invoke-GatewayLifecycleAcceptance -Profile $profile -Root $root -Artifacts $artifacts
 }
 
+function Invoke-SetupAcceptance {
+    Assert-NativeWindowsX64
+    if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for setup-acceptance' }
+    if (-not $AllowCurrentUserSetupAcceptance -and $env:GITHUB_ACTIONS -ne 'true') {
+        throw 'setup-acceptance mutates the current Windows user. Run only on a disposable CI user, or pass -AllowCurrentUserSetupAcceptance explicitly.'
+    }
+    $root = Assert-SafeStateRoot $StateRoot
+    $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
+    $setup = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) 'DefenseClawSetup-x64.exe'
+    if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+        throw "native setup executable not found: $setup"
+    }
+    $logs = Join-Path $root 'logs'
+    [IO.Directory]::CreateDirectory($logs) | Out-Null
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $installRoot = Join-Path $localAppData 'Programs\DefenseClaw'
+    $dataRoot = Join-Path $userProfile '.defenseclaw'
+    $cacheRoot = Join-Path $localAppData 'DefenseClaw\InstallerCache'
+    $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
+    if (Test-Path -LiteralPath $installRoot) { throw "refusing to overwrite an existing current-user install: $installRoot" }
+    if (Test-Path -LiteralPath $dataRoot) { throw "refusing to overwrite existing current-user data: $dataRoot" }
+    if (Test-Path -LiteralPath $arpKey) { throw 'refusing to overwrite existing DefenseClaw Installed Apps registration' }
+    $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $processPathBefore = $env:PATH
+    $launcher = Join-Path $installRoot 'bin\defenseclaw.exe'
+    $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
+    $hook = Join-Path $installRoot 'bin\defenseclaw-hook.exe'
+    $python = Join-Path $installRoot 'runtime\python\python.exe'
+    $cosign = Join-Path $installRoot 'runtime\tools\cosign.exe'
+    try {
+        Invoke-WindowsNativeProcess $setup @(
+            '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
+            'MODE=observe', 'STARTGATEWAY=0'
+        ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-install.log') | Out-Null
+
+        foreach ($required in @(
+            $launcher, $gateway, $hook, $python, $cosign,
+            (Join-Path $installRoot 'bin\skill-scanner.exe'),
+            (Join-Path $installRoot 'bin\mcp-scanner.exe'),
+            (Join-Path $installRoot 'bin\defenseclaw-observability.exe')
+        )) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+                throw "setup install did not create required file: $required"
+            }
+        }
+        $env:DEFENSECLAW_HOME = $dataRoot
+        $env:PATH = "$(Join-Path $installRoot 'bin');$env:SystemRoot\System32;$env:SystemRoot"
+        $resolved = @(Get-Command defenseclaw -CommandType Application -ErrorAction Stop)[0].Source
+        if (-not ([IO.Path]::GetFullPath($resolved)).Equals(
+            [IO.Path]::GetFullPath($launcher), [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "setup launcher resolved outside install root: $resolved"
+        }
+        Invoke-Installed $launcher @('--version') -Timeout 120 -Log (Join-Path $logs 'setup-version.log') | Out-Null
+        Invoke-Installed $gateway @('--version') -Timeout 60 -Log (Join-Path $logs 'setup-gateway-version.log') | Out-Null
+        Invoke-Installed $cosign @('version') -Timeout 60 -Log (Join-Path $logs 'setup-cosign-version.log') | Out-Null
+        Invoke-Installed $hook @() @(2) 30 (Join-Path $logs 'setup-hook.log') | Out-Null
+        Invoke-Installed (Join-Path $installRoot 'bin\skill-scanner.exe') @('--help') -Timeout 120 | Out-Null
+        Invoke-Installed (Join-Path $installRoot 'bin\mcp-scanner.exe') @('--help') -Timeout 120 | Out-Null
+        Assert-ManagedDistributionIntegrity $python (Join-Path $installRoot 'runtime\python')
+        Invoke-HeadlessTui $python
+
+        Invoke-Installed $launcher @(
+            'init', '--skip-install', '--non-interactive', '--yes', '--connector', 'codex',
+            '--profile', 'observe', '--no-start-gateway', '--no-verify'
+        ) -Timeout 300 -Log (Join-Path $logs 'setup-init-codex.log') | Out-Null
+        Invoke-Installed $launcher @(
+            'init', '--skip-install', '--non-interactive', '--yes', '--connector', 'claudecode',
+            '--profile', 'observe', '--no-start-gateway', '--no-verify'
+        ) -Timeout 300 -Log (Join-Path $logs 'setup-init-claudecode.log') | Out-Null
+
+        $statePath = Join-Path $installRoot 'installer\install-state.json'
+        $installedState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $targetVersion = [string]$installedState.version
+        $installedState.version = '99.0.0'
+        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Invoke-WindowsNativeProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
+            -AllowedExitCodes @(1) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-downgrade-rejected.log') | Out-Null
+        $installedState.version = '0.0.0'
+        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Invoke-WindowsNativeProcess $setup @(
+            '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user',
+            'FROMVERSION=0.0.0'
+        ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-seeded-upgrade.log') | Out-Null
+        $upgradedState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$upgradedState.version -ne $targetVersion) {
+            throw "seeded setup upgrade version mismatch: $($upgradedState.version), expected $targetVersion"
+        }
+
+        $lockStart = [Diagnostics.ProcessStartInfo]::new()
+        $lockStart.FileName = $python
+        $lockStart.UseShellExecute = $false
+        $lockStart.CreateNoWindow = $true
+        [void]$lockStart.ArgumentList.Add('-I')
+        [void]$lockStart.ArgumentList.Add('-c')
+        [void]$lockStart.ArgumentList.Add('import time; time.sleep(60)')
+        $lockProcess = [Diagnostics.Process]::Start($lockStart)
+        try {
+            Start-Sleep -Milliseconds 500
+            Invoke-WindowsNativeProcess $setup @('/repair', '/quiet', 'INSTALLSCOPE=user') `
+                -AllowedExitCodes @(3010) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-locked-file.log') | Out-Null
+        } finally {
+            if (-not $lockProcess.HasExited) { $lockProcess.Kill($true) }
+            $lockProcess.Dispose()
+        }
+        Invoke-Installed $launcher @('--version') -Timeout 120 | Out-Null
+
+        Assert-PackagedDoctorSmoke $launcher $logs
+        Set-MinimalGatewayAcceptanceConfig $python
+        Invoke-Installed $gateway @('start') -Timeout 90 -Log (Join-Path $logs 'setup-gateway-start.log') | Out-Null
+        Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 -Log (Join-Path $logs 'setup-watchdog-start.log') | Out-Null
+        Invoke-Installed $gateway @('status') -Timeout 30 | Out-Null
+        Invoke-Installed $gateway @('watchdog', 'status') -Timeout 30 | Out-Null
+        $beforeRepair = Get-GatewayIdentity $dataRoot
+        $preserved = Join-Path $dataRoot 'installer-preservation.txt'
+        Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii
+
+        Invoke-WindowsNativeProcess $setup @('/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user') `
+            -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-repair.log') | Out-Null
+        $afterRepair = Get-GatewayIdentity $dataRoot
+        if (-not (Test-GatewayIdentityChanged $beforeRepair $afterRepair)) {
+            throw 'setup repair did not restart the previously running gateway'
+        }
+        Invoke-Installed $gateway @('watchdog', 'status') -Timeout 30 | Out-Null
+        if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) {
+            throw 'setup repair did not preserve user data'
+        }
+
+        Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet') `
+            -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
+        if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
+        if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
+        if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
+        if (-not [string]::Equals($userPathBefore, [Environment]::GetEnvironmentVariable('Path', 'User'), [StringComparison]::Ordinal)) {
+            throw 'setup uninstall did not restore the original user PATH exactly'
+        }
+
+        Invoke-WindowsNativeProcess $setup @(
+            '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
+            'MODE=observe', 'STARTGATEWAY=0'
+        ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-reinstall.log') | Out-Null
+        Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+            -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
+        if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
+        if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
+    } finally {
+        $env:PATH = $processPathBefore
+        Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $installRoot) {
+            try {
+                Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+                    -AllowedExitCodes @(0, 3010) -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
+            } catch { Write-Warning "setup acceptance cleanup failed: $($_.Exception.Message)" }
+        }
+        for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
+            Start-Sleep -Milliseconds 250
+        }
+        if (Test-Path -LiteralPath $cacheRoot) { throw "setup uninstall left installer cache behind: $cacheRoot" }
+    }
+}
+
 function Invoke-Contract {
     Assert-NativeWindowsX64
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for contract' }
@@ -1328,7 +1520,9 @@ if (-not $NoRun) {
     switch ($Operation) {
         'stage-package-data' { Stage-PackageData (Join-Path $WorkspaceRoot 'cli\defenseclaw') }
         'build-artifacts' { Invoke-BuildArtifacts }
+        'build-installer' { Invoke-BuildInstaller }
         'acceptance' { Invoke-Acceptance }
+        'setup-acceptance' { Invoke-SetupAcceptance }
         'contract' { Invoke-Contract }
         'capture' { Invoke-Capture }
         'cleanup' { Invoke-Cleanup }
