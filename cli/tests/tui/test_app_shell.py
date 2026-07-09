@@ -6387,10 +6387,10 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
         assert app._connector_filter() == ""
         assert render_calls == 0
 
-        await pilot.click("#action-menu-row-1")
-        await pilot.pause()
-        assert app._connector_filter() == "codex"
-        assert "Codex (codex)" in scope_text()
+        assert await pilot.click("#action-menu-row-1")
+        await _wait_for_background(
+            lambda: app._connector_filter() == "codex" and "Codex (codex)" in scope_text()
+        )
         # The scope acknowledgement is immediate; metric content remains the
         # last coherent snapshot until the deferred generation completes.
         assert "Hook Calls (2 connectors)" in metric_labels()
@@ -6399,10 +6399,10 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
 
         await pilot.press("m")
         await pilot.pause()
-        await pilot.click("#action-menu-row-0")
-        await pilot.pause()
-        assert app._connector_filter() == ""
-        assert "All connectors" in scope_text()
+        assert await pilot.click("#action-menu-row-0")
+        await _wait_for_background(
+            lambda: app._connector_filter() == "" and "All connectors" in scope_text()
+        )
         assert "Hook Calls (2 connectors)" in metric_labels()
         assert render_calls == 0
         assert deferred_calls == 2
