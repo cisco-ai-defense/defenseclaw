@@ -257,6 +257,8 @@ jobs:
         run: ./scripts/windows-native-ci.ps1 -Operation build-artifacts -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
       - name: Build unsigned native Windows setup executable
         run: ./scripts/windows-native-ci.ps1 -Operation build-installer -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+      - name: Verify native setup wizard responsiveness
+        run: ./scripts/test-windows-setup-wizard.ps1 -SetupPath (Join-Path $env:DC_ARTIFACT_ROOT 'DefenseClawSetup-x64.exe') -StateRoot (Join-Path $env:DC_STATE_ROOT 'wizard-smoke')
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
