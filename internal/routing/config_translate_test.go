@@ -137,14 +137,14 @@ func TestTranslate_DefaultPort(t *testing.T) {
 
 	cfg := Translate(input)
 
-	if cfg.Server.Port != 8080 {
-		t.Errorf("Server.Port = %d, want 8080 (default)", cfg.Server.Port)
+	if cfg.Server.Port != 8888 {
+		t.Errorf("Server.Port = %d, want 8888 (default)", cfg.Server.Port)
 	}
 }
 
 func TestTranslate_EmbeddingConfig(t *testing.T) {
 	input := TranslateInput{
-		Port: 8080,
+		Port: 8888,
 		Models: []TranslateModel{
 			{Name: "test", Provider: "openai", Model: "gpt-4"},
 		},
@@ -192,7 +192,7 @@ func TestTranslate_EmbeddingConfig(t *testing.T) {
 
 func TestTranslate_ClassifierConfig(t *testing.T) {
 	input := TranslateInput{
-		Port: 8080,
+		Port: 8888,
 		Models: []TranslateModel{
 			{Name: "test", Provider: "openai", Model: "gpt-4"},
 		},
@@ -278,7 +278,7 @@ func TestTranslateAndWrite_AtomicWrite(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	input := TranslateInput{
-		Port: 8080,
+		Port: 8888,
 		Models: []TranslateModel{
 			{Name: "test", Provider: "openai", Model: "gpt-4"},
 		},
@@ -306,7 +306,7 @@ func TestTranslateAndWrite_AtomicWrite(t *testing.T) {
 
 func TestTranslate_AllSignals(t *testing.T) {
 	input := TranslateInput{
-		Port: 8080,
+		Port: 8888,
 		Models: []TranslateModel{
 			{Name: "test", Provider: "openai", Model: "gpt-4"},
 		},
