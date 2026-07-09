@@ -253,12 +253,12 @@ func TestCodesignValidatingListener_ANDSemantics(t *testing.T) {
 			wantAccept: true,
 		},
 		{
-			name:         "empty-string entries alone still bypass wrapper",
-			team:         []string{"", ""},
-			sign:         []string{""},
-			bundleIDs:    []string{""},
-			id:           unixPeer,
-			wantAccept:   true,
+			name:       "empty-string entries alone still bypass wrapper",
+			team:       []string{"", ""},
+			sign:       []string{""},
+			bundleIDs:  []string{""},
+			id:         unixPeer,
+			wantAccept: true,
 		},
 	}
 
