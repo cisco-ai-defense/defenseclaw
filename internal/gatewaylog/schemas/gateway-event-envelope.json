@@ -39,8 +39,8 @@
     "agent_execution_id":  { "type": ["string", "null"], "pattern": "^execution-[0-9a-f]{16}$" },
     "agent_lifecycle_event": { "type": ["string", "null"], "enum": ["session_start", "session_end", "subagent_start", "subagent_stop", "turn_start", "turn_end", "tool_start", "tool_end", "compact_start", "compact_end", "event", null] },
     "agent_lifecycle_state": { "type": ["string", "null"], "enum": ["active", "completed", "failed", "interrupted", "observed", null] },
-    "agent_phase": { "type": ["string", "null"], "enum": ["session", "planning", "model", "tool", "approval", "waiting", "responding", "maintenance", "completed", "failed", "interrupted", "observed", null] },
-    "agent_previous_phase": { "type": ["string", "null"], "enum": ["session", "planning", "model", "tool", "approval", "waiting", "responding", "maintenance", "completed", "failed", "interrupted", "observed", null] },
+    "agent_phase": { "$ref": "#/$defs/AgentPhase" },
+    "agent_previous_phase": { "$ref": "#/$defs/AgentPhase" },
     "agent_phase_code": { "type": ["integer", "null"], "minimum": 0, "maximum": 12 },
     "agent_sequence": { "type": ["integer", "null"], "minimum": 1 },
     "agent_operation_id": { "type": ["string", "null"] },
@@ -109,6 +109,10 @@
     { "properties": { "event_type": { "const": "agent_inventory" } },     "required": ["event_type", "agent_inventory"] }
   ],
   "$defs": {
+    "AgentPhase": {
+      "type": ["string", "null"],
+      "enum": ["session", "planning", "model", "tool", "approval", "waiting", "responding", "maintenance", "completed", "failed", "interrupted", "observed", null]
+    },
     "VerdictPayload": {
       "type": "object",
       "required": ["stage", "action"],

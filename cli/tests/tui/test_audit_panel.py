@@ -278,6 +278,26 @@ def test_audit_refresh_error_is_rendered() -> None:
     assert panel.render_text() == "Audit refresh failed: db locked"
 
 
+def test_audit_refresh_preserves_last_good_rows_when_database_is_locked() -> None:
+    class FlakyStore:
+        locked = False
+
+        def list_actionable_event_summaries(self, _limit: int) -> list[Event]:
+            if self.locked:
+                raise RuntimeError("database is locked")
+            return [Event(id="cached", severity="HIGH", action="block", target="skill://one")]
+
+    store = FlakyStore()
+    panel = AuditPanelModel(store)
+    panel.refresh()
+    store.locked = True
+    panel.refresh()
+
+    assert [event.id for event in panel.items] == ["cached"]
+    assert [event.id for event in panel.filtered] == ["cached"]
+    assert panel.error_message == "Audit refresh failed: database is locked"
+
+
 def test_audit_view_metadata_exposes_toolbar_rows_columns_and_styles() -> None:
     panel = AuditPanelModel()
     panel.set_events(

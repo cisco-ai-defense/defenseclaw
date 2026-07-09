@@ -53,19 +53,28 @@ def test_notifications_model_matches_go_oracle_copy_and_argv() -> None:
     assert desired_notifications_action(False) == "on"
     assert notifications_command(False).args == ("setup", "notifications", "on", "--yes")
 
-    on_model = build_notifications_model(False)
+    on_model = build_notifications_model(False, "Linux")
     on_copy = "\n".join((on_model.summary, *on_model.details, on_model.consequence))
     assert "asset-policy blocks" in on_copy
     assert "would-blocks" in on_copy
     assert "HITL approval" in on_copy
     assert "does not approve" in on_copy
 
-    off_model = build_notifications_model(True)
+    off_model = build_notifications_model(True, "Darwin")
     off_copy = "\n".join((off_model.summary, *off_model.details))
     assert "Event history" in off_copy
     assert "telemetry destinations" in off_copy
     assert "webhooks" in off_copy
     assert "not affected" in off_copy
+
+
+def test_windows_notifications_model_is_inactive_and_has_no_toggle_command() -> None:
+    model = build_notifications_model(True, "Windows")
+    assert "unsupported" in model.title.lower()
+    assert "INACTIVE" in model.summary
+    assert "legacy setting retained" in model.summary
+    assert model.actions[0].label == "Close"
+    assert model.actions[0].command is None
 
 
 def test_uninstall_model_defaults_to_dry_run_and_maps_all_argv() -> None:
@@ -93,7 +102,7 @@ async def test_uninstall_modal_renders_red_danger_border() -> None:
 
 @pytest.mark.asyncio
 async def test_notifications_modal_click_confirms_cli_argv() -> None:
-    app = ModalHarness(NotificationsToggleScreen(currently_enabled=False))
+    app = ModalHarness(NotificationsToggleScreen(currently_enabled=False, system="Linux"))
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.click("#consequence-action-0")

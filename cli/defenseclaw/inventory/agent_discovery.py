@@ -24,7 +24,6 @@ import ntpath
 import os
 import shutil
 import subprocess
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -49,6 +48,7 @@ from defenseclaw.connector_paths import (
     hermes_config_path,
     omnigent_config_path,
 )
+from defenseclaw.file_permissions import atomic_write_private_bytes
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -122,6 +122,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
     """
     local_app_data = os.environ.get("LOCALAPPDATA", "")
     roaming_app_data = os.environ.get("APPDATA", "")
+    system_root = os.environ.get("SYSTEMROOT", "") or os.environ.get("WINDIR", "")
     home = os.path.expanduser("~")
     program_roots = tuple(
         path
@@ -137,6 +138,11 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
         candidates.extend(
             (
                 os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                # Codex Desktop installs its bundled native MCP executables
+                # below this product-specific runtime root.  Never trust all
+                # of LOCALAPPDATA; executable admission still validates the
+                # full owner/DACL chain through this narrow prefix.
+                os.path.join(local_app_data, "OpenAI", "Codex", "runtimes"),
                 os.path.join(
                     local_app_data,
                     "hermes",
@@ -144,6 +150,9 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                     "venv",
                     "Scripts",
                 ),
+                # Hermes/uv installs the native uvx.exe launcher here. Keep
+                # the prefix product-specific; never trust all LOCALAPPDATA.
+                os.path.join(local_app_data, "hermes", "bin"),
                 os.path.join(local_app_data, "agy", "bin"),
                 os.path.join(local_app_data, "Programs", "antigravity"),
                 os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
@@ -165,11 +174,20 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
     for root in program_roots:
         candidates.extend(
             (
+                # The official Node.js MSI installs npx.cmd beside node.exe.
+                # MCP scanning resolves only that exact wrapper and still
+                # applies the owner/DACL chain checks below.
+                os.path.join(root, "nodejs"),
                 os.path.join(root, "OpenAI", "Codex", "bin"),
                 os.path.join(root, "cursor", "resources", "app", "bin"),
                 os.path.join(root, "Windsurf", "bin"),
             )
         )
+    if system_root:
+        # npx.cmd requires the native command processor because CreateProcess
+        # cannot execute a batch wrapper as an image. Trust only System32 and
+        # retain the same owner/DACL checks as every other executable prefix.
+        candidates.append(os.path.join(system_root, "System32"))
     return tuple(candidates)
 
 
@@ -178,6 +196,14 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     if os.name == "nt"
     else _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
 )
+
+
+def _builtin_trusted_bin_prefixes() -> tuple[str, ...]:
+    """Resolve identity-dependent Windows defaults at point of use."""
+    if os.name == "nt":
+        return _windows_default_trusted_bin_prefixes()
+    return _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
+
 
 _WINDOWS_EXECUTABLE_EXTENSIONS = frozenset({".com", ".exe", ".bat", ".cmd"})
 
@@ -340,6 +366,9 @@ def discover_agents(
         )
     agents = {signal.name: signal for signal in signals}
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
+    # Cache persistence is deliberately best-effort: the freshly computed
+    # discovery result is authoritative and must still be returned when the
+    # optional acceleration cache cannot be protected or written.
     _write_cache(discovery, data_dir=data_dir)
     return discovery
 
@@ -511,7 +540,7 @@ def _trusted_bin_prefixes(
         piece = piece.strip()
         if piece:
             extras.append(piece)
-    return tuple(_expand_bin_prefixes((*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras)))
+    return tuple(_expand_bin_prefixes((*_builtin_trusted_bin_prefixes(), *extras)))
 
 
 def _path_key(path: str) -> str:
@@ -569,7 +598,7 @@ def _default_trusted_bin_prefixes() -> frozenset[str]:
     opting in via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``. They get a stricter
     ownership requirement (see ``_is_trusted_binary_path``).
     """
-    return frozenset(_expand_bin_prefixes(_TRUSTED_BIN_PREFIXES_DEFAULT))
+    return frozenset(_expand_bin_prefixes(_builtin_trusted_bin_prefixes()))
 
 
 def _bin_chain_is_system_owned(resolved: str, prefix: str) -> bool:
@@ -1347,39 +1376,21 @@ def _write_cache(
     disc: AgentDiscovery,
     *,
     data_dir: str | os.PathLike[str] | None = None,
-) -> None:
+) -> bool:
     target_dir = Path(data_dir) if data_dir else default_data_path()
     path = _cache_path(data_dir=target_dir)
-    tmp_path = ""
     try:
-        os.makedirs(target_dir, mode=0o700, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".agent_discovery.",
-            suffix=".tmp",
-            dir=target_dir,
-        )
         payload = {
             "version": CACHE_SCHEMA_VERSION,
             "scanned_at": disc.scanned_at,
             "ttl_seconds": CACHE_TTL_SECONDS,
             "agents": {name: asdict(signal) for name, signal in disc.agents.items()},
         }
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, path)
-        tmp_path = ""
-    except Exception:
-        pass
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        atomic_write_private_bytes(path, body.encode("utf-8"))
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _cache_path(*, data_dir: str | os.PathLike[str] | None = None) -> Path:

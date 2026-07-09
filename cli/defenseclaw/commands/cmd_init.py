@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
@@ -343,16 +344,16 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # leaking audit state to other local users. Force 0700 on creation
     # *and* tighten any pre-existing directory so the perms are
     # deterministic regardless of umask.
+    from defenseclaw.file_permissions import make_private_directory
+
     for d in dirs:
-        os.makedirs(d, mode=0o700, exist_ok=True)
-        os.chmod(d, 0o700)
+        make_private_directory(d)
 
     external_dirs = list(cfg.skill_dirs())
     for d in external_dirs:
         d_real = os.path.realpath(d)
         if d_real.startswith(data_dir_real + os.sep):
-            os.makedirs(d, mode=0o700, exist_ok=True)
-            os.chmod(d, 0o700)
+            make_private_directory(d)
     click.echo("  Directories:   " + ux._style("created", fg="green"))
 
     _seed_rego_policies(cfg.policy_dir)
@@ -1813,7 +1814,10 @@ def _resolve_splunk_bridge_bundle():
     return bundled_splunk_bridge_dir()
 
 
-_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = ("bin", "run.sh")
+_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = (
+    os.path.join("bin", "openclaw-observability-bridge"),
+    "run.sh",
+)
 
 
 def _seed_local_observability_stack(data_dir: str) -> None:
@@ -1827,11 +1831,9 @@ def _seed_local_observability_stack(data_dir: str) -> None:
     On a fresh data dir we copy the entire bundle. On a re-init, we
     *preserve* operator-editable config (dashboards, prom rules,
     compose overrides, OTel collector config) but *refresh* the
-    maintainer-owned bridge entry points (``bin/`` and ``run.sh``) so
+    maintainer-owned compatibility entry points (``bin/`` and ``run.sh``) so
     bug fixes shipped in the wheel actually reach previously-seeded
-    installs. Without this, a stale seeded bridge (e.g. one missing
-    the bash 3.2 ``set -u`` empty-array guard on macOS) would keep
-    crashing even after ``pip install --upgrade``.
+    installs continue to delegate to the packaged Python controller.
     """
     bundled = bundled_local_observability_dir()
     if not bundled.is_dir():
@@ -1839,7 +1841,24 @@ def _seed_local_observability_stack(data_dir: str) -> None:
 
     dest = os.path.join(data_dir, "observability-stack")
     if not os.path.isdir(dest):
-        shutil.copytree(str(bundled), dest)
+        from defenseclaw.bundle_refresh import (
+            _assert_safe_bundle_destination,
+            _rsync_overwrite,
+        )
+
+        try:
+            _assert_safe_bundle_destination(Path(data_dir), Path(dest))
+            Path(dest).mkdir(parents=False)
+        except OSError as exc:
+            click.echo(f"  warning: could not seed observability stack: {exc}", err=True)
+            return
+        _refreshed, _preserved, errors = _rsync_overwrite(
+            src=Path(bundled), dest=Path(dest), preserve=()
+        )
+        if errors:
+            for error in errors[:3]:
+                click.echo(f"  warning: could not seed observability stack: {error}", err=True)
+            return
         _ensure_observability_stack_executables(dest)
         click.echo(f"  Observability stack: seeded in {dest}")
         return
@@ -1861,9 +1880,8 @@ def _seed_local_observability_stack(data_dir: str) -> None:
 def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
     """Overwrite maintainer-owned scripts in ``dest`` from ``bundled``.
 
-    Only files under :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
-    refreshed — these are pure code (the ``openclaw-observability-bridge``
-    bash entry point and its ``run.sh`` shim) and have no operator
+    Only files in :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
+    refreshed — these are compatibility shims and have no operator
     config baked in, so unconditional overwrite is safe.
 
     Returns the list of relative paths that were actually rewritten so
@@ -1871,20 +1889,30 @@ def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
     sources are skipped silently and copy failures are surfaced as
     warnings rather than failing ``init`` outright.
     """
+    from defenseclaw.bundle_refresh import (
+        _assert_safe_bundle_destination,
+        _atomic_copy_file,
+    )
+
     refreshed: list[str] = []
+    dest_root = Path(dest)
+    try:
+        _assert_safe_bundle_destination(dest_root.parent, dest_root)
+    except OSError as exc:
+        click.echo(
+            f"  warning: could not refresh observability stack: {exc}", err=True
+        )
+        return refreshed
     for rel in _OBSERVABILITY_STACK_REFRESH_PATHS:
         src = bundled / rel
-        if not src.exists():
+        if not src.is_file():
             continue
-        target = os.path.join(dest, rel)
+        target = dest_root / rel
         try:
-            if src.is_dir():
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
-                shutil.copytree(str(src), target)
-            else:
-                os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-                shutil.copy2(str(src), target)
+            _assert_safe_bundle_destination(dest_root, target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _assert_safe_bundle_destination(dest_root, target)
+            _atomic_copy_file(str(src), str(target), root=dest_root)
         except OSError as exc:
             click.echo(
                 f"  warning: could not refresh observability stack {rel}: {exc}",

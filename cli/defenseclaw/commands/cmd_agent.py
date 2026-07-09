@@ -32,6 +32,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
 from defenseclaw.inventory import agent_discovery, ai_signatures
@@ -376,7 +377,10 @@ def processes(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     raw_signals = payload.get("signals", []) or []
-    process_signals = [s for s in raw_signals if s.get("runtime")]
+    process_signals = [
+        s for s in raw_signals
+        if s.get("runtime") and str(s.get("state", "")).lower() != "gone"
+    ]
     # Most-recently-seen first so an operator hunting a runaway agent
     # sees fresh activity at the top.
     process_signals.sort(
@@ -384,9 +388,21 @@ def processes(
         reverse=True,
     )
 
+    process_error = str(
+        ((payload.get("summary") or {}).get("detector_errors") or {}).get("process", "")
+    )
+
     if as_json:
-        click.echo(json.dumps({"processes": process_signals}, indent=2, sort_keys=True))
+        output: dict[str, Any] = {"processes": process_signals}
+        if process_error:
+            output["errors"] = [{"detector": "process", "message": process_error}]
+        click.echo(json.dumps(output, indent=2, sort_keys=True))
+        if process_error:
+            raise click.exceptions.Exit(1)
         return
+
+    if process_error:
+        raise click.ClickException(f"process snapshot failed: {process_error}")
 
     click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
 
@@ -1145,7 +1161,10 @@ def discovery_enable(
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
     connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1154,8 +1173,16 @@ def discovery_enable(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is live.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
         click.echo()
 
         if scan:
@@ -1172,7 +1199,8 @@ def discovery_enable(
         action=f"ai_discovery-{action_suffix}",
         details=(
             f"mode={ad.mode} scan_interval_min={ad.scan_interval_min} "
-            f"restart={restart} scan={scan} changes={len(diff)}"
+            f"restart={restart} scan={scan} changes={len(diff)} "
+            f"connectors={','.join(connectors) or 'none'}"
         ),
     )
 
@@ -1225,6 +1253,10 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
+    connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1232,15 +1264,23 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
             cfg.data_dir,
             cfg.gateway.host,
             cfg.gateway.port,
-            connector=_resolve_connector_for_restart(cfg),
+            connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is stopped.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
         click.echo()
 
     _log_discovery_action(
         app,
         action="ai_discovery-disable",
-        details=f"restart={restart}",
+        details=f"restart={restart} connectors={','.join(connectors) or 'none'}",
     )
 
 
@@ -1799,20 +1839,48 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     try:
         active = cfg.active_connector()
         if active:
-            return str(active).strip().lower()
+            return normalize_connector(str(active))
     except Exception:
         pass
     gc = getattr(cfg, "guardrail", None)
     if gc is not None:
         connector = getattr(gc, "connector", "")
         if connector:
-            return str(connector).strip().lower()
+            return normalize_connector(str(connector))
     claw = getattr(cfg, "claw", None)
     if claw is not None:
         mode = getattr(claw, "mode", "")
         if mode:
-            return str(mode).strip().lower()
+            return normalize_connector(str(mode))
     return "openclaw"
+
+
+def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
+    """Return the authoritative active connector roster for a restart.
+
+    Config.active_connectors() is authoritative when present, including its
+    explicit empty-list result for an unconfigured install. The singular
+    resolver remains only as compatibility for older Config-like objects.
+    """
+    resolver = getattr(cfg, "active_connectors", None)
+    if callable(resolver):
+        try:
+            raw_connectors = resolver()
+        except Exception:
+            pass
+        else:
+            roster: list[str] = []
+            seen: set[str] = set()
+            for raw in raw_connectors or []:
+                connector = normalize_connector(str(raw))
+                if not connector or connector in seen:
+                    continue
+                seen.add(connector)
+                roster.append(connector)
+            return roster
+
+    connector = normalize_connector(_resolve_connector_for_restart(cfg))
+    return [connector] if connector else []
 
 
 def _trigger_post_enable_scan(

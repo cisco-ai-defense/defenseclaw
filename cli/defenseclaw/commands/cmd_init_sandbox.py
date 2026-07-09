@@ -22,6 +22,22 @@ _SANDBOX_SYSTEM_DEPS = ["iptables"]
 _TRUSTED_SYSTEM_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
 
 
+def _require_sandbox_platform(action: str = "setup") -> None:
+    """Fail clearly before Linux-only sandbox helpers run on other hosts."""
+    from defenseclaw.platform_support import host_os
+
+    os_name = host_os()
+    if os_name == "windows":
+        click.echo(
+            f"  ERROR: Sandbox {action} is unsupported on native Windows.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if os_name != "linux":
+        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
+        raise SystemExit(1)
+
+
 def _trusted_system_command(name: str) -> str | None:
     """Resolve a privileged helper only from root-owned system directories."""
     if not name or os.path.basename(name) != name:
@@ -146,13 +162,9 @@ def sandbox_init_cmd(app: AppContext) -> None:
     Example:
       defenseclaw sandbox init
     """
-    import platform
-
     from defenseclaw.config import config_path, load, require_v8_config
 
-    if platform.system() != "Linux":
-        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
-        raise SystemExit(1)
+    _require_sandbox_platform("init")
 
     if not os.path.exists(config_path()):
         click.echo("  ERROR: DefenseClaw is not initialized.", err=True)

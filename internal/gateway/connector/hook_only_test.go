@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
@@ -305,7 +308,7 @@ func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	workspace := filepath.Join(dir, "repo")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	conn := NewAntigravityConnector()
 	opts := SetupOpts{
@@ -428,7 +431,11 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			}
 			wantConfigNeedle := conn.scriptName
 			if runtime.GOOS == "windows" {
-				wantConfigNeedle = nativeHookFlag + conn.Name()
+				if conn.Name() == "cursor" {
+					wantConfigNeedle = "cursor-hook.ps1"
+				} else {
+					wantConfigNeedle = nativeHookFlag + conn.Name()
+				}
 			}
 			if !strings.Contains(string(data), wantConfigNeedle) {
 				t.Fatalf("config after setup does not reference %s:\n%s", wantConfigNeedle, string(data))
@@ -740,6 +747,9 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 }
 
 func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenHands requires WSL and is unsupported on native Windows; platform rejection coverage remains active")
+	}
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, ".openhands", "hooks.json")
 	prev := OpenHandsHooksPathOverride
@@ -1021,7 +1031,7 @@ func TestOpenHandsWorkspaceRootFallsBackToHomeWhenDaemonCwdIsDataDir(t *testing.
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	prevHooks := OpenHandsHooksPathOverride
 	prevWorkspace := OpenHandsWorkspaceDirOverride
@@ -1055,7 +1065,7 @@ func TestCopilotSetupDefaultsToGlobalWhenDaemonCwdIsDataDir(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	prevHooks := CopilotHooksPathOverride
 	prevWorkspace := CopilotWorkspaceDirOverride
@@ -1124,6 +1134,100 @@ func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"failClosed": true`) {
 		t.Fatalf("cursor hooks did not enable failClosed when explicitly requested:\n%s", string(data))
+	}
+
+	// Refreshing the same connector in observe/fail-open mode must replace the
+	// managed entries rather than retaining stale host-side enforcement.
+	opts.HookFailMode = "open"
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("observe refresh Setup: %v", err)
+	}
+	cfg, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	for event, raw := range hooks {
+		entries, _ := raw.([]interface{})
+		if len(entries) != 1 {
+			t.Fatalf("Cursor %s entries = %d after refresh, want 1", event, len(entries))
+		}
+		entry, _ := entries[0].(map[string]interface{})
+		if entry["failClosed"] != false {
+			t.Fatalf("Cursor %s retained failClosed=true after observe refresh: %#v", event, entry)
+		}
+	}
+}
+
+func TestCursorHooks_RefreshMigratesNativeCommandAndUpdatesFailClosed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("direct-native to PowerShell adapter migration is Windows-specific")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "hooks.json")
+	prev := CursorHooksPathOverride
+	CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { CursorHooksPathOverride = prev })
+	setHookBinaryOverride(t, filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName))
+
+	legacyNative := windowsQuoteExe(defenseclawHookBinary()) + " " + nativeHookFlag + "cursor"
+	foreign := `& 'C:\Tools\operator-hook.ps1'`
+	seed := fmt.Sprintf(`{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {"type":"command","command":%q,"failClosed":true},
+      {"type":"command","command":%q,"failClosed":true}
+    ]
+  }
+}`, legacyNative, foreign)
+	if err := os.WriteFile(cfgPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := NewCursorConnector()
+	opts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		HookFailMode: "open",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("observe Setup: %v", err)
+	}
+	// A second setup must be idempotent rather than duplicating the adapter.
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repeated observe Setup: %v", err)
+	}
+
+	cfg, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	entries, _ := hooks["beforeSubmitPrompt"].([]interface{})
+	if len(entries) != 2 {
+		t.Fatalf("beforeSubmitPrompt entries = %d, want one foreign and one DefenseClaw: %#v", len(entries), entries)
+	}
+	managedCount := 0
+	foreignFound := false
+	for _, raw := range entries {
+		item, _ := raw.(map[string]interface{})
+		command, _ := item["command"].(string)
+		switch {
+		case command == foreign:
+			foreignFound = true
+		case strings.Contains(command, "cursor-hook.ps1"):
+			managedCount++
+			if item["failClosed"] != false {
+				t.Fatalf("observe adapter retained failClosed=true: %#v", item)
+			}
+		case command == legacyNative:
+			t.Fatalf("legacy direct-native command survived refresh: %#v", item)
+		}
+	}
+	if !foreignFound || managedCount != 1 {
+		t.Fatalf("refresh did not preserve foreign hook and deduplicate adapter: %#v", entries)
 	}
 }
 

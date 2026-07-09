@@ -29,6 +29,7 @@ import platform
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -36,7 +37,7 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths
+from defenseclaw import connector_paths, credential_provenance
 from defenseclaw import migration_state as migration_state_helpers
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
@@ -1816,11 +1817,9 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Transport-layer failures (gateway unreachable / 5xx) are
-    # handled separately by each hook's ``fail_unreachable`` helper
-    # and ALWAYS allow unless the operator opts into strict
-    # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
-    # regardless of this field's value. Mirrors
+    # Transport-layer failures (gateway unreachable / timeout / 5xx)
+    # follow this same mode. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    # remains an unconditional force-closed override. Mirrors
     # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
     hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
@@ -1905,11 +1904,19 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Per-connector override > global > ``"open"`` (non-"closed")."""
+        """Explicit connector posture > observe compatibility > global.
+
+        Existing observe-only installs remain fail-open when they only carry
+        the legacy global value. A connector-scoped value is an explicit
+        runtime response-integrity choice, however, and must not be collapsed
+        back to open merely because policy findings are being observed.
+        """
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":
                 return "closed"
+            return "open"
+        if self.effective_mode(connector).strip().lower() != "action":
             return "open"
         if self.hook_fail_mode.strip().lower() == "closed":
             return "closed"
@@ -2592,6 +2599,37 @@ class Config:
         path = str(config_path_for_data_dir(self.data_dir))
         with locked_config_yaml(path):
             self._save_locked(path)
+
+    def save_verified(self, verify: Callable[[str], None]) -> None:
+        """Persist, verify the exact written generation, and roll back on failure.
+
+        Verification runs while the canonical per-config lock is held. If it
+        fails after the atomic replacement, the prior v8 document is restored
+        atomically before the original error is re-raised.
+        """
+        path = str(config_path_for_data_dir(self.data_dir))
+        previous_source_version = self._source_config_version
+        previous_snapshot = copy.deepcopy(self._loaded_v8_modeled_snapshot)
+        with locked_config_yaml(path):
+            existed = os.path.exists(path)
+            existing = _load_existing_config_yaml(path)
+            self._save_locked(path)
+            try:
+                verify(path)
+            except Exception as verify_error:
+                self._source_config_version = previous_source_version
+                self._loaded_v8_modeled_snapshot = previous_snapshot
+                try:
+                    if existed:
+                        write_config_yaml_secure(path, existing)
+                    else:
+                        os.unlink(path)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "config verification failed and the previous configuration "
+                        f"could not be restored: {rollback_error}"
+                    ) from verify_error
+                raise
 
     def _save_locked(self, path: str) -> None:
         """Persist using an already-held config lock."""
@@ -4345,6 +4383,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     even when not exported in the user's shell profile.
     """
     env_path = os.path.join(data_dir, ".env")
+    credential_provenance.begin_dotenv_load(data_dir, env_path)
+    seen_keys: set[str] = set()
     try:
         with open(env_path) as f:
             for line in f:
@@ -4355,8 +4395,17 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 key, value = key.strip(), value.strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                     value = value[1:-1]
-                if key and key not in os.environ:
-                    os.environ[key] = value
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    injected = key not in os.environ
+                    if injected:
+                        os.environ[key] = value
+                    credential_provenance.note_dotenv_candidate(
+                        data_dir,
+                        key,
+                        value,
+                        injected=injected,
+                    )
     except FileNotFoundError:
         pass
     except OSError as exc:

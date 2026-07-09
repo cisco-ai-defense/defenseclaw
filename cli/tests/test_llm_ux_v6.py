@@ -41,8 +41,11 @@ import unittest
 from unittest import mock
 
 import click
+import pytest
 import yaml
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw import config as _cfgmod
 from defenseclaw import credentials as creds
 from defenseclaw.commands import _llm_picker

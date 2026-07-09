@@ -79,9 +79,10 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
+from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
@@ -104,6 +105,9 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
+_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
+_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
+_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
 
 
 def _log_setup_action(
@@ -1738,32 +1742,9 @@ def _restore_regular_file_snapshot(
     except FileNotFoundError:
         pass
     restored_mode = mode if mode is not None else 0o600
-    directory = os.path.dirname(path) or "."
-    temp_path = os.path.join(directory, f".{os.path.basename(path)}.restore-{uuid.uuid4().hex}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor_chmod = getattr(os, "fchmod", None)
-    try:
-        fd = os.open(temp_path, flags, restored_mode)
-        with os.fdopen(fd, "wb") as handle:
-            _ensure_regular_file(os.fstat(handle.fileno()).st_mode, temp_path)
-            if descriptor_chmod is not None:
-                descriptor_chmod(handle.fileno(), restored_mode)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if descriptor_chmod is None:
-            os.chmod(temp_path, restored_mode)
-        reject_symlink(path, what=what)
-        try:
-            _ensure_regular_file(os.lstat(path).st_mode, path)
-        except FileNotFoundError:
-            pass
-        os.replace(temp_path, path)
-    finally:
-        try:
-            os.unlink(temp_path)
-        except FileNotFoundError:
-            pass
+    atomic_write_private_bytes(path, payload)
+    if os.name != "nt":
+        os.chmod(path, restored_mode)
 
 
 def _ensure_regular_file(mode: int, path: str) -> None:
@@ -1793,23 +1774,11 @@ def _write_dotenv_locked(path: str, entries: dict[str, str]) -> None:
     creation. Tighten the open descriptor before writing so repeat runs also
     converge on POSIX 0600 or the equivalent protected Windows DACL.
     """
-    lines = [f"{k}={sanitize_dotenv_value(v, key=k)}\n" for k, v in sorted(entries.items())]
-    reject_symlink(path, what="dotenv file")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = -1
-    try:
-        fd = os.open(path, flags, 0o600)
-        set_file_mode(fd, path, 0o600)
-        stream = os.fdopen(fd, "w")
-        fd = -1  # ownership transferred; stream closes on every with-path
-        with stream as f:
-            f.writelines(lines)
-    finally:
-        if fd != -1:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+    body = "".join(
+        f"{key}={sanitize_dotenv_value(value, key=key)}\n"
+        for key, value in sorted(entries.items())
+    )
+    atomic_write_private_bytes(path, body.encode("utf-8"))
 
 
 def _load_config_for_data_dir(data_dir: str):
@@ -2355,9 +2324,6 @@ def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
     Python-side rotation produces the same byte-shape on disk as the
     Go-side first-boot synthesis.
     """
-    parent = os.path.dirname(dotenv_path) or "."
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-
     lines: list[str] = []
     if os.path.exists(dotenv_path):
         with open(dotenv_path, encoding="utf-8") as fh:
@@ -2371,16 +2337,7 @@ def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
     lines.append(f"DEFENSECLAW_GATEWAY_TOKEN={new_token}")
     body = "\n".join(lines) + "\n"
 
-    tmp = dotenv_path + ".tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        os.write(fd, body.encode("utf-8"))
-    finally:
-        os.close(fd)
-    # Belt-and-suspenders: chmod in case the umask widened the perms.
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, dotenv_path)
+    atomic_write_private_bytes(dotenv_path, body.encode("utf-8"))
 
 
 @setup.command("rotate-token")
@@ -2685,7 +2642,12 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
         cmd.extend(["--profile", profile])
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+        )
         if result.returncode == 0:
             return result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -4991,7 +4953,45 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo()
 
 
-def _print_observability_summary(connector: str, cfg=None, *, mode: str = "observe") -> None:
+def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -> None:
+    """Print native commands for inspecting one connector's activity."""
+
+    if os_name is None:
+        os_name = os.name
+
+    click.echo("  Next steps:")
+    click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
+    click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
+    if os_name == "nt":
+        click.echo("    • Watch decisions live: defenseclaw tui")
+        click.echo(
+            "      Or in PowerShell: Get-Content -LiteralPath "
+            "(Join-Path $HOME '.defenseclaw\\gateway.jsonl') -Wait | "
+            "ForEach-Object { $_ | ConvertFrom-Json }"
+        )
+        click.echo(
+            f"    • Recent alerts for this connector: "
+            f"defenseclaw alerts --limit 25 --connector {connector}"
+        )
+        return
+
+    click.echo(
+        "    • Watch decisions live: defenseclaw tui  "
+        "(Logs and Alerts read canonical SQLite history)"
+    )
+    click.echo(
+        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
+        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
+    )
+
+
+def _print_observability_summary(
+    connector: str,
+    cfg=None,
+    *,
+    mode: str = "observe",
+    os_name: str | None = None,
+) -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
     if connector == "omnigent":
@@ -5044,14 +5044,7 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     click.echo()
     print_redaction_status_hint(cfg)
     click.echo()
-    click.echo("  Next steps:")
-    click.echo("    • Verify gateway picked up the new connector: defenseclaw-gateway status")
-    click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
-    click.echo("    • Watch decisions live: defenseclaw tui  (Logs and Alerts read canonical SQLite history)")
-    click.echo(
-        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
-        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
-    )
+    _print_connector_next_steps(connector, os_name=os_name)
     if multi:
         click.echo(f"    • Change this connector's mode: defenseclaw setup {connector} --mode observe|action")
     click.echo()
@@ -7119,12 +7112,32 @@ def setup_notifications(
     cfg = app.cfg
     nc = cfg.notifications
     current = bool(nc.enabled)
+    capability = desktop_notification_capability()
 
     normalized = action.strip().lower() if action else None
 
     if normalized == "status":
         ux.section("Notifications state")
-        click.echo(f"    {ux.dim('config (notifications.enabled):')} {'ON' if current else 'OFF'}")
+        click.echo(f"    {ux.dim('configured (notifications.enabled):')} {'ON' if current else 'OFF'}")
+        effective = capability.effective_enabled(current)
+        click.echo(
+            f"    {ux.dim('native desktop delivery:')} "
+            f"{'ACTIVE' if effective else 'INACTIVE'}"
+        )
+        if not capability.supported:
+            click.echo(
+                f"    {ux.dim('capability:')} UNSUPPORTED — "
+                f"{capability.unsupported_reason}"
+            )
+            if current:
+                click.echo(
+                    "    Legacy configured ON is retained, but native desktop "
+                    "delivery is not active."
+                )
+            click.echo(
+                "    Delivery failures use a labelled terminal fallback; "
+                "they are never desktop success."
+            )
         click.echo(f"    {ux.dim('block_enforced:')} {'on' if nc.block_enforced else 'off'}")
         click.echo(f"    {ux.dim('block_would_block:')} {'on' if nc.block_would_block else 'off'}")
         click.echo(f"    {ux.dim('hitl_approval:')} {'on' if nc.hitl_approval else 'off'}")
@@ -7134,6 +7147,9 @@ def setup_notifications(
         click.echo(f"    {ux.dim('dedup_window:')} {nc.dedup_window or '30s'}")
         click.echo(f"    {ux.dim('max_per_minute:')} {nc.max_per_minute}")
         return
+
+    if not capability.supported and normalized != "off":
+        raise click.ClickException(capability.unsupported_reason)
 
     if normalized in ("on", "off"):
         desired = normalized == "on"
@@ -7158,6 +7174,7 @@ def setup_notifications(
     try:
         cfg.save()
     except OSError as exc:
+        nc.enabled = current
         ux.err(f"Failed to save config: {exc}")
         raise click.ClickException("config save failed") from exc
 
@@ -8314,7 +8331,17 @@ def _restart_openclaw_gateway() -> bool:
         click.echo("    Install OpenClaw or restart its gateway manually.")
         return False
     except subprocess.TimeoutExpired:
-        click.echo(" ✗ (timed out)")
+        # Windows trust/AV inspection can outlive the launcher timeout even
+        # though its detached managed daemon reaches READY. Reconcile through
+        # the real lifecycle command and canonical v8 API before declaring the
+        # setup failed. A timed-out initial start is stopped best-effort so a
+        # late daemon cannot appear after rollback.
+        if _gateway_lifecycle_status() and _wait_for_defense_gateway_api(data_dir):
+            click.echo(" ✓ (ready after launcher timeout)")
+            return True
+        if not was_running:
+            _cleanup_timed_out_gateway_start()
+        click.echo(" ✗ (timed out; final status is not healthy)")
         return False
 
 
@@ -8452,6 +8479,34 @@ def _wait_for_defense_gateway_api(
         if sleep_for:
             time.sleep(sleep_for)
     return False
+
+
+def _gateway_lifecycle_status() -> bool:
+    try:
+        result = subprocess.run(
+            ["defenseclaw-gateway", "status"],
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _cleanup_timed_out_gateway_start() -> None:
+    try:
+        subprocess.run(
+            ["defenseclaw-gateway", "stop"],
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # The caller already reports failure. The gateway's native PID and
+        # identity checks prevent this best-effort cleanup targeting another
+        # process.
+        return
 
 
 @setup.result_callback()

@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -42,6 +43,7 @@ from defenseclaw.config import SeverityAction
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import ActionState, Finding, ScanResult
 
+from tests.environment import requires_symlink_privilege
 from tests.helpers import cleanup_app, make_app_context
 
 
@@ -414,6 +416,42 @@ class TestSkillScan(SkillCommandTestBase):
 
         scanner.scan.assert_called_once_with(skill_dir)
 
+    def test_scan_all_nonactive_codex_expands_system_child_skills(self):
+        from defenseclaw.commands.cmd_skill import _scan_all
+
+        codex_root = os.path.join(self.tmp_dir, ".codex", "skills")
+        regular = os.path.join(codex_root, "operator-skill")
+        system_root = os.path.join(codex_root, ".system")
+        child_a = os.path.join(system_root, "imagegen")
+        child_b = os.path.join(system_root, "skill-installer")
+        for path in (regular, child_a, child_b):
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(f"# {os.path.basename(path)}\n")
+        os.makedirs(os.path.join(system_root, "not-a-skill"), exist_ok=True)
+
+        self.app.cfg.active_connector = lambda: "antigravity"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["antigravity", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: (  # type: ignore[method-assign]
+            [codex_root] if connector == "codex" else []
+        )
+
+        scanner = MagicMock()
+        scanner.scan.side_effect = lambda path: ScanResult(
+            scanner="skill-scanner",
+            target=path,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+
+        _scan_all(self.app, scanner, as_json=False, connector="codex")
+
+        scanned = [call.args[0] for call in scanner.scan.call_args_list]
+        self.assertEqual(scanned, [regular, child_a, child_b])
+        self.assertNotIn(system_root, scanned)
+        self.assertNotIn(os.path.join(system_root, "not-a-skill"), scanned)
+
 
 class TestSkillScanContainment(SkillCommandTestBase):
     """F-0501/F-0502: scan must not trust a connector-reported baseDir or a
@@ -478,7 +516,29 @@ class TestSkillScanContainment(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         scanner.scan.assert_called_once_with(outside)
 
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_scan_all_rejects_list_adapter_path_outside_skill_roots(
+        self, mock_list,
+    ):
+        from defenseclaw.commands.cmd_skill import _scan_all
+
+        skill_root = os.path.join(self.tmp_dir, "skills")
+        outside = os.path.join(self.tmp_dir, "outside-target")
+        os.makedirs(skill_root)
+        os.makedirs(outside)
+        mock_list.return_value = {
+            "skills": [{"name": "outside", "path": outside, "baseDir": outside}]
+        }
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [skill_root]  # type: ignore[method-assign]
+        scanner = MagicMock()
+
+        _scan_all(self.app, scanner, as_json=False, connector="codex")
+
+        scanner.scan.assert_not_called()
+
     @patch("defenseclaw.config.Config.skill_dirs")
+    @requires_symlink_privilege
     def test_f0502_scan_all_skips_symlinked_entry(self, mock_skill_dirs):
         from defenseclaw.commands.cmd_skill import _scan_all
 
@@ -524,6 +584,7 @@ class TestResolvePathFreezesSymlinks(SkillCommandTestBase):
     """F-0503: _resolve_path must reject symlinked candidates and return a
     frozen realpath so a pinned allow entry cannot be retargeted later."""
 
+    @requires_symlink_privilege
     def test_f0503_rejects_symlinked_target(self):
         from defenseclaw.commands.cmd_skill import _resolve_path
 
@@ -545,6 +606,7 @@ class TestResolvePathFreezesSymlinks(SkillCommandTestBase):
         resolved = _resolve_path(self.app, "frozen")
         self.assertEqual(resolved, os.path.realpath(skill_dir))
 
+    @requires_symlink_privilege
     def test_f0503_rejects_symlinked_candidate(self):
         from defenseclaw.commands.cmd_skill import _resolve_path
 
@@ -556,6 +618,178 @@ class TestResolvePathFreezesSymlinks(SkillCommandTestBase):
         os.symlink(outside, os.path.join(skill_root, "swapme"))
 
         self.assertIsNone(_resolve_path(self.app, "swapme"))
+
+
+class TestClawHubWindowsLauncher(unittest.TestCase):
+    def test_windows_resolver_prefers_cmd_over_extensionless_wrapper(self):
+        from defenseclaw.commands.cmd_skill import _resolve_windows_launcher
+
+        with tempfile.TemporaryDirectory(prefix="clawhub bin with spaces-") as bin_dir:
+            unix_wrapper = os.path.join(bin_dir, "clawhub")
+            windows_wrapper = os.path.join(bin_dir, "ClAwHuB.CmD")
+            with open(unix_wrapper, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 99\n")
+            with open(windows_wrapper, "w", encoding="utf-8") as handle:
+                handle.write("@exit /b 0\r\n")
+
+            resolved = _resolve_windows_launcher(
+                "clawhub",
+                search_path=bin_dir,
+                pathext=".CMD;.EXE;.BAT;.COM",
+            )
+
+            self.assertEqual(resolved, os.path.abspath(windows_wrapper))
+            self.assertNotEqual(resolved, unix_wrapper)
+
+    def test_windows_resolver_honors_pathext_order(self):
+        from defenseclaw.commands.cmd_skill import _resolve_windows_launcher
+
+        with tempfile.TemporaryDirectory() as bin_dir:
+            cmd = os.path.join(bin_dir, "clawhub.cmd")
+            exe = os.path.join(bin_dir, "clawhub.exe")
+            open(cmd, "wb").close()
+            open(exe, "wb").close()
+
+            self.assertEqual(
+                _resolve_windows_launcher(
+                    "CLawHub",
+                    search_path=bin_dir,
+                    pathext=".EXE;.CMD",
+                ),
+                os.path.abspath(exe),
+            )
+            self.assertEqual(
+                _resolve_windows_launcher(
+                    "CLawHub",
+                    search_path=bin_dir,
+                    pathext=".CMD;.EXE",
+                ),
+                os.path.abspath(cmd),
+            )
+
+    def test_windows_resolver_rejects_extensionless_only_wrapper(self):
+        from defenseclaw.commands.cmd_skill import _resolve_windows_launcher
+
+        with tempfile.TemporaryDirectory() as bin_dir:
+            with open(os.path.join(bin_dir, "clawhub"), "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\n")
+            self.assertIsNone(_resolve_windows_launcher("clawhub", search_path=bin_dir, pathext=".CMD"))
+
+    def test_staged_skill_path_alias_is_rejected(self):
+        from defenseclaw.commands.cmd_skill import _find_clawhub_staged_skill
+
+        with tempfile.TemporaryDirectory() as stage:
+            candidate = os.path.join(stage, "skills", "benign-skill")
+            os.makedirs(candidate)
+            with open(os.path.join(candidate, "SKILL.md"), "w", encoding="utf-8") as handle:
+                handle.write("# benign\n")
+            with patch(
+                "defenseclaw.commands.cmd_skill._is_path_alias",
+                side_effect=lambda path: os.path.normcase(path) == os.path.normcase(candidate),
+            ):
+                self.assertIsNone(_find_clawhub_staged_skill(stage, "benign-skill"))
+
+    def test_connector_copy_revalidates_tree_after_copy(self):
+        from defenseclaw.commands.cmd_skill import _copy_skill_tree_to_connector
+
+        with tempfile.TemporaryDirectory() as root:
+            source = os.path.join(root, "source")
+            install_root = os.path.join(root, "installed")
+            os.makedirs(source)
+            with open(os.path.join(source, "SKILL.md"), "w", encoding="utf-8") as handle:
+                handle.write("# benign\n")
+
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_skill._validate_staged_skill_tree",
+                    side_effect=[True, False],
+                ) as validate_tree,
+                self.assertRaises(SystemExit),
+            ):
+                _copy_skill_tree_to_connector(
+                    source,
+                    install_root,
+                    "benign-skill",
+                    force=False,
+                )
+
+            self.assertEqual(validate_tree.call_count, 2)
+            self.assertFalse(os.path.exists(os.path.join(install_root, "benign-skill")))
+            self.assertEqual(os.listdir(install_root), [])
+
+    @unittest.skipUnless(os.name == "nt", "native Windows resolver/CLI test")
+    def test_extensionless_only_wrapper_is_concise_cli_error(self):
+        with tempfile.TemporaryDirectory() as bin_dir:
+            with open(os.path.join(bin_dir, "clawhub"), "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 99\n")
+            with (
+                patch.dict(os.environ, {"PATH": bin_dir, "PATHEXT": ".CMD;.EXE"}),
+                patch(
+                    "defenseclaw.commands.cmd_skill.os.getcwd",
+                    return_value=bin_dir,
+                ),
+            ):
+                app, root, database = make_app_context()
+                try:
+                    result = CliRunner().invoke(
+                        skill,
+                        ["install", "benign-skill"],
+                        obj=app,
+                        catch_exceptions=False,
+                    )
+                finally:
+                    cleanup_app(app, database, root)
+
+            self.assertEqual(result.exit_code, 1, result.output)
+            self.assertIn("neither a launchable clawhub nor npx", result.output)
+            self.assertNotIn("Traceback", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value="/opt/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill.os.name", "posix")
+    def test_non_windows_resolver_keeps_extensionless_executable(self, _which):
+        from defenseclaw.commands.cmd_skill import _resolve_command
+
+        self.assertEqual(_resolve_command("clawhub"), os.path.abspath("/opt/bin/clawhub"))
+
+    def test_external_output_capture_is_bounded(self):
+        from defenseclaw.commands.cmd_skill import _CLAWHUB_OUTPUT_LIMIT, _run_clawhub_process
+
+        result = _run_clawhub_process(
+            [os.path.abspath(sys.executable), "-c", "import sys; sys.stderr.write('x' * 100000)"],
+            timeout=30,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stderr.encode("utf-8")), _CLAWHUB_OUTPUT_LIMIT)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows command-script test")
+    def test_cmd_argument_metacharacters_are_not_commands(self):
+        from defenseclaw.commands.cmd_skill import _run_clawhub_process
+
+        with tempfile.TemporaryDirectory(prefix="clawhub argv ") as fixture:
+            helper = os.path.join(fixture, "capture.py")
+            launcher = os.path.join(fixture, "clawhub.cmd")
+            captured = os.path.join(fixture, "captured.txt")
+            injected = os.path.join(fixture, "injected.txt")
+            with open(helper, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import pathlib, sys\npathlib.Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')\n"
+                )
+            with open(launcher, "w", encoding="utf-8") as handle:
+                handle.write(f'@"{sys.executable}" "{helper}" %*\n')
+            payload = f"space & echo injected>{injected} | more ^ 100% ! (safe)"
+
+            result = _run_clawhub_process(
+                [os.path.abspath(launcher), captured, payload],
+                timeout=30,
+                cwd=fixture,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(captured, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), payload)
+            self.assertFalse(os.path.exists(injected))
+
 
 
 class TestSkillInstall(SkillCommandTestBase):
@@ -574,6 +808,117 @@ class TestSkillInstall(SkillCommandTestBase):
         self.assertIn("configured connector skill dirs", output)
         self.assertIn("default: every configured connector", output)
         self.assertNotIn("OpenClaw skill", output)
+
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_rejects_traversal_before_launcher(self, mock_install):
+        result = self.invoke(["install", "../benign-skill"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("invalid ClawHub skill name", result.output)
+        mock_install.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="C:\\bin\\clawhub.cmd")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_launch_oserror_is_concise_and_staging_is_cleaned(self, mock_run, _resolve):
+        staged: list[str] = []
+
+        def fail_launch(_argv, **kwargs):
+            staged.append(kwargs["cwd"])
+            raise OSError(193, "not a valid application")
+
+        mock_run.side_effect = fail_launch
+        result = self.invoke(["install", "benign-skill"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("could not launch clawhub install", result.output)
+        self.assertNotIn("Traceback", result.output)
+        self.assertNotIn("installed 'benign-skill' ->", result.output)
+        self.assertEqual(len(staged), 1)
+        self.assertFalse(os.path.exists(staged[0]))
+
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="C:\\bin\\clawhub.cmd")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_launch_access_denied_and_disappeared_are_concise(self, mock_run, _resolve):
+        for failure in (PermissionError(13, "access denied"), FileNotFoundError("disappeared")):
+            with self.subTest(failure=type(failure).__name__):
+                mock_run.side_effect = failure
+                result = self.invoke(["install", "benign-skill"])
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("could not launch clawhub install", result.output)
+                self.assertNotIn("Traceback", result.output)
+                self.assertNotIn("installed 'benign-skill' ->", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="C:\\bin\\clawhub.cmd")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_child_nonzero_preserves_bounded_diagnostic(self, mock_run, _resolve):
+        mock_run.return_value = subprocess.CompletedProcess(
+            ["clawhub"],
+            7,
+            "",
+            "registry rejected package",
+        )
+
+        result = self.invoke(["install", "benign-skill"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("registry rejected package", result.output)
+        self.assertNotIn("installed 'benign-skill' ->", result.output)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ClawHub acceptance test")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_native_windows_cmd_installs_codex_skill_once(self, mock_scan, mock_eval):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        bin_dir = os.path.join(self.tmp_dir, "npm bin with spaces")
+        codex_root = os.path.join(self.tmp_dir, "codex home", "skills")
+        os.makedirs(bin_dir)
+        os.makedirs(codex_root)
+        extensionless = os.path.join(bin_dir, "clawhub")
+        launcher = os.path.join(bin_dir, "clawhub.cmd")
+        helper = os.path.join(bin_dir, "stage_skill.py")
+        marker = os.path.join(bin_dir, "calls.txt")
+        with open(extensionless, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\nexit 99\n")
+        with open(helper, "w", encoding="utf-8") as handle:
+            handle.write(
+                "import os, pathlib, sys\n"
+                "name = sys.argv[2]\n"
+                "root = pathlib.Path.cwd() / 'skills' / name\n"
+                "root.mkdir(parents=True)\n"
+                "(root / 'SKILL.md').write_text('# benign fixture\\n', encoding='utf-8')\n"
+                "marker = pathlib.Path(os.environ['DEFENSECLAW_TEST_MARKER'])\n"
+                "marker.write_text(marker.read_text() + '1' if marker.exists() else '1')\n"
+            )
+        with open(launcher, "w", encoding="utf-8") as handle:
+            handle.write(f'@"{sys.executable}" "{helper}" %*\n')
+
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [codex_root]  # type: ignore[method-assign]
+        destination = os.path.join(codex_root, "benign-skill")
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target=destination,
+            timestamp=datetime.now(timezone.utc), findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_eval.return_value = AdmissionDecision("clean", "clean")
+
+        with patch.dict(
+            os.environ,
+            {
+                "PATH": bin_dir,
+                "PATHEXT": ".CMD;.EXE;.BAT;.COM",
+                "DEFENSECLAW_TEST_MARKER": marker,
+            },
+        ):
+            result = self.invoke(["install", "benign-skill", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Traceback", result.output)
+        self.assertTrue(os.path.isfile(os.path.join(destination, "SKILL.md")))
+        with open(marker, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "1")
 
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
@@ -1498,11 +1843,12 @@ class TestSkillSearch(SkillCommandTestBase):
     # `npx --no-install` (cached only, never network-fetched). Plain `npx`
     # (network fetch + execute) is gated behind explicit --allow-remote-fetch.
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_default_uses_npx_no_install_no_network_fetch(self, mock_run, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_search_default_uses_npx_no_install_no_network_fetch(self, mock_run, mock_resolve):
         # No local clawhub binary, no opt-in: must use `npx --no-install` so npx
         # refuses to download+execute the package from the network.
+        mock_resolve.side_effect = lambda name, **_kwargs: None if name == "clawhub" else "/bin/npx"
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="wiki  Wiki  (3.504)\nwiki-local  WikiLocal  (3.392)\n",
@@ -1513,54 +1859,59 @@ class TestSkillSearch(SkillCommandTestBase):
         self.assertIn("wiki", result.output)
         self.assertIn("wiki-local", result.output)
         mock_run.assert_called_once_with(
-            ["npx", "--no-install", "clawhub", "search", "wiki"],
-            capture_output=True, text=True, timeout=30,
+            ["/bin/npx", "--no-install", "clawhub", "search", "wiki"],
+            timeout=30,
         )
         # Must never invoke the network-fetching plain `npx clawhub`.
         self.assertNotIn(
-            ["npx", "clawhub", "search", "wiki"],
+            ["/bin/npx", "clawhub", "search", "wiki"],
             [c.args[0] for c in mock_run.call_args_list],
         )
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value="/usr/local/bin/clawhub")
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_prefers_local_clawhub_binary(self, mock_run, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="/usr/local/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_search_prefers_local_clawhub_binary(self, mock_run, _resolve):
         # A locally-installed pinned binary is run directly — no npx, no fetch.
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="wiki  Wiki  (3.504)\n", stderr="",
+            returncode=0,
+            stdout="wiki  Wiki  (3.504)\n",
+            stderr="",
         )
         result = self.invoke(["search", "wiki"])
         self.assertEqual(result.exit_code, 0, result.output)
         mock_run.assert_called_once_with(
             ["/usr/local/bin/clawhub", "search", "wiki"],
-            capture_output=True, text=True, timeout=30,
+            timeout=30,
         )
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_allow_remote_fetch_opts_into_npx_network_fetch(self, mock_run, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_search_allow_remote_fetch_opts_into_npx_network_fetch(self, mock_run, mock_resolve):
         # Explicit opt-in re-enables the original fetch+execute behavior.
+        mock_resolve.side_effect = lambda name, **_kwargs: None if name == "clawhub" else "/bin/npx"
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="wiki  Wiki  (3.504)\n", stderr="",
+            returncode=0,
+            stdout="wiki  Wiki  (3.504)\n",
+            stderr="",
         )
         result = self.invoke(["search", "wiki", "--allow-remote-fetch"])
         self.assertEqual(result.exit_code, 0, result.output)
         mock_run.assert_called_once_with(
-            ["npx", "clawhub", "search", "wiki"],
-            capture_output=True, text=True, timeout=30,
+            ["/bin/npx", "clawhub", "search", "wiki"],
+            timeout=30,
         )
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_no_results(self, mock_run, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_search_no_results(self, mock_run, _resolve):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         result = self.invoke(["search", "zzz_nonexistent"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No skills found", result.output)
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_json_no_results_outputs_empty_array(self, mock_run, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_search_json_no_results_outputs_empty_array(self, mock_run, _resolve):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         result = self.invoke(["search", "dc-skill-does-not-exist", "--json"])
 
@@ -1568,9 +1919,9 @@ class TestSkillSearch(SkillCommandTestBase):
         self.assertEqual(json.loads(result.output), [])
         self.assertNotIn("No skills found", result.output)
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_json_output(self, mock_run, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_search_json_output(self, mock_run, _resolve):
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="wiki  Wiki  (3.504)\n",
@@ -1582,28 +1933,32 @@ class TestSkillSearch(SkillCommandTestBase):
         self.assertIsInstance(data, list)
         self.assertTrue(len(data) >= 1)
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run", side_effect=FileNotFoundError)
-    def test_search_npx_not_found(self, _mock, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value=None)
+    def test_search_npx_not_found(self, _resolve):
         result = self.invoke(["search", "wiki"])
         self.assertNotEqual(result.exit_code, 0)
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_clawhub_failure_hints_at_remote_fetch(self, mock_run, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_search_clawhub_failure_hints_at_remote_fetch(self, mock_run, mock_resolve):
         # `npx --no-install` fails when clawhub isn't cached; the error must
         # point at --allow-remote-fetch rather than silently fetching.
+        mock_resolve.side_effect = lambda name, **_kwargs: None if name == "clawhub" else "/bin/npx"
         mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="npm ERR! could not determine executable",
+            returncode=1,
+            stdout="",
+            stderr="npm ERR! could not determine executable",
         )
         result = self.invoke(["search", "wiki"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--allow-remote-fetch", result.output)
 
-    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run",
-           side_effect=__import__("subprocess").TimeoutExpired(cmd="npx", timeout=30))
-    def test_search_timeout(self, _mock, _which):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="/bin/clawhub")
+    @patch(
+        "defenseclaw.commands.cmd_skill._run_clawhub_process",
+        side_effect=__import__("subprocess").TimeoutExpired(cmd="clawhub", timeout=30),
+    )
+    def test_search_timeout(self, _mock, _resolve):
         result = self.invoke(["search", "wiki"])
         self.assertNotEqual(result.exit_code, 0)
 
@@ -2261,23 +2616,22 @@ class TestSkillSearchUX(SkillCommandTestBase):
     """SK-7: search is a remote ClawHub registry query (labelled as such), and
     a broken/missing clawhub package degrades to a concise hint."""
 
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_clawhub_broken_gives_concise_error(self, mock_run):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_clawhub_broken_gives_concise_error(self, mock_run, _resolve):
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout="",
-            stderr=(
-                "node:internal/modules/esm/resolve:1\n"
-                "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'chalk'"
-            ),
+            stderr=("node:internal/modules/esm/resolve:1\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'chalk'"),
         )
         result = self.invoke(["search", "wiki"])
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("skill registry unavailable", result.output)
         self.assertNotIn("ERR_MODULE_NOT_FOUND", result.output)
 
-    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_results_labelled_as_registry(self, mock_run):
+    @patch("defenseclaw.commands.cmd_skill._resolve_command", return_value="/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_process")
+    def test_results_labelled_as_registry(self, mock_run, _resolve):
         mock_run.return_value = MagicMock(returncode=0, stdout="wiki  Wiki  (3.5)\n", stderr="")
         result = self.invoke(["search", "wiki"])
         self.assertEqual(result.exit_code, 0, result.output)

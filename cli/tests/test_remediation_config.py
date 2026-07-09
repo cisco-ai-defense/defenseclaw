@@ -271,14 +271,10 @@ def test_f0083_fresh_audit_db_is_owner_only(tmp_path):
     finally:
         os.umask(old_umask)
 
-    db_mode = stat.S_IMODE(os.stat(db_path).st_mode)
-    parent_mode = stat.S_IMODE(os.stat(root).st_mode)
-    # DB is owner read/write only — no group/world bits.
-    assert db_mode & 0o077 == 0, oct(db_mode)
-    assert not (db_mode & stat.S_IROTH)
-    # The parent dir we created the DB under loses world access so a
-    # different local user cannot traverse to the DB.
-    assert not (parent_mode & stat.S_IRWXO), oct(parent_mode)
+    assert_owner_only_file(db_path)
+    if os.name != "nt":
+        parent_mode = stat.S_IMODE(os.stat(root).st_mode)
+        assert not (parent_mode & stat.S_IRWXO), oct(parent_mode)
 
 
 def test_f0083_existing_loose_db_is_tightened_without_data_loss(tmp_path):
@@ -293,7 +289,7 @@ def test_f0083_existing_loose_db_is_tightened_without_data_loss(tmp_path):
     store2.init()
     try:
         # Re-opening tightens perms back to owner-only...
-        assert stat.S_IMODE(os.stat(db_path).st_mode) & 0o077 == 0
+        assert_owner_only_file(db_path)
         # ...and the DB is still usable (init is idempotent).
         store2.db.execute("SELECT 1").fetchone()
     finally:
@@ -489,6 +485,9 @@ def test_f0141_ca_file_clears_prior_skip_verify(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX shell gateway probe; native Windows executable probing has dedicated coverage"
+)
 def test_f0001_version_probe_uses_configured_gateway(tmp_path, monkeypatch):
     fake_version = "9.9.9" if __version__ != "9.9.9" else "0.0.1"
     fake_gateway = tmp_path / "custom-defenseclaw-gateway"

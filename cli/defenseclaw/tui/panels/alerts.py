@@ -621,7 +621,7 @@ class AlertsPanelModel:
             copied = self.copy_detail_text()
             if not copied:
                 return AlertPanelAction(True, hint="No alert detail to copy.")
-            return AlertPanelAction(True, hint="Alert detail copied.", copy_text=copied)
+            return AlertPanelAction(True, hint="Copied alert detail.", copy_text=copied)
         if key == "d":
             row = self.selected()
             if row is None or row.event.id.startswith("gw:"):

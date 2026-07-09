@@ -41,6 +41,7 @@ __all__ = [
     "EnvVar",
     "Registry",
     "load_registry",
+    "load_registry_file",
     "active_security_overrides",
     "CATEGORY_SECURITY_OPT_OUT",
     "CATEGORY_DEBUG",
@@ -179,9 +180,10 @@ _cached: Registry | None = None
 def _registry_path() -> Path:
     """Locate the registry.json relative to the repo root.
 
-    Walks up from this file (cli/defenseclaw/envvars.py) until it finds
-    ``internal/envvars/registry.json``. Falls back to an explicit path
-    derived from DEFENSECLAW_REPO_ROOT if set (useful in CI sandboxes).
+    A module imported from ``<repo>/cli/defenseclaw`` uses the authoritative
+    source registry. An installed package uses only its adjacent package-data
+    mirror, even when its virtualenv happens to live below a source checkout.
+    DEFENSECLAW_REPO_ROOT remains an explicit override for CI sandboxes.
     """
     env_root = os.environ.get("DEFENSECLAW_REPO_ROOT", "").strip()
     if env_root:
@@ -189,13 +191,13 @@ def _registry_path() -> Path:
         if p.is_file():
             return p
     here = Path(__file__).resolve()
-    for parent in (here, *here.parents):
-        candidate = parent / _REGISTRY_RELATIVE_PATH
-        if candidate.is_file():
-            return candidate
-        bundled = parent / _BUNDLED_REGISTRY_PATH
-        if bundled.is_file():
-            return bundled
+    if len(here.parents) >= 3 and here.parents[1].name == "cli":
+        source = here.parents[2] / _REGISTRY_RELATIVE_PATH
+        if source.is_file():
+            return source
+    bundled = here.parent / _BUNDLED_REGISTRY_PATH
+    if bundled.is_file():
+        return bundled
     raise FileNotFoundError(
         f"could not locate {_REGISTRY_RELATIVE_PATH} starting from {here}"
     )
@@ -306,13 +308,13 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
     )
 
 
-def load_registry(force_reload: bool = False) -> Registry:
-    """Load and validate the registry. Cached after first call."""
-    global _cached
-    if _cached is not None and not force_reload:
-        return _cached
+def load_registry_file(path: str | Path) -> Registry:
+    """Load and validate one explicit registry file without using the cache.
 
-    path = _registry_path()
+    Generators use this entry point so their input cannot change based on an
+    ambient, potentially stale package-data mirror.
+    """
+    path = Path(path)
     with path.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
 
@@ -348,12 +350,21 @@ def load_registry(force_reload: bool = False) -> Registry:
             raise ValueError(f"{path}: duplicate entry for {e.name!r}")
         seen.add(e.name)
 
-    _cached = Registry(
+    return Registry(
         schema_version=schema_version,
         description=description,
         categories=categories,
         entries=entries,
     )
+
+
+def load_registry(force_reload: bool = False) -> Registry:
+    """Load and validate the discovered registry. Cached after first call."""
+    global _cached
+    if _cached is not None and not force_reload:
+        return _cached
+
+    _cached = load_registry_file(_registry_path())
     return _cached
 
 

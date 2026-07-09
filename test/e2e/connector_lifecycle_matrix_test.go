@@ -86,6 +86,9 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 				t.Fatalf("[%s] VerifyClean before Setup: unexpected residue: %v",
 					fx.Name, err)
 			}
+			if !connector.ConnectorSupportedOnHostOS(fx.Name) {
+				t.Skipf("[%s] has no native lifecycle on this host; platform rejection is covered by connector support tests", fx.Name)
+			}
 
 			// Stage 2: Setup. The actual error type is implementation
 			// detail; we only care that the connector's *contract*

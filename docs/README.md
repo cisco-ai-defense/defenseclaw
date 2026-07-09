@@ -8,7 +8,8 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 
 | Guide | Description |
 |-------|-------------|
-| [Install](INSTALL.md) | DGX Spark, macOS, Linux, existing OpenClaw installs, and source builds |
+| [Install](INSTALL.md) | Windows, DGX Spark, macOS, Linux, existing OpenClaw installs, and source builds |
+| [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) | PowerShell install, native connector setup, verification, and troubleshooting |
 | [Quick Start](QUICKSTART.md) | First successful setup, scan, guardrail, and dashboard flow |
 | [Architecture](ARCHITECTURE.md) | System diagram, data flow, and component responsibilities |
 | [CLI Reference](CLI.md) | Python CLI commands and flags |

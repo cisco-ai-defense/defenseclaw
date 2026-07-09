@@ -246,7 +246,7 @@
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "hook_script_version": "v8",
           "hook_script": "cursor-hook.sh",
           "hook_config_path_templates": [
             "~/.cursor/hooks.json"

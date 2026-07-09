@@ -42,6 +42,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from defenseclaw import credential_provenance
+
 if TYPE_CHECKING:
     from defenseclaw.config import Config
 
@@ -924,7 +926,12 @@ def resolve(env_name: str, data_dir: str) -> Resolution:
     """
     value = os.environ.get(env_name, "")
     if value:
-        return Resolution(env_name=env_name, value=value, source="env")
+        source = (
+            "dotenv"
+            if credential_provenance.was_injected_from_dotenv(data_dir, env_name, value)
+            else "env"
+        )
+        return Resolution(env_name=env_name, value=value, source=source)
     dotenv_val = _parse_dotenv(os.path.join(data_dir, ".env")).get(env_name, "")
     if dotenv_val:
         return Resolution(env_name=env_name, value=dotenv_val, source="dotenv")

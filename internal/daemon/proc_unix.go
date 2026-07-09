@@ -35,6 +35,8 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	}
 }
 
+func daemonChildRegistersPID() bool { return false }
+
 func sendTermSignal(proc *os.Process) error {
 	return proc.Signal(syscall.SIGTERM)
 }

@@ -83,14 +83,15 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// HookFailMode is the operator-chosen response-layer fail mode
-	// baked into every hook script we write. Values: "open" (default,
-	// allow on response-layer failures) or "closed" (block on
-	// response-layer failures). The sidecar populates this from
-	// cfg.Guardrail.EffectiveHookFailMode(); empty string is treated as
-	// the default ("open"). Transport-layer failures (gateway unreachable /
-	// 5xx) are governed separately by DEFENSECLAW_STRICT_AVAILABILITY in
-	// the hook scripts themselves and are NOT controlled by this field.
+	// HookFailMode is the operator-chosen response-layer fail mode supplied to
+	// setup and hook-writing paths. Values: "open" (allow on response or
+	// transport failures) or "closed" (block on either failure class). Runtime
+	// setup populates it from cfg.EffectiveHookFailModeForConnector(conn.Name()).
+	// Hook-writing helpers normalize an empty or invalid value to the secure
+	// "closed" fallback. Profile-only callers may omit it; provider-specific
+	// profile defaults are separate from the hook-writing boundary.
+	// DEFENSECLAW_STRICT_AVAILABILITY remains
+	// an unconditional force-closed override in generated hooks.
 	HookFailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire

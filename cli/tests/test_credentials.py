@@ -27,6 +27,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import config as config_mod
+from defenseclaw import credential_provenance
 from defenseclaw import credentials as C
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
@@ -601,6 +603,15 @@ class BoundEndpointTests(unittest.TestCase):
 class ResolveTests(unittest.TestCase):
     """Resolution walks env → .env → unset."""
 
+    def setUp(self):
+        credential_provenance._reset_for_tests()
+
+    def tearDown(self):
+        credential_provenance._reset_for_tests()
+
+    def _without_key(self, env_name):
+        return {k: v for k, v in os.environ.items() if k != env_name}
+
     def test_env_beats_dotenv(self):
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as fh:
@@ -629,6 +640,83 @@ class ResolveTests(unittest.TestCase):
                 res = C.resolve("EXAMPLE_KEY", tmp)
                 self.assertFalse(res.is_set)
                 self.assertEqual(res.source, "unset")
+
+    def test_dotenv_injected_into_os_retains_dotenv_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("EXAMPLE_KEY=dotenv-only-value\n")
+            with patch.dict(os.environ, self._without_key("EXAMPLE_KEY"), clear=True):
+                config_mod._load_dotenv_into_os(tmp)
+                res = C.resolve("EXAMPLE_KEY", tmp)
+                self.assertEqual(res.value, "dotenv-only-value")
+                self.assertEqual(res.source, "dotenv")
+
+    def test_exported_environment_only_remains_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"EXAMPLE_KEY": "exported-value"}, clear=False):
+                config_mod._load_dotenv_into_os(tmp)
+                self.assertEqual(C.resolve("EXAMPLE_KEY", tmp).source, "env")
+
+    def test_exported_environment_beats_different_dotenv_value_after_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as fh:
+                fh.write("EXAMPLE_KEY=dotenv-value\n")
+            with patch.dict(os.environ, {"EXAMPLE_KEY": "exported-value"}, clear=False):
+                config_mod._load_dotenv_into_os(tmp)
+                res = C.resolve("EXAMPLE_KEY", tmp)
+                self.assertEqual(res.value, "exported-value")
+                self.assertEqual(res.source, "env")
+
+    def test_same_exported_and_dotenv_value_is_env_when_already_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as fh:
+                fh.write("EXAMPLE_KEY=shared-value\n")
+            with patch.dict(os.environ, {"EXAMPLE_KEY": "shared-value"}, clear=False):
+                config_mod._load_dotenv_into_os(tmp)
+                self.assertEqual(C.resolve("EXAMPLE_KEY", tmp).source, "env")
+
+    def test_replacing_injected_value_invalidates_dotenv_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as fh:
+                fh.write("EXAMPLE_KEY=dotenv-value\n")
+            with patch.dict(os.environ, self._without_key("EXAMPLE_KEY"), clear=True):
+                config_mod._load_dotenv_into_os(tmp)
+                os.environ["EXAMPLE_KEY"] = "replacement-value"
+                res = C.resolve("EXAMPLE_KEY", tmp)
+                self.assertEqual(res.value, "replacement-value")
+                self.assertEqual(res.source, "env")
+
+    def test_repeated_loads_and_data_dirs_do_not_leak_provenance(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            for directory in (first, second):
+                with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as fh:
+                    fh.write("EXAMPLE_KEY=shared-value\n")
+            with patch.dict(os.environ, self._without_key("EXAMPLE_KEY"), clear=True):
+                config_mod._load_dotenv_into_os(first)
+                config_mod._load_dotenv_into_os(first)
+                self.assertEqual(C.resolve("EXAMPLE_KEY", first).source, "dotenv")
+
+                config_mod._load_dotenv_into_os(second)
+                self.assertEqual(C.resolve("EXAMPLE_KEY", second).source, "env")
+                self.assertEqual(C.resolve("EXAMPLE_KEY", first).source, "env")
+
+    def test_changed_or_removed_dotenv_invalidates_stale_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("EXAMPLE_KEY=first-value\n")
+            with patch.dict(os.environ, self._without_key("EXAMPLE_KEY"), clear=True):
+                config_mod._load_dotenv_into_os(tmp)
+                self.assertEqual(C.resolve("EXAMPLE_KEY", tmp).source, "dotenv")
+
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("EXAMPLE_KEY=second-value\n")
+                self.assertEqual(C.resolve("EXAMPLE_KEY", tmp).source, "env")
+
+                os.remove(path)
+                config_mod._load_dotenv_into_os(tmp)
+                self.assertEqual(C.resolve("EXAMPLE_KEY", tmp).source, "env")
 
 
 class MaskTests(unittest.TestCase):

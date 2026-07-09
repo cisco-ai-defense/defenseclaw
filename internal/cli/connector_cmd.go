@@ -28,6 +28,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // connectorCmd is the parent for low-level connector lifecycle subcommands
@@ -110,6 +112,16 @@ Exit codes:
 	RunE: runConnectorVerify,
 }
 
+var connectorReconcileCmd = &cobra.Command{
+	Use:   "reconcile",
+	Short: "Refresh one connector's installed runtime registration",
+	Long: `Reconcile the named connector from the current DefenseClaw config.
+
+This is the selected-connector setup primitive used by transactional policy
+mutations. It does not restart the gateway and does not setup peer connectors.`,
+	RunE: runConnectorReconcile,
+}
+
 var connectorListBackupsCmd = &cobra.Command{
 	Use:   "list-backups",
 	Short: "List pristine connector backups stored under the data directory",
@@ -142,6 +154,7 @@ func init() {
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
+	connectorCmd.AddCommand(connectorReconcileCmd)
 	connectorCmd.AddCommand(connectorListBackupsCmd)
 
 	rootCmd.AddCommand(connectorCmd)
@@ -237,7 +250,96 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
+	opts.APIToken = cfg.Gateway.ResolvedToken()
 	return opts
+}
+
+func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		return fmt.Errorf("connector reconcile: no data directory configured")
+	}
+	name := resolveActiveConnectorName(dataDir)
+	reg := newConnectorRegistryWithPlugins()
+	conn, ok := reg.Get(name)
+	if !ok {
+		return fmt.Errorf("connector reconcile: unknown connector %q", name)
+	}
+	if name != "claudecode" && name != "codex" {
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for claudecode and codex")
+	}
+	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
+		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)
+	} else if warning != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "connector reconcile %s: warning: %s\n", name, warning)
+	}
+	opts := resolveConnectorOpts(dataDir)
+	if cfg != nil {
+		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
+		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
+	}
+	hookToken, err := connector.LoadHookAPIToken(dataDir, name)
+	if err != nil {
+		return fmt.Errorf("connector reconcile: load scoped hook token: %w", err)
+	}
+	if hookToken == "" {
+		hookToken, err = connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil {
+			return fmt.Errorf("connector reconcile: ensure scoped hook token: %w", err)
+		}
+	}
+	// Match the sidecar's least-privilege registration semantics: Claude and
+	// Codex use the connector-scoped token for both native telemetry and hook
+	// calls. Never write the gateway master token into agent-owned config.
+	opts.APIToken = hookToken
+	opts.HookAPIToken = hookToken
+	opts.HookAPITokenScoped = true
+	opts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, name)
+	previous := connector.LoadHookContractLockEntry(dataDir, name)
+	if opts.AgentVersion == "" {
+		// A scoped policy refresh must not downgrade a previously verified
+		// registration merely because discovery cache cleanup ran between
+		// setups. Reuse the lock's exact observed version as audit evidence.
+		opts.AgentVersion = previous.RawAgentVersion
+	}
+	resolution := connector.ResolveHookContract(name, opts.AgentVersion)
+	opts.HookContractID = resolution.Contract.ContractID
+	actionMode := cfg != nil && strings.EqualFold(
+		strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name)), "action",
+	)
+	if connector.HookContractNeedsActionOverride(resolution) && actionMode &&
+		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return fmt.Errorf(
+			"connector reconcile %s: agent version %q is not verified against a known hook contract: %s",
+			name, opts.AgentVersion, resolution.Reason,
+		)
+	}
+	if previous.Connector != "" {
+		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+		if connector.HookContractCompatibilityDrifted(previous, current) && actionMode &&
+			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			return fmt.Errorf("connector reconcile %s: hook contract compatibility drift", name)
+		}
+	}
+
+	if err := conn.Setup(cmd.Context(), opts); err != nil {
+		return fmt.Errorf("connector reconcile %s: %w", name, err)
+	}
+	entry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	if err := connector.SaveHookContractLockEntry(dataDir, entry); err != nil {
+		return fmt.Errorf("connector reconcile %s lock: %w", name, err)
+	}
+	if connectorFlagJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+			"connector": name,
+			"action":    "reconcile",
+			"ok":        true,
+			"fail_mode": opts.HookFailMode,
+		})
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style("✓", "fg=green", "bold"), name)
+	return nil
 }
 
 func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
