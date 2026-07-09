@@ -16,6 +16,9 @@ func patchModelInBody(body []byte, model string) []byte {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return body
 	}
+	if raw == nil {
+		return body
+	}
 	modelJSON, err := json.Marshal(model)
 	if err != nil {
 		return body
