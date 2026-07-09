@@ -191,18 +191,44 @@ func TestExtractZipReaderRejectsExpandedSizeLimit(t *testing.T) {
 
 func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
 	manifest := payloadManifest{
-		SchemaVersion:   1,
-		Version:         "1.2.3",
-		GatewayArchive:  "gateway.zip",
-		Wheel:           "defenseclaw.whl",
-		PythonEmbed:     "python.zip",
-		SitePackages:    "site-packages.zip",
-		Launcher:        "launcher.exe",
-		UpgradeManifest: "upgrade-manifest.json",
-		Files:           map[string]string{},
+		SchemaVersion:      1,
+		Version:            "1.2.3",
+		SourceCommit:       "0123456789abcdef0123456789abcdef01234567",
+		DistributionFlavor: "oss",
+		GatewayArchive:     "gateway.zip",
+		Wheel:              "defenseclaw.whl",
+		PythonEmbed:        "python.zip",
+		SitePackages:       "site-packages.zip",
+		Launcher:           "launcher.exe",
+		UpgradeManifest:    "upgrade-manifest.json",
+		Files:              map[string]string{},
 	}
 	if err := verifyPayloadManifest(t.TempDir(), manifest); err == nil {
 		t.Fatal("verifyPayloadManifest accepted missing required hashes")
+	}
+}
+
+func TestVerifyPayloadManifestRejectsInvalidSourceCommit(t *testing.T) {
+	manifest := payloadManifest{
+		SchemaVersion:      1,
+		Version:            "1.2.3",
+		SourceCommit:       "not-a-git-commit",
+		DistributionFlavor: "oss",
+	}
+	if err := verifyPayloadManifest(t.TempDir(), manifest); err == nil {
+		t.Fatal("verifyPayloadManifest accepted an invalid source commit")
+	}
+}
+
+func TestVerifyPayloadManifestRejectsManagedEnterpriseWithoutOverlay(t *testing.T) {
+	manifest := payloadManifest{
+		SchemaVersion:      1,
+		Version:            "1.2.3",
+		SourceCommit:       "0123456789abcdef0123456789abcdef01234567",
+		DistributionFlavor: "managed-enterprise",
+	}
+	if err := verifyPayloadManifest(t.TempDir(), manifest); err == nil {
+		t.Fatal("verifyPayloadManifest accepted a managed-enterprise payload without the private Windows CMID overlay")
 	}
 }
 
