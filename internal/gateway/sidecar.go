@@ -51,6 +51,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/training"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"github.com/google/uuid"
@@ -515,6 +517,27 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 	return snapshot
 }
 
+
+func (s *Sidecar) otelSnapshot() *telemetry.Provider {
+	if s == nil {
+		return nil
+	}
+	s.otelMu.RLock()
+	defer s.otelMu.RUnlock()
+	return s.otel
+}
+
+func (s *Sidecar) swapOTel(next *telemetry.Provider) *telemetry.Provider {
+	if s == nil {
+		return nil
+	}
+	s.otelMu.Lock()
+	defer s.otelMu.Unlock()
+	previous := s.otel
+	s.otel = next
+	return previous
+}
+
 func (s *Sidecar) webhooksSnapshot() *WebhookDispatcher {
 	if s == nil {
 		return nil
@@ -628,6 +651,69 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	netguard.SetAllowedPrivateIPs(allowedIPs)
 	if len(allowedIPs) > 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
+	}
+	}
+
+	// Initialize training pipeline if enabled.
+	if s.currentConfig().Training.Enabled {
+		trainingDBPath := filepath.Join(s.currentConfig().DataDir, "training-store.db")
+		trainingStore, err := training.NewStore(trainingDBPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[training] store init failed: %v (training disabled)\n", err)
+		} else {
+			// Start capturer (async trace writes)
+			capturer := training.NewCapturer(trainingStore)
+			defer capturer.Stop()
+
+			// Start llama-server
+			modelsDir := s.currentConfig().Training.ModelsDir
+			if modelsDir == "" {
+				modelsDir = filepath.Join(s.currentConfig().DataDir, "models")
+			}
+			llamaSrv := training.NewLlamaServer(training.LlamaConfig{
+				ModelsDir: modelsDir,
+				Port:      s.currentConfig().Training.LlamaServerPort,
+			})
+			if err := llamaSrv.Start(runCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "[training] llama-server start failed: %v\n", err)
+			} else {
+				defer llamaSrv.Stop()
+			}
+
+			// Start auto-trigger
+			registry, err := training.NewRegistry(modelsDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[training] registry init failed: %v\n", err)
+			}
+			pipeline := training.NewPipeline(trainingStore, registry)
+
+			// Build TriggerConfig from config.Training.Categories
+			var triggers []training.CategoryTrigger
+			for _, cat := range s.currentConfig().Training.Categories {
+				if !cat.AutoTrigger {
+					continue
+				}
+				triggers = append(triggers, training.CategoryTrigger{
+					Name:      cat.Name,
+					MinTraces: cat.MinTraces,
+					PipelineCfg: training.PipelineConfig{
+						Category:  cat.Name,
+						BaseModel: cat.BaseModel,
+						Algorithm: cat.Algorithm,
+					},
+				})
+			}
+			if len(triggers) > 0 {
+				trigger := training.NewAutoTrigger(trainingStore, pipeline, training.TriggerConfig{
+					Categories: triggers,
+				})
+				trigger.Start(runCtx)
+				defer trigger.Stop()
+			}
+
+			fmt.Fprintf(os.Stderr, "[training] pipeline enabled (backend=%s, categories=%d)\n",
+				s.currentConfig().Training.Backend, len(s.currentConfig().Training.Categories))
+		}
 	}
 
 	// Initialize OPA engine before goroutines so both the watcher and the
@@ -2511,12 +2597,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookAPIToken:       setupTokens.hookToken,
 		HookAPITokenScoped: setupTokens.hookTokenScoped,
 		WorkspaceDir:       workspaceDir,
-		// HookFailMode is the operator-chosen response-layer fail mode
-		// for every generated hook (see GuardrailConfig.HookFailMode
-		// for the contract). Routed via EffectiveHookFailMode so the
-		// default "open" is applied uniformly when the field is unset
-		// — matches the user-friendly default in defaultsFor() and
-		// avoids a partial install accidentally going fail-closed.
+		// HookFailMode controls delivery, authentication, and invalid-response
+		// failures for generated hooks (see GuardrailConfig.HookFailMode).
+		// This single-connector path uses the persisted global value, whose
+		// secure fallback is "closed"; the multi-connector path below uses the
+		// connector-aware effective resolver.
 		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
