@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
@@ -59,6 +61,7 @@ type Daemon struct {
 	dataDir string
 	pidFile string
 	logFile string
+	started pidInfo
 }
 
 func New(dataDir string) *Daemon {
@@ -89,7 +92,22 @@ func (d *Daemon) LogFile() string { return d.logFile }
 // approach (re-wrapping in lumberjack) is what caused the EPIPE regression,
 // so rotation needs a SIGUSR1-reopen or supervised sidecar instead.
 func (d *Daemon) openLogFileForChild() (*os.File, error) {
-	return os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if _, err := os.Lstat(d.logFile); err == nil {
+		if err := safefile.ProtectFile(d.logFile); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	f, err := os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := safefile.ProtectFile(d.logFile); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 type pidInfo struct {
@@ -130,6 +148,18 @@ func (d *Daemon) IsRunning() (bool, int) {
 		return false, 0
 	}
 	return true, info.PID
+}
+
+// HasManagedProcessIdentity requires the complete PID record written by current
+// daemon versions and revalidates both executable and kernel start identity.
+// Legacy bare-PID records remain usable for stop/status compatibility but are
+// not strong enough to prove that an occupied API port is the expected daemon.
+func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
+	info, err := d.readPIDInfo()
+	if err != nil || info.PID != pid || info.Executable == "" || info.StartIdentity == "" {
+		return false
+	}
+	return d.verifyProcess(info)
 }
 
 // verifyProcess returns true when the live process at info.PID is the SAME
@@ -180,6 +210,15 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 			if !strings.HasSuffix(comm, exeBase) && comm != exeBase {
 				return false
 			}
+		}
+		return true
+	case "windows":
+		exePath, err := processExecutableWindows(info.PID)
+		if err != nil {
+			return false
+		}
+		if info.Executable != "" && !strings.EqualFold(filepath.Clean(exePath), filepath.Clean(info.Executable)) {
+			return false
 		}
 		return true
 	default:
@@ -264,7 +303,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 
 	d.killStaleProcesses()
 
-	if err := os.MkdirAll(d.dataDir, 0700); err != nil {
+	if err := safefile.ProtectDirectory(d.dataDir); err != nil {
 		return 0, fmt.Errorf("daemon: create data dir: %w", err)
 	}
 
@@ -336,6 +375,11 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// the legacy behavior on platforms without /proc.
 	startIdentity, _ := processStartIdentity(pid)
 
+	// On Windows the breakaway child also writes this same strong identity at
+	// its earliest sidecar pre-run hook. That closes the launcher-cancellation
+	// window between CreateProcess and this parent-side write: a surviving
+	// breakaway child is always PID-file-managed. Keep the parent write as the
+	// authoritative handoff/error check and to preserve the existing Unix path.
 	if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
 		_ = cmd.Process.Kill()
 		<-exitCh // reap the child so it doesn't become a zombie
@@ -343,6 +387,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: write pid: %w", err)
 	}
+	d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
 
 	// Close our copy of the file descriptors — the child holds its own dup'd
 	// fds now, and keeping these open in the parent only delays GC once the
@@ -484,6 +529,53 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	return nil
 }
 
+// StopStarted terminates only the child launched by this Daemon value. It is
+// used for failed startup rollback so a replaced PID file can never redirect
+// cleanup toward a foreign process.
+func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
+	info := d.started
+	if info.PID != pid || !d.verifyProcess(info) {
+		return ErrNotRunning
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("daemon: find started process %d: %w", pid, err)
+	}
+	if err := sendTermSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("daemon: stop started process: %w", err)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !d.verifyProcess(info) {
+			d.removePIDFileIfStarted(info)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !d.verifyProcess(info) {
+		d.removePIDFileIfStarted(info)
+		return nil
+	}
+	_ = sendKillSignal(proc)
+	time.Sleep(100 * time.Millisecond)
+	if d.verifyProcess(info) {
+		return ErrStopTimeout
+	}
+	d.removePIDFileIfStarted(info)
+	return nil
+}
+
+func (d *Daemon) removePIDFileIfStarted(started pidInfo) {
+	current, err := d.readPIDInfo()
+	if err != nil || current.PID != started.PID {
+		return
+	}
+	if started.StartIdentity != "" && current.StartIdentity != started.StartIdentity {
+		return
+	}
+	_ = os.Remove(d.pidFile)
+}
+
 func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
 	if running, _ := d.IsRunning(); running {
 		if err := d.Stop(timeout); err != nil && !errors.Is(err, ErrNotRunning) {
@@ -521,9 +613,40 @@ func (d *Daemon) writePIDInfo(pid int, executable string, startIdentity string) 
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.pidFile, data, 0600)
+	return safefile.WritePrivate(d.pidFile, data)
 }
 
 func IsDaemonChild() bool {
 	return os.Getenv(EnvDaemon) == "1"
+}
+
+// RegisterCurrentProcess records the strong identity of a Windows daemon
+// child before sidecar initialization. Managed Windows children can explicitly
+// leave a TUI Job Object, so they must not depend solely on the launcher
+// remaining alive long enough to write gateway.pid. Other platforms keep the
+// existing parent-owned registration path unchanged.
+func RegisterCurrentProcess() error {
+	if !IsDaemonChild() || !daemonChildRegistersPID() {
+		return nil
+	}
+	dataDir := strings.TrimSpace(os.Getenv(EnvDataDir))
+	if dataDir == "" {
+		return fmt.Errorf("daemon: %s is empty for daemon child", EnvDataDir)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("daemon: get child executable: %w", err)
+	}
+	pid := os.Getpid()
+	startIdentity, err := processStartIdentity(pid)
+	if err != nil {
+		return fmt.Errorf("daemon: get child process identity: %w", err)
+	}
+	if startIdentity == "" {
+		return errors.New("daemon: child process identity is empty")
+	}
+	if err := New(dataDir).writePIDInfo(pid, executable, startIdentity); err != nil {
+		return fmt.Errorf("daemon: register child process: %w", err)
+	}
+	return nil
 }

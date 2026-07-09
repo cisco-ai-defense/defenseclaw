@@ -17,7 +17,10 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +34,152 @@ func setHookBinaryOverride(t *testing.T, path string) {
 	prev := defenseclawHookBinaryOverride
 	defenseclawHookBinaryOverride = path
 	t.Cleanup(func() { defenseclawHookBinaryOverride = prev })
+}
+
+func TestWindowsHookConfigSidecarPreservesMixedConnectorModes(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.FailModes["claudecode"] != "closed" || state.FailModes["codex"] != "open" {
+		t.Fatalf("mixed fail modes not preserved: %#v", state.FailModes)
+	}
+}
+
+func TestWindowsHookConfigSidecarMigratesLegacyScalar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	legacy := []byte("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\nDEFENSECLAW_FAIL_MODE=open\n")
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("legacy sidecar was not migrated to v2: %v", err)
+	}
+	if state.Version != 2 || state.FailModes["claudecode"] != "closed" {
+		t.Fatalf("migrated state = %#v", state)
+	}
+	if state.LegacyMode != "open" {
+		t.Fatalf("legacy fallback was not retained for unmigrated connector peers: %#v", state)
+	}
+}
+
+func TestHookConfigSidecarClearRemovesOnlySelectedConnector(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearHookConfigSidecarEntry(dir, "claudecode"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookConfigSidecar
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.FailModes["claudecode"]; ok {
+		t.Fatalf("selected connector survived clear: %#v", state.FailModes)
+	}
+	if state.FailModes["codex"] != "open" {
+		t.Fatalf("peer connector changed during clear: %#v", state.FailModes)
+	}
+	if _, err := os.Stat(filepath.Join(dir, hookConfigSidecarName+".claudecode")); !os.IsNotExist(err) {
+		t.Fatalf("selected flat runtime record survived clear: %v", err)
+	}
+	peer, err := os.ReadFile(filepath.Join(dir, hookConfigSidecarName+".codex"))
+	if err != nil || !strings.Contains(string(peer), "DEFENSECLAW_FAIL_MODE=open") {
+		t.Fatalf("peer flat runtime record changed: err=%v body=%q", err, peer)
+	}
+}
+
+func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	before := []byte(`{"version":2,"fail_modes":`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "closed", false); err == nil {
+		t.Fatal("malformed peer runtime state was overwritten")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("failed sidecar write changed malformed peer state")
+	}
+}
+
+func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	jsonPath := filepath.Join(dir, hookConfigSidecarName)
+	flatPath := filepath.Join(dir, hookConfigSidecarName+".claudecode")
+	jsonBefore, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatBefore, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	failSecond := func(path string, data []byte, mode os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return errors.New("injected flat sidecar failure")
+		}
+		return atomicWriteFile(path, data, mode)
+	}
+	if err := writeHookConfigSidecarUsing(
+		dir,
+		"127.0.0.1:18970",
+		"claudecode",
+		"closed",
+		false,
+		failSecond,
+	); err == nil {
+		t.Fatal("injected second-file failure was ignored")
+	}
+	jsonAfter, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatAfter, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(jsonAfter, jsonBefore) || !bytes.Equal(flatAfter, flatBefore) {
+		t.Fatal("second-file failure left JSON and flat runtime state changed")
+	}
 }
 
 func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
@@ -51,11 +200,32 @@ func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
 	}
 }
 
+func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows native launcher contract")
+	}
+	root := t.TempDir()
+	launcher := filepath.Join(root, windowsHookBinaryName)
+	if err := os.WriteFile(launcher, []byte("MZfixture-launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setHookBinaryOverride(t, launcher)
+	opts := SetupOpts{DataDir: filepath.Join(root, "data"), HookFailMode: "closed"}
+	entry := NewHookContractLockEntry(opts, NewClaudeCodeConnector(), "test")
+	if entry.HookScriptDigests[windowsHookBinaryName] == "" {
+		t.Fatalf("native launcher digest missing: %v", entry.HookScriptDigests)
+	}
+	if !stringInSlice(entry.Locations.HookScriptPaths, launcher) {
+		t.Fatalf("native launcher path missing: %v", entry.Locations.HookScriptPaths)
+	}
+}
+
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; Windows invokes the native Go `hook` subcommand instead of any Bash/.cmd
-// wrapper.
+// path; Windows Cursor uses the PowerShell object-pipeline adapter while other
+// connectors invoke the native Go `hook` subcommand directly.
 func TestHookInvocationCommand(t *testing.T) {
 	const unix = "/home/u/.defenseclaw/hooks/codex-hook.sh"
+	const cursorUnix = "/home/u/.defenseclaw/hooks/cursor-hook.sh"
 	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, windowsExe)
 
@@ -65,19 +235,22 @@ func TestHookInvocationCommand(t *testing.T) {
 		}
 	}
 
-	win := hookInvocationCommandFor("windows", "cursor", unix)
-	wantWin := `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector cursor`
+	win := hookInvocationCommandFor("windows", "cursor", cursorUnix)
+	wantWin := `& '/home/u/.defenseclaw/hooks/cursor-hook.ps1'`
 	if win != wantWin {
 		t.Errorf("windows command = %q, want %q", win, wantWin)
 	}
-	if !strings.Contains(win, nativeHookFlag+"cursor") {
-		t.Errorf("windows command = %q, missing %q", win, nativeHookFlag+"cursor")
+	if !strings.Contains(win, "cursor-hook.ps1") {
+		t.Errorf("windows command = %q, missing Cursor adapter", win)
 	}
 	if strings.Contains(win, ".sh") || strings.Contains(win, ".cmd") || strings.Contains(win, "bash") {
-		t.Errorf("windows command = %q should not reference a shell/script wrapper", win)
+		t.Errorf("windows command = %q should reference only the PowerShell adapter", win)
 	}
-	if !isNativeHookCommand(win) {
-		t.Errorf("isNativeHookCommand(%q) = false, want true", win)
+	if got := shellWord(win); got != win {
+		t.Errorf("shellWord(Cursor adapter) = %q, want complete PowerShell command %q", got, win)
+	}
+	if isNativeHookCommand(win) {
+		t.Errorf("isNativeHookCommand(%q) = true for adapter command", win)
 	}
 	if isNativeHookCommand(unix) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
@@ -106,6 +279,98 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 	if strings.ContainsAny(agy, `"'`) {
 		t.Errorf("antigravity direct-exec command contains literal quotes: %q", agy)
+	}
+}
+
+// TestCursorWindowsAdapterPreservesObjectPipelineJSON reproduces Cursor 3.9's
+// actual Windows launch boundary: Get-Content reads a vendor temp file and
+// passes the payload through PowerShell's object pipeline into the configured
+// hook command. A native executable receives only encoding preambles on this
+// boundary; the generated adapter must recover the JSON exactly, invoke the
+// launcher through --input-file, forward stdout, and remove its payload file.
+func TestCursorWindowsAdapterPreservesObjectPipelineJSON(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Cursor PowerShell transport is Windows-specific")
+	}
+
+	root := t.TempDir()
+	hookDir := filepath.Join(root, "hooks")
+	helper := filepath.Join(root, "fake-defenseclaw-hook.exe")
+	helperSource := filepath.Join(root, "fake-defenseclaw-hook.go")
+	helperBody := `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	for i, arg := range os.Args {
+		if arg != "--input-file" || i+1 >= len(os.Args) {
+			continue
+		}
+		payload, err := os.ReadFile(os.Args[i+1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(8)
+		}
+		_, _ = os.Stdout.Write(payload)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "missing input file argument")
+	os.Exit(9)
+}
+`
+	if err := os.WriteFile(helperSource, []byte(helperBody), 0o600); err != nil {
+		t.Fatalf("write launcher probe source: %v", err)
+	}
+	build := exec.Command("go", "build", "-o", helper, helperSource)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build launcher probe: %v\n%s", err, output)
+	}
+	setHookBinaryOverride(t, helper)
+
+	if err := WriteHookScriptsForConnectorObject(
+		hookDir,
+		"127.0.0.1:18970",
+		"tok-test",
+		NewCursorConnector(),
+	); err != nil {
+		t.Fatalf("render Cursor adapter: %v", err)
+	}
+
+	payload := `{"hook_event_name":"beforeSubmitPrompt","prompt":"DefenseClaw Cursor adapter test"}`
+	vendorInput := filepath.Join(root, "cursor-vendor-input.json")
+	if err := os.WriteFile(vendorInput, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write Cursor vendor input: %v", err)
+	}
+	configuredCommand := hookInvocationCommand(
+		"cursor",
+		filepath.Join(hookDir, "cursor-hook.sh"),
+	)
+	command := "$OutputEncoding = [System.Text.Encoding]::UTF8; " +
+		"Get-Content -LiteralPath " + powershellQuoteLiteral(vendorInput) +
+		" -Raw | & { $input | " + configuredCommand + " }"
+
+	out, err := exec.Command(
+		"powershell.exe",
+		"-NoProfile",
+		"-NonInteractive",
+		"-Command",
+		command,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Cursor-style PowerShell launch failed: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	if !strings.Contains(strings.TrimSpace(string(out)), payload) {
+		t.Fatalf("adapter output did not preserve JSON\nwant: %s\ngot: %q", payload, out)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(hookDir, ".cursor-input-*.json"))
+	if err != nil {
+		t.Fatalf("find adapter payload leftovers: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("adapter left temporary payload files behind: %v", leftovers)
 	}
 }
 
@@ -320,11 +585,45 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			text := string(data)
 			connectorName := tt.conn.Name()
-			if !strings.Contains(text, windowsHookBinaryName) {
-				t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
-			}
-			if !strings.Contains(text, nativeHookFlag+connectorName) {
-				t.Errorf("config missing native connector command for %s:\n%s", connectorName, text)
+			if connectorName == "cursor" {
+				wantCommand := hookInvocationCommand(
+					"cursor",
+					filepath.Join(dataDir, "hooks", "cursor-hook.sh"),
+				)
+				encodedCommand, err := json.Marshal(wantCommand)
+				if err != nil {
+					t.Fatalf("encode Cursor Windows adapter command: %v", err)
+				}
+				if !strings.Contains(text, string(encodedCommand)) {
+					t.Errorf("config missing Cursor Windows adapter command %q:\n%s", wantCommand, text)
+				}
+				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "cursor-hook.ps1"))
+				if err != nil {
+					t.Fatalf("read Cursor Windows adapter: %v", err)
+				}
+				adapterText := string(adapter)
+				if !strings.Contains(adapterText, windowsHookBinaryName) ||
+					!strings.Contains(adapterText, "--input-file") {
+					t.Errorf("Cursor adapter does not invoke the native launcher through --input-file:\n%s", adapter)
+				}
+				for _, marker := range []string{
+					"$timeoutMs = 10000",
+					"WaitForExit($timeoutMs)",
+					"$process.Kill()",
+					`{"continue":true}`,
+					"could not remove temporary Cursor payload",
+				} {
+					if !strings.Contains(adapterText, marker) {
+						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
+					}
+				}
+			} else {
+				if !strings.Contains(text, windowsHookBinaryName) {
+					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
+				}
+				if !strings.Contains(text, nativeHookFlag+connectorName) {
+					t.Errorf("config missing native connector command for %s:\n%s", connectorName, text)
+				}
 			}
 			lower := strings.ToLower(text)
 			for _, forbidden := range []string{".sh", `"bash"`, "curl", "jq"} {
@@ -354,7 +653,19 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				}
 			}
 
-			token, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".token"))
+			hookDir := filepath.Join(dataDir, "hooks")
+			tokenPath := filepath.Join(hookDir, ".token")
+			scopedToken := !IsProxyConnector(connectorName)
+			if scopedToken {
+				tokenPath, err = HookTokenFilePath(hookDir, connectorName)
+				if err != nil {
+					t.Fatalf("resolve connector-scoped hook token sidecar: %v", err)
+				}
+				if _, err := os.Lstat(filepath.Join(hookDir, ".token")); !os.IsNotExist(err) {
+					t.Fatalf("legacy shared hook token sidecar still exists: %v", err)
+				}
+			}
+			token, err := os.ReadFile(tokenPath)
 			if err != nil {
 				t.Fatalf("read hook token sidecar: %v", err)
 			}
@@ -365,16 +676,20 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read native hook config sidecar: %v", err)
 			}
-			if !strings.Contains(string(hookCfg), "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970") {
-				t.Errorf("hook config sidecar missing API address: %s", hookCfg)
+			var hookState hookConfigSidecar
+			if err := json.Unmarshal(hookCfg, &hookState); err != nil {
+				t.Fatalf("parse native hook config sidecar: %v", err)
+			}
+			if hookState.GatewayAddr != "127.0.0.1:18970" {
+				t.Errorf("hook config sidecar API address = %q", hookState.GatewayAddr)
 			}
 			wantFailMode := resolveHookFailMode(opts, tt.conn)
 			if hp, ok := tt.conn.(HookCapabilityProvider); ok &&
 				wantFailMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
 				wantFailMode = "open"
 			}
-			if !strings.Contains(string(hookCfg), "DEFENSECLAW_FAIL_MODE="+wantFailMode) {
-				t.Errorf("hook config sidecar fail mode = %q, want %q", hookCfg, wantFailMode)
+			if got := hookState.FailModes[connectorName]; got != wantFailMode {
+				t.Errorf("hook config sidecar fail mode = %q, want %q", got, wantFailMode)
 			}
 
 			if err := tt.conn.Teardown(context.Background(), opts); err != nil {
@@ -386,12 +701,13 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 				t.Errorf("generated config survived teardown: %v", err)
 			}
-			// These sidecars are shared by all active native connectors. A
-			// single connector teardown must not remove them and break peers.
-			for _, name := range []string{".token", hookConfigSidecarName} {
-				if _, err := os.Stat(filepath.Join(dataDir, "hooks", name)); err != nil {
-					t.Errorf("shared sidecar %s removed by connector teardown: %v", name, err)
-				}
+			// Runtime sidecars can still be referenced by another managed config
+			// for the same connector, so one config teardown must preserve them.
+			if _, err := os.Stat(filepath.Join(hookDir, hookConfigSidecarName)); err != nil {
+				t.Errorf("shared sidecar %s removed by connector teardown: %v", hookConfigSidecarName, err)
+			}
+			if _, err := os.Stat(tokenPath); err != nil {
+				t.Errorf("hook token sidecar removed by connector teardown: %v", err)
 			}
 		})
 	}

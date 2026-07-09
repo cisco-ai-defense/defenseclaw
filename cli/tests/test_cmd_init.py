@@ -25,9 +25,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
@@ -110,9 +114,15 @@ class TestInitFirstRunBackend(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-first-run-")
         self.runner = CliRunner()
+        self._had_llm_key = "DEFENSECLAW_LLM_KEY" in os.environ
+        self._llm_key = os.environ.get("DEFENSECLAW_LLM_KEY", "")
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        if self._had_llm_key:
+            os.environ["DEFENSECLAW_LLM_KEY"] = self._llm_key
+        else:
+            os.environ.pop("DEFENSECLAW_LLM_KEY", None)
 
     def _invoke(self, args):
         return self.runner.invoke(
@@ -1023,7 +1033,7 @@ class TestValidateGatewayToken(unittest.TestCase):
 
 
 class TestResolveSplunkBridgeBundle(unittest.TestCase):
-    def test_prefers_packaged_bundle_data(self):
+    def test_prefers_maintained_bundle_in_source_checkout(self):
         from defenseclaw.commands.cmd_init import _resolve_splunk_bridge_bundle
 
         def fake_is_dir(path):
@@ -1033,7 +1043,7 @@ class TestResolveSplunkBridgeBundle(unittest.TestCase):
         with patch("pathlib.Path.is_dir", autospec=True, side_effect=fake_is_dir):
             result = _resolve_splunk_bridge_bundle()
 
-        self.assertTrue(str(result).replace("\\", "/").endswith("_data/splunk_local_bridge"))
+        self.assertTrue(str(result).replace("\\", "/").endswith("bundles/splunk_local_bridge"))
 
 
 class TestInitSeedsSplunkBridge(unittest.TestCase):

@@ -1,11 +1,14 @@
 # Installation Guide
 
-This guide covers two scenarios:
+This guide covers three scenarios:
 
 1. **You already have OpenClaw running** — add DefenseClaw to secure it
 2. **Fresh install** — set up OpenClaw inside OpenShell, then add DefenseClaw
+3. **Native Windows** — protect a supported agent through its native hook surface
 
-Instructions are provided for both **NVIDIA DGX Spark** (aarch64/Ubuntu) and **macOS** (Apple Silicon).
+Instructions cover **NVIDIA DGX Spark** (aarch64/Ubuntu), **macOS** (Apple
+Silicon), Linux, and native Windows. For the complete PowerShell install and
+operations flow, see the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/).
 
 ---
 
@@ -38,34 +41,38 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 
 ### Windows support
 
-On **native Windows**, DefenseClaw is **hook-only**. The current Windows
-connector scope deliberately excludes WSL and requires both the upstream agent
-and the complete DefenseClaw hook path to run directly on Windows.
+On **native Windows x64**, DefenseClaw is **hook-only**. **WSL is unsupported.**
+Windows ARM64 requires separate certification.
 
-- **Supported:** Codex, Claude Code, Cursor IDE hooks, Windsurf, Gemini CLI,
-  Copilot CLI, Antigravity, and OpenCode.
-- **Preview:** Hermes, because upstream labels native Windows support Early
-  Beta.
-- **Unsupported:** OpenHands and OmniGent. OpenHands CLI requires WSL;
-  OmniGent has no supported native Windows terminal/sandbox path.
+Follow the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
+for prerequisites, PowerShell installation, connector setup, verification,
+upgrades, and troubleshooting.
 
-Supported command-hook connectors invoke the native, no-console
-`defenseclaw-hook.exe --connector <name> --event <event>` launcher; OpenCode
-loads its JavaScript bridge plugin and calls the gateway over HTTP directly.
-DefenseClaw's hook entrypoint does not add a WSL, Git Bash, `jq`, or POSIX-shell
+- **Certified:** Codex CLI and Claude Code.
+- **Not certified:** Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity,
+  OpenCode, and Hermes. These require separate certification before use on
+  native Windows x64.
+- **Unsupported:** OpenHands, OmniGent, OpenClaw, and ZeptoClaw.
+
+Certified command-hook connectors invoke the native, no-console
+`defenseclaw-hook.exe --connector <name> --event <event>` launcher.
+DefenseClaw's hook entrypoint does not add a Git Bash, `jq`, or POSIX-shell
 dependency; upstream agent prerequisites still apply (for example, Claude
-Code's native Windows setup requires Git for Windows). Cursor support here means
-the Windows IDE hook surface; Cursor's separate CLI remains WSL-only.
-
-WSL availability is tracked for upstream research in
-[`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md), but it is not part of the current
-DefenseClaw Windows support or release-certification scope. A connector that
-only works through WSL does not qualify as Windows-supported.
+Code's native Windows setup requires Git for Windows).
 
 The proxy connectors **OpenClaw** and **ZeptoClaw** are **not supported on
 Windows**: they require the local guardrail proxy, which DefenseClaw does not
 host there. They are hidden from the TUI/CLI connector pickers and rejected by
 setup on Windows with a clear error. Use them on macOS or Linux instead.
+
+Sandbox, enterprise hooks, and native desktop toasts are unsupported on
+Windows. Bundled Local Splunk and the separate local observability stack are
+supported from PowerShell/cmd on native Windows x64 when Docker Desktop runs
+Linux containers through Hyper-V on Windows Pro, Enterprise, or Education.
+The Local Splunk controller calls native `docker.exe` and Compose v2 directly;
+it does not use Bash, WSL, MSYS, Git Bash, or command-script shims. Per-user and
+WSL-only Docker Desktop installations are outside that no-WSL certification.
+macOS/Linux retain the existing bridge behavior.
 
 ## Splunk Terms And Scope For The Local Preset
 
@@ -597,11 +604,18 @@ defenseclaw setup splunk
 | `--disable` | Disable integration(s); combine with `--o11y` / `--logs` / `--enterprise` to scope |
 | `--non-interactive` | Requires at least `--o11y`, `--logs`, or `--enterprise` |
 
-The `--logs` option requires Docker and sets up a local Splunk runtime with the
-DefenseClaw Splunk bridge (`splunk-claw-bridge`). That runtime starts directly
-in Splunk Free mode from day 1. In Splunk Free mode, alerting is disabled and
-authentication is not required. To use full Splunk Enterprise features later,
-apply a valid Splunk Enterprise license. For more details, see
+The `--logs` option requires Docker and sets up a local Splunk runtime. Native
+Windows uses the Python lifecycle controller and Docker Desktop's `docker.exe`;
+macOS/Linux retain the `splunk-claw-bridge` path. Setup validates the complete
+bundle, Docker/Compose/Linux-container prerequisites, exact project ownership,
+and ports before stopping or writing configuration. It waits for Splunk Web
+and HEC, writes the local sink, and reloads the gateway as one transaction.
+Failures restore the prior config and running owned stack. The runtime starts
+directly in Splunk Free mode from day 1. In Free mode, alerting is disabled and
+Web authentication is not required. A securely generated administrator secret
+is still retained because the container bootstrap requires it; it is not a Web
+login. Generated secrets are shown only by `--show-credentials`. To use full
+Splunk Enterprise features later, apply a valid Splunk Enterprise license. For more details, see
 https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free
 
 ```bash
@@ -621,6 +635,10 @@ defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
 # Disable both
 defenseclaw setup splunk --disable
 ```
+
+`--disable --logs` disables only the `local-splunk` HEC destination and stops
+only the exact owned Compose project. It does not pass `--volumes`, so the
+owned Splunk data volumes survive ordinary disable and subsequent setup.
 
 For `--enterprise`, the Splunk administrator must already have enabled HTTP
 Event Collector, created an active HEC token, and allowed the configured index.

@@ -243,7 +243,7 @@ class TestScanAllUX(_MCPScanUXBase):
             ("only", "http://only.example/mcp"),
         ])
         result = self.invoke(["scan", "--all"])
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("[ERROR] only", result.output)
         # errored=N appears only when there's at least one error.
         self.assertIn("errored=1", result.output)

@@ -27,7 +27,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -2161,13 +2160,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookAPIToken:       setupTokens.hookToken,
 		HookAPITokenScoped: setupTokens.hookTokenScoped,
 		WorkspaceDir:       workspaceDir,
-		// HookFailMode is the operator-chosen response-layer fail mode
-		// for every generated hook (see GuardrailConfig.HookFailMode
-		// for the contract). Routed via EffectiveHookFailMode so the
-		// default "open" is applied uniformly when the field is unset
-		// — matches the user-friendly default in defaultsFor() and
-		// avoids a partial install accidentally going fail-closed.
-		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
+		// Resolve the response-layer fail mode for this connector, including
+		// manual and application-protection overrides plus observe/action
+		// compatibility semantics. The hook-writing boundary normalizes an
+		// unexpected empty value to the secure "closed" default.
+		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
@@ -2227,14 +2224,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {
-		support := connector.ConnectorSupportOnHostOS(conn.Name())
-		if support.Status == connector.PlatformUnsupported {
-			err := fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
-			s.health.SetGuardrail(StateError, err.Error(), nil)
-			return err
+		warning, supportErr := connector.CheckPlatformSupportOnHost(conn.Name())
+		if supportErr != nil {
+			s.health.SetGuardrail(StateError, supportErr.Error(), nil)
+			return supportErr
 		}
-		if support.Status == connector.PlatformPreview {
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+		if warning != "" {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %s\n", warning)
 		}
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
@@ -3096,12 +3092,12 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // back just this connector's Setup before returning so a half-installed
 // connector never lingers.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
-	support := connector.ConnectorSupportOnHostOS(conn.Name())
-	if support.Status == connector.PlatformUnsupported {
-		return fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+	warning, supportErr := connector.CheckPlatformSupportOnHost(conn.Name())
+	if supportErr != nil {
+		return supportErr
 	}
-	if support.Status == connector.PlatformPreview {
-		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %s\n", warning)
 	}
 	// Inject credentials before Setup so probes keyed off them succeed.
 	conn.SetCredentials(opts.APIToken, masterKey)
@@ -3311,6 +3307,14 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		// connector=openclaw or wire a non-loopback host.
 		return false
 	}
+}
+
+// RequiresFleetGateway reports whether the configured topology depends on the
+// OpenClaw fleet WebSocket subsystem. Keep external health/readiness consumers
+// on this predicate so they cannot drift from the sidecar's actual topology
+// decision (including the explicit gateway.fleet_mode override).
+func RequiresFleetGateway(cfg *config.Config) bool {
+	return gatewayShouldConnectForConfiguredConnector(cfg)
 }
 
 // isLoopbackGatewayHost reports whether host points at the local
@@ -3553,6 +3557,11 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	defer func() {
+		if err := aiDiscovery.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] close AI discovery store: %v\n", err)
+		}
+	}()
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
 		"mode":                      s.currentConfig().AIDiscovery.Mode,
 		"scan_interval_min":         s.currentConfig().AIDiscovery.ScanIntervalMin,
@@ -3592,6 +3601,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 				"result":          report.Summary.Result,
 			})
 		case <-ctx.Done():
+			<-errCh
 			s.health.SetAIDiscovery(StateStopped, "", nil)
 			return ctx.Err()
 		}
@@ -3787,6 +3797,7 @@ func (s *Sidecar) reportTelemetryHealth() {
 				"preset":   destination.Preset,
 				"enabled":  destination.Enabled,
 				"scope":    "process",
+				"protocol": destination.Protocol,
 				"endpoint": netguard.EndpointForDisplay(destination.Endpoint),
 				"signals":  strings.Join(signals, ", "),
 			}

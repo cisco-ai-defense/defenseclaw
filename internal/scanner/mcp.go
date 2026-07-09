@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 // mcpScanTargetLooksLikeURL returns true when “target“ parses as a
@@ -243,7 +244,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	}
 
 	args := s.buildArgs(target)
-	cmd := exec.CommandContext(ctx, s.Config.Binary, args...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
 	// Inherit the gateway's environment (like the plugin scanner):
 	// the Python CLI resolves LLM / Cisco AI Defense credentials from
 	// its own config, so no scanner-specific env injection is needed.

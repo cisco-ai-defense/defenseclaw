@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestActiveConnector_Precedence pins the resolution order:
@@ -162,11 +164,12 @@ func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 // plugins — must continue producing claw_home/extensions when no
 // connector is configured.
 func TestPluginDirs_FallsBackToOpenClaw(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "legacy-oc-home")
 	cfg := &Config{}
-	cfg.Claw.HomeDir = "/tmp/legacy-oc-home"
+	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirs()
-	want := "/tmp/legacy-oc-home/extensions"
+	want := filepath.Join(home, "extensions")
 	if len(dirs) != 1 || dirs[0] != want {
 		t.Errorf("PluginDirs() = %v, want [%q]", dirs, want)
 	}
@@ -197,13 +200,15 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 }
 
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}
 	cfg.Guardrail.Connector = "future-connector"
-	cfg.Claw.HomeDir = "/tmp/foo"
+	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirsForConnector("openclaw")
-	if len(dirs) != 1 || dirs[0] != "/tmp/foo/extensions" {
-		t.Errorf("PluginDirsForConnector(openclaw) = %v, want [/tmp/foo/extensions]", dirs)
+	want := filepath.Join(home, "extensions")
+	if len(dirs) != 1 || dirs[0] != want {
+		t.Errorf("PluginDirsForConnector(openclaw) = %v, want [%s]", dirs, want)
 	}
 }
 
@@ -235,7 +240,7 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	// register global MCP servers like playwright) doesn't leak into
 	// the assertion below — Codex layers the global TOML table with
 	// the project-local ./.mcp.json we wrote above.
-	t.Setenv("HOME", tmp)
+	testenv.SetHome(t, tmp)
 
 	prev, err := os.Getwd()
 	if err != nil {
@@ -273,7 +278,7 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	writeMCP := func(path, name string) {
 		t.Helper()
@@ -356,7 +361,7 @@ func containsPath(paths []string, want string) bool {
 // the fused command argv and surfacing remote servers by URL.
 func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	ocDir := filepath.Join(home, ".config", "opencode")
 	if err := os.MkdirAll(ocDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -402,7 +407,7 @@ func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 // opencode has none.
 func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	clawDir := filepath.Join(home, ".openclaw")
 	if err := os.MkdirAll(clawDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -429,7 +434,7 @@ func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
 
 func TestReadMCPServersForConnector_AntigravityReadsNativeMCP(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	if err := os.MkdirAll(filepath.Join(home, ".gemini", "config"), 0o700); err != nil {
 		t.Fatal(err)
@@ -506,7 +511,7 @@ func TestReadMCPServersForConnector_AntigravityReadsNativeMCP(t *testing.T) {
 
 func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	if err := os.MkdirAll(filepath.Join(workspace, ".agents"), 0o700); err != nil {
 		t.Fatal(err)
@@ -527,7 +532,7 @@ func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testin
 
 func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClawFallback(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	clawDir := filepath.Join(home, ".openclaw")
 	if err := os.MkdirAll(clawDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -569,7 +574,7 @@ func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClaw
 // through to OpenClaw paths.
 func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	cfg := &Config{}
 	cfg.Claw.HomeDir = "/tmp/should-not-appear"
@@ -618,7 +623,7 @@ func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
 // ~/.gemini/antigravity-cli, neither the OpenClaw home_dir (claw.go:406).
 func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	cfg := &Config{}
 	cfg.Claw.HomeDir = "/tmp/openclaw-home"
 
@@ -636,7 +641,7 @@ func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
 	home := t.TempDir()
 	configHome := filepath.Join(home, "isolated-omnigent")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	t.Setenv("OMNIGENT_CONFIG_HOME", configHome)
 	cfg := &Config{}
 

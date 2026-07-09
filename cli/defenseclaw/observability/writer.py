@@ -39,7 +39,9 @@ from __future__ import annotations
 import copy
 import os
 import re
-from contextlib import nullcontext
+import stat
+import tempfile
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -47,7 +49,7 @@ from urllib.parse import urlparse
 import yaml
 
 from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import reject_reparse_path, set_file_mode
 from defenseclaw.observability.presets import Preset, Signal, resolve_preset
 from defenseclaw.safety import sanitize_dotenv_value
 
@@ -120,6 +122,7 @@ class Destination:
     enabled: bool
     preset_id: str  # "" when not stamped by the writer
     endpoint: str
+    protocol: str  # "grpc" | "http" for OTLP; "" when not applicable
     # Per-signal enablement; populated for OTel only.
     signals: dict[str, bool]
 
@@ -138,6 +141,7 @@ def apply_preset(
     enabled: bool = True,
     signals: tuple[Signal, ...] | None = None,
     secret_value: str | None = None,
+    secret_env_name: str | None = None,
     target_override: str | None = None,
     dry_run: bool = False,
 ) -> WriteResult:
@@ -169,6 +173,10 @@ def apply_preset(
         ``preset.token_env``. Must not be empty when the preset declares
         a ``token_env`` and no value already exists. Callers are
         responsible for prompting/redacting.
+    secret_env_name:
+        Optional destination-specific environment variable override. This is
+        used by bundled Local Splunk so its generated token cannot overwrite a
+        separately configured remote Splunk Enterprise token.
     target_override:
         For presets that support multiple targets (``otlp`` →
         ``otel`` | ``audit_sinks``), force one. Ignored for all other
@@ -182,6 +190,9 @@ def apply_preset(
         On unknown preset / missing required inputs.
     """
     preset = resolve_preset(preset_id)
+    effective_secret_env = secret_env_name or preset.token_env
+    if effective_secret_env and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", effective_secret_env):
+        raise ValueError("secret_env_name must be an uppercase environment variable name")
     effective_target = _resolve_target(preset, target_override)
     resolved_inputs = _resolve_inputs(preset, inputs)
     dest_name = _destination_name(preset, name, resolved_inputs)
@@ -215,6 +226,7 @@ def apply_preset(
                 resolved_inputs,
                 name=dest_name,
                 enabled=enabled,
+                token_env=effective_secret_env,
                 warnings=warnings,
             )
 
@@ -223,6 +235,7 @@ def apply_preset(
             data_dir,
             preset,
             secret_value,
+            token_env=effective_secret_env,
             dry_run=dry_run,
         )
 
@@ -274,6 +287,7 @@ def list_destinations(data_dir: str) -> list[Destination]:
                         enabled=bool(otel.get("enabled", False) and item.get("enabled", False)),
                         preset_id=str(item.get("preset", "") or ""),
                         endpoint=_derive_otel_endpoint(item),
+                        protocol=_derive_otel_protocol(item),
                         signals={
                             "traces": bool((item.get("traces") or {}).get("enabled", False)),
                             "metrics": bool((item.get("metrics") or {}).get("enabled", False)),
@@ -297,6 +311,7 @@ def list_destinations(data_dir: str) -> list[Destination]:
                 enabled=bool(sink.get("enabled", False)),
                 preset_id=_sink_preset_id(sink),
                 endpoint=_sink_endpoint(sink),
+                protocol=_sink_protocol(sink),
                 signals={},
             ),
         )
@@ -519,6 +534,8 @@ def _apply_otel_preset(
     dest_name: str,
     warnings: list[str],
 ) -> None:
+    protocol = _effective_otel_protocol(preset, inputs)
+
     otel = raw.setdefault("otel", {})
     if not isinstance(otel, dict):
         warnings.append("otel: replaced non-mapping value")
@@ -547,7 +564,7 @@ def _apply_otel_preset(
         "name": dest_name,
         "preset": preset.id,
         "enabled": bool(enabled),
-        "protocol": preset.otel_protocol or inputs.get("protocol", "grpc"),
+        "protocol": protocol,
         "endpoint": endpoint,
     }
     if preset.id == "galileo":
@@ -573,7 +590,10 @@ def _apply_otel_preset(
 
     signals_set = set(signals)
     for sig in ("traces", "metrics", "logs"):
-        block: dict[str, Any] = {"enabled": sig in signals_set}
+        block: dict[str, Any] = {
+            "enabled": sig in signals_set,
+            "protocol": protocol,
+        }
         path = preset.signal_url_paths.get(sig, "")
         if path:
             block["url_path"] = path
@@ -873,6 +893,7 @@ def _apply_audit_sink_preset(
     *,
     name: str,
     enabled: bool,
+    token_env: str | None = None,
     warnings: list[str],
 ) -> None:
     sinks = raw.setdefault("audit_sinks", [])
@@ -881,7 +902,13 @@ def _apply_audit_sink_preset(
         sinks = []
         raw["audit_sinks"] = sinks
 
-    entry = _build_sink_entry(preset, inputs, name=name, enabled=enabled)
+    entry = _build_sink_entry(
+        preset,
+        inputs,
+        name=name,
+        enabled=enabled,
+        token_env=token_env or preset.token_env,
+    )
     existing_idx = -1
     for i, s in enumerate(sinks):
         if isinstance(s, dict) and s.get("name") == name:
@@ -906,6 +933,7 @@ def _build_sink_entry(
     *,
     name: str,
     enabled: bool,
+    token_env: str | None = None,
 ) -> dict[str, Any]:
     kind = preset.sink_kind or ""
     # The generic ``otlp`` preset declares target=otel and sink_kind=None
@@ -960,7 +988,7 @@ def _build_sink_entry(
             )
         block: dict[str, Any] = {
             "endpoint": endpoint,
-            "token_env": preset.token_env,
+            "token_env": token_env or preset.token_env,
             "index": inputs.get("index", "defenseclaw"),
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
@@ -972,11 +1000,7 @@ def _build_sink_entry(
         base["splunk_hec"] = block
     elif kind == _SINK_KIND_OTLP_LOGS:
         endpoint = inputs.get("endpoint", "").strip()
-        protocol = (inputs.get("protocol") or preset.otel_protocol or "grpc").strip()
-        if protocol not in ("grpc", "http"):
-            raise ValueError(
-                f"invalid protocol {protocol!r}; must be grpc or http",
-            )
+        protocol = _effective_otel_protocol(preset, inputs)
         block: dict[str, Any] = {
             "endpoint": _strip_scheme(endpoint),
             "protocol": protocol,
@@ -1006,8 +1030,9 @@ def _build_sink_entry(
             "url": url,
             "method": method,
         }
-        if preset.token_env:
-            block["bearer_env"] = preset.token_env
+        effective_token_env = token_env or preset.token_env
+        if effective_token_env:
+            block["bearer_env"] = effective_token_env
         headers = dict(preset.otel_headers)  # usually empty for webhook
         if headers:
             block["headers"] = headers
@@ -1054,6 +1079,12 @@ def _resolve_inputs(preset: Preset, inputs: dict[str, str]) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for flag_name, _placeholder, _desc, default in preset.prompts:
         val = inputs.get(flag_name, "")
+        # Transport defaults belong to ``Preset.otel_protocol``. Keeping an
+        # omitted protocol absent here lets the writer distinguish caller
+        # input from a prompt display default and apply the documented
+        # explicit > preset > grpc precedence.
+        if flag_name == "protocol" and not val:
+            continue
         if not val:
             val = default
         if not val:
@@ -1140,6 +1171,19 @@ def _parse_bool(value: str) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def _effective_otel_protocol(preset: Preset, inputs: dict[str, str]) -> str:
+    """Resolve and validate the transport before any configuration mutation."""
+
+    protocol = (
+        inputs.get("protocol")
+        or preset.otel_protocol
+        or "grpc"
+    ).strip().lower()
+    if protocol not in {"grpc", "http"}:
+        raise ValueError(f"invalid protocol {protocol!r}; must be grpc or http")
+    return protocol
+
+
 def _summarize_diff(
     before: dict[str, Any],
     after: dict[str, Any],
@@ -1182,27 +1226,29 @@ def _apply_secret(
     preset: Preset,
     secret_value: str | None,
     *,
+    token_env: str | None = None,
     dry_run: bool,
 ) -> list[str]:
-    if not preset.token_env:
+    token_env = token_env or preset.token_env
+    if not token_env:
         return []
     if not secret_value:
         # No new value — caller may have passed the secret through the
         # environment or dotenv already. Emit an advisory.
         dotenv = _load_dotenv(os.path.join(data_dir, DOTENV_FILE_NAME))
-        if preset.token_env not in dotenv and not os.environ.get(preset.token_env):
+        if token_env not in dotenv and not os.environ.get(token_env):
             return [
-                f"{preset.token_env}: not set — sink/exporter will fail until exported or added to ~/.defenseclaw/.env",
+                f"{token_env}: not set — sink/exporter will fail until exported or added to ~/.defenseclaw/.env",
             ]
         return []
     if dry_run:
-        return [f"{preset.token_env}: (would write to ~/.defenseclaw/.env)"]
+        return [f"{token_env}: (would write to ~/.defenseclaw/.env)"]
     path = os.path.join(data_dir, DOTENV_FILE_NAME)
     existing = _load_dotenv(path)
-    existing[preset.token_env] = secret_value
+    existing[token_env] = secret_value
     _write_dotenv(path, existing)
-    os.environ[preset.token_env] = secret_value
-    return [f"{preset.token_env}: written to ~/.defenseclaw/.env"]
+    os.environ[token_env] = secret_value
+    return [f"{token_env}: written to ~/.defenseclaw/.env"]
 
 
 # ---------------------------------------------------------------------------
@@ -1231,6 +1277,17 @@ def _derive_otel_endpoint(otel: dict[str, Any]) -> str:
     return str(otel.get("endpoint", "") or "")
 
 
+def _derive_otel_protocol(otel: dict[str, Any]) -> str:
+    protocol = str(otel.get("protocol", "") or "").strip().lower()
+    if protocol:
+        return protocol
+    for sig in ("traces", "metrics", "logs"):
+        block = otel.get(sig) or {}
+        if isinstance(block, dict) and block.get("protocol"):
+            return str(block["protocol"]).strip().lower()
+    return "grpc"
+
+
 def _sink_endpoint(sink: dict[str, Any]) -> str:
     kind = sink.get("kind", "")
     if kind == _SINK_KIND_SPLUNK_HEC:
@@ -1240,6 +1297,12 @@ def _sink_endpoint(sink: dict[str, Any]) -> str:
     if kind == _SINK_KIND_HTTP_JSONL:
         return str((sink.get("http_jsonl") or {}).get("url", "") or "")
     return ""
+
+
+def _sink_protocol(sink: dict[str, Any]) -> str:
+    if sink.get("kind") != _SINK_KIND_OTLP_LOGS:
+        return ""
+    return str((sink.get("otlp_logs") or {}).get("protocol", "") or "grpc").strip().lower()
 
 
 def _sink_preset_id(sink: dict[str, Any]) -> str:
@@ -1293,8 +1356,18 @@ def _is_remote_splunk_endpoint(endpoint: str) -> bool:
 
 def _load_dotenv(path: str) -> dict[str, str]:
     out: dict[str, str] = {}
+    reject_reparse_path(path)
+    descriptor = -1
     try:
-        with open(path) as f:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"dotenv path is not a regular file: {path}")
+        stream = os.fdopen(descriptor, encoding="utf-8")
+        descriptor = -1
+        with stream as f:
             for raw_line in f:
                 line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -1307,29 +1380,34 @@ def _load_dotenv(path: str) -> dict[str, str]:
                     out[k] = v
     except FileNotFoundError:
         pass
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
     return out
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     lines = [f"{k}={sanitize_dotenv_value(v, key=k)}\n" for k, v in sorted(entries.items())]
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    # O_NOFOLLOW (where available) refuses to open through a symlink so a
-    # pre-planted symlink cannot redirect the secret write elsewhere.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    reject_reparse_path(path)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
     fd = -1
+    tmp = ""
     try:
-        fd = os.open(path, flags, 0o600)
-        # The 0o600 mode argument to os.open only applies when the file is
-        # newly CREATED. Tighten existing files too, and on Windows replace
-        # inherited access with a real owner-only DACL before writing secrets.
-        set_file_mode(fd, path, 0o600)
-        stream = os.fdopen(fd, "w")
-        fd = -1  # ownership transferred; stream closes on every with-path
+        fd, tmp = tempfile.mkstemp(prefix=".dotenv.", suffix=".tmp", dir=directory)
+        set_file_mode(fd, tmp, 0o600, set_owner=True)
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
         with stream as f:
             f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = ""
     finally:
         if fd != -1:
-            try:
+            with suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
+        if tmp:
+            with suppress(OSError):
+                os.unlink(tmp)

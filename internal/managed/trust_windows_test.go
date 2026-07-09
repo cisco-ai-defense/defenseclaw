@@ -89,11 +89,13 @@ func TestRejectUntrustedWindowsWriteACEs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SecurityDescriptorFromString: %v", err)
 			}
-			dacl, present, err := descriptor.DACL()
+			dacl, _, err := descriptor.DACL()
 			if err != nil {
 				t.Fatalf("DACL: %v", err)
 			}
-			if !present || dacl == nil {
+			// x/sys/windows may report the control-bit presence flag as false
+			// for an in-memory SDDL descriptor even though it returns its DACL.
+			if dacl == nil {
 				t.Fatal("test descriptor has no DACL")
 			}
 			err = rejectUntrustedWindowsWriteACEs("test-path", dacl)

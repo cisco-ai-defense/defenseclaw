@@ -29,15 +29,20 @@ overwriting ``guardrail.connector``. These tests pin the WU7 decisions:
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import os
 import sys
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw.commands.cmd_setup import (
     _configured_connector_set,
     _print_observability_summary,
@@ -46,7 +51,7 @@ from defenseclaw.commands.cmd_setup import (
 from defenseclaw.commands.cmd_setup import (
     setup as setup_group,
 )
-from defenseclaw.config import PerConnectorGuardrailConfig
+from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig, load
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -241,10 +246,10 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.app.cfg.guardrail.connector = sorted(connectors)[0]
         self.app.cfg.claw.mode = sorted(connectors)[0]
 
-    def _capture_summary(self, connector):
+    def _capture_summary(self, connector, *, os_name=None):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            _print_observability_summary(connector, self.app.cfg, mode="observe")
+            _print_observability_summary(connector, self.app.cfg, mode="observe", os_name=os_name)
         return buf.getvalue()
 
     def test_multi_connector_summary_lists_all_peers_without_primary(self):
@@ -269,6 +274,29 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertNotIn("guardrail.mode:", out)
         self.assertNotIn("connectors:", out)
         self.assertNotIn("primary:", out)
+
+    def test_windows_summary_uses_native_powershell_and_cli_filtering(self):
+        self._seed_map("claudecode")
+
+        out = self._capture_summary("claudecode", os_name="nt")
+
+        self.assertIn("Get-Content -LiteralPath", out)
+        self.assertIn("-Wait", out)
+        self.assertIn("ConvertFrom-Json", out)
+        self.assertIn("defenseclaw alerts --limit 25 --connector claudecode", out)
+        self.assertNotIn("tail -f", out)
+        self.assertNotIn("| jq", out)
+        self.assertNotIn("Bash", out)
+        self.assertNotIn("WSL", out)
+
+    def test_posix_summary_retains_unix_guidance(self):
+        self._seed_map("claudecode")
+
+        out = self._capture_summary("claudecode", os_name="posix")
+
+        self.assertIn("tail -f ~/.defenseclaw/gateway.jsonl | jq", out)
+        self.assertIn("jq 'select(.connector == \"claudecode\")'", out)
+        self.assertNotIn("Get-Content -LiteralPath", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
@@ -305,14 +333,13 @@ class TestRemoveConnector(unittest.TestCase):
       which fully unconfigures enforcement.
     * D3=A — teardown is delegated to a gateway restart (no per-connector
       teardown plumbing); ``--no-restart`` defers it and is honored.
-    * Mutation shape mirrors setup-add: multi stays multi, the next-to-last
-      removal collapses back to the legacy singular shape.
+    * Mutation shape mirrors setup-add: the connector map remains authoritative
+      when one peer survives, while singular fields mirror that survivor.
     """
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
-        self.app.cfg.save = lambda: open(self.cfg_path, "w").write("x\n")  # type: ignore[assignment]
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -343,14 +370,14 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
-    # Removing the next-to-last collapses back to the legacy singular shape.
-    def test_remove_collapses_to_singular(self):
+    # Removing the next-to-last retains its map entry so overrides stay lossless.
+    def test_remove_retains_one_entry_map(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce():
             result = _invoke(["remove", "cursor", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         gc = self.app.cfg.guardrail
-        self.assertEqual(gc.connectors, {})
+        self.assertEqual(set(gc.connectors), {"codex"})
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
@@ -378,8 +405,16 @@ class TestRemoveConnector(unittest.TestCase):
     def test_remove_unknown_refused(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce():
-            result = _invoke(["remove", "windsurf", "--yes", "--no-restart"], self.app)
+            result = _invoke(["remove", "not-a-connector", "--yes", "--no-restart"], self.app)
         self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
+
+    def test_remove_known_absent_is_idempotent(self):
+        self._seed_map("codex", "cursor")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "windsurf", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("already absent", result.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
     # Connector name match is case-insensitive.
@@ -397,6 +432,87 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
         self.assertNotIn("claudecode", self.app.cfg.guardrail.connectors)
+
+    def _effective_policy(self, connector):
+        gc = self.app.cfg.guardrail
+        hilt = gc.effective_hilt(connector)
+        gate = [str(name).strip() for name in gc.judge.hook_connectors]
+        return {
+            "enabled": gc.effective_enabled(connector),
+            "mode": gc.effective_mode(connector),
+            "rule_pack_dir": gc.effective_rule_pack_dir(connector),
+            "hook_fail_mode": gc.effective_hook_fail_mode(connector),
+            "hilt_enabled": hilt.enabled,
+            "hilt_min_severity": hilt.min_severity,
+            "block_message": gc.effective_block_message(connector),
+            "judge_gate": bool(gc.judge.enabled) and ("*" in gate or connector in gate),
+        }
+
+    def test_remove_preserves_each_survivor_policy_round_trip_and_is_idempotent(self):
+        policies = {
+            "codex": PerConnectorGuardrailConfig(
+                enabled=False,
+                mode="action",
+                rule_pack_dir="codex-pack",
+                hook_fail_mode="closed",
+                hilt=HILTConfig(enabled=True, min_severity="LOW"),
+                block_message="codex-block",
+            ),
+            "claudecode": PerConnectorGuardrailConfig(
+                enabled=False,
+                mode="action",
+                rule_pack_dir="claude-pack",
+                hook_fail_mode="closed",
+                hilt=HILTConfig(enabled=True, min_severity="MEDIUM"),
+                block_message="claude-block",
+            ),
+        }
+        cases = (("claudecode", "codex"), ("codex", "claudecode"))
+
+        for removed, survivor in cases:
+            with self.subTest(removed=removed, survivor=survivor):
+                gc = self.app.cfg.guardrail
+                gc.enabled = True
+                gc.mode = "observe"
+                gc.rule_pack_dir = "global-pack"
+                gc.hook_fail_mode = "open"
+                gc.hilt = HILTConfig(enabled=False, min_severity="HIGH")
+                gc.block_message = "global-block"
+                gc.connectors = copy.deepcopy(policies)
+                gc.connector = "claudecode"
+                self.app.cfg.claw.mode = "claudecode"
+                gc.judge.enabled = True
+                gc.judge.hook_connectors = ["codex", "claudecode"]
+
+                expected_entry = copy.deepcopy(gc.connectors[survivor])
+                expected_policy = self._effective_policy(survivor)
+                with self._no_restart_bounce():
+                    result = _invoke(["remove", removed, "--yes", "--no-restart"], self.app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(set(gc.connectors), {survivor})
+                self.assertEqual(gc.connectors[survivor], expected_entry)
+                self.assertEqual(self._effective_policy(survivor), expected_policy)
+                self.assertEqual(self.app.cfg.active_connectors(), [survivor])
+                self.assertEqual(gc.connector, survivor)
+                self.assertEqual(self.app.cfg.claw.mode, survivor)
+
+                with patch.dict(
+                    os.environ,
+                    {"DEFENSECLAW_HOME": self.tmp_dir, "DEFENSECLAW_CONFIG": self.cfg_path},
+                ):
+                    reloaded = load()
+                self.assertEqual(set(reloaded.guardrail.connectors), {survivor})
+                self.assertEqual(reloaded.guardrail.connectors[survivor], expected_entry)
+                self.assertEqual(reloaded.guardrail.connector, survivor)
+                self.assertEqual(reloaded.claw.mode, survivor)
+
+                saved = open(self.cfg_path, "rb").read()
+                with self._no_restart_bounce():
+                    repeated = _invoke(["remove", removed, "--yes", "--no-restart"], self.app)
+                self.assertEqual(repeated.exit_code, 0, msg=repeated.output)
+                self.assertIn("already absent", repeated.output)
+                self.assertEqual(open(self.cfg_path, "rb").read(), saved)
+                self.assertEqual(self._effective_policy(survivor), expected_policy)
 
     # D3=A: --restart bounces the gateway so boot-time set-diff teardown runs.
     def test_remove_restart_bounces_gateway(self):
@@ -458,6 +574,89 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
         self.assertEqual(gc.mode, "observe")  # global field NOT flipped to action
         self.assertEqual(gc.effective_mode("codex"), "action")
         self.assertEqual(gc.effective_mode("hermes"), "observe")
+
+    def test_connector_setup_tui_unchanged_rerun_preserves_both_connectors(self):
+        from defenseclaw.tui.panels.setup import SetupPanelModel, SetupWizard, build_wizard_args
+
+        cases = (
+            (
+                "codex",
+                "action",
+                ("setup", "codex", "--yes", "--mode", "action"),
+            ),
+            (
+                "claudecode",
+                "observe",
+                ("setup", "claude-code", "--yes", "--mode", "observe"),
+            ),
+        )
+        for connector, effective_mode, expected_argv in cases:
+            with self.subTest(connector=connector):
+                gc = self.app.cfg.guardrail
+                gc.enabled = True
+                gc.mode = "observe"
+                gc.rule_pack_dir = "global-pack"
+                gc.hook_fail_mode = "open"
+                gc.hilt = HILTConfig(enabled=False, min_severity="HIGH")
+                gc.block_message = "global-block"
+                gc.connector = "claudecode"
+                self.app.cfg.claw.mode = "claudecode"
+                gc.connectors = {
+                    "codex": PerConnectorGuardrailConfig(
+                        enabled=False,
+                        mode="action",
+                        rule_pack_dir="codex-pack",
+                        hook_fail_mode="closed",
+                        hilt=HILTConfig(enabled=True, min_severity="LOW"),
+                        block_message="codex-block",
+                    ),
+                    "claudecode": PerConnectorGuardrailConfig(
+                        enabled=True,
+                        mode="observe",
+                        rule_pack_dir="claude-pack",
+                        hook_fail_mode="open",
+                        hilt=HILTConfig(enabled=False, min_severity="MEDIUM"),
+                        block_message="claude-block",
+                    ),
+                }
+                gc.judge.enabled = True
+                gc.judge.hook_connectors = ["codex"]
+                gc.detection_strategy = "regex_judge"
+                gc.detection_strategy_completion = "regex_judge"
+                before_policies = copy.deepcopy(gc.connectors)
+                before_gate = list(gc.judge.hook_connectors)
+
+                model = SetupPanelModel(cfg=self.app.cfg, os_name="windows")
+                model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
+                for index, field in enumerate(model.form_fields):
+                    if field.label == "Connector":
+                        model.form_fields[index] = field.with_value(connector)
+                        break
+                model.recompute_dependent_fields()
+                argv = build_wizard_args(SetupWizard.CONNECTOR_SETUP, model.form_fields)
+
+                self.assertEqual(argv, expected_argv)
+                self.assertNotIn("--replace", argv)
+                with _setup_patches():
+                    result = _invoke(list(argv[1:]), self.app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(set(gc.connectors), {"codex", "claudecode"})
+                self.assertEqual(gc.effective_mode(connector), effective_mode)
+                self.assertEqual(gc.connectors, before_policies)
+                self.assertEqual(gc.judge.hook_connectors, before_gate)
+                self.assertEqual(gc.connector, "claudecode")
+                self.assertEqual(self.app.cfg.claw.mode, "claudecode")
+
+                with patch.dict(
+                    os.environ,
+                    {
+                        "DEFENSECLAW_HOME": self.tmp_dir,
+                        "DEFENSECLAW_CONFIG": os.path.join(self.tmp_dir, "config.yaml"),
+                    },
+                ):
+                    reloaded = load()
+                self.assertEqual(reloaded.guardrail.connectors, before_policies)
+                self.assertEqual(reloaded.guardrail.judge.hook_connectors, before_gate)
 
     def test_pdf_repro_peer_mode_not_flipped(self):
         # PDF repro: `setup hermes --mode action` then `setup codex` (default

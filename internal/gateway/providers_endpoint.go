@@ -39,17 +39,38 @@ type providersListResponse struct {
 	OverlayApplied bool `json:"overlay_applied"`
 }
 
+// registerProviderRoutes installs provider management on the sidecar mux. Kept
+// separate from Run so route/auth behavior can be tested without opening any
+// listener (especially the guardrail proxy listener).
+func (a *APIServer) registerProviderRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/v1/config/providers", a.handleListProviders)
+	mux.HandleFunc("/v1/config/providers/reload", a.handleReloadProviders)
+}
+
 // handleListProviders exposes the merged provider registry over HTTP.
 // Used by the TypeScript fetch-interceptor at bootstrap so custom
 // providers (added via `defenseclaw setup provider add` or by hand-
 // editing ~/.defenseclaw/custom-providers.json) are honored without
 // rebuilding the TS bundle.
 //
-// The handler is read-only, does not require authentication (the
-// domain list is not a secret; the TS plugin must be able to call it
-// before it has any credentials), and applies standard anti-caching
-// headers so a stale value does not persist across a reload.
+// Proxy compatibility wrapper. Provider metadata is configuration state, so
+// both the legacy proxy route and the sidecar management route require the
+// configured gateway token.
 func (p *GuardrailProxy) handleListProviders(w http.ResponseWriter, r *http.Request) {
+	if !p.authenticateRequest(w, r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	serveListProviders(w, r)
+}
+
+// handleListProviders exposes the same registry through the authenticated
+// sidecar management API. Authentication is enforced by APIServer.tokenAuth.
+func (a *APIServer) handleListProviders(w http.ResponseWriter, r *http.Request) {
+	serveListProviders(w, r)
+}
+
+func serveListProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -96,6 +117,21 @@ func (p *GuardrailProxy) handleReloadProviders(w http.ResponseWriter, r *http.Re
 	// succeeded so emitLifecycleReload below stamps a stable
 	// agent_instance_id on its lifecycle event.
 	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
+	serveReloadProviders(w, r)
+}
+
+// handleReloadProviders exposes provider reload through the authenticated
+// sidecar management API. It intentionally does not depend on a
+// GuardrailProxy, so hook-only deployments keep the proxy listener disabled.
+func (a *APIServer) handleReloadProviders(w http.ResponseWriter, r *http.Request) {
+	serveReloadProviders(w, r)
+}
+
+func serveReloadProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if err := ReloadProviderRegistry(); err != nil {
 		// Log full error server-side for operators; return a
 		// generic message to the caller so a malformed overlay
@@ -111,7 +147,7 @@ func (p *GuardrailProxy) handleReloadProviders(w http.ResponseWriter, r *http.Re
 		providerCount = len(reg.Providers)
 	}
 	ctx := r.Context()
-	p.emitLifecycleReload(ctx, providerCount)
+	emitProvidersReloadLifecycle(ctx, providerCount)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -137,7 +173,7 @@ func overlayExists(path string) bool {
 // caller-meaningful "reload" transition gets normalized to the
 // schema-valid "completed" while the original intent survives on
 // details.transition_raw.
-func (p *GuardrailProxy) emitLifecycleReload(ctx context.Context, providerCount int) {
+func emitProvidersReloadLifecycle(ctx context.Context, providerCount int) {
 	emitLifecycle(ctx, "providers", "reload", map[string]string{
 		"provider_count": strconv.Itoa(providerCount),
 		"overlay_path":   configs.CustomProvidersPath(),

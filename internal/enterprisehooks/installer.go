@@ -73,6 +73,9 @@ type InstallResult struct {
 }
 
 func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if errEnterpriseHooksUnsupportedWindows != nil {
+		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
+	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
 		return InstallResult{}, err

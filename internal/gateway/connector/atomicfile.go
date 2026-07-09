@@ -22,6 +22,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // atomicWriteFile writes data to path atomically by writing to a temp file in
@@ -51,6 +54,13 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
+	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
+		if err := safefile.ProtectFile(tmpPath); err != nil {
+			tmp.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("protect temp file: %w", err)
+		}
+	}
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
@@ -66,7 +76,6 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-
 	if err := os.Rename(tmpPath, writePath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)

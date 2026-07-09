@@ -19,6 +19,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 
@@ -43,9 +44,14 @@ func watchdogStartDir() string {
 // inherited and the child is addressable by GenerateConsoleCtrlEvent for a
 // graceful stop) combined with DETACHED_PROCESS (drop the inherited console
 // so a closing terminal cannot deliver CTRL_CLOSE and kill the watchdog).
+// CREATE_BREAKAWAY_FROM_JOB is scoped to this managed, PID-file-owned child so
+// it survives a successful TUI launch without allowing arbitrary descendants
+// to escape the TUI's kill-on-close job.
 func watchdogSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP |
+			windows.DETACHED_PROCESS |
+			windows.CREATE_BREAKAWAY_FROM_JOB,
 	}
 }
 
@@ -56,6 +62,19 @@ func watchdogProcessAlive(pid int, _ *os.Process) bool {
 	}
 	_ = windows.CloseHandle(h)
 	return true
+}
+
+func watchdogProcessStartIdentity(pid int) string {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(h) //nolint:errcheck -- read-only identity handle.
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &creation, &exit, &kernel, &user); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", creation.Nanoseconds())
 }
 
 func watchdogTerminate(proc *os.Process) error {

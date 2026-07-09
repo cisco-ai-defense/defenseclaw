@@ -53,6 +53,8 @@ from defenseclaw.connector_contracts import (
 from defenseclaw.context import AppContext
 from defenseclaw.inventory import agent_discovery as ad
 
+from tests.permissions import grant_everyone
+
 
 def _make_app_context(data_dir: str) -> AppContext:
     cfg = Config(
@@ -385,18 +387,11 @@ class TrustedPathsCliTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows ACL regression")
     def test_add_everyone_writable_refused_without_force(self):
-        import subprocess
-
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
             unsafe = os.path.join(tmp, "everyone-write")
             os.makedirs(unsafe)
-            subprocess.run(
-                ["icacls", unsafe, "/grant", "*S-1-1-0:(OI)(CI)F"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            grant_everyone(unsafe)
             with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
                 result = self.runner.invoke(cmd_setup.trusted_paths, ["add", unsafe, "--json"], obj=app)
 

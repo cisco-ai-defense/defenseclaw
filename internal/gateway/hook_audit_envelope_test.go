@@ -257,6 +257,26 @@ func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
 	}
 }
 
+func TestRenderHookAuditEnvelopeNormalizesOptionalPreviousPhase(t *testing.T) {
+	_, structured := renderHookAuditEnvelopePayload(HookAuditEnvelope{
+		Connector:          "codex",
+		Event:              "PreToolUse",
+		Result:             "ok",
+		AgentPhase:         " ToOl ",
+		AgentPreviousPhase: "future-phase",
+		AgentSequence:      1,
+		AgentLifecycleID:   "lifecycle-0123456789abcdef",
+		AgentExecutionID:   "execution-0123456789abcdef",
+		AgentOperationID:   "operation-1",
+	})
+	if structured["agent_phase"] != "tool" {
+		t.Fatalf("agent_phase=%#v want tool", structured["agent_phase"])
+	}
+	if _, exists := structured["agent_previous_phase"]; exists {
+		t.Fatalf("unsupported optional previous phase was retained: %#v", structured)
+	}
+}
+
 // TestRenderHookAuditLegacyDetails_LogInjection asserts the legacy
 // formatter strips control runes per codeguard-0-logging.
 func TestRenderHookAuditLegacyDetails_LogInjection(t *testing.T) {

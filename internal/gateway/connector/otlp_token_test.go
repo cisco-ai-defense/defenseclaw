@@ -7,8 +7,11 @@ package connector
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // TestIsValidOTLPScope_NegativeCases protects the lazy-reload path
@@ -93,6 +96,9 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := os.Symlink(target, path); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("symlink privilege unavailable; reparse-point rejection has dedicated Windows coverage: %v", err)
+					}
 					t.Fatal(err)
 				}
 			},
@@ -148,7 +154,7 @@ func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := strings.Repeat("b", 64)
-	if err := os.WriteFile(path, []byte(want+"\n"), 0o600); err != nil {
+	if err := safefile.WritePrivate(path, []byte(want+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := LoadOTLPPathToken(dir, OTLPScopeGeminiCLI)

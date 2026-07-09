@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from defenseclaw.models import Event
 from defenseclaw.tui.panels import alerts as alerts_module
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertFinding, AlertsPanelModel, humanize_alert_details
 from defenseclaw.tui.services.gateway_events import count_recent_silent_bypass, load_gateway_egress
@@ -71,6 +72,27 @@ def test_alerts_set_events_owns_the_input_list() -> None:
 
     assert [event.id for event in model.audit_events] == ["a1"]
     assert [row.event.id for row in model.filtered] == ["a1"]
+
+
+def test_alerts_refresh_preserves_last_good_rows_when_database_is_locked() -> None:
+    class FlakyStore:
+        locked = False
+
+        def list_alert_summaries(self, _limit: int) -> list[Event]:
+            if self.locked:
+                raise RuntimeError("database is locked")
+            return [Event(id="cached", severity="HIGH", action="block", target="skill://one")]
+
+        list_alerts = list_alert_summaries
+
+    store = FlakyStore()
+    model = AlertsPanelModel(store=store)
+    model.refresh()
+    store.locked = True
+    model.refresh()
+
+    assert [event.id for event in model.audit_events] == ["cached"]
+    assert [row.event.id for row in model.filtered] == ["cached"]
 
 
 def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
@@ -425,6 +447,7 @@ def test_alerts_detail_pairs_copy_text_and_store_enrichment() -> None:
 
     copied = model.handle_key("y")
     assert copied.copy_text
+    assert copied.hint == "Copied alert detail."
     assert "Severity: HIGH" in copied.copy_text
     assert "Summary: api:443 strict gpt-4o" in copied.copy_text
     assert "Request ID: req-1" in copied.copy_text

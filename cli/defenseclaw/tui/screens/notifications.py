@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.tui.screens.consequence import (
     CommandSpec,
     ConsequenceAction,
@@ -38,8 +39,33 @@ def notifications_command(currently_enabled: bool) -> CommandSpec:
     )
 
 
-def build_notifications_model(currently_enabled: bool) -> ConsequenceModalModel:
+def build_notifications_model(currently_enabled: bool, system: str | None = None) -> ConsequenceModalModel:
     """Build the notifications modal model from the cached current state."""
+
+    capability = desktop_notification_capability(system)
+    if not capability.supported:
+        configured = "ON (legacy setting retained)" if currently_enabled else "OFF"
+        return ConsequenceModalModel(
+            title="Desktop notifications — unsupported",
+            summary=f"Configured state: {configured}\nNative desktop delivery: INACTIVE",
+            details=(
+                capability.unsupported_reason,
+                "Windows toast delivery cannot be enabled in this release.",
+                "Audit DB, Splunk, OTel, webhooks, files, and terminal output are unchanged.",
+                "Any delivery fallback is labelled as terminal fallback, never desktop success.",
+            ),
+            consequence="Use `defenseclaw setup notifications off` to clear a legacy enabled setting.",
+            actions=(
+                ConsequenceAction(
+                    action_id="close",
+                    label="Close",
+                    description="No configuration will be changed.",
+                    command=None,
+                ),
+            ),
+            default_action_id="close",
+            border_color=DEFAULT_TOKENS.accent_amber,
+        )
 
     desired = desired_notifications_action(currently_enabled)
     current_label = "ON (toasts on every block / approval)" if currently_enabled else "OFF (audit unchanged)"
@@ -87,5 +113,5 @@ def build_notifications_model(currently_enabled: bool) -> ConsequenceModalModel:
 class NotificationsToggleScreen(ConsequenceModalScreen):
     """Textual modal for the Logs/Overview notifications toggle."""
 
-    def __init__(self, currently_enabled: bool) -> None:
-        super().__init__(build_notifications_model(currently_enabled))
+    def __init__(self, currently_enabled: bool, system: str | None = None) -> None:
+        super().__init__(build_notifications_model(currently_enabled, system))

@@ -12,6 +12,8 @@ keywords:
 
 DefenseClaw ships a single command — `defenseclaw setup splunk` — with three independent pipelines you can mix and match:
 
+<Callout type="info">Local `--logs` is supported on certified native Windows x64 through Docker Desktop's native `docker.exe`, Compose v2, Linux containers, and the Hyper-V backend. No Bash, WSL, MSYS, Git Bash, `.cmd`, or `.bat` lifecycle shim is used. macOS/Linux retain the existing bridge path.</Callout>
+
 | Pipeline | Use case | What it does |
 | --- | --- | --- |
 | `--logs` | Local demo / dev | Brings up Splunk Free in Docker, installs the bundled local-mode app, sends events via HEC |
@@ -35,20 +37,20 @@ What happens:
     **License check.** Without `--accept-splunk-license` the CLI prompts you interactively. Use `--non-interactive` for CI.
   </Step>
   <Step>
-    **Docker preflight.** Verifies Docker is running and that ports `8000` (Splunk Web) and `8088` (HEC) are free.
+    **Docker and ownership preflight.** Verifies Compose v2, daemon reachability, Linux-container mode, the complete bundle, and ports `8000` (Splunk Web) and `8088` (HEC). Ports already published by the exact owned project are accepted; foreign listeners are rejected.
   </Step>
   <Step>
-    **Bridge bootstrap.** `splunk-claw-bridge up` (shipped in `bundles/splunk_local_bridge/`) launches the container, waits for `/services/server/info`, and provisions an HEC token.
+    **Native/bridge bootstrap.** Windows packages the app with Python and launches `docker.exe compose` using argument arrays. macOS/Linux use `splunk-claw-bridge`. A cryptographically random HEC token and runtime-required administrator bootstrap secret are stored in the protected private env file.
   </Step>
   <Step>
-    **Sink wiring.** Writes a `splunk_hec` audit sink into `config.yaml` pointing at `http://127.0.0.1:8088/services/collector/event`, index `defenseclaw_local`, sourcetype `defenseclaw:json`.
+    **Readiness and sink wiring.** Waits for both Web and authenticated HEC health, then writes the owned `local-splunk` audit sink pointing at `https://127.0.0.1:8088/services/collector/event`, index `defenseclaw_local`, sourcetype `defenseclaw:json`, and reloads/restarts the gateway. A failure rolls configuration and runtime back.
   </Step>
   <Step>
     **App install.** Copies `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode` into the container — five dashboards plus shared SPL macros.
   </Step>
 </Steps>
 
-Open Splunk at [http://localhost:8000](http://localhost:8000) (default credentials are surfaced by `defenseclaw setup splunk --show-credentials`). The bundled app shows up as **DefenseClaw (local mode)**.
+Open Splunk at [http://localhost:8000](http://localhost:8000). Splunk Free mode disables Web authentication, so there is no login to advertise. `defenseclaw setup splunk --show-credentials` explicitly reveals the HEC token and labels the administrator bootstrap secret as runtime-only. The bundled app shows up as **DefenseClaw (local mode)**.
 
 ### Bundled dashboards
 
@@ -181,7 +183,7 @@ defenseclaw setup splunk --disable --enterprise
 defenseclaw setup splunk --disable --o11y
 ```
 
-`--disable` removes the matching block from `config.yaml` (and stops the local container if you ran `--logs`). It does not touch other sinks.
+`--disable` disables the matching destination (and stops the exact owned local project if you ran `--logs`). Local named volumes are preserved, and operator-authored loopback or remote HEC sinks are not touched.
 
 ## Verify
 
@@ -197,7 +199,7 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.kind == "guardrail.verdict")'
 
 <Accordions>
   <Accordion title="Local Splunk container won't start (port 8000 in use)">
-    Stop the conflicting service or run `defenseclaw setup splunk --disable --logs` and re-run after freeing the port. There's no `--port` flag today; ports `8000` and `8088` are checked at boot.
+    Stop the conflicting service or run `defenseclaw setup splunk --disable --logs` and retry. There's no `--port` flag today. A listener is accepted only when Docker proves that the exact DefenseClaw-owned Compose project publishes the expected loopback mapping.
   </Accordion>
   <Accordion title="Enterprise HEC returns 403">
     Token is wrong or HEC isn't enabled on that Splunk endpoint. Test with curl: `curl -k $HEC_ENDPOINT -H "Authorization: Splunk $TOKEN" -d '{"event":"test"}'`. The CLI's `--skip-test` skips this same probe.

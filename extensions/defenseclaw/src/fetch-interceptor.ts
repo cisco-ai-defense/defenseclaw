@@ -149,7 +149,7 @@ export function applyProviderRegistry(reg: {
  */
 export async function bootstrapProviderOverlay(
   guardrailPort: number,
-  options?: { timeoutMs?: number; fetchImpl?: typeof fetch },
+  options?: { timeoutMs?: number; fetchImpl?: typeof fetch; token?: string },
 ): Promise<void> {
   const timeoutMs = options?.timeoutMs ?? 2000;
   const doFetch = options?.fetchImpl ?? globalThis.fetch;
@@ -165,7 +165,14 @@ export async function bootstrapProviderOverlay(
   try {
     const res = await doFetch(
       `http://127.0.0.1:${guardrailPort}/v1/config/providers`,
-      { method: "GET", signal: ctrl.signal, cache: "no-store" },
+      {
+        method: "GET",
+        signal: ctrl.signal,
+        cache: "no-store",
+        headers: options?.token
+          ? { [DC_AUTH_HEADER]: `Bearer ${options.token}` }
+          : undefined,
+      },
     );
     if (!res.ok) return;
     // If Content-Length advertises more than the cap, bail early —
@@ -930,6 +937,7 @@ export function createFetchInterceptor(
     // wrapper we're about to install.
     void bootstrapProviderOverlay(guardrailPort, {
       fetchImpl: originalFetch,
+      token: loadSidecarConfig().token,
     });
 
     globalThis.fetch = async (

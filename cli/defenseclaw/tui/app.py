@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
-import tempfile
 import time
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, suppress
-from dataclasses import asdict
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
 
+import requests
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
 from rich.markup import escape as rich_escape
@@ -34,7 +36,8 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__
 from defenseclaw import config as config_module
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
@@ -45,6 +48,7 @@ from defenseclaw.tui.command_line import (
 from defenseclaw.tui.executor import (
     CommandAlreadyRunningError,
     CommandExecutor,
+    captured_subprocess_kwargs,
     resolve_subprocess_argv,
 )
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
@@ -127,6 +131,12 @@ from defenseclaw.tui.services.catalog_state import (
     friendly_connector_name,
 )
 from defenseclaw.tui.services.cli_choices import CONNECTORS as _KNOWN_CONNECTORS
+from defenseclaw.tui.services.config_watch import (
+    CONFIG_POLL_INTERVAL_SECONDS,
+    ConfigChangeWatcher,
+    ConfigGeneration,
+    probe_config_generation,
+)
 from defenseclaw.tui.services.overview_state import (
     ConnectorHealth,
     ConnectorOverviewRow,
@@ -141,37 +151,42 @@ from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
+from defenseclaw.tui.windows_clipboard import ClipboardError, copy_windows_clipboard
 
 
-def _write_owner_only_text(path: Path, text: str) -> None:
-    """Atomically write sensitive TUI output with a native owner-only ACL."""
-    fd = -1
-    tmp = ""
-    try:
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=path.parent,
-        )
-        set_file_mode(fd, tmp, 0o600)
-        stream = os.fdopen(fd, "w", encoding="utf-8")
-        fd = -1
-        with stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if fd != -1:
-            with suppress(OSError):
-                os.close(fd)
-        if tmp:
-            with suppress(OSError):
-                os.unlink(tmp)
+def _write_owner_only_text(path: Path, text: str, *, protect_parent: bool = False) -> None:
+    """Atomically write sensitive TUI output with the private policy ACL."""
+    atomic_write_private_bytes(path, text.encode("utf-8"), protect_parent=protect_parent)
 
 
 TOKENS = DEFAULT_TOKENS
+
+
+class _ConfigGenerationChangedError(RuntimeError):
+    """The watched config moved while a background reload was in flight."""
+
+
+@dataclass(frozen=True)
+class GatewayHealthResult:
+    """One sidecar API probe and its optional fresh health payload."""
+
+    state: str
+    detail: str = ""
+    snapshot: HealthSnapshot | None = None
+
+
+def _load_config_generation(path: Path, expected: ConfigGeneration) -> object:
+    """Load exactly ``expected`` while cooperating writers are excluded."""
+
+    with config_module.locked_config_yaml(str(path)):
+        before = probe_config_generation(path)
+        if before != expected:
+            raise _ConfigGenerationChangedError("config changed before reload")
+        loaded = config_module.load()
+        after = probe_config_generation(path)
+        if after != expected:
+            raise _ConfigGenerationChangedError("config changed during reload")
+    return loaded
 
 
 # Wizard rows whose value changes must re-derive the conditional field groups
@@ -180,23 +195,25 @@ TOKENS = DEFAULT_TOKENS
 # the custom-provider ``Action`` selector.
 _SETUP_DRIVER_FLAGS: dict[SetupWizard, frozenset[str]] = {
     SetupWizard.LLM: frozenset({"--provider", "--role"}),
+    SetupWizard.GUARDRAIL: frozenset({"--connector"}),
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"--base-provider-type"}),
 }
 _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
+    SetupWizard.CONNECTOR_SETUP: frozenset({"Connector", "Action"}),
     # The guardrail judge "Provider" row carries no flag (it is emitted as
     # ``--judge-provider`` by the arg builder), so it must be matched by label.
-    SetupWizard.GUARDRAIL: frozenset({"Provider"}),
+    SetupWizard.GUARDRAIL: frozenset({"Provider", "Scope"}),
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"Action"}),
 }
 
 
 _DEFENSECLAW_LOGO = (
-    "██████╗ ███████╗███████╗███████╗███╗   ██╗███████╗███████╗  ██████╗██╗      █████╗ ██╗    ██╗\n"
-    "██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║██╔════╝██╔════╝ ██╔════╝██║     ██╔══██╗██║    ██║\n"
-    "██║  ██║█████╗  █████╗  █████╗  ██╔██╗ ██║███████╗█████╗   ██║     ██║     ███████║██║ █╗ ██║\n"
-    "██║  ██║██╔══╝  ██╔══╝  ██╔══╝  ██║╚██╗██║╚════██║██╔══╝   ██║     ██║     ██╔══██║██║███╗██║\n"
-    "██████╔╝███████╗██║     ███████╗██║ ╚████║███████║███████╗ ╚██████╗███████╗██║  ██║╚███╔███╔╝\n"
-    "╚═════╝ ╚══════╝╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝"
+    "██████╗ ███████╗███████╗███████╗███╗   ██╗███████╗███████╗ ██████╗██╗      █████╗ ██╗    ██╗\n"
+    "██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║██╔════╝██╔════╝██╔════╝██║     ██╔══██╗██║    ██║\n"
+    "██║  ██║█████╗  █████╗  █████╗  ██╔██╗ ██║███████╗█████╗  ██║     ██║     ███████║██║ █╗ ██║\n"
+    "██║  ██║██╔══╝  ██╔══╝  ██╔══╝  ██║╚██╗██║╚════██║██╔══╝  ██║     ██║     ██╔══██║██║███╗██║\n"
+    "██████╔╝███████╗██║     ███████╗██║ ╚████║███████║███████╗╚██████╗███████╗██║  ██║╚███╔███╔╝\n"
+    "╚═════╝ ╚══════╝╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝"
 )
 
 
@@ -227,6 +244,58 @@ PANELS = (
 
 PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
 PANEL_NAMES = {name for name, _key, _label in PANELS}
+
+
+@dataclass(frozen=True)
+class _PanelRenderSnapshot:
+    """Immutable, widget-free content prepared for one panel generation."""
+
+    generation: int
+    panel: str
+    body_text: str
+    body_renderable: RenderableType
+    table_columns: tuple[str, ...]
+    table_rows: tuple[tuple[str, ...], ...]
+    detail_text: str
+    chip_click_segments: tuple[tuple[int, int, str], ...]
+
+
+@dataclass(frozen=True)
+class _OverviewRenderSnapshot:
+    """One coherent Overview sample reused by every visible surface."""
+
+    generation: int
+    body_text: str
+    body_renderable: RenderableType
+    metrics: tuple[MetricDatum, ...]
+    connector_rows: tuple[ConnectorOverviewRow, ...]
+    enforcement: EnforcementCounts
+    body_signature: tuple[object, ...]
+    connector_rows_signature: tuple[object, ...]
+    live_data_signature: tuple[object, ...]
+    scope_text: str
+    skill_scanner_available: bool
+    audit_version: object | None
+    hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
+
+
+@dataclass(frozen=True)
+class _SignalRefreshSnapshot:
+    """Worker-loaded Alerts/Audit/Logs data, free of live sqlite handles."""
+
+    source_token: tuple[str, str]
+    alert_events: tuple[Any, ...]
+    scan_blocks: tuple[Any, ...]
+    egress_events: tuple[Any, ...]
+    audit_events: tuple[Any, ...]
+    audit_error: str
+    log_lines: tuple[tuple[str, tuple[str, ...]], ...]
+    log_errors: tuple[tuple[str, str], ...]
+    verdict_rows: tuple[Any, ...]
+    otel_rows: tuple[Any, ...]
+    log_refresh_signatures: tuple[tuple[str, object], ...]
+    doctor: DoctorCache | None
+    silent_bypass: int
 
 
 class _BodyStatic(Static):
@@ -395,6 +464,10 @@ class DefenseClawTUI(App[None]):
     }
 
     #overview-metrics {
+        margin-bottom: 1;
+    }
+
+    #overview-scope {
         margin-bottom: 1;
     }
 
@@ -691,6 +764,7 @@ class DefenseClawTUI(App[None]):
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
+        config_path: str | Path | None = None,
     ) -> None:
         super().__init__()
         # Textual defaults to two rows per wheel notch, which makes the dense
@@ -701,6 +775,12 @@ class DefenseClawTUI(App[None]):
         self.first_run_model = first_run_model or FirstRunPanelModel(active=first_run)
         self.executor = CommandExecutor()
         self.config = config
+        # ``run_textual_tui`` passes the active path explicitly. Keeping the
+        # default disabled prevents model-only tests and embedded consumers
+        # from accidentally watching the operator's real home config.
+        self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
+        self._config_poll_running = False
+        self._config_reload_count = 0
         self.data_dir = _resolve_data_dir(config, data_dir)
         # Operator's persisted session preferences (palette MRU,
         # per-panel "last seen" cursors, last filter, theme).
@@ -740,6 +820,7 @@ class DefenseClawTUI(App[None]):
         self.activity_model = ActivityPanelModel()
         audit_store = _audit_store(config)
         self.alerts_model = alerts_model or AlertsPanelModel(self.data_dir, store=audit_store)
+        self._registries_model_owned = registries_model is None
         self.registries_model = registries_model or RegistriesPanelModel(config, data_dir=self.data_dir)
         connector = _active_connector(config)
         self.skills_model = skills_model or SkillsPanelModel(connector=connector)
@@ -775,6 +856,7 @@ class DefenseClawTUI(App[None]):
         self._table_rows: tuple[tuple[str, ...], ...] = ()
         self._periodic_refresh_running = False
         self._slow_refresh_running = False
+        self._roster_catalog_refresh_pending = False
         self._credentials_refresh_running = False
         self._health_poll_running = False
         self._ai_usage_poll_running = False
@@ -817,12 +899,34 @@ class DefenseClawTUI(App[None]):
         self._overview_session_enforcement_counts_render_cache: EnforcementCounts | None = None
         self._connector_hook_event_stats_cache: dict[str, dict[str, Any]] | None = None
         self._connector_hook_event_stats_loaded_at: float = 0.0
+        self._overview_audit_version_cache: object | None = None
         self._overview_last_render_scroll_y: float | None = None
         self._overview_last_scroll_activity_at: float = 0.0
         self._overview_deferred_render_token: int = 0
         self._overview_sampled_refresh_scheduled = False
         self._overview_connector_rows_signature_cache: tuple[object, ...] | None = None
         self._overview_live_data_signature_cache: tuple[object, ...] | None = None
+        # Panel navigation has two phases. The first mutates only lightweight
+        # chrome so Textual can paint the selected tab immediately. Content is
+        # prepared after that paint and applied only if this generation is
+        # still current. Per-panel lanes coalesce repeated refresh requests;
+        # Overview and Alerts can therefore prepare independently without a
+        # slow SQLite aggregate starving the other panel.
+        self._panel_render_generation = 0
+        self._panel_render_queued: dict[str, int] = {}
+        self._panel_render_running: set[str] = set()
+        self._panel_render_pending: dict[str, tuple[int, DefenseClawTUI, tuple[str, object | None]]] = {}
+        self._panel_render_workers: dict[str, Any] = {}
+        self._panel_content_cache: dict[str, _PanelRenderSnapshot] = {}
+        self._overview_render_snapshot: _OverviewRenderSnapshot | None = None
+        self._applying_panel_snapshot = False
+        self._signal_refresh_running = False
+        self._signal_refresh_pending = False
+        # Cosmetic state writes are atomic but can still be slow on Windows
+        # when endpoint protection scans the replacement file. Keep in-memory
+        # unread/active-panel state synchronous, then debounce only the disk
+        # flush; on_unmount performs the crash-safe final attempt.
+        self._state_save_token = 0
         # Set while ``_render_panel_table`` programmatically restores the
         # DataTable cursor. Textual fires ``RowHighlighted`` for that move just
         # like a real keypress, and the handler would call the model's
@@ -1392,18 +1496,55 @@ class DefenseClawTUI(App[None]):
             yield HintBar(id="hint")
             yield Static("", id="status")
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         # Signal background pollers to stop spawning fresh subprocess
         # workers; without this guard our 30 s / 60 s tickers can fire
         # during pytest teardown and leak "Event loop is closed"
         # warnings that flake the visual snapshot suite.
         self._app_shutting_down = True
+        self._panel_render_generation += 1
+        self._panel_render_queued.clear()
+        self._panel_render_pending.clear()
+        for worker in tuple(self._panel_render_workers.values()):
+            try:
+                worker.cancel()
+            except Exception:  # noqa: BLE001 - teardown is best-effort.
+                pass
+        await self.executor.cancel()
         # Best-effort final flush of session state so the next launch
         # keeps palette MRU, theme, filters, and per-panel cursors.
         try:
             self.state_store.save()
         except Exception:  # noqa: BLE001
             pass
+
+    def export_screenshot(self, *, title: str | None = None, simplify: bool = False) -> str:
+        """Export the selected lightweight panel after applying queued chrome."""
+
+        panel = self.active_panel
+        if title is None:
+            label = next((label for name, _key, label in PANELS if name == panel), panel.title())
+            title = f"DefenseClaw — {label}"
+        generation = self._panel_render_queued.get(panel)
+        if panel not in {
+            "overview",
+            "alerts",
+            "audit",
+            "logs",
+        }:
+            if generation == self._panel_render_generation:
+                # Lightweight panels render synchronously once their post-paint
+                # callback starts. The queued-generation guard makes the later
+                # Textual callback a no-op.
+                self._start_deferred_panel_render(panel, generation)
+            else:
+                # The post-paint callback may already have consumed its marker
+                # while the final widget refresh is still queued. An explicit
+                # screenshot must describe the selected panel, so synchronize
+                # its cheap chrome directly instead of exporting the prior
+                # frame under a new active-panel value.
+                self._render_chrome_if_generation(panel, self._panel_render_generation)
+        return super().export_screenshot(title=title, simplify=simplify)
 
     def on_mount(self) -> None:
         self._app_shutting_down = False
@@ -1422,6 +1563,12 @@ class DefenseClawTUI(App[None]):
         self._refresh_models_from_disk()
         self.set_interval(0.25, self._tick_command_strip)
         self.set_interval(2.0, self._periodic_refresh)
+        # Config freshness is independent of gateway health. The watcher
+        # hashes a stable file generation in a background thread and parses
+        # only after a change, so renders never perform config I/O.
+        if self._config_watcher is not None:
+            self.set_interval(CONFIG_POLL_INTERVAL_SECONDS, self._schedule_config_poll)
+            self._schedule_config_poll()
         self.set_interval(30.0, self._schedule_ai_usage_poll)
         # Mirror Go TUI: poll /health every 3s so the Overview SERVICES
         # box reflects the actual sidecar state instead of "unknown".
@@ -1485,6 +1632,9 @@ class DefenseClawTUI(App[None]):
                 await self._load_inventory_model()
         finally:
             self._slow_refresh_running = False
+            if self._roster_catalog_refresh_pending:
+                self._roster_catalog_refresh_pending = False
+                self._schedule_slow_refresh()
 
     def on_key(self, event: events.Key) -> None:
         if len(self.screen_stack) > 1:
@@ -1707,10 +1857,8 @@ class DefenseClawTUI(App[None]):
             text = f"{key} {label}"
             if unread:
                 text = f"{text} ({unread})"
-            # Textual >=8.0 ``Tabs.get_tab(id) -> Tab | None`` replaces
-            # the older ``query_one("#tab-id", Tab)`` + NoMatches dance.
-            # It returns the tab widget directly (or None for unknown
-            # ids), so we skip exception-as-control-flow.
+            # Textual >=8.0 ``Tabs.get_tab(id) -> Tab | None`` returns the tab
+            # widget directly and avoids exception-as-control-flow here.
             tab = tabs.get_tab(f"tab-{name}")
             if tab is None:
                 continue
@@ -1727,10 +1875,9 @@ class DefenseClawTUI(App[None]):
         self.help_open = False
         if self.status_text.startswith("backend=textual  panel="):
             self.status_text = ""
-        self._render_chrome()
-        # Persist the operator's last-active panel + clear the "unread"
-        # badge for the panel they just opened. Best-effort: a failed
-        # write must never block the UI.
+        # Update the in-memory visit cursor before repainting the tab labels so
+        # the active panel's unread badge disappears in the acknowledgement
+        # frame. The atomic disk write is deliberately deferred below.
         try:
             self.state_store.set_active_panel(panel)
             self.state_store.mark_seen(panel)
@@ -1740,9 +1887,18 @@ class DefenseClawTUI(App[None]):
             # panel forever after the first visit.
             self.state_store.record_seen_count(panel, self._panel_total_count(panel))
             self.state = self.state_store.state
-            self.state_store.save()
         except Exception:  # noqa: BLE001 - persistence is cosmetic
             pass
+        self._schedule_state_save()
+
+        self._panel_render_generation += 1
+        generation = self._panel_render_generation
+        # This phase intentionally contains no model refresh, SQLite query,
+        # table row projection, or Rich dashboard construction. Returning to
+        # Textual now lets the selected tab and correct panel visibility paint
+        # on the next event-loop opportunity.
+        self._acknowledge_panel_switch(panel)
+        self._queue_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
         # Mirror Go TUI: catalog + inventory panels auto-load on first
@@ -1764,6 +1920,547 @@ class DefenseClawTUI(App[None]):
                 exclusive=False,
                 thread=False,
             )
+
+    def _schedule_state_save(self, *, delay: float = 0.25) -> None:
+        """Coalesce cosmetic state writes without weakening final persistence."""
+
+        self._state_save_token += 1
+        token = self._state_save_token
+
+        def save_if_current() -> None:
+            if token != self._state_save_token or getattr(self, "_app_shutting_down", False):
+                return
+            try:
+                self.state_store.save()
+            except Exception:  # noqa: BLE001 - session persistence is cosmetic.
+                pass
+
+        if not self.is_running:
+            save_if_current()
+            return
+        try:
+            self.set_timer(delay, save_if_current)
+        except Exception:  # noqa: BLE001 - outside a running app, save synchronously.
+            save_if_current()
+
+    def _acknowledge_panel_switch(self, panel: str) -> None:
+        """Paint only the tab, visibility, and already-cached panel content."""
+
+        try:
+            tabs = self.query_one("#tabs", Tabs)
+        except NoMatches:
+            return
+        tab_id = f"tab-{panel}"
+        if tabs.active != tab_id and tabs.query(f"#{tab_id}"):
+            self._suppressed_tab_activations[tab_id] = (
+                self._suppressed_tab_activations.get(tab_id, 0) + 1
+            )
+            tabs.active = tab_id
+        self._update_tab_labels()
+        try:
+            activity = self.query_one("#activity", RichLog)
+            body_widget = self.query_one("#body", Static)
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+            table = self.query_one("#panel-table", DataTable)
+            detail = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return
+
+        activity.set_class(panel != "activity", "hidden")
+        overview_visible = panel == "overview"
+        scroller.set_class(overview_visible, "overview-scroll")
+        self._render_panel_control_visibility()
+
+        cached_overview = self._overview_render_snapshot if overview_visible else None
+        cached_panel = self._panel_content_cache.get(panel)
+        expected_table_panel = (
+            self._last_table_signature[0]
+            if self._last_table_signature is not None and self._last_table_signature
+            else None
+        )
+
+        if cached_overview is not None:
+            self.body_text = cached_overview.body_text
+            body_widget.update(cached_overview.body_renderable)
+            self._last_body_signature = cached_overview.body_signature
+            self._set_overview_metrics_visible(True)
+            self._apply_overview_scope_text(cached_overview.scope_text)
+        elif cached_panel is not None:
+            self.body_text = cached_panel.body_text
+            self._chip_click_segments = list(cached_panel.chip_click_segments)
+            body_widget.update(cached_panel.body_renderable)
+            self._last_body_signature = (panel, False, cached_panel.body_text)
+        elif panel == "activity":
+            self.body_text = ""
+            body_widget.update("")
+            self._last_body_signature = (panel, False, "")
+        else:
+            label = next(label for name, _key, label in PANELS if name == panel)
+            loading = f"[bold #22D3EE]{label}[/]\n\nLoading current data…"
+            self.body_text = loading
+            body_widget.update(self._safe_body_renderable(loading))
+            self._last_body_signature = (panel, False, loading)
+
+        # Never expose another panel's rows or detail while the requested
+        # generation is preparing. If the retained table already belongs to
+        # this panel, reveal it immediately without clear/add_row churn.
+        if cached_panel is not None and expected_table_panel == panel and cached_panel.table_columns:
+            table.remove_class("hidden")
+        else:
+            table.add_class("hidden")
+        detail.add_class("hidden")
+
+        if not overview_visible:
+            self._set_overview_metrics_visible(False)
+            self._apply_overview_scope_text("")
+        self._render_command_strip()
+        acknowledgement_status = self.status_text or self._status_text()
+        self.status_text = acknowledgement_status
+        try:
+            self.query_one("#status", Static).update(
+                self._safe_body_renderable(acknowledgement_status)
+            )
+        except NoMatches:
+            pass
+
+    def _queue_deferred_panel_render(self, panel: str, generation: int) -> None:
+        """Track work before its post-paint callback enters the render lane."""
+
+        self._panel_render_queued[panel] = generation
+        try:
+            self.call_after_refresh(self._start_deferred_panel_render, panel, generation)
+        except Exception:  # noqa: BLE001 - direct unit calls may not have an active loop.
+            self._start_deferred_panel_render(panel, generation)
+
+    def _start_deferred_panel_render(self, panel: str, generation: int) -> None:
+        """Start content preparation only after the acknowledgement paint."""
+
+        # A newer request can replace this generation before Textual delivers
+        # the post-paint callback. Only the callback that still owns the queued
+        # marker may enter the lane; this also gives tests and diagnostics an
+        # exact idle signal instead of a scheduler-dependent pause.
+        if self._panel_render_queued.get(panel) != generation:
+            return
+        self._panel_render_queued.pop(panel, None)
+        if (
+            generation != self._panel_render_generation
+            or panel != self.active_panel
+            or self.help_open
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        if panel not in {"overview", "alerts", "audit", "logs"}:
+            self._render_chrome_if_generation(panel, generation)
+            return
+
+        # Synchronize cheap filter state after the acknowledgement frame, then
+        # copy the pure model inputs. Worker code never touches live widgets or
+        # mutable live model collections.
+        if panel in {"alerts", "audit", "logs"}:
+            self._sync_signal_connector_filters()
+        template = self._detached_render_context(panel)
+        store_source = self._worker_audit_store_source()
+        request = (generation, template, store_source)
+        if panel in self._panel_render_running:
+            self._panel_render_pending[panel] = request
+            return
+        self._launch_deferred_panel_render(panel, request)
+
+    def _render_chrome_if_generation(self, panel: str, generation: int) -> None:
+        if generation != self._panel_render_generation or panel != self.active_panel:
+            return
+        self._applying_panel_snapshot = True
+        try:
+            self._render_chrome()
+        finally:
+            self._applying_panel_snapshot = False
+
+    def _launch_deferred_panel_render(
+        self,
+        panel: str,
+        request: tuple[int, DefenseClawTUI, tuple[str, object | None]],
+    ) -> None:
+        generation, template, store_source = request
+        if generation != self._panel_render_generation or panel != self.active_panel:
+            return
+        self._panel_render_running.add(panel)
+        try:
+            worker = self.run_worker(
+                self._run_deferred_panel_render(panel, generation, template, store_source),
+                name=f"render-{panel}-{generation}",
+                group=f"panel-render-{panel}",
+                exclusive=False,
+                thread=False,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 - teardown may race worker creation.
+            self._panel_render_running.discard(panel)
+            return
+        self._panel_render_workers[panel] = worker
+
+    def _launch_pending_panel_render(
+        self,
+        panel: str,
+        request: tuple[int, DefenseClawTUI, tuple[str, object | None]],
+    ) -> None:
+        """Promote one still-current coalesced request without an idle gap."""
+
+        if self._panel_render_pending.get(panel) != request:
+            return
+        self._panel_render_pending.pop(panel, None)
+        self._launch_deferred_panel_render(panel, request)
+
+    async def _run_deferred_panel_render(
+        self,
+        panel: str,
+        generation: int,
+        template: DefenseClawTUI,
+        store_source: tuple[str, object | None],
+    ) -> None:
+        try:
+            if panel == "overview":
+                snapshot: _OverviewRenderSnapshot | _PanelRenderSnapshot = await asyncio.to_thread(
+                    self._build_overview_render_snapshot,
+                    template,
+                    generation,
+                    store_source,
+                )
+            else:
+                snapshot = await asyncio.to_thread(
+                    self._build_panel_render_snapshot,
+                    template,
+                    panel,
+                    generation,
+                )
+            if isinstance(snapshot, _OverviewRenderSnapshot):
+                self._apply_overview_render_snapshot(snapshot)
+            else:
+                self._apply_panel_render_snapshot(snapshot)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - a panel must degrade, never WorkerFailed.
+            if generation == self._panel_render_generation and panel == self.active_panel:
+                self._set_status(f"{panel.title()} refresh deferred after transient error: {exc}")
+        finally:
+            self._panel_render_running.discard(panel)
+            self._panel_render_workers.pop(panel, None)
+            pending = self._panel_render_pending.get(panel)
+            relaunch_scheduled = False
+            if pending is not None and not getattr(self, "_app_shutting_down", False):
+                pending_generation = pending[0]
+                if pending_generation == self._panel_render_generation and panel == self.active_panel:
+                    # Keep the request visible as pending until the next-turn
+                    # launcher promotes it to running. Consumers waiting for a
+                    # stable panel must never observe a false idle window.
+                    self.call_later(self._launch_pending_panel_render, panel, pending)
+                    relaunch_scheduled = True
+            if not relaunch_scheduled:
+                self._panel_render_pending.pop(panel, None)
+
+    def _detached_render_context(self, panel: str) -> DefenseClawTUI:
+        """Copy render inputs so worker computation cannot race live mutation."""
+
+        detached = copy.copy(self)
+        detached.active_panel = panel
+        detached.help_open = False
+        detached.body_text = ""
+        detached._table_columns = ()
+        detached._table_rows = ()
+        detached._chip_click_segments = []
+        detached._enforcement_inventory_requested = True
+
+        overview = OverviewPanelModel(copy.deepcopy(self.overview_model.cfg), version=self.overview_model.version)
+        overview.set_health(copy.deepcopy(self.overview_model.health))
+        overview.set_doctor_cache(copy.deepcopy(self.overview_model.doctor))
+        overview.set_enforcement_counts(self.overview_model.enforcement)
+        overview.set_silent_bypass_count(self.overview_model.silent_bypass)
+        overview.set_ai_usage(copy.deepcopy(self.overview_model.ai_usage))
+        overview.set_skill_scanner_available(self.overview_model.skill_scanner_available)
+        detached.overview_model = overview
+
+        alerts = copy.copy(self.alerts_model)
+        alerts.store = None
+        alerts.audit_events = list(self.alerts_model.audit_events)
+        alerts.scan_blocks = list(self.alerts_model.scan_blocks)
+        alerts.egress_events = list(self.alerts_model.egress_events)
+        alerts.expanded = set(self.alerts_model.expanded)
+        alerts.selected_ids = set(self.alerts_model.selected_ids)
+        alerts.filtered = list(self.alerts_model.filtered)
+        detached.alerts_model = alerts
+
+        audit = copy.copy(self.audit_model)
+        audit.store = None
+        audit.items = list(self.audit_model.items)
+        audit.filtered = list(self.audit_model.filtered)
+        detached.audit_model = audit
+
+        logs = copy.copy(self.logs_model)
+        logs.lines = {source: list(rows) for source, rows in self.logs_model.lines.items()}
+        logs.error_messages = dict(self.logs_model.error_messages)
+        logs.verdict_rows = list(self.logs_model.verdict_rows)
+        logs.otel_rows = list(self.logs_model.otel_rows)
+        logs.cursor = dict(self.logs_model.cursor)
+        logs.cursor_moved = dict(self.logs_model.cursor_moved)
+        logs.scroll = dict(self.logs_model.scroll)
+        logs._pause_baseline = dict(self.logs_model._pause_baseline)
+        logs._refresh_signatures = dict(self.logs_model._refresh_signatures)
+        logs._filtered_lines_cache = dict(self.logs_model._filtered_lines_cache)
+        detached.logs_model = logs
+
+        detached.inventory_model = copy.copy(self.inventory_model)
+        detached._connector_hook_event_stats_cache = None
+        detached._connector_hook_event_stats_loaded_at = 0.0
+        detached._overview_audit_version_cache = None
+        detached._overview_connector_rows_signature_cache = None
+        detached._overview_live_data_signature_cache = None
+        return detached
+
+    def _worker_audit_store_source(self) -> tuple[str, object | None]:
+        """Describe a worker-safe audit reader without sharing sqlite handles."""
+
+        store = getattr(self.audit_model, "store", None) or getattr(self.alerts_model, "store", None)
+        database = getattr(store, "db", None)
+        if isinstance(database, sqlite3.Connection):
+            try:
+                row = database.execute("PRAGMA database_list").fetchone()
+                path = str(row[2] or "") if row is not None else ""
+            except Exception:  # noqa: BLE001 - in-memory model rows remain available.
+                path = ""
+            return ("path", path or None)
+        # Pure Python test doubles are safe to share; real sqlite connections
+        # are handled above and are never crossed between threads.
+        return ("shared", store)
+
+    @staticmethod
+    def _worker_store_source_token(source: tuple[str, object | None]) -> tuple[str, str]:
+        kind, value = source
+        return (kind, str(value) if kind == "path" else str(id(value)))
+
+    @staticmethod
+    def _attach_worker_audit_store(
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> object | None:
+        kind, value = source
+        if kind == "path" and value:
+            from defenseclaw.db import Store
+
+            worker_store = Store(str(value))
+            detached.audit_model.store = worker_store
+            detached.alerts_model.store = worker_store
+            return worker_store
+        if kind == "shared" and value is not None:
+            detached.audit_model.store = value
+            detached.alerts_model.store = value
+        return None
+
+    def _build_overview_render_snapshot(
+        self,
+        detached: DefenseClawTUI,
+        generation: int,
+        store_source: tuple[str, object | None],
+    ) -> _OverviewRenderSnapshot:
+        """Build exactly one coherent Overview sample off the UI thread."""
+
+        worker_store = self._attach_worker_audit_store(detached, store_source)
+        try:
+            with detached._connector_hook_event_render_cache():
+                renderable = detached._overview_renderable()
+                metrics = detached._overview_metric_data()
+                connector_rows = tuple(detached._overview_connector_rows())
+                enforcement = detached._overview_session_enforcement_counts()
+                body_signature = detached._overview_body_signature()
+                connector_signature = detached._overview_connector_rows_signature()
+                live_signature = detached._overview_live_data_signature()
+                scope_text = detached._overview_connector_scope_text().strip()
+            return _OverviewRenderSnapshot(
+                generation=generation,
+                body_text=detached.body_text,
+                body_renderable=renderable,
+                metrics=metrics,
+                connector_rows=connector_rows,
+                enforcement=enforcement,
+                body_signature=body_signature,
+                connector_rows_signature=connector_signature,
+                live_data_signature=live_signature,
+                scope_text=scope_text,
+                skill_scanner_available=detached.overview_model.skill_scanner_available,
+                audit_version=detached._overview_audit_version_cache,
+                hook_stats=tuple(
+                    (
+                        connector,
+                        int(values.get("calls", 0)),
+                        int(values.get("blocks", 0)),
+                        int(values.get("alerts", 0)),
+                        values.get("newest"),
+                    )
+                    for connector, values in (
+                        detached._connector_hook_event_stats_cache or {}
+                    ).items()
+                ),
+            )
+        finally:
+            if worker_store is not None:
+                try:
+                    worker_store.close()
+                except Exception:  # noqa: BLE001 - reader teardown is best-effort.
+                    pass
+
+    @staticmethod
+    def _build_panel_render_snapshot(
+        detached: DefenseClawTUI,
+        panel: str,
+        generation: int,
+    ) -> _PanelRenderSnapshot:
+        """Project cached signal rows without touching Textual widgets."""
+
+        body_text = detached._body_text()
+        detail_text = detached._detail_text()
+        return _PanelRenderSnapshot(
+            generation=generation,
+            panel=panel,
+            body_text=body_text,
+            body_renderable=detached._safe_body_renderable(body_text),
+            table_columns=detached._table_columns,
+            table_rows=detached._table_rows,
+            detail_text=detail_text,
+            chip_click_segments=tuple(detached._chip_click_segments),
+        )
+
+    def _apply_panel_render_snapshot(self, snapshot: _PanelRenderSnapshot) -> None:
+        """Apply a prepared signal panel generation on Textual's UI thread."""
+
+        if (
+            snapshot.generation != self._panel_render_generation
+            or snapshot.panel != self.active_panel
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        try:
+            body_widget = self.query_one("#body", Static)
+        except NoMatches:
+            return
+        self._applying_panel_snapshot = True
+        try:
+            self.body_text = snapshot.body_text
+            self._chip_click_segments = list(snapshot.chip_click_segments)
+            body_signature = (snapshot.panel, False, snapshot.body_text)
+            if body_signature != self._last_body_signature:
+                body_widget.update(snapshot.body_renderable)
+                self._last_body_signature = body_signature
+            self._table_columns = snapshot.table_columns
+            self._table_rows = snapshot.table_rows
+            self._render_native_widgets()
+            self._render_panel_controls()
+            self._render_panel_table()
+            self._apply_detail_text(snapshot.detail_text)
+            self._render_command_strip()
+            self._set_status(self.status_text or self._status_text())
+            self._refresh_hint()
+            self._panel_content_cache[snapshot.panel] = snapshot
+        finally:
+            self._applying_panel_snapshot = False
+
+    def _apply_overview_render_snapshot(self, snapshot: _OverviewRenderSnapshot) -> None:
+        """Apply a coherent Overview generation, discarding stale workers."""
+
+        if (
+            snapshot.generation != self._panel_render_generation
+            or self.active_panel != "overview"
+            or self.help_open
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        try:
+            body_widget = self.query_one("#body", Static)
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return
+        self._applying_panel_snapshot = True
+        try:
+            current_scroll_y = float(scroller.scroll_y)
+            self.body_text = snapshot.body_text
+            if (
+                snapshot.body_signature != self._last_body_signature
+                or snapshot.connector_rows_signature != self._overview_connector_rows_signature_cache
+                or snapshot.live_data_signature != self._overview_live_data_signature_cache
+            ):
+                body_widget.update(snapshot.body_renderable)
+                current_scroll_y = self._restore_overview_scroll(scroller, current_scroll_y) or 0.0
+            self._last_body_signature = snapshot.body_signature
+            self._overview_connector_rows_signature_cache = snapshot.connector_rows_signature
+            self._overview_live_data_signature_cache = snapshot.live_data_signature
+            self._overview_last_render_scroll_y = current_scroll_y
+            self._overview_audit_version_cache = snapshot.audit_version
+            self._connector_hook_event_stats_cache = {
+                connector: {
+                    "calls": calls,
+                    "blocks": blocks,
+                    "alerts": alerts,
+                    "newest": newest,
+                }
+                for connector, calls, blocks, alerts, newest in snapshot.hook_stats
+            }
+            self._connector_hook_event_stats_loaded_at = monotonic()
+            self.overview_model.set_skill_scanner_available(snapshot.skill_scanner_available)
+            self._apply_overview_metric_snapshot(snapshot.metrics)
+            self._apply_overview_scope_text(snapshot.scope_text)
+            self._table_columns = ()
+            self._table_rows = ()
+            self._render_panel_controls()
+            self._render_panel_table()
+            self._apply_detail_text("")
+            self._render_command_strip()
+            self._set_status(self.status_text or self._status_text())
+            self._refresh_hint()
+            self._overview_render_snapshot = snapshot
+        finally:
+            self._applying_panel_snapshot = False
+
+    def _set_overview_metrics_visible(self, visible: bool) -> None:
+        try:
+            metrics = self.query_one("#overview-metrics", OverviewMetrics)
+        except NoMatches:
+            return
+        metrics.set_class(not visible, "hidden")
+
+    def _apply_overview_metric_snapshot(self, metrics_data: tuple[MetricDatum, ...]) -> None:
+        try:
+            metrics = self.query_one("#overview-metrics", OverviewMetrics)
+        except NoMatches:
+            return
+        visible = self.active_panel == "overview" and not self.help_open
+        metrics.set_class(not visible, "hidden")
+        if visible:
+            metrics.refresh_metrics(metrics_data)
+
+    def _apply_overview_scope_text(self, text: str) -> None:
+        try:
+            scope = self.query_one("#overview-scope", Static)
+        except NoMatches:
+            return
+        visible = self.active_panel == "overview" and not self.help_open and bool(text)
+        scope.set_class(not visible, "hidden")
+        if visible:
+            scope.update(self._safe_body_renderable(text))
+
+    def _apply_detail_text(self, detail: str) -> None:
+        try:
+            panel = self.query_one("#detail-panel", VerticalScroll)
+            body = self.query_one("#detail-panel-body", Static)
+        except NoMatches:
+            return
+        self.detail_text = detail
+        if not detail:
+            panel.add_class("hidden")
+            self._last_detail_signature = None
+            return
+        panel.remove_class("hidden")
+        signature = (self.active_panel, detail)
+        if signature != self._last_detail_signature:
+            body.update(self._safe_body_renderable(detail))
+            panel.scroll_home(animate=False)
+            self._last_detail_signature = signature
 
     def action_next_panel(self) -> None:
         visible = self._visible_panels()
@@ -2448,15 +3145,25 @@ class DefenseClawTUI(App[None]):
                     next_hint = suggested_next_action(label, exit_code)
                     self.activity_model.finish_entry(
                         exit_code,
+                        cancelled=event.cancelled,
                         config_reloaded=config_reloaded,
                         restart_completed=restart_completed,
                         doctor_cache_refreshed=doctor_cache_refreshed,
                         suggested_next_action=next_hint,
                     )
-                    color = "#34D399" if event.exit_code == 0 else "#F87171"
-                    self._write_activity(f"[{color}]exit {event.exit_code}[/] in {event.duration:.2f}s")
-                    self._strip_finished(event.exit_code or 0, event.duration or 0.0)
-                    if event.exit_code == 0:
+                    if event.cancelled:
+                        self._write_activity(
+                            f"[#FBBF24]cancelled[/] in {event.duration:.2f}s"
+                        )
+                    else:
+                        color = "#34D399" if event.exit_code == 0 else "#F87171"
+                        self._write_activity(f"[{color}]exit {event.exit_code}[/] in {event.duration:.2f}s")
+                    self._strip_finished(
+                        event.exit_code or 0,
+                        event.duration or 0.0,
+                        cancelled=event.cancelled,
+                    )
+                    if event.exit_code == 0 and not event.cancelled:
                         await self._handle_successful_command(binary, args)
                     elif binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
                         # A setup-family run failed (non-zero exit). Clear the
@@ -2516,6 +3223,13 @@ class DefenseClawTUI(App[None]):
             self._refresh_hint()
 
     def _render_chrome(self) -> None:
+        if not self._applying_panel_snapshot:
+            # A direct render represents newer UI/model state than any queued
+            # background projection (for example a filter key pressed while an
+            # Alerts snapshot was computing). Invalidate that work before it
+            # can apply over the interaction.
+            self._panel_render_generation += 1
+            self._panel_render_pending.pop(self.active_panel, None)
         try:
             tabs = self.query_one("#tabs", Tabs)
         except NoMatches:
@@ -2563,15 +3277,20 @@ class DefenseClawTUI(App[None]):
                 and self._last_body_signature is not None
             )
             wheel_active = self._overview_scroll_activity_recent() and self._last_body_signature is not None
-            live_data_changed = (
-                False if wheel_active else self._overview_live_data_changed_since_render()
-            )
-            if (scrolling_now or wheel_active) and not live_data_changed:
-                self._overview_last_render_scroll_y = current_scroll_y
-                self._table_columns = ()
-                self._table_rows = ()
-            else:
-                with self._connector_hook_event_render_cache():
+            # Change detection and rendering consume the same sampled event
+            # window. Previously the change check opened one cache scope and
+            # the render opened another, so a single passive repaint could
+            # query and classify the same hook rows twice on Textual's event
+            # loop. Keeping one scope makes each repaint one bounded sample.
+            with self._connector_hook_event_render_cache():
+                live_data_changed = (
+                    False if wheel_active else self._overview_live_data_changed_since_render()
+                )
+                if (scrolling_now or wheel_active) and not live_data_changed:
+                    self._overview_last_render_scroll_y = current_scroll_y
+                    self._table_columns = ()
+                    self._table_rows = ()
+                else:
                     renderable = self._overview_renderable()
                     body_signature = self._overview_body_signature()
                     connector_rows_signature = self._overview_connector_rows_signature()
@@ -2623,6 +3342,17 @@ class DefenseClawTUI(App[None]):
         self._render_command_strip()
         self._set_status(self.status_text or self._status_text())
         self._refresh_hint()
+        if self.active_panel in {"alerts", "audit", "logs"} and not self.help_open:
+            self._panel_content_cache[self.active_panel] = _PanelRenderSnapshot(
+                generation=self._panel_render_generation,
+                panel=self.active_panel,
+                body_text=self.body_text,
+                body_renderable=self._safe_body_renderable(self.body_text),
+                table_columns=self._table_columns,
+                table_rows=self._table_rows,
+                detail_text=self.detail_text,
+                chip_click_segments=tuple(self._chip_click_segments),
+            )
 
     @staticmethod
     def _safe_body_renderable(content: str) -> Text:
@@ -2967,7 +3697,7 @@ class DefenseClawTUI(App[None]):
         if text:
             scope.update(self._safe_body_renderable(text))
 
-    def _render_panel_controls(self) -> None:
+    def _render_panel_control_visibility(self) -> None:
         overview = self.query_one("#overview-controls", Horizontal)
         alerts = self.query_one("#alerts-controls", Horizontal)
         audit = self.query_one("#audit-controls", Horizontal)
@@ -3023,6 +3753,9 @@ class DefenseClawTUI(App[None]):
         # buttons naturally disable because no row is selected.
         plugins.set_class(self.active_panel != "plugins" or self.help_open, "hidden")
         tools.set_class(self.active_panel != "tools" or self.help_open, "hidden")
+
+    def _render_panel_controls(self) -> None:
+        self._render_panel_control_visibility()
         # Stdin pipe is panel-scoped to Activity but command-state-scoped
         # to "executor is busy" — handle it after the per-panel sync so
         # the visibility check sees the freshest state.
@@ -3060,13 +3793,8 @@ class DefenseClawTUI(App[None]):
         like a static palette dump.
         """
 
-        gateway_state = ""
-        cards = self.overview_model.service_cards()
-        for card in cards:
-            if card.name.lower() == "gateway":
-                gateway_state = (card.state or "").lower()
-                break
-        gateway_offline = gateway_state in {"", "unknown", "down", "stopped", "offline", "error", "failed"}
+        gateway_state = self.overview_model.gateway_availability().state.strip().lower()
+        gateway_offline = gateway_state in {"down", "stopped", "offline"}
         gateway_running = gateway_state in {"running", "ok", "healthy", "up"}
 
         ai_box = self.overview_model.ai_discovery_box()
@@ -3415,7 +4143,15 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         if filter_input.value != model.filter_text:
-            filter_input.value = model.filter_text
+            if not model.loaded and filter_input.value:
+                # Initial catalog auto-loads can complete a repaint between
+                # Input.value changing and Textual delivering Input.Changed.
+                # Preserve that fresh operator text instead of copying the
+                # still-empty model value back over it; apply_loaded() will
+                # reapply the filter to the eventual rows.
+                model.set_filter(filter_input.value)
+            else:
+                filter_input.value = model.filter_text
 
     def _on_catalog_filter_input_changed(self, panel: str, value: str) -> None:
         """Live-filter the catalog model as the user types in the Input.
@@ -3710,42 +4446,49 @@ class DefenseClawTUI(App[None]):
     # without scrolling the TUI back to the start of a long run.
     # ------------------------------------------------------------------
 
-    def _clipboard_copy(self, text: str) -> tuple[bool, str]:
+    def _clipboard_copy(self, text: str, *, platform: str | None = None) -> tuple[bool, str]:
         """Push ``text`` to the OS clipboard, returning ``(ok, transport)``.
 
-        Tries the platform-appropriate command-line tool in order:
+        Windows uses the native Unicode clipboard API. Other platforms try
         pbcopy (macOS) → wl-copy (Wayland) → xclip → xsel (X11). If
-        none of those exist or all of them fail, we fall back to a
+        the native/API transport is unavailable, we fall back to a
         last-resort file at ``~/.defenseclaw/tui/last-copy.txt`` so
         operators on headless boxes still have *some* way to recover
         the payload. Failure here never crashes the TUI — the caller
         toasts the outcome.
         """
 
-        if not text:
-            return False, ""
-        candidates: tuple[tuple[str, tuple[str, ...]], ...] = (
-            ("pbcopy", ("pbcopy",)),
-            ("wl-copy", ("wl-copy",)),
-            ("xclip", ("xclip", "-selection", "clipboard")),
-            ("xsel", ("xsel", "--clipboard", "--input")),
-        )
-        payload = text.encode("utf-8", errors="replace")
-        for name, argv in candidates:
-            if shutil.which(argv[0]) is None:
-                continue
+        current_platform = os.name if platform is None else platform
+        if current_platform == "nt":
             try:
-                proc = subprocess.run(
-                    argv,
-                    input=payload,
-                    check=False,
-                    capture_output=True,
-                    timeout=4,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-            if proc.returncode == 0:
-                return True, name
+                copy_windows_clipboard(text)
+            except (ClipboardError, OSError):
+                pass
+            else:
+                return True, "Windows"
+        else:
+            candidates: tuple[tuple[str, tuple[str, ...]], ...] = (
+                ("pbcopy", ("pbcopy",)),
+                ("wl-copy", ("wl-copy",)),
+                ("xclip", ("xclip", "-selection", "clipboard")),
+                ("xsel", ("xsel", "--clipboard", "--input")),
+            )
+            payload = text.encode("utf-8", errors="replace")
+            for name, argv in candidates:
+                if shutil.which(argv[0]) is None:
+                    continue
+                try:
+                    proc = subprocess.run(
+                        argv,
+                        input=payload,
+                        check=False,
+                        capture_output=True,
+                        timeout=4,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if proc.returncode == 0:
+                    return True, name
         # File fallback: still useful — operators can ``cat`` it from
         # another shell. Mode 0600 so the contents stay scoped to the
         # current user; activity output frequently contains tokens
@@ -3753,7 +4496,7 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-copy.txt"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            _write_owner_only_text(target, text)
+            _write_owner_only_text(target, text, protect_parent=True)
         except OSError:
             return False, ""
         return True, f"file:{target}"
@@ -3803,14 +4546,14 @@ class DefenseClawTUI(App[None]):
                 # surface that so the operator knows where to ``cat`` from.
                 self.notify_toast(
                     "info",
-                    f"No clipboard tool found · wrote output to {transport[5:]}",
+                    f"Clipboard unavailable · wrote output to fallback file {transport[5:]}",
                 )
             else:
                 self.notify_toast("success", f"Copied last output to clipboard ({transport}).")
         else:
             self.notify_toast(
                 "error",
-                "Copy failed — install pbcopy / wl-copy / xclip and try again.",
+                "Clipboard unavailable and fallback write failed.",
             )
 
     def action_run_diagnose(self) -> None:
@@ -3872,6 +4615,7 @@ class DefenseClawTUI(App[None]):
                     *resolve_subprocess_argv("defenseclaw", ("doctor",)),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    **captured_subprocess_kwargs(),
                 )
             except (FileNotFoundError, OSError) as exc:
                 # Most common failure here: ``defenseclaw`` binary not on
@@ -3926,7 +4670,7 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-run.log"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            _write_owner_only_text(target, header + body + "\n")
+            _write_owner_only_text(target, header + body + "\n", protect_parent=True)
         except OSError as exc:
             self.notify_toast("error", f"Save failed: {exc}")
             return
@@ -3959,7 +4703,11 @@ class DefenseClawTUI(App[None]):
                 f"# {entry.status_label}\n"
                 f"# saved {datetime.now(timezone.utc).isoformat()}\n\n"
             )
-            _write_owner_only_text(target, header + "\n".join(entry.output) + "\n")
+            _write_owner_only_text(
+                target,
+                header + "\n".join(entry.output) + "\n",
+                protect_parent=self.data_dir is not None,
+            )
             # F-0782: command output frequently contains tokens/secrets, so
             # the saved transcript must be owner-only, not world-readable.
         except OSError as exc:
@@ -4028,10 +4776,10 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.cwd()) / f"defenseclaw-ai-usage-{stamp}.json"
         payload = asdict(snapshot)
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps(payload, indent=2, default=self._json_default),
-                encoding="utf-8",
+            atomic_write_private_bytes(
+                target,
+                json.dumps(payload, indent=2, default=self._json_default).encode("utf-8"),
+                protect_parent=self.data_dir is not None,
             )
         except OSError as exc:
             self._set_status(f"AI export failed: {exc}")
@@ -4094,9 +4842,16 @@ class DefenseClawTUI(App[None]):
             if multi_connectors and not selected_connector
             else self._connector_health_for_metric(connector, use_single=not multi_connectors or bool(selected_connector))
         )
-        health = self.overview_model.health
-        gateway_state = (health.gateway.state if health is not None else "").strip().lower()
+        gateway_state = self.overview_model.gateway_availability().state.strip().lower()
         gateway_online = gateway_state in {"running", "ready", "healthy", "ok"}
+        gateway_unavailable_label = {
+            "starting": "gateway starting",
+            "reconnecting": "gateway reconnecting",
+            "error": "gateway health error",
+            "failed": "gateway health error",
+            "unknown": "gateway status pending",
+            "": "gateway status pending",
+        }.get(gateway_state, "gateway offline")
 
         sev = self._alert_severity_counts_for_connectors(scope_connectors)
         fleet_sev = self._alert_severity_counts("")
@@ -4149,73 +4904,45 @@ class DefenseClawTUI(App[None]):
                 requests = connector_health.requests
                 inspections = connector_health.tool_inspections
                 errors = connector_health.errors
-                tool_blocks = connector_health.tool_blocks
-                subprocess_blocks = connector_health.subprocess_blocks
             else:
-                requests = inspections = errors = tool_blocks = subprocess_blocks = 0
-            blocks_total = tool_blocks + subprocess_blocks
-            session_since = self._session_start_for_connectors(scope_connectors)
+                requests = inspections = errors = 0
             allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown_for_connectors(
-                scope_connectors, since=session_since
+                scope_connectors
             )
-            history_ready = health is not None
-            live_hook_calls, live_blocks_value, has_live_hook_counts = self._connector_live_counts_for_connectors(scope_connectors)
-            fleet_live_hook_calls, fleet_live_blocks_value, has_fleet_live_hook_counts = self._connector_live_counts_for_connectors(())
-            if history_ready and not has_live_hook_counts:
-                total_allow, total_alert, total_block, _total_newest = self._connector_hook_stats_for_connectors(scope_connectors)
-            else:
-                total_allow = total_alert = total_block = 0
-            if history_ready and not has_fleet_live_hook_counts:
-                fleet_total_allow, fleet_total_alert, fleet_total_block, _fleet_total_newest = self._connector_hook_stats_for_connectors()
-            else:
-                fleet_total_allow = fleet_total_alert = fleet_total_block = 0
+            total_allow, total_alert, total_block, _total_newest = (
+                self._connector_hook_stats_for_connectors(scope_connectors)
+            )
+            fleet_total_allow, fleet_total_alert, fleet_total_block, _fleet_total_newest = (
+                self._connector_hook_stats_for_connectors()
+            )
 
-            # Prefer the gateway's live per-connector request counters when
-            # available. Older gateways did not expose the connector array,
-            # so after /health has loaded fall back to grouped audit totals.
-            # Before the first health poll, avoid flashing all-time history in
-            # the header; use the bounded recent window instead.
+            # Persisted audit aggregates are the counter source of truth.
+            # /health describes process/session status only; substituting its
+            # restart-scoped counters here made Overview jump between
+            # incompatible all-time and live-session windows.
             hook_timestamps = self._hook_event_timestamps_for_connectors(scope_connectors)
             total_hook_calls = total_allow + total_alert + total_block
             fleet_total_hook_calls = fleet_total_allow + fleet_total_alert + fleet_total_block
-            fleet_hook_calls = (
-                fleet_live_hook_calls
-                if has_fleet_live_hook_counts
-                else fleet_total_hook_calls
-            )
-            hook_calls = (
-                live_hook_calls
-                if has_live_hook_counts
-                else (requests or total_hook_calls or len(hook_timestamps))
-            )
+            fleet_hook_calls = fleet_total_hook_calls
+            hook_calls = total_hook_calls
             outside_roster_hook_calls = max(fleet_hook_calls - hook_calls, 0) if scope_connectors and not selected_connector else 0
             block_timestamps = self._block_event_timestamps_for_connectors(scope_connectors)
-            fleet_block_timestamps = self._block_event_timestamps()
-            blocks_value = (
-                live_blocks_value
-                if has_live_hook_counts
-                else (blocks_total or total_block or len(block_timestamps))
-            )
-            fleet_blocks_value = (
-                fleet_live_blocks_value
-                if has_fleet_live_hook_counts
-                else (fleet_total_block or len(fleet_block_timestamps))
-            )
+            blocks_value = total_block
+            fleet_blocks_value = fleet_total_block
             outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
             finding_timestamps = self._finding_event_timestamps_for_connectors(scope_connectors)
 
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
                 call_detail_parts.append(
-                    f"session [{TOKENS.accent_green}]a{allow_count}[/] "
+                    f"recent [{TOKENS.accent_green}]a{allow_count}[/] "
                     f"[{TOKENS.accent_amber}]w{alert_count}[/] "
                     f"[{TOKENS.accent_red}]b{block_decisions}[/]"
                 )
                 if top_hook:
                     call_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{top_hook}[/]")
                 if selected_connector:
-                    fleet_prefix = "live fleet" if has_fleet_live_hook_counts else "fleet"
-                    call_detail_parts.append(f"{fleet_prefix} {fleet_hook_calls}")
+                    call_detail_parts.append(f"fleet {fleet_hook_calls}")
                 elif outside_roster_hook_calls:
                     call_detail_parts.append(f"outside roster {outside_roster_hook_calls}")
             elif inspections or errors:
@@ -4224,7 +4951,7 @@ class DefenseClawTUI(App[None]):
                 if errors:
                     call_detail_parts.append(f"[{TOKENS.accent_red}]{errors}[/] errors")
             elif not gateway_online:
-                call_detail_parts.append(f"[{TOKENS.accent_amber}]gateway offline · press : then start[/]")
+                call_detail_parts.append(f"[{TOKENS.accent_amber}]{gateway_unavailable_label}[/]")
             elif requests == 0:
                 call_detail_parts.append("waiting for tool calls")
             else:
@@ -4235,16 +4962,18 @@ class DefenseClawTUI(App[None]):
 
             top_blocked_target, top_blocked_count = self._top_block_target_for_connectors(scope_connectors)
             block_detail_parts: list[str] = []
-            if tool_blocks:
-                block_detail_parts.append(f"[{TOKENS.accent_red}]{tool_blocks}[/] tool")
-            if subprocess_blocks:
-                block_detail_parts.append(f"[{TOKENS.accent_red}]{subprocess_blocks}[/] subprocess")
             if top_blocked_target:
                 short_target = top_blocked_target if len(top_blocked_target) <= 22 else top_blocked_target[:21] + "…"
                 block_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{short_target}[/] x{top_blocked_count}")
             if not block_detail_parts:
-                if not gateway_online:
-                    block_detail_parts.append(f"[{TOKENS.text_muted}]no data — gateway offline[/]")
+                if blocks_value:
+                    block_detail_parts.append(
+                        f"[{TOKENS.accent_red}]{blocks_value}[/] persisted"
+                    )
+                elif not gateway_online:
+                    block_detail_parts.append(
+                        f"[{TOKENS.text_muted}]0 persisted · {gateway_unavailable_label}[/]"
+                    )
                 else:
                     block_detail_parts.append("no blocks yet")
             if selected_connector:
@@ -4443,85 +5172,15 @@ class DefenseClawTUI(App[None]):
                 return health.connector
         return None
 
-    @staticmethod
-    def _connector_health_has_live_window(connector_health: Any) -> bool:
-        """True when a health row represents a current gateway counter window."""
-
-        if not connector_health:
-            return False
-        if (getattr(connector_health, "since", "") or "").strip():
-            return True
-        return any(
-            _coerce_nonnegative_int(getattr(connector_health, field, 0))
-            for field in (
-                "requests",
-                "errors",
-                "tool_inspections",
-                "tool_blocks",
-                "subprocess_blocks",
-            )
-        )
-
-    def _connector_live_counts_for_connectors(
-        self, connectors: Iterable[str] = (),
-    ) -> tuple[int, int, bool]:
-        """Return live ``(requests, blocks, has_live_window)`` for a scope."""
-
-        health = self.overview_model.health
-        if health is None:
-            return 0, 0, False
-        scope = self._normalize_connector_scope(connectors)
-        rows: list[Any] = []
-        for conn in health.connectors:
-            name = conn.name.strip().lower()
-            if not scope or any(want in name for want in scope):
-                rows.append(conn)
-        if not rows and health.connector is not None:
-            name = health.connector.name.strip().lower()
-            if not scope or any(want in name for want in scope):
-                rows.append(health.connector)
-        live_rows = [row for row in rows if self._connector_health_has_live_window(row)]
-        if not live_rows:
-            return 0, 0, False
-        requests = sum(_coerce_nonnegative_int(getattr(row, "requests", 0)) for row in live_rows)
-        blocks = sum(
-            _coerce_nonnegative_int(getattr(row, "tool_blocks", 0))
-            + _coerce_nonnegative_int(getattr(row, "subprocess_blocks", 0))
-            for row in live_rows
-        )
-        return requests, blocks, True
-
-    def _session_start_for_connectors(
-        self, connectors: Iterable[str] = (),
-    ) -> datetime | None:
-        """Start of the active gateway/session window for a connector scope."""
-
-        health = self.overview_model.health
-        if health is None:
-            return None
-        scope = self._normalize_connector_scope(connectors)
-        starts: list[datetime] = []
-        for conn in health.connectors:
-            name = conn.name.strip().lower()
-            if scope and not any(want in name for want in scope):
-                continue
-            since = _parse_timestamp(conn.since)
-            if since is not None:
-                starts.append(since)
-        if not starts and health.connector is not None:
-            name = health.connector.name.strip().lower()
-            if not scope or any(want in name for want in scope):
-                since = _parse_timestamp(health.connector.since)
-                if since is not None:
-                    starts.append(since)
-        if not starts:
-            since = _parse_timestamp(health.guardrail.since)
-            if since is not None:
-                starts.append(since)
-        return min(starts) if starts else None
-
     def _overview_session_enforcement_counts(self) -> EnforcementCounts:
-        """Overview counts using the active gateway/session where possible."""
+        """Persisted Overview enforcement counts independent of health.
+
+        The historical method name is retained for compatibility with focused
+        callers, but these values deliberately no longer follow a gateway
+        session boundary.  Status and uptime remain health-derived; audit and
+        scan statistics remain stable when that health endpoint restarts or
+        disappears.
+        """
 
         if (
             self._connector_hook_event_cache_enabled
@@ -4531,53 +5190,31 @@ class DefenseClawTUI(App[None]):
 
         current = self.overview_model.enforcement
         scope = tuple(self._active_connector_names())
-        session_start = self._session_start_for_connectors(scope)
         total_scans = current.total_scans
         store = getattr(self.alerts_model, "store", None) or getattr(self.audit_model, "store", None)
         loader = getattr(store, "count_scan_results_since", None)
         if callable(loader):
             try:
-                total_scans = int(loader(session_start))
+                total_scans = int(loader(None))
             except Exception:  # noqa: BLE001 - retain the last known count.
                 total_scans = current.total_scans
+        if scope:
+            _allow, active_alerts, _block, _newest = self._connector_hook_stats_for_connectors(
+                scope
+            )
+        else:
+            active_alerts = current.active_alerts
         counts = EnforcementCounts(
             blocked_skills=current.blocked_skills,
             allowed_skills=current.allowed_skills,
             blocked_mcps=current.blocked_mcps,
             allowed_mcps=current.allowed_mcps,
             total_scans=total_scans,
-            active_alerts=self._session_alert_count_for_connectors(scope),
+            active_alerts=active_alerts,
         )
         if self._connector_hook_event_cache_enabled:
             self._overview_session_enforcement_counts_render_cache = counts
         return counts
-
-    def _session_alert_count_for_connectors(self, connectors: Iterable[str] = ()) -> int:
-        """Count current-session alert decisions for an Overview connector scope."""
-
-        scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
-        seen: set[tuple[str, ...]] = set()
-
-        if self.alerts_model is not None:
-            for row in self.alerts_model.flat_rows():
-                if row.kind == "scan_finding":
-                    continue
-                event = row.event
-                if not self._event_in_session(event, since):
-                    continue
-                if not self._cached_event_matches_scope(event, scope):
-                    continue
-                bucket = self._cached_event_metric_severity_bucket(event)
-                if bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
-                    seen.add(self._event_count_key(event))
-
-        summary = self._recent_hook_scope_summary(scope, since=since)
-        if summary["alert"]:
-            for event in summary["alert_events"]:
-                seen.add(self._event_count_key(event))
-
-        return len(seen)
 
     @staticmethod
     def _event_count_key(event: Any) -> tuple[str, ...]:
@@ -4615,7 +5252,7 @@ class DefenseClawTUI(App[None]):
 
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         seen: set[tuple[str, ...]] = set()
         if self.alerts_model is not None:
             for row in self.alerts_model.flat_rows():
@@ -4683,7 +5320,7 @@ class DefenseClawTUI(App[None]):
         if not scope:
             return True
         got = DefenseClawTUI._event_connector(event)
-        return bool(got) and any(want in got for want in scope)
+        return got in scope
 
     def _cached_event_connector(self, event: Any) -> str:
         if not self._connector_hook_event_cache_enabled:
@@ -4714,36 +5351,15 @@ class DefenseClawTUI(App[None]):
         if not normalized:
             return True
         got = self._cached_event_connector(event)
-        return bool(got) and any(want in got for want in normalized)
+        return got in normalized
 
     @staticmethod
     def _hook_decision(event: Any) -> str:
-        details = _parse_kv_details(getattr(event, "details", "") or "")
-        structured = getattr(event, "structured", None)
-        if isinstance(structured, dict):
-            action = str(structured.get("action") or details.get("action", "")).strip().lower()
-            raw_action = str(structured.get("raw_action") or details.get("raw_action", "")).strip().lower()
-            mode = str(structured.get("mode") or details.get("mode", "")).strip().lower()
-            if "would_block" in structured:
-                would_block = bool(structured.get("would_block"))
-            else:
-                would_block = details.get("would_block", "").strip().lower() == "true"
-        else:
-            action = details.get("action", "").strip().lower()
-            raw_action = details.get("raw_action", "").strip().lower()
-            mode = details.get("mode", "").strip().lower()
-            would_block = details.get("would_block", "").strip().lower() == "true"
-
-        if action in {"block", "deny"}:
-            return "block"
-        if action in {"alert", "warn"}:
-            return "alert"
-        if action == "allow" and mode == "observe":
-            if raw_action in {"block", "deny"} or would_block:
-                return "alert"
-            if raw_action in {"alert", "warn"}:
-                return "alert"
-        return action
+        return connector_hook_decision(
+            getattr(event, "details", "") or "",
+            getattr(event, "structured", None),
+            getattr(event, "enforced", None),
+        )
 
     def _connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
         """All-time connector-hook counts plus latest timestamps.
@@ -4764,6 +5380,15 @@ class DefenseClawTUI(App[None]):
         store = getattr(self.audit_model, "store", None) if self.audit_model is not None else None
         loader = getattr(store, "connector_hook_event_stats", None)
         if callable(loader):
+            version_loader = getattr(store, "audit_data_version", None)
+            if callable(version_loader):
+                try:
+                    # Capture the version before the aggregate. If a writer
+                    # commits during the query, the next poll observes another
+                    # change instead of treating a stale snapshot as current.
+                    self._overview_audit_version_cache = version_loader()
+                except Exception:  # noqa: BLE001 - version checks are an optimization.
+                    self._overview_audit_version_cache = None
             try:
                 raw_stats = loader() or {}
             except Exception:  # noqa: BLE001 - fall back to the recent in-memory window.
@@ -4773,12 +5398,15 @@ class DefenseClawTUI(App[None]):
                 if not connector or not isinstance(raw, dict):
                     continue
                 calls = _coerce_nonnegative_int(raw.get("calls"))
-                blocks = _coerce_nonnegative_int(raw.get("blocks"))
-                alerts = _coerce_nonnegative_int(raw.get("alerts"))
+                blocks = min(_coerce_nonnegative_int(raw.get("blocks")), calls)
+                alerts = min(
+                    _coerce_nonnegative_int(raw.get("alerts")),
+                    max(calls - blocks, 0),
+                )
                 stats[connector] = {
                     "calls": calls,
-                    "blocks": min(blocks, calls),
-                    "alerts": min(alerts, calls),
+                    "blocks": blocks,
+                    "alerts": alerts,
                     "newest": _parse_timestamp(raw.get("newest")),
                 }
         if not stats:
@@ -4812,7 +5440,7 @@ class DefenseClawTUI(App[None]):
         allow = alert = block = 0
         newest: datetime | None = None
         for connector, row in self._connector_hook_event_stats().items():
-            if scope and not any(want in connector for want in scope):
+            if scope and connector not in scope:
                 continue
             calls = _coerce_nonnegative_int(row.get("calls"))
             row_alerts = min(_coerce_nonnegative_int(row.get("alerts")), calls)
@@ -4892,12 +5520,9 @@ class DefenseClawTUI(App[None]):
     @staticmethod
     def _is_block_event(event: Any) -> bool:
         action = (getattr(event, "action", "") or "").lower()
-        details = (getattr(event, "details", "") or "").lower()
-        return (
-            action in {"block", "guardrail-block", "deny", "quarantine"}
-            or "action=block" in details
-            or "action=deny" in details
-        )
+        if action == "connector-hook":
+            return DefenseClawTUI._hook_decision(event) == "block"
+        return action in {"block", "guardrail-block", "deny", "quarantine"}
 
     def _findings_metric_detail(
         self,
@@ -5000,18 +5625,10 @@ class DefenseClawTUI(App[None]):
         return self._enforcement_scope_breakdown((connector,))
 
     def _enforcement_scope_breakdown(self, connectors: Iterable[str]) -> tuple[int, int, int]:
-        """``(calls, alerts, blocks)`` for an Overview connector scope."""
+        """Authoritative persisted ``(calls, alerts, blocks)`` for a scope."""
 
-        since = self._session_start_for_connectors(connectors)
-        allow, alert, block, _top = self._connector_hook_breakdown_for_connectors(
-            connectors, since=since
-        )
-        live_calls, live_blocks, has_live = self._connector_live_counts_for_connectors(connectors)
-        return (
-            live_calls if has_live else allow + alert + block,
-            alert,
-            live_blocks if has_live else block,
-        )
+        allow, alert, block, _newest = self._connector_hook_stats_for_connectors(connectors)
+        return allow + alert + block, alert, block
 
     _BLOCK_VERDICTS = frozenset({"block", "blocked", "deny", "denied", "quarantine", "quarantined"})
     _ALLOW_VERDICTS = frozenset({"allow", "allowed", "clean", "ok", "pass"})
@@ -5209,7 +5826,6 @@ class DefenseClawTUI(App[None]):
         overview_active = self.active_panel == "overview" and not self.help_open
         if overview_active:
             self._render_overview_scope_indicator()
-            self._render_overview_metrics()
             self._schedule_overview_deferred_render()
             return
         self._render_chrome()
@@ -5325,7 +5941,7 @@ class DefenseClawTUI(App[None]):
                 return
             if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
                 return
-            self._render_chrome()
+            self._schedule_active_panel_refresh("connector-filter")
 
         self.set_timer(0.2, render_if_current)
 
@@ -5347,9 +5963,27 @@ class DefenseClawTUI(App[None]):
             self._overview_sampled_refresh_scheduled = False
             if not self._overview_sampled_refresh_allowed(allow_scrolled=allow_scrolled):
                 return
-            self._render_chrome()
+            self._schedule_active_panel_refresh("overview-sample")
 
         self.set_timer(delay, refresh_if_still_allowed)
+
+    def _schedule_active_panel_refresh(self, reason: str = "") -> int:
+        """Invalidate/coalesce the active panel through the deferred pipeline.
+
+        External config refresh can call this after installing its new config
+        generation. The render generation is intentionally independent of the
+        config generation: whichever config update wins simply schedules the
+        latest immutable panel snapshot, and older work is discarded here.
+        """
+
+        del reason  # Reserved for diagnostics without coupling callers to logs.
+        if getattr(self, "_app_shutting_down", False):
+            return self._panel_render_generation
+        panel = self.active_panel
+        self._panel_render_generation += 1
+        generation = self._panel_render_generation
+        self._queue_deferred_panel_render(panel, generation)
+        return generation
 
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
         """Resolve a click on the ``#body`` Static to a connector chip action.
@@ -5393,7 +6027,7 @@ class DefenseClawTUI(App[None]):
                 return False
         except NoMatches:
             pass
-        # ``_overview_renderable`` paints the five-line logo, the tagline, and
+        # ``_overview_renderable`` paints the logo, the tagline, and
         # one spacer before the connector chip. The fallback ``body_text`` has
         # a different line layout, so content validation alone misses clicks on
         # the visible chip.
@@ -5418,10 +6052,10 @@ class DefenseClawTUI(App[None]):
         """Per-connector split lines for the Hook Calls and Blocks tiles.
 
         Returns ``(calls_detail, blocks_detail)``. Each active connector is
-        scored independently via :meth:`_connector_hook_breakdown` so the
+        scored independently via the persisted grouped aggregate so the
         single tile row stays intact (D1=B) while the detail sub-line
-        attributes recent activity to the right connector — e.g.
-        ``recent codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists
+        attributes complete activity to the right connector — e.g.
+        ``persisted codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists
         only connectors that actually blocked something. Returns ``("", "")``
         when fewer than two connectors are active, leaving the
         single-connector detail lines unchanged.
@@ -5433,12 +6067,11 @@ class DefenseClawTUI(App[None]):
         call_parts: list[str] = []
         block_parts: list[str] = []
         for connector in connectors:
-            since = self._session_start_for_connectors((connector,))
-            allow, alert, block, _top = self._connector_hook_breakdown_for_connectors(
-                (connector,), since=since
+            allow, alert, block, _newest = self._connector_hook_stats_for_connectors(
+                (connector,)
             )
             call_parts.append(
-                f"[{TOKENS.text_secondary}]session[/] [{TOKENS.accent_cyan}]{connector}[/] "
+                f"[{TOKENS.text_secondary}]persisted[/] [{TOKENS.accent_cyan}]{connector}[/] "
                 f"[{TOKENS.accent_green}]a{allow}[/] "
                 f"[{TOKENS.accent_amber}]w{alert}[/] "
                 f"[{TOKENS.accent_red}]b{block}[/]"
@@ -5464,6 +6097,8 @@ class DefenseClawTUI(App[None]):
             for conn in health.connectors:
                 if conn.name:
                     out[conn.name.strip().lower()] = (conn.state or "").strip()
+            if not out and health.connector is not None and health.connector.name:
+                out[health.connector.name.strip().lower()] = (health.connector.state or "").strip()
         return out
 
     def _connector_last_activity(
@@ -5479,26 +6114,15 @@ class DefenseClawTUI(App[None]):
         remains the compatibility fallback even when live counters exist.
         """
 
-        if health_row is not None:
-            live_activity = _parse_timestamp(health_row.last_activity_at)
-            if live_activity is not None:
-                return live_activity
-
         want = connector.strip().lower()
-        if self.overview_model.health is not None:
-            stats_newest = self._connector_hook_event_stats().get(want, {}).get("newest")
-            if isinstance(stats_newest, datetime):
-                return stats_newest
-        latest: datetime | None = None
-        for event in self._recent_connector_hook_events():
-            if event.timestamp is None:
-                continue
-            attributed = self._cached_event_connector(event)
-            if attributed != want:
-                continue
-            if latest is None or event.timestamp > latest:
-                latest = event.timestamp
-        return latest
+        stats_newest = self._connector_hook_event_stats().get(want, {}).get("newest")
+        persisted = stats_newest if isinstance(stats_newest, datetime) else None
+        live = _parse_timestamp(health_row.last_activity_at) if health_row is not None else None
+        if persisted is None:
+            return live
+        if live is None:
+            return persisted
+        return max(persisted, live)
 
     def _overview_connector_rows(self) -> list[ConnectorOverviewRow]:
         """Per-connector rows for the Overview CONNECTORS table.
@@ -5526,33 +6150,18 @@ class DefenseClawTUI(App[None]):
         # Fallback status when the gateway doesn't expose connectors[] yet:
         # the gateway runs every connector in one process, so the gateway
         # state stands in for each connector.
-        gateway_state = self.overview_model.subsystem_state("gateway")
+        gateway_state = self.overview_model.gateway_availability().state
         fallback_status = "active" if gateway_state.strip().lower() == "running" else gateway_state
         now = datetime.now(timezone.utc)
         rows: list[ConnectorOverviewRow] = []
         for connector, mode in cfg.connector_modes:
             if not connector:
                 continue
-            health_row = self._connector_health_for_metric(connector, use_single=False)
-            health_has_live_window = health_row is not None and self._connector_health_has_live_window(health_row)
-            if health_has_live_window:
-                calls = _coerce_nonnegative_int(getattr(health_row, "requests", 0))
-                blocks = (
-                    _coerce_nonnegative_int(getattr(health_row, "tool_blocks", 0))
-                    + _coerce_nonnegative_int(getattr(health_row, "subprocess_blocks", 0))
-                )
-                since = _parse_timestamp(getattr(health_row, "since", ""))
-                _allow, alerts, audit_blocks, _top = self._connector_hook_breakdown_for_connectors(
-                    (connector,), since=since
-                )
-                if blocks == 0:
-                    blocks = audit_blocks
-            else:
-                if self.overview_model.health is None:
-                    allow, alerts, blocks, _top = self._connector_hook_breakdown_for_connectors((connector,))
-                else:
-                    allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors((connector,))
-                calls = allow + alerts + blocks
+            health_row = self._connector_health_for_metric(connector, use_single=True)
+            allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
+                (connector,)
+            )
+            calls = allow + alerts + blocks
             last = self._connector_last_activity(
                 connector,
                 health_row=health_row,
@@ -5611,11 +6220,7 @@ class DefenseClawTUI(App[None]):
         else:
             with self._connector_hook_event_render_cache():
                 signature = self._overview_connector_rows_signature()
-        changed = signature != self._overview_connector_rows_signature_cache
-        if changed:
-            self._connector_hook_event_stats_cache = None
-            self._connector_hook_event_stats_loaded_at = 0.0
-        return changed
+        return signature != self._overview_connector_rows_signature_cache
 
     def _overview_live_data_signature(self) -> tuple[object, ...]:
         """Fingerprint every live value shared across the Overview surfaces.
@@ -5663,26 +6268,13 @@ class DefenseClawTUI(App[None]):
         else:
             with self._connector_hook_event_render_cache():
                 signature = self._overview_live_data_signature()
-        changed = signature != self._overview_live_data_signature_cache
-        if changed:
-            # A live signature can advance from audit data even when the
-            # gateway has no per-connector counter window (older gateways).
-            # Drop the short-lived grouped-stats cache before the synchronized
-            # render so CONNECTORS does not lag behind tiles/ENFORCEMENT by one
-            # additional TTL.
-            self._connector_hook_event_stats_cache = None
-            self._connector_hook_event_stats_loaded_at = 0.0
-        return changed
+        return signature != self._overview_live_data_signature_cache
 
     def _hook_event_timestamps(self, connector: str = "") -> list[datetime]:
         """Timestamps of recent connector-hook audit events.
 
-        Each connector-hook event is one hook call (preToolUse,
-        afterShellExecution, ...), so this is the authoritative "Hook
-        Calls" series even when the gateway's connector ``requests``
-        counter stays at zero — hook connectors deliver calls
-        out-of-band from proxied LLM requests, so that counter never
-        moves for them.
+        The bounded series feeds only the sparkline.  Authoritative numeric
+        totals come from :meth:`_connector_hook_event_stats`.
         """
 
         return self._hook_event_timestamps_for_connectors((connector,) if connector else ())
@@ -5740,7 +6332,7 @@ class DefenseClawTUI(App[None]):
         """Recent block/deny events for a connector roster scope."""
 
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         events: list[Any] = list(self._recent_hook_scope_summary(scope, since=since)["block_events"])
         if self.audit_model is not None:
             events.extend(self.audit_model.items)
@@ -5786,7 +6378,7 @@ class DefenseClawTUI(App[None]):
         else:
             alert_events = list(self.alerts_model.audit_events)
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         stamps: list[datetime] = []
         seen: set[tuple[str, ...]] = set()
         for event in alert_events:
@@ -5814,7 +6406,7 @@ class DefenseClawTUI(App[None]):
 
         if self.audit_model is None:
             return []
-        since = self._session_start_for_connectors(tuple(self._active_connector_names()))
+        since = None
         stamps: list[datetime] = []
         for event in self.audit_model.items:
             action = (event.action or "").lower()
@@ -5862,7 +6454,7 @@ class DefenseClawTUI(App[None]):
 
         alert_events: list[Any] = [] if self.alerts_model is None else list(self.alerts_model.audit_events[-200:])
         scope = self._normalize_connector_scope(connectors)
-        since = self._session_start_for_connectors(scope)
+        since = None
         severity_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
         best: tuple[int, str, str] = (0, "", "")
         seen: set[tuple[str, ...]] = set()
@@ -6037,16 +6629,22 @@ class DefenseClawTUI(App[None]):
         if self._strip_state == "running":
             self._render_command_strip()
 
-    def _strip_finished(self, exit_code: int, duration: float) -> None:
+    def _strip_finished(
+        self, exit_code: int, duration: float, *, cancelled: bool = False
+    ) -> None:
         """Move running → success/failure. Strip stays until dismissed."""
 
-        self._strip_state = "success" if exit_code == 0 else "failure"
+        self._strip_state = (
+            "cancelled" if cancelled else ("success" if exit_code == 0 else "failure")
+        )
         self._strip_frozen_duration = duration
         # Build a one-line summary: for success use the last output line if
         # it's short and looks like a result, otherwise just acknowledge
         # exit code; for failure show the last (likely error) line so the
         # user sees the actual reason without leaving the panel.
-        if self._strip_state == "success":
+        if self._strip_state == "cancelled":
+            self._strip_summary = "cancelled by operator"
+        elif self._strip_state == "success":
             tail = self._strip_last_output
             self._strip_summary = (
                 tail if (tail and len(tail) <= 120) else "exit 0 · finished cleanly"
@@ -6059,13 +6657,15 @@ class DefenseClawTUI(App[None]):
         # guardrail`). Empty string means "no hint" — skip the footer
         # rather than rendering an awkward dangling separator.
         label = self._strip_label or "command"
-        hint = suggested_next_action(label, exit_code)
+        hint = "" if cancelled else suggested_next_action(label, exit_code)
         if hint:
             self._strip_summary = f"{self._strip_summary} · next: {hint}"
         # Fire a transient toast as well so operators on a different
         # panel still notice the result without having to switch back to
         # Activity. Strip is the persistent receipt; toast is the nudge.
-        if exit_code == 0:
+        if cancelled:
+            self.notify_toast("warn", f"{label} cancelled in {duration:.1f}s")
+        elif exit_code == 0:
             self.notify_toast("success", f"{label} finished in {duration:.1f}s")
         else:
             failure_msg = f"{label} failed (exit {exit_code}) — {self._strip_summary}"
@@ -6165,13 +6765,14 @@ class DefenseClawTUI(App[None]):
 
         panel.set_class(self._strip_state == "running", "running")
         panel.set_class(self._strip_state == "success", "success")
-        panel.set_class(self._strip_state == "failure", "failure")
+        panel.set_class(self._strip_state in {"failure", "cancelled"}, "failure")
         panel.set_class(self._strip_state == "rejected", "rejected")
 
         icon, icon_color, header_color = {
             "running": (self._SPINNER_FRAMES[self._strip_spinner_tick], TOKENS.accent_amber, TOKENS.accent_amber),
             "success": ("✓", TOKENS.accent_green, TOKENS.accent_green),
             "failure": ("✗", TOKENS.accent_red, TOKENS.accent_red),
+            "cancelled": ("■", TOKENS.accent_amber, TOKENS.accent_amber),
             "rejected": ("✗", TOKENS.accent_red, TOKENS.accent_red),
         }.get(self._strip_state, (" ", TOKENS.text_secondary, TOKENS.text_primary))
 
@@ -6212,6 +6813,9 @@ class DefenseClawTUI(App[None]):
         elif self._strip_state == "success":
             snippet = self._strip_summary
             snippet_color = TOKENS.accent_green
+        elif self._strip_state == "cancelled":
+            snippet = self._strip_summary
+            snippet_color = TOKENS.accent_amber
         else:
             snippet = self._strip_summary
             snippet_color = TOKENS.accent_red
@@ -6227,6 +6831,7 @@ class DefenseClawTUI(App[None]):
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
             "success": "press A for full output  ·  q or click Dismiss to clear",
             "failure": "press A for full output  ·  q or click Dismiss to clear",
+            "cancelled": "press A for full output  ·  q or click Dismiss to clear",
             "rejected": "press : to retry  ·  q or click Dismiss to clear",
         }.get(self._strip_state, "")
         self.query_one("#command-progress-hint", Static).update(
@@ -6874,6 +7479,7 @@ class DefenseClawTUI(App[None]):
             table.add_column(no_wrap=True, min_width=16)  # SCOPE
             table.add_column(no_wrap=True, min_width=12)  # KIND
             table.add_column(no_wrap=True, min_width=10)  # STATE
+            table.add_column(no_wrap=True, min_width=10)  # PROTOCOL
             table.add_column(no_wrap=True, min_width=18)  # SIGNALS
             table.add_column(no_wrap=True, min_width=13)  # ROUTING
             table.add_column(overflow="ellipsis")  # ENDPOINT
@@ -6883,6 +7489,7 @@ class DefenseClawTUI(App[None]):
                 Text("SCOPE", style=TOKENS.text_secondary),
                 Text("KIND/PRESET", style=TOKENS.text_secondary),
                 Text("STATE", style=TOKENS.text_secondary),
+                Text("PROTOCOL", style=TOKENS.text_secondary),
                 Text("SIGNALS", style=TOKENS.text_secondary),
                 Text("ROUTING", style=TOKENS.text_secondary),
                 Text("ENDPOINT", style=TOKENS.text_secondary),
@@ -6895,6 +7502,7 @@ class DefenseClawTUI(App[None]):
                     Text(row.scope, style=TOKENS.text_secondary),
                     Text(row.kind, style=TOKENS.text_secondary),
                     Text(row.state, style=color),
+                    Text(row.protocol, style=TOKENS.text_secondary),
                     Text(row.signals, style=TOKENS.text_secondary),
                     Text(row.routing or "—", style=TOKENS.accent_cyan),
                     Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
@@ -6964,7 +7572,7 @@ class DefenseClawTUI(App[None]):
             )
         lines = [
             f"  {'NAME':<20}{'TARGET':<14}{'SCOPE':<20}{'KIND/PRESET':<16}{'STATE':<11}"
-            f"{'SIGNALS':<20}{'ROUTING':<16}ENDPOINT"
+            f"{'PROTOCOL':<11}{'SIGNALS':<20}{'ROUTING':<16}ENDPOINT"
         ]
         for row in rows:
             color = state_color(row.state)
@@ -6973,11 +7581,12 @@ class DefenseClawTUI(App[None]):
             scope = rich_escape(row.scope[:19])
             kind = rich_escape(row.kind[:15])
             state = rich_escape(row.state[:10])
+            protocol = rich_escape(row.protocol[:10])
             signals = rich_escape(row.signals[:19])
             routing = rich_escape((row.routing or "—")[:15])
             lines.append(
                 f"  {name:<20}{target:<14}{scope:<20}{kind:<16}"
-                f"[{color}]{state:<11}[/]{signals:<20}"
+                f"[{color}]{state:<11}[/]{protocol:<11}{signals:<20}"
                 f"{routing:<16}{rich_escape(row.endpoint)}"
             )
         lines.append(
@@ -7287,6 +7896,11 @@ class DefenseClawTUI(App[None]):
             lines.append(rich_escape(toolbar.filter_label))
         if toolbar.search_prompt:
             lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(toolbar.search_prompt)}[/]")
+        if self.audit_model.error_message:
+            lines.append(
+                f"[{TOKENS.accent_amber}]{rich_escape(self.audit_model.error_message)}; "
+                "showing the last successful snapshot.[/]"
+            )
         lines.append(
             "Search examples: severity:HIGH action:block target:skill run:<id>. "
             "Use Same target or Same run to correlate the selected event."
@@ -7352,6 +7966,9 @@ class DefenseClawTUI(App[None]):
         target = path or Path("defenseclaw-audit-export.json")
         if not target.is_absolute():
             target = (self.data_dir or Path.cwd()) / target
+        target = target.resolve(strict=False)
+        managed_data_dir = self.data_dir.resolve(strict=False) if self.data_dir is not None else None
+        protect_parent = managed_data_dir is not None and target.parent.is_relative_to(managed_data_dir)
         rows = []
         store = getattr(self.audit_model, "store", None)
         for event in self.audit_model.filtered:
@@ -7374,7 +7991,7 @@ class DefenseClawTUI(App[None]):
                 }
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        _write_owner_only_text(target, json.dumps(rows, indent=2))
+        _write_owner_only_text(target, json.dumps(rows, indent=2), protect_parent=protect_parent)
         # F-0781: audit exports can carry sensitive identifiers (targets,
         # actors, run ids), so the file must be owner-only rather than
         # world-readable under the operator's umask.
@@ -7437,10 +8054,12 @@ class DefenseClawTUI(App[None]):
         guardrail_detail = self.overview_model.service_detail("guardrail")
         guardrail = ServiceStatus("Guardrail", guardrail_state, guardrail_detail)
 
-        # Gateway / Watchdog mirror the live /health subsystem state
-        # so the strip and the SERVICES box agree.
-        gateway_state = self.overview_model.subsystem_state("gateway") or "unknown"
-        gateway_detail = self.overview_model.service_detail("gateway")
+        # Gateway reports authenticated sidecar API availability, not the
+        # optional fleet uplink in ``/health.gateway``.  The latter is
+        # intentionally disabled in healthy hook-only deployments.
+        gateway_availability = self.overview_model.gateway_availability()
+        gateway_state = gateway_availability.state or "unknown"
+        gateway_detail = gateway_availability.last_error or self.overview_model.service_detail("gateway")
 
         # Context pills (connector / redaction / policy) only render
         # when we have a loaded configuration to draw from. Before
@@ -7494,9 +8113,12 @@ class DefenseClawTUI(App[None]):
         if not self._table_columns:
             with self._programmatic_table_update():
                 table.add_class("hidden")
-                table.clear(columns=True)
-                self._rendered_table_row_keys.clear()
-            self._last_table_signature = None
+            # Retain the hidden table and its signature. Overview/Activity do
+            # not own table rows, and clearing here forced an unchanged Alerts
+            # feed to rebuild all 500 rows merely because the operator glanced
+            # at Overview. A different table panel still rebuilds (its panel id
+            # changes the signature), while returning directly can reveal the
+            # cached table with no mutation at all.
             return
 
         # Idempotence guard: cursor-only changes and small streaming deltas
@@ -7513,6 +8135,7 @@ class DefenseClawTUI(App[None]):
             self.active_panel == "setup" and self.setup_model.form_active,
         )
         if signature == self._last_table_signature:
+            table.remove_class("hidden")
             return
 
         # A cursor move does not change table content. Keep Textual's
@@ -7950,20 +8573,21 @@ class DefenseClawTUI(App[None]):
             # said "Alert detail copied." but nothing actually landed
             # in the system clipboard — pure lie. Reusing the shared
             # ``_clipboard_copy`` helper means the alert ``y`` flow
-            # benefits from the same pbcopy → wl-copy → xclip → xsel
-            # → file fallback chain as the global ``Y`` binding.
+            # benefits from the same native/command transport and protected
+            # file fallback chain as the global ``Y`` binding.
             ok, transport = self._clipboard_copy(action.copy_text)
             if ok and not transport.startswith("file:"):
-                self.notify_toast("success", f"Copied alert detail ({transport}).")
+                message = f"Copied alert detail to clipboard ({transport})."
+                self.notify_toast("success", message)
             elif ok:
                 # File fallback — surface where the bytes went.
-                self.notify_toast("info", f"Wrote alert detail to {transport[5:]}.")
+                message = f"Wrote alert detail to fallback file {transport[5:]}."
+                self.notify_toast("info", message)
             else:
-                self.notify_toast(
-                    "error",
-                    "Copy failed — install pbcopy / wl-copy / xclip and try again.",
-                )
-        if action.hint:
+                message = "Clipboard unavailable and fallback write failed."
+                self.notify_toast("error", message)
+            self._set_status(message)
+        elif action.hint:
             self._set_status(action.hint)
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
@@ -8251,6 +8875,12 @@ class DefenseClawTUI(App[None]):
             missing_line = (
                 f"\n[#FBBF24]Required fields still empty:[/] {', '.join(missing)}" if missing else ""
             )
+            disk_change_line = (
+                "\n[#FBBF24]Config changed on disk.[/] Your unsaved form values were preserved; "
+                "run or cancel this form to use refreshed defaults."
+                if self.setup_model.disk_change_pending
+                else ""
+            )
             focused_line = (
                 f"[{TOKENS.accent_violet} bold]→ {focused.label}[/] "
                 f"[{TOKENS.text_secondary}]({focused.kind})[/]"
@@ -8270,6 +8900,7 @@ class DefenseClawTUI(App[None]):
                 f"Keys: ↑/↓ move · ←/→ or space cycle choice · type to edit · "
                 f"Ctrl+T reveal={reveal} · [bold]Ctrl+R run[/] · Esc cancel"
                 f"[/]"
+                f"{disk_change_line}"
                 f"{missing_line}"
                 # Escape ``focused.hint`` so a wizard hint that quotes a
                 # bracketed identifier (e.g. ``set webhooks[0].url``) can't
@@ -8287,6 +8918,12 @@ class DefenseClawTUI(App[None]):
                 else f"[{TOKENS.text_secondary}]{label.name}[/]"
                 for label in self.setup_model.section_labels()
             )
+            disk_change_line = (
+                "\n[#FBBF24]Config changed on disk.[/] Your draft is preserved; "
+                "S merges edited fields or R reloads the disk version."
+                if self.setup_model.disk_change_pending
+                else ""
+            )
             return (
                 f"[bold #22D3EE]Setup Config[/]  {section.name if section else 'No sections'}\n"
                 f"{sections}\n"
@@ -8300,6 +8937,7 @@ class DefenseClawTUI(App[None]):
                 f"{'  '.join(hints.action_bar)}\n"
                 "Keys: tab/shift+tab section, up/down field, enter/space cycle, type/backspace edit, "
                 "S save, R revert, w wizards."
+                f"{disk_change_line}"
             ).strip()
         readiness_rows = self.setup_model.readiness_checks
         readiness = "\n".join(f"{check.status.upper()}: {check.title} - {check.detail}" for check in readiness_rows[:8])
@@ -8475,6 +9113,11 @@ class DefenseClawTUI(App[None]):
                 self.setup_model.active_wizard = SetupWizard(value)
                 return SetupPanelAction(True)
         if key in {"enter", "e", "space"}:
+            if not self.setup_model.wizard_available(self.setup_model.active_wizard):
+                return SetupPanelAction(
+                    True,
+                    hint=self.setup_model.wizard_unavailable_reason(self.setup_model.active_wizard),
+                )
             opened = self.setup_model.open_goal_menu(self.setup_model.active_wizard)
             if opened:
                 return SetupPanelAction(True, hint="Choose what you want to do.")
@@ -8623,6 +9266,18 @@ class DefenseClawTUI(App[None]):
             save = getattr(self.config, "save", None)
             if callable(save):
                 save()
+            roster_changed, storage_changed = self._apply_config_snapshot(
+                self.config,
+                external=False,
+                refresh_disk=False,
+            )
+            if self._config_watcher is not None:
+                self._config_watcher.sync_to_disk()
+            if roster_changed:
+                self._schedule_roster_catalog_refresh()
+            if storage_changed:
+                self._schedule_signal_data_refresh()
+            self._schedule_active_panel_refresh("config-save")
             self.setup_model.queue_restart(restart_reason)
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
@@ -8775,13 +9430,10 @@ class DefenseClawTUI(App[None]):
         # release the matching wizard's "running…" badge if it was a
         # setup-family run.
         cancelled_label = self.command_label
-        await self.executor.cancel()
-        self.command_running = False
-        self.command_label = ""
-        self._command_started_at = 0.0
-        self.activity_model.finish_entry(130, cancelled=True)
-        self._write_activity("[#FBBF24]cancel requested[/]")
-        self._set_status("Cancel requested for running command.")
+        cancelled = await self.executor.cancel()
+        if not cancelled:
+            return
+        self._set_status("Running command cancelled.")
         # Map back to argv if the label looks like one of the setup
         # commands so the wizard table doesn't keep spinning after the
         # user explicitly cancelled. The label is the same string built
@@ -8827,6 +9479,92 @@ class DefenseClawTUI(App[None]):
             return
         await self._load_catalog_model(panel)
 
+    def _schedule_config_poll(self) -> None:
+        """Probe the active config without depending on gateway health."""
+
+        if (
+            self._config_watcher is None
+            or self._config_poll_running
+            or getattr(self, "_app_shutting_down", False)
+        ):
+            return
+        self._config_poll_running = True
+        self.run_worker(
+            self._poll_config_once(),
+            exclusive=False,
+            thread=False,
+        )
+
+    async def _poll_config_once(self, *, now: float | None = None) -> None:
+        """Apply one changed, stable config generation if one is available."""
+
+        watcher = self._config_watcher
+        if watcher is None:
+            self._config_poll_running = False
+            return
+        try:
+            generation = await asyncio.to_thread(watcher.poll, now=now)
+            if generation is None:
+                return
+            try:
+                new_cfg = await asyncio.to_thread(
+                    _load_config_generation,
+                    watcher.path,
+                    generation,
+                )
+            except _ConfigGenerationChangedError:
+                # Atomic replacement or an in-place writer advanced again
+                # while this worker waited for the config lock. The next poll
+                # evaluates the new generation; the current snapshot remains.
+                return
+            except Exception as exc:  # noqa: BLE001 - malformed/locked config is retryable.
+                if watcher.reject(generation, now=now):
+                    self._write_activity(
+                        f"[#FBBF24]external config reload deferred:[/] "
+                        f"{rich_escape(str(exc))}; keeping the last valid snapshot."
+                    )
+                return
+
+            try:
+                roster_changed, storage_changed = self._apply_config_snapshot(
+                    new_cfg,
+                    external=True,
+                    refresh_disk=False,
+                )
+            except Exception as exc:  # noqa: BLE001 - never replace the accepted generation on failure.
+                if watcher.reject(generation, now=now):
+                    self._write_activity(
+                        f"[#FBBF24]external config refresh failed:[/] "
+                        f"{rich_escape(str(exc))}; keeping the last valid snapshot."
+                    )
+                return
+
+            watcher.accept(generation)
+            self._config_reload_count += 1
+            self._set_status("Configuration refreshed from disk.")
+            self._schedule_active_panel_refresh("config-generation")
+            if storage_changed:
+                self._schedule_signal_data_refresh()
+            if roster_changed or storage_changed:
+                self._schedule_roster_catalog_refresh()
+        finally:
+            self._config_poll_running = False
+
+    def _schedule_roster_catalog_refresh(self) -> None:
+        """Reload already-open catalogs when connector membership changes."""
+
+        loaded = any(getattr(model, "loaded", False) for model in self.catalog_models.values())
+        loaded = loaded or bool(getattr(self.inventory_model, "loaded", False))
+        if not loaded:
+            return
+        if self._slow_refresh_running:
+            self._roster_catalog_refresh_pending = True
+            return
+        try:
+            self._schedule_slow_refresh()
+        except Exception:  # noqa: BLE001 - direct model tests have no running Textual app.
+            pass
+
     def _refresh_cached_config(self) -> None:
         """Full reload-from-disk after ``setup``/``init``/``sandbox``/``registry``.
 
@@ -8866,20 +9604,74 @@ class DefenseClawTUI(App[None]):
             self._write_activity(
                 f"[#FBBF24]config reload failed:[/] {rich_escape(str(exc))}; keeping current snapshot."
             )
-            new_cfg = self.config
+            return
+
+        roster_changed, storage_changed = self._apply_config_snapshot(
+            new_cfg,
+            external=False,
+            refresh_disk=True,
+        )
+        if self._config_watcher is not None:
+            self._config_watcher.sync_to_disk()
+        self._schedule_active_panel_refresh("internal-config-generation")
+        if storage_changed:
+            self._schedule_signal_data_refresh()
+        if roster_changed or storage_changed:
+            self._schedule_roster_catalog_refresh()
+
+    def _apply_config_snapshot(
+        self,
+        new_cfg: object | None,
+        *,
+        external: bool,
+        refresh_disk: bool,
+    ) -> tuple[bool, bool]:
+        """Swap the authoritative config and all config-derived TUI state.
+
+        The method is synchronous and contains no event-loop yield, so every
+        model sees one generation before the next render. Returns whether the
+        configured connector roster and its backing storage changed. Callers
+        feed those invalidations into the deferred rendering/data pipelines so
+        a config write in another process cannot block Textual's event loop.
+        """
+
+        old_cfg = self.config
+        old_overview_cfg = self.overview_model.cfg
+        new_overview_cfg = _overview_config(new_cfg)
+        old_roster = _overview_connector_names(old_overview_cfg)
+        new_roster = _overview_connector_names(new_overview_cfg)
+        old_data_dir = self.data_dir
+        new_data_dir = _resolve_data_dir(new_cfg, None)
+        data_dir_changed = new_data_dir != old_data_dir
+        storage_changed = (
+            refresh_disk
+            or data_dir_changed
+            or _audit_db_path(old_cfg) != _audit_db_path(new_cfg)
+        )
+
+        new_store = _audit_store(new_cfg) if storage_changed else None
+        old_stores: list[object] = []
+        if storage_changed:
+            for model in (self.alerts_model, self.audit_model, self.tools_model):
+                prior = getattr(model, "store", None)
+                if prior is not None and prior is not new_store and prior not in old_stores:
+                    old_stores.append(prior)
 
         self.config = new_cfg
-        new_data_dir = _resolve_data_dir(new_cfg, None)
-        if new_data_dir is not None:
-            self.data_dir = new_data_dir
-
-        # Panels that cache the config snapshot.
-        self.setup_model.set_config(new_cfg)
-        self.overview_model.set_cfg(_overview_config(new_cfg))
+        self.data_dir = new_data_dir
+        self.overview_model.set_cfg(new_overview_cfg)
+        self.setup_model.set_config(new_cfg, external=external)
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
+        if (
+            data_dir_changed
+            and self._registries_model_owned
+            and hasattr(self.registries_model, "set_data_dir")
+        ):
+            self.registries_model.set_data_dir(new_data_dir)
 
-        # Panels that tail files from data_dir.
+        if data_dir_changed and hasattr(self.state_store, "set_data_dir"):
+            self.state_store.set_data_dir(new_data_dir)
         if hasattr(self.logs_model, "set_data_dir"):
             self.logs_model.set_data_dir(new_data_dir)
         if hasattr(self.activity_model, "set_data_dir"):
@@ -8887,24 +9679,19 @@ class DefenseClawTUI(App[None]):
         if hasattr(self.alerts_model, "set_data_dir"):
             self.alerts_model.set_data_dir(new_data_dir)
 
-        # Re-open audit store at the new path. Capture the previous
-        # handles *before* the swap so we can close them after — the
-        # alerts and audit panels each held a reference and replacing
-        # the attribute alone leaked the SQLite file descriptor on
-        # every setup-driven reload (which a typical session triggers
-        # several times: connector pick, registry add, redaction
-        # toggle, etc.). The previous handles can be the same Store
-        # instance, so dedupe before closing.
-        new_store = _audit_store(new_cfg)
-        old_stores: list[object] = []
-        for model in (self.alerts_model, self.audit_model):
-            prior = getattr(model, "store", None)
-            if prior is not None and prior is not new_store and prior not in old_stores:
-                old_stores.append(prior)
-        if hasattr(self.alerts_model, "set_store"):
-            self.alerts_model.set_store(new_store)
-        if hasattr(self.audit_model, "set_store"):
-            self.audit_model.set_store(new_store)
+        if storage_changed:
+            if hasattr(self.alerts_model, "set_store"):
+                self.alerts_model.set_store(new_store)
+            if hasattr(self.audit_model, "set_store"):
+                self.audit_model.set_store(new_store)
+            if hasattr(self.tools_model, "set_store"):
+                self.tools_model.set_store(new_store)
+            else:
+                self.tools_model.store = new_store
+            self._connector_hook_event_stats_cache = None
+            self._connector_hook_event_stats_loaded_at = 0.0
+            self._overview_audit_version_cache = None
+
         for stale in old_stores:
             close = getattr(stale, "close", None)
             if callable(close):
@@ -8913,16 +9700,31 @@ class DefenseClawTUI(App[None]):
                 except Exception:  # noqa: BLE001 — best-effort cleanup; never block the reload.
                     pass
 
-        # Re-apply the known health snapshot so subsystem state stays
-        # populated through the reload (next poll overwrites this in 3s).
+        # Clamp a removed connector selection before propagating the new
+        # action target. Multi-connector removals fall back predictably to All.
+        self.connector_filter = connector_filter_svc.normalize_filter(
+            self.connector_filter,
+            self._active_connector_names(),
+        )
+        self._overview_connector_rows_render_cache = None
+        self._overview_metric_data_render_cache = None
+        self._overview_session_enforcement_counts_render_cache = None
+        self._overview_connector_rows_signature_cache = None
+        self._overview_live_data_signature_cache = None
+        self._last_body_signature = None
+
+        # Keep the last health sample, but do not use health availability as
+        # the freshness trigger. Config is authoritative for connector scope.
         self.overview_model.set_health(self.overview_model.health)
         self._propagate_connector(self.overview_model.health)
-
-        # Run the standard refresh pipeline so every panel re-reads
-        # against the new paths in a single pass, then rebuild Setup
-        # readiness so rows flip on the same tick.
-        self._refresh_models_from_disk()
+        self._sync_catalog_connector_filters()
         self._sync_setup_readiness()
+
+        if self.first_run_model.active and new_cfg is not None:
+            self.first_run_model.active = False
+            if self.active_panel == "setup":
+                self.active_panel = "overview"
+        return old_roster != new_roster, storage_changed
 
     def _schedule_credentials_refresh(self) -> None:
         """Dispatch a credential refresh as a Textual worker.
@@ -8967,6 +9769,7 @@ class DefenseClawTUI(App[None]):
                 ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **captured_subprocess_kwargs(),
             )
             stdout, stderr = await process.communicate()
         except OSError as exc:
@@ -9005,6 +9808,7 @@ class DefenseClawTUI(App[None]):
                 *resolve_subprocess_argv(intent.binary, intent.args),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **captured_subprocess_kwargs(),
             )
             stdout, stderr = await process.communicate()
         except OSError as exc:
@@ -9042,6 +9846,7 @@ class DefenseClawTUI(App[None]):
                     *resolve_subprocess_argv(intent.binary, intent.args),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **captured_subprocess_kwargs(),
                 )
                 stdout, stderr = await process.communicate()
             except OSError:
@@ -9274,6 +10079,7 @@ class DefenseClawTUI(App[None]):
                 *resolve_subprocess_argv(intent.binary, intent.args),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **captured_subprocess_kwargs(),
             )
             stdout, stderr = await process.communicate()
         except OSError as exc:
@@ -9310,6 +10116,7 @@ class DefenseClawTUI(App[None]):
                     *resolve_subprocess_argv(intent.binary, intent.args),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **captured_subprocess_kwargs(),
                 )
                 stdout, stderr = await process.communicate()
             except OSError:
@@ -9446,13 +10253,14 @@ class DefenseClawTUI(App[None]):
         if len(self.screen_stack) > 1:
             return
         if self.active_panel == "overview" and not self.help_open:
-            live_data_changed = self._overview_live_data_changed_since_render()
-            # A changed generation is rendered as one unit so the native tiles,
-            # ENFORCEMENT box, and CONNECTORS table never show mixed samples.
-            # When nothing changed, retain the cheap native-tile refresh.
-            if not live_data_changed:
-                self._render_overview_metrics()
-            self._schedule_overview_sampled_refresh(allow_scrolled=live_data_changed)
+            # The worker-owned Overview snapshot checks the audit generation
+            # and grouped totals. Never touch the UI thread's sqlite handle in
+            # this timer turn: an external writer or transient lock must not
+            # delay the next keyboard/mouse event.
+            self._schedule_active_panel_refresh("periodic-audit")
+            return
+        if self.active_panel in {"alerts", "audit", "logs"} and not self.help_open:
+            self._schedule_signal_data_refresh()
             return
         self._periodic_refresh_running = True
         try:
@@ -9464,15 +10272,173 @@ class DefenseClawTUI(App[None]):
         finally:
             self._periodic_refresh_running = False
 
+    def _schedule_signal_data_refresh(self) -> None:
+        """Coalesce file/SQLite refreshes for Alerts, Audit, and Logs."""
+
+        # Model-level callers and unit tests can apply a config snapshot before
+        # Textual mounts the app. Do not manufacture an unowned Worker/coroutine
+        # in that state; the mount/periodic refresh will load the current source.
+        if not self.is_running or getattr(self, "_app_shutting_down", False):
+            return
+        if self._signal_refresh_running:
+            self._signal_refresh_pending = True
+            return
+        self._signal_refresh_running = True
+        detached = self._detached_render_context(self.active_panel)
+        source = self._worker_audit_store_source()
+        try:
+            worker = self.run_worker(
+                self._run_signal_data_refresh(detached, source),
+                name="signal-data-refresh",
+                group="signal-data-refresh",
+                exclusive=False,
+                thread=False,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 - teardown may race the timer.
+            self._signal_refresh_running = False
+            return
+        self._panel_render_workers["__signals__"] = worker
+
+    async def _run_signal_data_refresh(
+        self,
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> None:
+        try:
+            snapshot = await asyncio.to_thread(self._build_signal_refresh_snapshot, detached, source)
+            self._apply_signal_refresh_snapshot(snapshot)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - cached data remains visible.
+            if not getattr(self, "_app_shutting_down", False):
+                self._set_status(f"Signal refresh deferred after transient error: {exc}")
+        finally:
+            self._signal_refresh_running = False
+            self._panel_render_workers.pop("__signals__", None)
+            if self._signal_refresh_pending and not getattr(self, "_app_shutting_down", False):
+                self._signal_refresh_pending = False
+                self.call_later(self._schedule_signal_data_refresh)
+
+    def _build_signal_refresh_snapshot(
+        self,
+        detached: DefenseClawTUI,
+        source: tuple[str, object | None],
+    ) -> _SignalRefreshSnapshot:
+        worker_store = self._attach_worker_audit_store(detached, source)
+        try:
+            detached.alerts_model.refresh()
+            detached.audit_model.refresh()
+            detached.logs_model.refresh()
+            detached._load_doctor_cache()
+            detached._load_silent_bypass_count()
+            return _SignalRefreshSnapshot(
+                source_token=self._worker_store_source_token(source),
+                alert_events=tuple(detached.alerts_model.audit_events),
+                scan_blocks=tuple(detached.alerts_model.scan_blocks),
+                egress_events=tuple(detached.alerts_model.egress_events),
+                audit_events=tuple(detached.audit_model.items),
+                audit_error=detached.audit_model.error_message,
+                log_lines=tuple(
+                    (source_name, tuple(rows))
+                    for source_name, rows in detached.logs_model.lines.items()
+                ),
+                log_errors=tuple(detached.logs_model.error_messages.items()),
+                verdict_rows=tuple(detached.logs_model.verdict_rows),
+                otel_rows=tuple(detached.logs_model.otel_rows),
+                log_refresh_signatures=tuple(detached.logs_model._refresh_signatures.items()),
+                doctor=detached.overview_model.doctor,
+                silent_bypass=detached.overview_model.silent_bypass,
+            )
+        finally:
+            if worker_store is not None:
+                try:
+                    worker_store.close()
+                except Exception:  # noqa: BLE001 - reader teardown is best-effort.
+                    pass
+
+    def _apply_signal_refresh_snapshot(self, snapshot: _SignalRefreshSnapshot) -> None:
+        """Install refreshed model data on the UI thread, preserving controls."""
+
+        if getattr(self, "_app_shutting_down", False):
+            return
+        if snapshot.source_token != self._worker_store_source_token(self._worker_audit_store_source()):
+            return
+        alerts = self.alerts_model
+        alert_sources_changed = (
+            tuple(alerts.audit_events) != snapshot.alert_events
+            or tuple(alerts.scan_blocks) != snapshot.scan_blocks
+            or tuple(alerts.egress_events) != snapshot.egress_events
+        )
+        if alert_sources_changed:
+            alerts.audit_events = list(snapshot.alert_events)
+            alerts.scan_blocks = list(snapshot.scan_blocks)
+            alerts.egress_events = list(snapshot.egress_events)
+            alerts._invalidate_row_caches()
+            alerts.apply_filter()
+
+        audit = self.audit_model
+        if tuple(audit.items) != snapshot.audit_events or audit.error_message != snapshot.audit_error:
+            audit.items = list(snapshot.audit_events)
+            audit.error_message = snapshot.audit_error
+            audit.apply_filter()
+
+        logs = self.logs_model
+        next_lines = {source: list(rows) for source, rows in snapshot.log_lines}
+        next_errors = dict(snapshot.log_errors)
+        if (
+            logs.lines != next_lines
+            or logs.error_messages != next_errors
+            or tuple(logs.verdict_rows) != snapshot.verdict_rows
+            or tuple(logs.otel_rows) != snapshot.otel_rows
+        ):
+            logs.lines = next_lines  # type: ignore[assignment]
+            logs.error_messages = next_errors  # type: ignore[assignment]
+            logs.verdict_rows = list(snapshot.verdict_rows)
+            logs.otel_rows = list(snapshot.otel_rows)
+            logs._refresh_signatures = dict(snapshot.log_refresh_signatures)
+            logs._filtered_lines_cache.clear()
+            logs._clamp_cursor()
+
+        self.overview_model.set_doctor_cache(snapshot.doctor)
+        self.overview_model.set_silent_bypass_count(snapshot.silent_bypass)
+        self._update_tab_labels()
+        if self.active_panel in {"alerts", "audit", "logs", "overview"} and not self.help_open:
+            self._schedule_active_panel_refresh("signal-data")
+
+    def _poll_overview_audit_stats(self) -> None:
+        """Invalidate/repaint Overview when persisted hook totals change."""
+
+        store = getattr(self.audit_model, "store", None) if self.audit_model is not None else None
+        version_loader = getattr(store, "audit_data_version", None)
+        if callable(version_loader):
+            try:
+                version = version_loader()
+            except Exception:  # noqa: BLE001 - fall back to the grouped query.
+                version = None
+            if version is not None and version == self._overview_audit_version_cache:
+                return
+            self._overview_audit_version_cache = version
+        previous = self._connector_hook_event_stats_cache
+        self._connector_hook_event_stats_cache = None
+        self._connector_hook_event_stats_loaded_at = 0.0
+        current = self._connector_hook_event_stats()
+        if previous is None or current != previous:
+            self._schedule_overview_sampled_refresh(allow_scrolled=True)
+
     def _refresh_models_from_disk(self) -> None:
-        self._refresh_alerts()
+        self._refresh_overview_disk_models()
         self.registries_model.refresh()
         self.logs_model.refresh()
         self.audit_model.refresh()
         self.tools_model.refresh()
+        self._load_activity_mutations()
+
+    def _refresh_overview_disk_models(self) -> None:
+        """Refresh disk-backed models needed while Overview owns the timer."""
+        self._refresh_alerts()
         self._load_doctor_cache()
         self._load_silent_bypass_count()
-        self._load_activity_mutations()
 
     def _refresh_alerts(self) -> None:
         """Single entry point for refreshing alerts from disk + audit DB.
@@ -9543,15 +10509,17 @@ class DefenseClawTUI(App[None]):
         "unknown" for every subsystem.
 
         We dispatch the actual fetch to a worker thread so the 3s
-        HTTP timeout never blocks Textual's event loop, and we tolerate
-        the gateway being offline by simply leaving ``health=None`` so
-        the existing "Gateway is offline" notice continues to render.
+        HTTP timeout never blocks Textual's event loop. Failed probes update
+        the explicit availability state while retaining the last live health
+        payload, so connector activity survives transient restarts.
         """
 
         if self.config is None or getattr(self, "_app_shutting_down", False):
             return
         api_port = _gateway_api_port(self.config)
         if api_port <= 0:
+            self.overview_model.set_gateway_probe("error", "sidecar API port is not configured")
+            self._sync_setup_readiness()
             return
         if self._health_poll_running:
             return
@@ -9592,36 +10560,45 @@ class DefenseClawTUI(App[None]):
             self._ai_usage_poll_running = False
 
     async def _poll_health(self) -> None:
-        # Use the configured token + host so a gateway that requires
-        # Authorization (the default when ``OPENCLAW_GATEWAY_TOKEN`` or
-        # ``gateway.token`` is set) doesn't 401 us into ``unknown``.
-        # The previous urllib fetcher couldn't attach the header and
-        # was the root cause of "I did everything but it still shows
-        # unknown" — the gateway was up, but the unauthenticated probe
-        # bounced.
-        snapshot = await asyncio.to_thread(_fetch_gateway_health, self.config)
-        # ``snapshot`` is None on connection refused / timeouts. We
-        # propagate that as ``set_health(None)`` so subsystem_state()
-        # returns "unknown" and the SERVICES rows clearly reflect
-        # "we don't know" instead of stale data from a previous run.
-        self.overview_model.set_health(snapshot)
-        self._propagate_connector(snapshot)
+        result = await asyncio.to_thread(_fetch_gateway_health, self.config)
+        # Compatibility for tests/extensions that replace the fetcher with
+        # the pre-WIN-AUD-047 return type.
+        if isinstance(result, HealthSnapshot):
+            result = GatewayHealthResult(
+                state=_gateway_state_from_snapshot(result),
+                snapshot=result,
+            )
+        elif result is None:
+            result = GatewayHealthResult("offline", "sidecar API is unreachable")
+        self.overview_model.set_gateway_probe(result.state, result.detail)
+        snapshot = result.snapshot
+        # A transient failed probe changes availability immediately but does
+        # not erase the last connector/activity payload.  The next successful
+        # poll replaces it and clears the failure without any latch.
+        if snapshot is not None:
+            self.overview_model.set_health(snapshot)
+            self._propagate_connector(snapshot)
         # Mirror Go: clear the queued-restart banner once the gateway
         # has actually restarted (its StartedAt moved). Without this
         # the banner sticks around forever even though the restart
         # already finished, since we never call mark_restart_started.
-        self._mark_restart_if_gateway_restarted(snapshot)
+        if snapshot is not None:
+            self._mark_restart_if_gateway_restarted(snapshot)
         # Rebuild Setup readiness now that we have a fresh health
         # snapshot (the gateway/api/guardrail rows depend on it).
         self._sync_setup_readiness()
         # Passive health polls update the model but do not force a full
         # Overview repaint. The dashboard render is expensive enough that a
-        # 3s timer can block the first wheel/key event after idle.
+        # 3s timer can block the first wheel/key event after idle. Schedule one
+        # sampled generation and let the sampler defer while the wheel is
+        # active. It may repaint a scrolled dashboard after interaction stops,
+        # preserving live counts without performing a synchronous signature
+        # pass here on the event loop.
         if self.active_panel == "overview" and not self.help_open:
+            self._refresh_overview_disk_models()
             self._render_overview_scope_indicator()
-            live_data_changed = self._overview_live_data_changed_since_render()
             self._schedule_overview_sampled_refresh(
-                allow_scrolled=live_data_changed,
+                allow_scrolled=True,
             )
 
     async def _poll_ai_usage(self, *, force_render: bool) -> None:
@@ -9658,6 +10635,7 @@ class DefenseClawTUI(App[None]):
                 credentials=tuple(
                     getattr(self.setup_model.credential_snapshot, "rows", ()) or ()
                 ),
+                gateway_status=self.overview_model.gateway_availability(),
             )
         except AttributeError:
             # Older SetupPanelModel — silently skip; the readiness
@@ -9683,18 +10661,21 @@ class DefenseClawTUI(App[None]):
         # ``_connector_filter`` returns "" for single-connector installs and
         # the All state, preserving the original behaviour.
         selected = self._connector_filter()
-        connector_name = selected or _resolve_active_connector(snapshot, mode)
+        configured = self.overview_model.active_connector_name()
+        connector_name = selected or configured or _resolve_active_connector(snapshot, mode)
         focus_enabled = bool(selected)
         for model in (
             self.skills_model,
             self.mcps_model,
             self.plugins_model,
+            self.tools_model,
             self.inventory_model,
         ):
-            try:
-                model.set_connector(connector_name)
-            except AttributeError:
-                continue
+            setter = getattr(model, "set_connector", None)
+            if callable(setter):
+                setter(connector_name)
+            elif hasattr(model, "connector"):
+                model.connector = connector_name
             if hasattr(model, "connector_focus_enabled"):
                 model.connector_focus_enabled = focus_enabled
 
@@ -9939,51 +10920,101 @@ def _gateway_api_port(config: object | None) -> int:
     return port if port > 0 else 0
 
 
-def _fetch_gateway_health(config: object | None) -> HealthSnapshot | None:
-    """Blocking ``/health`` fetcher, intended for ``asyncio.to_thread``.
+def _gateway_state_from_snapshot(snapshot: HealthSnapshot) -> str:
+    """Classify sidecar readiness using the Go daemon's required states."""
 
-    Uses :class:`OrchestratorClient` so the configured token, host, and
-    port all flow through automatically — that matters because a gateway
-    started with ``OPENCLAW_GATEWAY_TOKEN`` set will 401 any probe that
-    forgets the ``Authorization: Bearer …`` header, and the operator's
-    SERVICES box would silently stay at ``unknown``.
+    api_state = snapshot.api.state.strip().lower()
+    gateway_state = snapshot.gateway.state.strip().lower()
+    api_running = api_state in {"", "running", "ready", "healthy", "ok"}
+    gateway_running = gateway_state in {"", "running", "ready", "healthy", "ok", "disabled"}
+    if api_running and gateway_running:
+        return "running"
+    if api_state in {"stopped", "offline", "down"}:
+        return "offline"
+    if api_state in {"error", "failed"}:
+        return "error"
+    if gateway_state in {"stopped", "offline", "down"}:
+        return "offline"
+    if api_state in {"starting", "reconnecting"} or gateway_state in {"starting", "reconnecting", "error", "failed"}:
+        return "starting"
+    return "starting"
 
-    Any exception (connection refused, DNS failure, malformed JSON,
-    401/403) collapses to ``None`` so the caller can render "unknown"
-    without crashing the panel.
+
+def _gateway_snapshot_detail(snapshot: HealthSnapshot, state: str) -> str:
+    """Return a concise, non-secret diagnostic for a classified snapshot."""
+
+    if state == "running" and snapshot.gateway.state.strip().lower() == "disabled":
+        summary = snapshot.gateway.details.get("summary", "")
+        return summary.strip() if isinstance(summary, str) else ""
+    for name, subsystem in (("API", snapshot.api), ("gateway", snapshot.gateway)):
+        raw_state = subsystem.state.strip().lower()
+        if state == "starting" and raw_state in {"starting", "reconnecting", "error", "failed"}:
+            return subsystem.last_error.strip() or f"{name} {raw_state}"
+        if state in {"offline", "error"} and raw_state in {
+            "stopped",
+            "offline",
+            "down",
+            "error",
+            "failed",
+        }:
+            return subsystem.last_error.strip() or f"{name} {raw_state}"
+    return ""
+
+
+def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
+    """Probe the configured authenticated sidecar API without using proxy state.
+
+    ``gateway.api_bind`` / ``api_port`` identify the REST listener;
+    ``gateway.host`` / ``port`` identify the optional fleet uplink and must not
+    influence TUI liveness.  Authentication, configuration, startup, and
+    transport failures remain distinct so the footer can give useful guidance.
     """
 
     if config is None:
-        return None
+        return GatewayHealthResult("error", "sidecar API configuration is unavailable")
     gateway_cfg = getattr(config, "gateway", None)
     if gateway_cfg is None:
-        return None
+        return GatewayHealthResult("error", "sidecar API configuration is unavailable")
     try:
         port = int(getattr(gateway_cfg, "api_port", 0) or 0)
     except (TypeError, ValueError):
-        return None
+        return GatewayHealthResult("error", "sidecar API port is invalid")
     if port <= 0:
-        return None
-    host = str(getattr(gateway_cfg, "host", "") or "127.0.0.1") or "127.0.0.1"
-    # The gateway's API server binds 127.0.0.1 by default; ``0.0.0.0`` /
-    # empty values would resolve fine over the wire but make the client
-    # round-trip needlessly slow on macOS. Normalize to loopback.
-    if host in ("", "0.0.0.0"):
-        host = "127.0.0.1"
-    resolve_token = getattr(gateway_cfg, "resolved_token", None)
-    token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+        return GatewayHealthResult("error", "sidecar API port is not configured")
 
     try:
-        from defenseclaw.gateway import OrchestratorClient
-    except Exception:  # noqa: BLE001 — never let a bad import kill the TUI
-        return None
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+        host = gateway_api_client_host(config)
+        resolve_token = getattr(gateway_cfg, "resolved_token", None)
+        token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+        client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+    except Exception:  # noqa: BLE001 - configuration/import errors must not kill the TUI.
+        return GatewayHealthResult("error", "sidecar API client configuration is invalid")
+
     try:
         payload = client.health()
-    except Exception:  # noqa: BLE001 — offline / unauthenticated gateway is normal
-        return None
-    return _health_snapshot_from_mapping(payload)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status in {401, 403}:
+            return GatewayHealthResult(
+                "error",
+                f"authentication error: sidecar rejected the configured token (HTTP {status})",
+            )
+        label = f"HTTP {status}" if status else "HTTP error"
+        return GatewayHealthResult("error", f"sidecar health request failed ({label})")
+    except (requests.ConnectionError, requests.Timeout, OSError):
+        return GatewayHealthResult("offline", "sidecar API is unreachable")
+    except (requests.RequestException, ValueError):
+        return GatewayHealthResult("error", "sidecar health response is invalid")
+    except Exception:  # noqa: BLE001 - unexpected probe failures are errors, not outages.
+        return GatewayHealthResult("error", "sidecar health probe failed")
+
+    snapshot = _health_snapshot_from_mapping(payload)
+    if snapshot is None:
+        return GatewayHealthResult("error", "sidecar health response is invalid")
+    state = _gateway_state_from_snapshot(snapshot)
+    return GatewayHealthResult(state, _gateway_snapshot_detail(snapshot, state), snapshot)
 
 
 def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
@@ -10006,17 +11037,15 @@ def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
         return None
     if port <= 0:
         return None
-    host = str(getattr(gateway_cfg, "host", "") or "127.0.0.1") or "127.0.0.1"
-    if host in ("", "0.0.0.0"):
-        host = "127.0.0.1"
     resolve_token = getattr(gateway_cfg, "resolved_token", None)
     token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
 
     try:
-        from defenseclaw.gateway import OrchestratorClient
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
     except Exception:  # noqa: BLE001
         return None
 
+    host = gateway_api_client_host(config)
     client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
     client._session.headers["Accept"] = "application/json"  # noqa: SLF001 - mirrors Go fetchAIUsage.
     try:
@@ -10127,6 +11156,24 @@ def _audit_store(config: object | None) -> object | None:
         return None
 
 
+def _audit_db_path(config: object | None) -> str:
+    if isinstance(config, dict):
+        return str(config.get("audit_db", "") or "")
+    return str(getattr(config, "audit_db", "") or "")
+
+
+def _overview_connector_names(cfg: OverviewConfig | None) -> tuple[str, ...]:
+    """Configured connector membership for reload invalidation."""
+
+    if cfg is None:
+        return ()
+    roster = tuple(name.strip().lower() for name, _mode in cfg.connector_modes if name.strip())
+    if roster:
+        return roster
+    active = cfg.guardrail_connector.strip().lower() or cfg.claw_mode.strip().lower()
+    return (active,) if active else ()
+
+
 def _flatten_scanner_overrides(
     overrides: object,
 ) -> tuple[tuple[str, str, str, str], ...]:
@@ -10209,6 +11256,43 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
+
+    # A one-entry ``guardrail.connectors`` map is still connector-scoped.
+    # Project its effective values into the legacy singular Overview fields;
+    # otherwise an external CLI write can correctly set Claude Code to action
+    # while the TUI keeps rendering the inherited global observe/defaults.
+    effective_guardrail_enabled = bool(getattr(guardrail, "enabled", False))
+    effective_guardrail_mode = str(getattr(guardrail, "mode", "") or "observe")
+    effective_rule_pack_dir = str(getattr(guardrail, "rule_pack_dir", "") or "")
+    effective_hilt = hilt
+    if len(actives) == 1 and guardrail is not None:
+        connector = actives[0]
+        if hasattr(guardrail, "effective_enabled"):
+            try:
+                effective_guardrail_enabled = effective_guardrail_enabled and bool(
+                    guardrail.effective_enabled(connector)
+                )
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
+        if hasattr(guardrail, "effective_mode"):
+            try:
+                effective_guardrail_mode = str(
+                    guardrail.effective_mode(connector) or effective_guardrail_mode
+                )
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
+        if hasattr(guardrail, "effective_rule_pack_dir"):
+            try:
+                effective_rule_pack_dir = str(
+                    guardrail.effective_rule_pack_dir(connector) or effective_rule_pack_dir
+                )
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
+        if hasattr(guardrail, "effective_hilt"):
+            try:
+                effective_hilt = guardrail.effective_hilt(connector)
+            except Exception:  # noqa: BLE001 - retain the global fallback.
+                pass
     if len(actives) > 1:
         pairs: list[tuple[str, str]] = []
         packs: list[tuple[str, str]] = []
@@ -10265,17 +11349,17 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # connector) instead of fabricating "openclaw". The Go-parity
         # config.active_connector() contract is deliberately left untouched.
         claw_mode=str(getattr(claw, "mode", "") or ""),
-        guardrail_enabled=bool(getattr(guardrail, "enabled", False)),
+        guardrail_enabled=effective_guardrail_enabled,
         guardrail_connector=str(getattr(guardrail, "connector", "") or ""),
-        guardrail_mode=str(getattr(guardrail, "mode", "") or "observe"),
-        guardrail_rule_pack_dir=str(getattr(guardrail, "rule_pack_dir", "") or ""),
+        guardrail_mode=effective_guardrail_mode,
+        guardrail_rule_pack_dir=effective_rule_pack_dir,
         guardrail_port=int(getattr(guardrail, "port", 0) or 0),
         guardrail_model=str(getattr(guardrail, "model", "") or ""),
         guardrail_strategy=str(getattr(guardrail, "strategy", "") or "default"),
         guardrail_judge_enabled=bool(getattr(guardrail, "judge_enabled", False)),
         guardrail_judge_model=str(getattr(guardrail, "judge_model", "") or ""),
-        hilt_enabled=bool(getattr(hilt, "enabled", False)),
-        hilt_min_severity=str(getattr(hilt, "min_severity", "") or ""),
+        hilt_enabled=bool(getattr(effective_hilt, "enabled", False)),
+        hilt_min_severity=str(getattr(effective_hilt, "min_severity", "") or ""),
         privacy_disable_redaction=bool(getattr(privacy, "disable_redaction", False)),
         llm_provider=str(getattr(llm, "provider", "") or ""),
         llm_model=str(getattr(llm, "model", "") or ""),

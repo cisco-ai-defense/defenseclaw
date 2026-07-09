@@ -25,6 +25,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 type PluginScanner struct {
@@ -76,7 +78,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	}()
 
 	binaryPath, args := s.pluginScanCommand(target)
-	cmd := exec.CommandContext(ctx, binaryPath, args...)
+	cmd := processutil.CommandContext(ctx, binaryPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

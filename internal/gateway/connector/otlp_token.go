@@ -26,6 +26,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // OTLPPathTokenScope identifies a connector-bound OTLP token used in
@@ -174,6 +176,10 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("chmod OTLP path-token: %w", err)
+	}
+	if err := safefile.ProtectFile(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("protect OTLP path-token: %w", err)
 	}
 	if err := os.Rename(tmp, tokenPath); err != nil {
 		_ = os.Remove(tmp)

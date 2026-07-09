@@ -36,9 +36,11 @@ DOC_INSTALL_COMMANDS = {
     "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES
     + (
         f'$Version = "{CURRENT_RELEASE}"',
-        '$InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"',
-        "& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version",
-        "& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version -Connector codex -Quickstart -Yes",
+        '$Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"',
+        '$InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"',
+        "Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing",
+        "& $Installer -Version $Version",
+        "& $Installer -Version $Version -Connector codex -Quickstart -Yes",
     ),
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
         f"VERSION={CURRENT_RELEASE}",
@@ -59,7 +61,7 @@ INSTALLER_FILES = (
 
 def test_quickstart_docs_do_not_pipe_main_installer() -> None:
     for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh" not in text
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1" not in text
         for expected in expected_lines:
@@ -68,7 +70,7 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
 
 def test_installer_help_does_not_pipe_main_installer() -> None:
     for rel in INSTALLER_FILES:
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         assert "defenseclaw/main" not in text
 
 

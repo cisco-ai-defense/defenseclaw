@@ -25,9 +25,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from defenseclaw import file_permissions
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery as ad
+
+from tests.permissions import grant_everyone, set_known_windows_directory_acl
 
 
 def _signal(name: str, installed: bool = False) -> ad.AgentSignal:
@@ -115,6 +118,49 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     assert refreshed.cache_hit is False
     assert refreshed.agents["codex"].installed is False
     assert refreshed.agents["claudecode"].installed is True
+
+
+def test_cache_write_failure_is_truthful_and_preserves_existing(monkeypatch, tmp_path):
+    cache = tmp_path / ad.CACHE_FILENAME
+    cache.write_text("ORIGINAL\n", encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise PermissionError("injected ACL failure")
+
+    monkeypatch.setattr(ad, "atomic_write_private_bytes", fail)
+
+    assert ad._write_cache(_discovery("codex"), data_dir=tmp_path) is False
+    assert cache.read_text(encoding="utf-8") == "ORIGINAL\n"
+
+
+def test_cache_refuses_symlinked_parent_without_escape(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked-cache"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    assert ad._write_cache(_discovery("codex"), data_dir=linked) is False
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL convergence")
+@pytest.mark.allow_subprocess
+def test_cache_removes_inherited_everyone_write_on_windows(tmp_path):
+    cache_dir = tmp_path / "agent cache 雪"
+    cache_dir.mkdir()
+    set_known_windows_directory_acl(cache_dir, everyone_write=True)
+
+    assert ad._write_cache(_discovery("codex"), data_dir=cache_dir) is True
+    assert ad._write_cache(_discovery("claudecode"), data_dir=cache_dir) is True
+
+    cache = cache_dir / ad.CACHE_FILENAME
+    assert file_permissions.windows_acl_write_error(cache_dir) is None
+    assert file_permissions.windows_acl_write_error(cache) is None
+    assert json.loads(cache.read_text(encoding="utf-8"))["agents"]["claudecode"]["installed"] is True
+    assert list(cache_dir.glob(f".{ad.CACHE_FILENAME}.*.tmp")) == []
 
 
 def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
@@ -297,14 +343,7 @@ def test_hermes_native_windows_venv_is_discovered_without_path(
 ):
     home = tmp_path / "home"
     local_app_data = tmp_path / "local-app-data"
-    binary = (
-        local_app_data
-        / "hermes"
-        / "hermes-agent"
-        / "venv"
-        / "Scripts"
-        / "hermes.exe"
-    )
+    binary = local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe"
     config = local_app_data / "hermes" / "config.yaml"
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"test executable")
@@ -396,16 +435,29 @@ def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_
     assert ad._path_key(str(local_app_data)) not in prefixes
 
 
+def test_codex_desktop_runtime_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    runtime_root = local_app_data / "OpenAI" / "Codex" / "runtimes"
+
+    assert ad._path_key(str(runtime_root)) in prefixes
+    assert ad._path_key(str(runtime_root.parent)) not in prefixes
+    assert ad._path_key(str(local_app_data / "OpenAI")) not in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
 def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     local_app_data = tmp_path / "local-app-data"
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
 
     prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
-    hermes_scripts = (
-        local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts"
-    )
+    hermes_scripts = local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts"
 
     assert ad._path_key(str(hermes_scripts)) in prefixes
+    assert ad._path_key(str(hermes_scripts.parent)) not in prefixes
+    assert ad._path_key(str(hermes_scripts.parent.parent)) not in prefixes
     assert ad._path_key(str(local_app_data / "hermes")) not in prefixes
     assert ad._path_key(str(local_app_data)) not in prefixes
 
@@ -773,12 +825,7 @@ def test_windows_acl_distinguishes_owner_control_from_everyone_write(tmp_path):
     unsafe = tmp_path / "everyone-write"
     safe.mkdir()
     unsafe.mkdir()
-    subprocess.run(
-        ["icacls", str(unsafe), "/grant", "*S-1-1-0:(OI)(CI)F"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    grant_everyone(unsafe)
 
     _safe_path, safe_error = ad.validate_trusted_prefix(str(safe))
     _unsafe_path, unsafe_error = ad.validate_trusted_prefix(str(unsafe))
@@ -802,7 +849,7 @@ def test_windows_trust_check_is_case_insensitive(monkeypatch, tmp_path):
 def test_windows_defaults_are_narrow_and_reject_drive_root():
     local_app_data = os.environ["LOCALAPPDATA"]
     expected = os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin")
-    default_keys = {ad._path_key(path) for path in ad._TRUSTED_BIN_PREFIXES_DEFAULT}
+    default_keys = {ad._path_key(path) for path in ad._builtin_trusted_bin_prefixes()}
 
     assert ad._path_key(expected) in default_keys
     assert ad._path_key(local_app_data) not in default_keys
