@@ -76,8 +76,8 @@ func StartManagedRouter(ctx context.Context, cfg OrchestratorConfig) (*Orchestra
 		return nil, err
 	}
 
-	// 5. Wait for health (Docker containers take time to start)
-	healthTimeout := 30 * time.Second
+	// 5. Wait for health (first run pulls ~8 Docker images: redis, postgres, milvus, envoy, etc.)
+	healthTimeout := 3 * time.Minute
 	if err := lc.WaitForHealth(ctx, healthTimeout); err != nil {
 		lc.Stop()
 		return nil, err
