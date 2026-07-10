@@ -271,7 +271,7 @@ struct DCEmptyState: View {
 struct ConfidenceGauge: View {
     let value: Double // 0...1
 
-    private var normalizedValue: Double { max(0, min(1, value)) }
+    private var normalizedValue: Double { AIConfidence.clampedUnit(value) }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -279,7 +279,7 @@ struct ConfidenceGauge: View {
                 .progressViewStyle(.linear)
                 .tint(normalizedValue > 0.8 ? Cisco.green : normalizedValue > 0.5 ? Cisco.orange : Cisco.red)
                 .frame(width: 70)
-            Text("\(Int(normalizedValue * 100))%")
+            Text("\(AIConfidence.percent(normalizedValue))%")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }

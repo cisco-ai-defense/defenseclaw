@@ -350,8 +350,11 @@ actor GatewayClient {
     private static func looseInt(_ value: Any?) -> Int {
         switch value {
         case let i as Int: return i
-        case let n as NSNumber: return n.intValue
-        case let s as String: return Int(s) ?? Int(Double(s) ?? 0)
+        case let n as NSNumber: return DCSafeNumbers.intTruncating(n.doubleValue) ?? 0
+        case let s as String:
+            if let integer = Int(s) { return integer }
+            guard let number = Double(s) else { return 0 }
+            return DCSafeNumbers.intTruncating(number) ?? 0
         default: return 0
         }
     }
@@ -602,7 +605,6 @@ actor GatewayClient {
     }
 
     private func normalizeConfidence(_ raw: Any?) -> Double {
-        let value = (raw as? Double) ?? (raw as? Int).map(Double.init) ?? 0
-        return value > 1 ? value / 100 : value // accept 0–100 or 0–1
+        AIConfidence.normalize(raw)
     }
 }

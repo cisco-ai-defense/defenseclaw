@@ -462,7 +462,7 @@ struct AIDiscoveryView: View {
             HStack(spacing: 12) {
                 StatCard(title: "Active Signals", value: "\(snapshot.activeSignals > 0 ? snapshot.activeSignals : snapshot.totalDetected)")
                 StatCard(title: "Files Scanned", value: "\(snapshot.filesScanned)", tint: .secondary)
-                StatCard(title: "Avg Confidence", value: "\(Int(snapshot.averageConfidence * 100))%",
+                StatCard(title: "Avg Confidence", value: "\(AIConfidence.percent(snapshot.averageConfidence))%",
                          tint: snapshot.averageConfidence > 0.8 ? Cisco.green : Cisco.orange)
                 StatCard(title: "Last Scan", value: DCDates.relative(snapshot.lastScan), tint: .secondary)
             }

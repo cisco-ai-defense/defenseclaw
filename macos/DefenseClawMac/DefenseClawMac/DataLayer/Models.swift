@@ -586,6 +586,37 @@ enum LogPreset: String, CaseIterable, Identifiable {
 
 // MARK: - AI discovery
 
+enum DCSafeNumbers {
+    /// Swift traps when converting a non-finite or out-of-range floating-point
+    /// value to Int. Return nil instead while preserving normal truncation.
+    static func intTruncating(_ value: Double) -> Int? {
+        guard value.isFinite else { return nil }
+        return Int(exactly: value.rounded(.towardZero))
+    }
+}
+
+/// Normalizes gateway confidence values and keeps display conversions safe.
+/// Gateway payloads may use either a 0...1 fraction or a 0...100 percent.
+enum AIConfidence {
+    static func normalize(_ raw: Any?) -> Double {
+        let value = (raw as? Double) ?? (raw as? Int).map(Double.init) ?? 0
+        guard value.isFinite else { return 0 }
+        return clampedUnit(value > 1 ? value / 100 : value)
+    }
+
+    static func clampedUnit(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+
+    static func percent(
+        _ value: Double,
+        roundingRule: FloatingPointRoundingRule = .towardZero
+    ) -> Int {
+        DCSafeNumbers.intTruncating((clampedUnit(value) * 100).rounded(roundingRule)) ?? 0
+    }
+}
+
 struct AIUsageSnapshot: Sendable {
     var totalDetected: Int = 0
     var activeSignals: Int = 0
@@ -694,8 +725,9 @@ enum AIDiscoveryGrouping {
     /// TUI format_confidence(): "band (NN%)".
     static func formatConfidence(score: Double, band: String) -> String {
         let band = band.trimmingCharacters(in: .whitespaces)
-        if band.isEmpty && score == 0 { return "" }
-        let pct = Int(score * 100 + 0.5)
+        let normalizedScore = AIConfidence.clampedUnit(score)
+        if band.isEmpty && normalizedScore == 0 { return "" }
+        let pct = AIConfidence.percent(normalizedScore, roundingRule: .toNearestOrAwayFromZero)
         return band.isEmpty ? "\(pct)%" : "\(band) (\(pct)%)"
     }
 
@@ -919,6 +951,7 @@ enum DCDates {
             return iso.date(from: s) ?? isoNoFrac.date(from: s)
         }
         if let n = raw as? Double {
+            guard n.isFinite else { return nil }
             // Heuristic: epoch seconds vs milliseconds.
             return Date(timeIntervalSince1970: n > 1e12 ? n / 1000 : n)
         }
