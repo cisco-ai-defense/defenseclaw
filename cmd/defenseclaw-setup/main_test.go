@@ -241,6 +241,23 @@ func TestVerifyPayloadManifestRejectsInvalidSourceCommit(t *testing.T) {
 	}
 }
 
+func TestValidSourceCommitRequiresExactLowercaseGitOID(t *testing.T) {
+	valid := "0123456789abcdef0123456789abcdef01234567"
+	if !validSourceCommit(valid) {
+		t.Fatal("validSourceCommit rejected a 40-character lowercase Git object ID")
+	}
+	for _, invalid := range []string{
+		"0123456789ABCDEF0123456789ABCDEF01234567",
+		"0123456789abcdef0123456789abcdef0123456",
+		"0123456789abcdef0123456789abcdef012345678",
+		"g123456789abcdef0123456789abcdef01234567",
+	} {
+		if validSourceCommit(invalid) {
+			t.Fatalf("validSourceCommit accepted %q", invalid)
+		}
+	}
+}
+
 func TestVerifyPayloadManifestRejectsManagedEnterpriseWithoutOverlay(t *testing.T) {
 	manifest := payloadManifest{
 		SchemaVersion:      1,

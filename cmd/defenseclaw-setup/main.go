@@ -1033,7 +1033,10 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 }
 
 func validSourceCommit(value string) bool {
-	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+	// Get-GitSourceCommit records this repository's exact SHA-1 object ID.
+	// Payload file digests are SHA-256, but the Git provenance field is the
+	// 40-character commit returned by `git rev-parse HEAD`.
+	if len(value) != 40 || value != strings.ToLower(value) {
 		return false
 	}
 	_, err := hex.DecodeString(value)
