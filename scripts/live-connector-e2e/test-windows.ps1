@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $harness = Join-Path $PSScriptRoot 'run-windows.ps1'
 $nativeHarness = Join-Path $root 'scripts\windows-native-ci.ps1'
+$wizardHarness = Join-Path $root 'scripts\test-windows-setup-wizard.ps1'
 $nativeWorkflow = Join-Path $root '.github\workflows\windows-native.yml'
 $liveWorkflow = Join-Path $root '.github\workflows\connector-live-e2e.yml'
 $ciWorkflow = Join-Path $root '.github\workflows\ci.yml'
@@ -22,7 +23,7 @@ function Assert-True([bool]$Condition, [string]$Message) {
 }
 
 try {
-    foreach ($scriptPath in @($harness, $nativeHarness, $installer)) {
+    foreach ($scriptPath in @($harness, $nativeHarness, $wizardHarness, $installer)) {
         $tokens = $null; $errors = $null
         [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors) | Out-Null
         Assert-True (@($errors).Count -eq 0) "PowerShell parser errors in ${scriptPath}: $($errors -join '; ')"
@@ -130,6 +131,7 @@ try {
     $ciWorkflowText = [IO.File]::ReadAllText($ciWorkflow)
     $harnessText = [IO.File]::ReadAllText($harness)
     $nativeHarnessText = [IO.File]::ReadAllText($nativeHarness)
+    $wizardHarnessText = [IO.File]::ReadAllText($wizardHarness)
     $installerText = [IO.File]::ReadAllText($installer)
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode\].*?windows-native-required:') 'required Windows contract matrix contains Codex and Claude'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
@@ -186,6 +188,49 @@ try {
         'Initialize-WindowsNativeTestEnvironment \$env:DC_STATE_ROOT'
     ).Count -ge 5) 'Go and Python test steps initialize the private temp root'
     Assert-True ($nativeHarnessText -match 'doctor'', ''--json-output' -and $nativeHarnessText -match 'skill'', ''scan' -and $nativeHarnessText -match 'mcp'', ''scan') 'installed artifact smoke covers doctor and scanners'
+    Assert-True ($wizardHarnessText.Contains('[switch]$ActivateInstall') -and
+        $wizardHarnessText -match "GITHUB_ACTIONS -ne 'true'" -and
+        $wizardHarnessText -match "RUNNER_ENVIRONMENT -ne 'github-hosted'" -and
+        $wizardHarnessText -match 'GetRelativePath\(\$runnerTemp, \$state\)') `
+        'install-driving wizard automation is restricted to disposable GitHub-hosted runner state'
+    Assert-True ($wizardHarnessText -match 'SendMessageTimeout' -and
+        $wizardHarnessText -match 'InstallTimeoutSeconds' -and
+        $wizardHarnessText -match 'Get-BoundedWindowText') `
+        'wizard automation uses bounded Win32 calls and install timeout'
+    foreach ($controlID in @(1001, 1002, 1003, 1005, 1009, 1011)) {
+        Assert-True ($wizardHarnessText -match "Get-WizardControl \`$window $controlID") `
+            "wizard automation reaches required real control id $controlID"
+    }
+    Assert-True ($wizardHarnessText -match 'foreach \(\$index in 0\.\.2\)' -and
+        $wizardHarnessText -match 'foreach \(\$index in 0\.\.1\)' -and
+        $wizardHarnessText -match 'Set-AndAssertCheckState \$startControl \$false' -and
+        $wizardHarnessText -match 'Set-AndAssertCheckState \$startControl \$true') `
+        'wizard automation deterministically exercises every connector, mode, and start choice'
+    Assert-True ($wizardHarnessText -match "Send-WizardCommand \`$window 1005 'Install'" -and
+        $wizardHarnessText -match "heading -ne 'DefenseClaw is installed'" -and
+        $wizardHarnessText -match "Send-WizardCommand \`$window 1005 'Finish'") `
+        'wizard automation activates Install and verifies the completion page before Finish'
+    Assert-True ($nativeHarnessText -match "Invoke-WizardConfigureLaterAcceptance" -and
+        $nativeHarnessText -match "(?s)Invoke-WizardConnectorAcceptance.*?'codex' 'observe'.*?Invoke-WizardConnectorAcceptance.*?'claudecode' 'action'") `
+        'setup acceptance performs Configure Later, Codex Observe, and Claude Code Action wizard installs'
+    $wizardAcceptance = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-WizardConnectorAcceptance\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($wizardAcceptance -and
+        $wizardAcceptance -match 'Assert-WizardConnectorState' -and
+        $wizardAcceptance -match 'Assert-WizardHookRegistration' -and
+        $wizardAcceptance -match 'Assert-WizardConnectorHealth' -and
+        $wizardAcceptance -match 'setup repair changed the selected' -and
+        $wizardAcceptance -notmatch 'DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT') `
+        'wizard connector acceptance validates canonical state, hooks, health, and repair without a contract override'
+    Assert-True ($wizardAcceptance -match "watchdog\.pid" -and
+        $wizardAcceptance -match "@\('watchdog', 'start'\)" -and
+        $wizardAcceptance -match 'Assert-OnlyInstalledGatewayProcesses') `
+        'wizard lifecycle distinguishes STARTGATEWAY from an explicit owned watchdog request'
+    Assert-True ($nativeHarnessText -match '\[IO\.FileShare\]::None' -and
+        $nativeHarnessText -notmatch 'import time; time\.sleep\(60\)') `
+        'setup locked-file acceptance uses a deterministic non-shareable handle'
     $acceptance = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Invoke-Acceptance\b.*?\n\}'

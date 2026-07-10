@@ -672,24 +672,32 @@ function Assert-PackagedDoctorSmoke([string]$CliShim, [string]$Logs) {
     }
 }
 
-function Get-GatewayIdentity([string]$DataDir) {
-    $pidFile = Join-Path $DataDir 'gateway.pid'
+function Get-ManagedProcessIdentity([string]$DataDir, [string]$PIDFileName) {
+    $pidFile = Join-Path $DataDir $PIDFileName
     if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
-        throw "managed gateway PID file is missing: $pidFile"
+        throw "managed process PID file is missing: $pidFile"
     }
     $record = Get-Content -LiteralPath $pidFile -Raw -Encoding UTF8 | ConvertFrom-Json
     $processId = 0
     if (-not [int]::TryParse([string]$record.pid, [ref]$processId) -or $processId -le 0) {
-        throw "managed gateway PID record is invalid: $pidFile"
+        throw "managed process PID record is invalid: $pidFile"
     }
     if ($null -eq (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
-        throw "managed gateway process is not running: $processId"
+        throw "managed process is not running: $processId"
     }
     return [pscustomobject]@{
         ProcessId = $processId
         StartIdentity = [string]$record.start_identity
         Executable = [IO.Path]::GetFullPath([string]$record.executable)
     }
+}
+
+function Get-GatewayIdentity([string]$DataDir) {
+    return Get-ManagedProcessIdentity $DataDir 'gateway.pid'
+}
+
+function Get-WatchdogIdentity([string]$DataDir) {
+    return Get-ManagedProcessIdentity $DataDir 'watchdog.pid'
 }
 
 function Test-GatewayIdentityChanged([object]$Before, [object]$After) {
@@ -1206,6 +1214,489 @@ function Assert-PackagedAntigravityPlatformGate(
     }
 }
 
+function New-WizardAgentFixtures([string]$Root) {
+    $bin = Join-Path $Root 'wizard-agent-fixtures'
+    Protect-TestDirectory $bin
+    $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+        throw "Windows .NET Framework compiler is unavailable: $compiler"
+    }
+    $fixtures = @(
+        [pscustomobject]@{
+            Name = 'codex.exe'
+            ClassName = 'CodexVersionFixture'
+            Version = 'codex-cli 0.124.0'
+        },
+        [pscustomobject]@{
+            Name = 'claude.exe'
+            ClassName = 'ClaudeVersionFixture'
+            Version = 'claude 2.1.144'
+        }
+    )
+    foreach ($fixture in $fixtures) {
+        $path = Join-Path $bin $fixture.Name
+        $sourcePath = Join-Path $bin ($fixture.ClassName + '.cs')
+        $source = @"
+using System;
+public static class $($fixture.ClassName) {
+    public static int Main(string[] arguments) {
+        Console.WriteLine("$($fixture.Version)");
+        return 0;
+    }
+}
+"@
+        Write-BoundedText $sourcePath $source
+        try {
+            Invoke-WindowsNativeProcess $compiler @(
+                '/nologo', '/target:exe', "/out:$path", $sourcePath
+            ) -TimeoutSeconds 60 | Out-Null
+        } finally {
+            Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+        }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "compatible connector fixture was not built: $path"
+        }
+    }
+    return $bin
+}
+
+function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserProfile) {
+    if ($ConnectorName -eq 'codex') {
+        return [pscustomobject]@{
+            Connector = 'codex'
+            OtherConnector = 'claudecode'
+            HookScript = 'codex-hook.sh'
+            OtherHookScript = 'claude-code-hook.sh'
+            ConfigPath = Join-Path $UserProfile '.codex\config.toml'
+            OtherConfigPath = Join-Path $UserProfile '.claude\settings.json'
+            DoctorLabel = 'Codex hooks'
+            OtherDoctorLabel = 'Claude Code hooks'
+        }
+    }
+    if ($ConnectorName -eq 'claudecode') {
+        return [pscustomobject]@{
+            Connector = 'claudecode'
+            OtherConnector = 'codex'
+            HookScript = 'claude-code-hook.sh'
+            OtherHookScript = 'codex-hook.sh'
+            ConfigPath = Join-Path $UserProfile '.claude\settings.json'
+            OtherConfigPath = Join-Path $UserProfile '.codex\config.toml'
+            DoctorLabel = 'Claude Code hooks'
+            OtherDoctorLabel = 'Codex hooks'
+        }
+    }
+    throw "unsupported wizard connector specification: $ConnectorName"
+}
+
+function Assert-NoDefenseClawRegistration([string[]]$Paths) {
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $content = [IO.File]::ReadAllText($path)
+        if ($content -match '(?i)defenseclaw') {
+            throw "unexpected DefenseClaw connector registration remains in $path"
+        }
+    }
+}
+
+function Assert-NoInstalledGatewayProcess([string]$GatewayPath) {
+    $full = [IO.Path]::GetFullPath($GatewayPath)
+    $owned = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).Equals(
+            $full,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    })
+    if ($owned.Count -ne 0) {
+        throw "unexpected installed gateway/watchdog process remains: $($owned.ProcessId -join ', ')"
+    }
+}
+
+function Assert-OwnedManagedProcess([object]$Identity, [string]$GatewayPath, [string]$Label) {
+    $expected = [IO.Path]::GetFullPath($GatewayPath)
+    if ([string]::IsNullOrWhiteSpace([string]$Identity.StartIdentity)) {
+        throw "$Label PID record omitted its process start identity"
+    }
+    if (-not ([IO.Path]::GetFullPath([string]$Identity.Executable)).Equals(
+        $expected,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "$Label is owned by an unexpected executable: $($Identity.Executable)"
+    }
+    $live = Get-CimInstance Win32_Process -Filter "ProcessId = $($Identity.ProcessId)" -ErrorAction Stop
+    if ($null -eq $live -or [string]::IsNullOrWhiteSpace($live.ExecutablePath) -or
+        -not ([IO.Path]::GetFullPath($live.ExecutablePath)).Equals(
+            $expected,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "$Label process identity does not resolve to the installed gateway executable"
+    }
+}
+
+function Assert-OnlyInstalledGatewayProcesses([string]$GatewayPath, [int[]]$ExpectedProcessIDs) {
+    $full = [IO.Path]::GetFullPath($GatewayPath)
+    $actual = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).Equals(
+            $full,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    } | ForEach-Object { [int]$_.ProcessId } | Sort-Object)
+    $expected = @($ExpectedProcessIDs | Sort-Object)
+    if (($actual -join ',') -ne ($expected -join ',')) {
+        throw "installed gateway process roster mismatch: actual=$($actual -join ',') expected=$($expected -join ',')"
+    }
+}
+
+function Get-PackagedConnectorState([string]$Python, [string]$LogPath) {
+    $probe = @'
+import json
+from defenseclaw.config import load
+
+cfg = load()
+roster = cfg.active_connectors()
+payload = {
+    "claw_connector": cfg.claw.mode,
+    "guardrail_connector": cfg.guardrail.connector,
+    "guardrail_mode": cfg.guardrail.mode,
+    "guardrail_enabled": cfg.guardrail.enabled,
+    "connector_keys": sorted(cfg.guardrail.connectors),
+    "roster": roster,
+    "effective_modes": {name: cfg.guardrail.effective_mode(name) for name in roster},
+    "effective_enabled": {name: cfg.guardrail.effective_enabled(name) for name in roster},
+}
+print("DC_WIZARD_STATE=" + json.dumps(payload, sort_keys=True, separators=(",", ":")))
+'@
+    $result = Invoke-Installed $Python @('-I', '-X', 'utf8', '-c', $probe) -Timeout 120 -Log $LogPath
+    $lines = @($result.StdOut -split "`r?`n" | Where-Object { $_.StartsWith('DC_WIZARD_STATE=') })
+    if ($lines.Count -ne 1) {
+        throw "packaged connector state probe returned $($lines.Count) structured results; expected one"
+    }
+    return $lines[0].Substring('DC_WIZARD_STATE='.Length) | ConvertFrom-Json
+}
+
+function Assert-WizardConnectorState([object]$State, [string]$ConnectorName, [string]$Mode) {
+    if ([string]$State.guardrail_connector -ne $ConnectorName -or
+        [string]$State.claw_connector -ne $ConnectorName) {
+        throw "wizard selection was not persisted under canonical connector '$ConnectorName': $($State | ConvertTo-Json -Compress -Depth 8)"
+    }
+    if ([string]$State.guardrail_mode -ne $Mode -or -not [bool]$State.guardrail_enabled) {
+        throw "wizard mode '$Mode' was not persisted as enabled guardrail state: $($State | ConvertTo-Json -Compress -Depth 8)"
+    }
+    $roster = @($State.roster)
+    if ($roster.Count -ne 1 -or [string]$roster[0] -ne $ConnectorName) {
+        throw "wizard created a partial or wrong connector roster: $($roster -join ', ')"
+    }
+    $keys = @($State.connector_keys)
+    if (@($keys | Where-Object { [string]$_ -ne $ConnectorName }).Count -ne 0) {
+        throw "wizard persisted a connector override under a non-canonical key: $($keys -join ', ')"
+    }
+    $effectiveMode = $State.effective_modes.PSObject.Properties[$ConnectorName]
+    $effectiveEnabled = $State.effective_enabled.PSObject.Properties[$ConnectorName]
+    if ($null -eq $effectiveMode -or [string]$effectiveMode.Value -ne $Mode -or
+        $null -eq $effectiveEnabled -or -not [bool]$effectiveEnabled.Value) {
+        throw "wizard connector effective mode/enabled state is inconsistent for $ConnectorName"
+    }
+}
+
+function Assert-SetupInstallState(
+    [string]$InstallRoot,
+    [string]$ConnectorName,
+    [string]$Mode
+) {
+    $statePath = Join-Path $InstallRoot 'installer\install-state.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        throw "setup install state is missing: $statePath"
+    }
+    $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$state.connector -ne $ConnectorName -or [string]$state.mode -ne $Mode) {
+        throw "setup install state did not preserve wizard selections: connector=$($state.connector) mode=$($state.mode)"
+    }
+}
+
+function Assert-WizardHookRegistration(
+    [object]$Specification,
+    [string]$DataRoot
+) {
+    $hookDir = Join-Path $DataRoot 'hooks'
+    $expectedHook = Join-Path $hookDir $Specification.HookScript
+    $wrongHook = Join-Path $hookDir $Specification.OtherHookScript
+    if (-not (Test-Path -LiteralPath $expectedHook -PathType Leaf)) {
+        throw "wizard-selected connector hook is missing: $expectedHook"
+    }
+    if (Test-Path -LiteralPath $wrongHook) {
+        throw "wizard configured the wrong connector hook: $wrongHook"
+    }
+    if (-not (Test-Path -LiteralPath $Specification.ConfigPath -PathType Leaf)) {
+        throw "wizard-selected connector registration is missing: $($Specification.ConfigPath)"
+    }
+    $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
+    $pattern = '(?i)defenseclaw-hook(?:\.exe)?[^\r\n]*\bhook\b[^\r\n]*--connector\s+' +
+        [regex]::Escape($Specification.Connector) + '\b'
+    if ($registration -notmatch $pattern) {
+        throw "wizard-selected connector does not use its exact native hook command: $($Specification.ConfigPath)"
+    }
+    if ($registration -match ('(?i)--connector\s+' + [regex]::Escape($Specification.OtherConnector) + '\b')) {
+        throw "wizard-selected connector registration references the wrong connector"
+    }
+    Assert-NoDefenseClawRegistration @($Specification.OtherConfigPath)
+}
+
+function Assert-WizardConnectorHealth(
+    [string]$Launcher,
+    [object]$Specification,
+    [string]$Mode,
+    [string]$Logs,
+    [string]$Phase
+) {
+    $statusResult = Invoke-Installed $Launcher @('status', '--json') -Timeout 120 `
+        -Log (Join-Path $Logs "wizard-$($Specification.Connector)-$Phase-status.json")
+    try { $status = $statusResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "wizard status did not emit valid JSON: $($_.Exception.Message)" }
+    if (-not [bool]$status.sidecar.running) {
+        throw "wizard-selected $($Specification.Connector) sidecar is not running"
+    }
+    $connectors = @($status.connectors)
+    if ($connectors.Count -ne 1 -or [string]$connectors[0].name -ne $Specification.Connector -or
+        [string]$connectors[0].mode -ne $Mode -or -not [bool]$connectors[0].enabled -or
+        [string]$connectors[0].source -ne 'manual') {
+        throw "wizard status reported a partial or wrong connector roster: $($connectors | ConvertTo-Json -Compress -Depth 8)"
+    }
+
+    $doctorResult = Invoke-Installed $Launcher @('doctor', '--json-output') @(0, 1) 300 `
+        (Join-Path $Logs "wizard-$($Specification.Connector)-$Phase-doctor.json")
+    try { $doctor = $doctorResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "wizard doctor did not emit valid JSON: $($_.Exception.Message)" }
+    $hookRows = @($doctor.checks | Where-Object {
+        [string]::Equals([string]$_.label, $Specification.DoctorLabel, [StringComparison]::Ordinal)
+    })
+    if ($hookRows.Count -ne 1 -or [string]$hookRows[0].status -ne 'pass' -or
+        [string]$hookRows[0].detail -notmatch 'healthy Windows-native executable registration') {
+        throw "wizard doctor did not validate the selected native hook: $($hookRows | ConvertTo-Json -Compress -Depth 5)"
+    }
+    $expectedHookExecutable = Join-Path (Split-Path -Parent $Launcher) 'defenseclaw-hook.exe'
+    if (([string]$hookRows[0].detail).IndexOf(
+        $expectedHookExecutable,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -lt 0) {
+        throw "wizard doctor validated an unexpected hook executable: $($hookRows[0].detail)"
+    }
+    $wrongRows = @($doctor.checks | Where-Object {
+        [string]::Equals([string]$_.label, $Specification.OtherDoctorLabel, [StringComparison]::Ordinal)
+    })
+    if ($wrongRows.Count -ne 0) {
+        throw "wizard doctor reported a hook row for the unselected connector"
+    }
+    $proxyRows = @($doctor.checks | Where-Object {
+        [string]::Equals([string]$_.label, 'Guardrail proxy', [StringComparison]::Ordinal)
+    })
+    if ($proxyRows.Count -ne 1 -or [string]$proxyRows[0].status -ne 'pass') {
+        throw "wizard doctor did not report healthy guardrail enforcement: $($proxyRows | ConvertTo-Json -Compress -Depth 5)"
+    }
+}
+
+function Invoke-WizardInstall(
+    [string]$Setup,
+    [string]$Root,
+    [string]$ConnectorName,
+    [string]$Mode,
+    [bool]$StartGateway,
+    [string]$LogPath
+) {
+    $driver = Join-Path $PSScriptRoot 'test-windows-setup-wizard.ps1'
+    $arguments = @{
+        SetupPath = $Setup
+        StateRoot = (Join-Path $Root "wizard-$ConnectorName-$Mode")
+        Connector = $ConnectorName
+        Mode = $Mode
+        StartGateway = $StartGateway
+        ActivateInstall = $true
+        TimeoutSeconds = 30
+        InstallTimeoutSeconds = 1200
+    }
+    $output = @(& $driver @arguments)
+    Write-BoundedText $LogPath ($output -join [Environment]::NewLine)
+}
+
+function Invoke-WizardConfigureLaterAcceptance(
+    [string]$Setup,
+    [string]$Root,
+    [string]$Logs,
+    [string]$InstallRoot,
+    [string]$DataRoot,
+    [string]$Gateway,
+    [string]$ARPKey,
+    [string[]]$ConnectorConfigPaths,
+    [AllowNull()][string]$UserPathBefore
+) {
+    Invoke-WizardInstall $Setup $Root 'none' 'observe' $false `
+        (Join-Path $Logs 'wizard-configure-later.json')
+    Assert-SetupInstallState $InstallRoot 'none' 'observe'
+    if (Test-Path -LiteralPath (Join-Path $DataRoot 'config.yaml')) {
+        throw 'Configure later unexpectedly wrote a DefenseClaw connector configuration'
+    }
+    $hookDir = Join-Path $DataRoot 'hooks'
+    if (Test-Path -LiteralPath $hookDir) {
+        $hookFiles = @(Get-ChildItem -LiteralPath $hookDir -File -Force -ErrorAction Stop)
+        if ($hookFiles.Count -ne 0) {
+            throw "Configure later unexpectedly generated connector hooks: $($hookFiles.Name -join ', ')"
+        }
+    }
+    foreach ($pidFile in @('gateway.pid', 'watchdog.pid')) {
+        if (Test-Path -LiteralPath (Join-Path $DataRoot $pidFile)) {
+            throw "Configure later unexpectedly started a managed process: $pidFile"
+        }
+    }
+    Assert-NoInstalledGatewayProcess $Gateway
+    Assert-NoDefenseClawRegistration $ConnectorConfigPaths
+
+    Invoke-WindowsNativeProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+        -TimeoutSeconds 600 -LogPath (Join-Path $Logs 'wizard-configure-later-uninstall.log') | Out-Null
+    if (Test-Path -LiteralPath $InstallRoot) {
+        throw "Configure later uninstall left install root behind: $InstallRoot"
+    }
+    if (Test-Path -LiteralPath $DataRoot) {
+        throw "Configure later uninstall left user data behind: $DataRoot"
+    }
+    if (Test-Path -LiteralPath $ARPKey) {
+        throw 'Configure later uninstall left Installed Apps registration behind'
+    }
+    if (-not [string]::Equals(
+        $UserPathBefore,
+        [Environment]::GetEnvironmentVariable('Path', 'User'),
+        [StringComparison]::Ordinal
+    )) {
+        throw 'Configure later uninstall did not restore the original user PATH exactly'
+    }
+}
+
+function Invoke-WizardConnectorAcceptance(
+    [string]$Setup,
+    [string]$Root,
+    [string]$Logs,
+    [string]$InstallRoot,
+    [string]$DataRoot,
+    [string]$ARPKey,
+    [string]$UserProfile,
+    [string]$FixtureBin,
+    [AllowNull()][string]$UserPathBefore,
+    [string]$ConnectorName,
+    [ValidateSet('observe', 'action')][string]$Mode
+) {
+    $specification = Get-WizardConnectorSpecification $ConnectorName $UserProfile
+    $launcher = Join-Path $InstallRoot 'bin\defenseclaw.exe'
+    $gateway = Join-Path $InstallRoot 'bin\defenseclaw-gateway.exe'
+    $python = Join-Path $InstallRoot 'runtime\python\python.exe'
+    Invoke-WizardInstall $Setup $Root $ConnectorName $Mode $true `
+        (Join-Path $Logs "wizard-$ConnectorName-$Mode-install.json")
+    $env:DEFENSECLAW_HOME = $DataRoot
+    $env:PATH = "$FixtureBin;$(Join-Path $InstallRoot 'bin');$env:SystemRoot\System32;$env:SystemRoot"
+
+    foreach ($required in @($launcher, $gateway, $python)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "wizard install did not create required file: $required"
+        }
+    }
+    Assert-SetupInstallState $InstallRoot $ConnectorName $Mode
+    $beforeState = Get-PackagedConnectorState $python `
+        (Join-Path $Logs "wizard-$ConnectorName-before-state.log")
+    Assert-WizardConnectorState $beforeState $ConnectorName $Mode
+    Assert-WizardHookRegistration $specification $DataRoot
+
+    Invoke-Installed $gateway @('status') -Timeout 30 `
+        -Log (Join-Path $Logs "wizard-$ConnectorName-gateway-status.log") | Out-Null
+    $beforeGateway = Get-GatewayIdentity $DataRoot
+    Assert-OwnedManagedProcess $beforeGateway $gateway 'wizard-started gateway'
+    if (Test-Path -LiteralPath (Join-Path $DataRoot 'watchdog.pid')) {
+        throw 'STARTGATEWAY unexpectedly requested a watchdog on a fresh install'
+    }
+    $watchdogStopped = Invoke-Installed $gateway @('watchdog', 'status') @(0, 1) 30 `
+        (Join-Path $Logs "wizard-$ConnectorName-watchdog-stopped.log")
+    if (($watchdogStopped.StdOut + $watchdogStopped.StdErr) -match '(?i)watchdog:\s+running') {
+        throw 'fresh STARTGATEWAY install reported an unrequested running watchdog'
+    }
+    Assert-OnlyInstalledGatewayProcesses $gateway @($beforeGateway.ProcessId)
+
+    Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 `
+        -Log (Join-Path $Logs "wizard-$ConnectorName-watchdog-start.log") | Out-Null
+    Invoke-Installed $gateway @('watchdog', 'status') -Timeout 30 | Out-Null
+    $beforeWatchdog = Get-WatchdogIdentity $DataRoot
+    Assert-OwnedManagedProcess $beforeWatchdog $gateway 'explicitly started watchdog'
+    if ($beforeGateway.ProcessId -eq $beforeWatchdog.ProcessId) {
+        throw 'gateway and watchdog unexpectedly share one process identity'
+    }
+    Assert-OnlyInstalledGatewayProcesses $gateway @(
+        $beforeGateway.ProcessId,
+        $beforeWatchdog.ProcessId
+    )
+    Assert-WizardConnectorHealth $launcher $specification $Mode $Logs 'before-repair'
+
+    $preserved = Join-Path $DataRoot "wizard-$ConnectorName-preservation.txt"
+    Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii
+    $stateFingerprint = $beforeState | ConvertTo-Json -Compress -Depth 8
+    Invoke-WindowsNativeProcess $Setup @('/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user') `
+        -TimeoutSeconds 1200 -LogPath (Join-Path $Logs "wizard-$ConnectorName-repair.log") | Out-Null
+
+    $afterState = Get-PackagedConnectorState $python `
+        (Join-Path $Logs "wizard-$ConnectorName-after-state.log")
+    Assert-WizardConnectorState $afterState $ConnectorName $Mode
+    if (($afterState | ConvertTo-Json -Compress -Depth 8) -ne $stateFingerprint) {
+        throw "setup repair changed the selected $ConnectorName connector/mode/roster"
+    }
+    Assert-SetupInstallState $InstallRoot $ConnectorName $Mode
+    Assert-WizardHookRegistration $specification $DataRoot
+    Assert-WizardConnectorHealth $launcher $specification $Mode $Logs 'after-repair'
+    if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) {
+        throw "setup repair did not preserve $ConnectorName user data"
+    }
+    $afterGateway = Get-GatewayIdentity $DataRoot
+    $afterWatchdog = Get-WatchdogIdentity $DataRoot
+    Assert-OwnedManagedProcess $afterGateway $gateway 'repair-restored gateway'
+    Assert-OwnedManagedProcess $afterWatchdog $gateway 'repair-restored watchdog'
+    if (-not (Test-GatewayIdentityChanged $beforeGateway $afterGateway)) {
+        throw 'setup repair did not restart the wizard-started gateway'
+    }
+    if (-not (Test-GatewayIdentityChanged $beforeWatchdog $afterWatchdog)) {
+        throw 'setup repair did not restart the explicitly started watchdog'
+    }
+    Assert-OnlyInstalledGatewayProcesses $gateway @(
+        $afterGateway.ProcessId,
+        $afterWatchdog.ProcessId
+    )
+
+    Invoke-Installed $gateway @('watchdog', 'stop') @(0, 1) 60 `
+        (Join-Path $Logs "wizard-$ConnectorName-watchdog-stop.log") | Out-Null
+    Invoke-Installed $gateway @('stop') @(0, 1) 60 `
+        (Join-Path $Logs "wizard-$ConnectorName-gateway-stop.log") | Out-Null
+    Invoke-Installed $gateway @('connector', 'teardown', '--connector', $ConnectorName) `
+        @(0, 1) 120 (Join-Path $Logs "wizard-$ConnectorName-teardown.log") | Out-Null
+    Invoke-Installed $gateway @('connector', 'verify', '--connector', $ConnectorName) `
+        -Timeout 120 -Log (Join-Path $Logs "wizard-$ConnectorName-teardown-verify.log") | Out-Null
+    Assert-NoDefenseClawRegistration @(
+        $specification.ConfigPath,
+        $specification.OtherConfigPath
+    )
+    Invoke-WindowsNativeProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+        -TimeoutSeconds 600 -LogPath (Join-Path $Logs "wizard-$ConnectorName-uninstall.log") | Out-Null
+    if (Test-Path -LiteralPath $InstallRoot) {
+        throw "wizard $ConnectorName uninstall left install root behind: $InstallRoot"
+    }
+    if (Test-Path -LiteralPath $DataRoot) {
+        throw "wizard $ConnectorName uninstall left user data behind: $DataRoot"
+    }
+    if (Test-Path -LiteralPath $ARPKey) {
+        throw "wizard $ConnectorName uninstall left Installed Apps registration behind"
+    }
+    Assert-NoInstalledGatewayProcess $gateway
+    if (-not [string]::Equals(
+        $UserPathBefore,
+        [Environment]::GetEnvironmentVariable('Path', 'User'),
+        [StringComparison]::Ordinal
+    )) {
+        throw "wizard $ConnectorName uninstall did not restore the original user PATH exactly"
+    }
+}
+
 function Invoke-SetupAcceptance {
     Assert-NativeWindowsX64
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for setup-acceptance' }
@@ -1226,17 +1717,60 @@ function Invoke-SetupAcceptance {
     $dataRoot = Join-Path $userProfile '.defenseclaw'
     $cacheRoot = Join-Path $localAppData 'DefenseClaw\InstallerCache'
     $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
+    $connectorConfigPaths = @(
+        (Join-Path $userProfile '.codex\config.toml'),
+        (Join-Path $userProfile '.claude\settings.json')
+    )
     if (Test-Path -LiteralPath $installRoot) { throw "refusing to overwrite an existing current-user install: $installRoot" }
     if (Test-Path -LiteralPath $dataRoot) { throw "refusing to overwrite existing current-user data: $dataRoot" }
     if (Test-Path -LiteralPath $arpKey) { throw 'refusing to overwrite existing DefenseClaw Installed Apps registration' }
     $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
     $processPathBefore = $env:PATH
+    $trustedPrefixesBefore = [Environment]::GetEnvironmentVariable('DEFENSECLAW_TRUSTED_BIN_PREFIXES')
     $launcher = Join-Path $installRoot 'bin\defenseclaw.exe'
     $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
     $hook = Join-Path $installRoot 'bin\defenseclaw-hook.exe'
     $python = Join-Path $installRoot 'runtime\python\python.exe'
     $cosign = Join-Path $installRoot 'runtime\tools\cosign.exe'
+    $disposableGithubRunner = $env:GITHUB_ACTIONS -eq 'true' -and
+        $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
+    $fixtureBin = ''
+    if ($disposableGithubRunner) {
+        if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or
+            -not (Test-PathWithin $root $env:RUNNER_TEMP)) {
+            throw 'interactive setup acceptance requires StateRoot below RUNNER_TEMP'
+        }
+        Assert-NoDefenseClawRegistration $connectorConfigPaths
+        Set-CurrentUserAsDefaultOwner
+        $fixtureBin = New-WizardAgentFixtures $root
+        $env:DEFENSECLAW_TRUSTED_BIN_PREFIXES = if ([string]::IsNullOrWhiteSpace($trustedPrefixesBefore)) {
+            $fixtureBin
+        } else {
+            "$fixtureBin;$trustedPrefixesBefore"
+        }
+        $env:PATH = "$fixtureBin;$processPathBefore"
+    }
     try {
+        if ($disposableGithubRunner) {
+            Invoke-WizardConfigureLaterAcceptance `
+                $setup $root $logs $installRoot $dataRoot $gateway $arpKey `
+                $connectorConfigPaths $userPathBefore
+            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+            $env:PATH = "$fixtureBin;$processPathBefore"
+
+            Invoke-WizardConnectorAcceptance `
+                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
+                $fixtureBin $userPathBefore 'codex' 'observe'
+            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+            $env:PATH = "$fixtureBin;$processPathBefore"
+
+            Invoke-WizardConnectorAcceptance `
+                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
+                $fixtureBin $userPathBefore 'claudecode' 'action'
+            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+            $env:PATH = $processPathBefore
+        }
+
         Invoke-WindowsNativeProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
             'MODE=observe', 'STARTGATEWAY=0'
@@ -1325,21 +1859,17 @@ function Invoke-SetupAcceptance {
             throw "seeded setup upgrade version mismatch: $($upgradedState.version), expected $targetVersion"
         }
 
-        $lockStart = [Diagnostics.ProcessStartInfo]::new()
-        $lockStart.FileName = $python
-        $lockStart.UseShellExecute = $false
-        $lockStart.CreateNoWindow = $true
-        [void]$lockStart.ArgumentList.Add('-I')
-        [void]$lockStart.ArgumentList.Add('-c')
-        [void]$lockStart.ArgumentList.Add('import time; time.sleep(60)')
-        $lockProcess = [Diagnostics.Process]::Start($lockStart)
+        $lockStream = [IO.FileStream]::new(
+            $python,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::None
+        )
         try {
-            Start-Sleep -Milliseconds 500
             Invoke-WindowsNativeProcess $setup @('/repair', '/quiet', 'INSTALLSCOPE=user') `
                 -AllowedExitCodes @(3010) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-locked-file.log') | Out-Null
         } finally {
-            if (-not $lockProcess.HasExited) { $lockProcess.Kill($true) }
-            $lockProcess.Dispose()
+            $lockStream.Dispose()
         }
         Invoke-Installed $launcher @('--version') -Timeout 120 | Out-Null
 
@@ -1364,6 +1894,18 @@ function Invoke-SetupAcceptance {
             throw 'setup repair did not preserve user data'
         }
 
+        Invoke-Installed $gateway @('watchdog', 'stop') @(0, 1) 60 `
+            (Join-Path $logs 'setup-watchdog-stop-before-teardown.log') | Out-Null
+        Invoke-Installed $gateway @('stop') @(0, 1) 60 `
+            (Join-Path $logs 'setup-gateway-stop-before-teardown.log') | Out-Null
+        foreach ($configuredConnector in @('codex', 'claudecode')) {
+            Invoke-Installed $gateway @('connector', 'teardown', '--connector', $configuredConnector) `
+                @(0, 1) 120 (Join-Path $logs "setup-$configuredConnector-teardown.log") | Out-Null
+            Invoke-Installed $gateway @('connector', 'verify', '--connector', $configuredConnector) `
+                -Timeout 120 -Log (Join-Path $logs "setup-$configuredConnector-teardown-verify.log") | Out-Null
+        }
+        Assert-NoDefenseClawRegistration $connectorConfigPaths
+
         Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
@@ -1384,6 +1926,25 @@ function Invoke-SetupAcceptance {
     } finally {
         $env:PATH = $processPathBefore
         Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($trustedPrefixesBefore)) {
+            Remove-Item Env:DEFENSECLAW_TRUSTED_BIN_PREFIXES -ErrorAction SilentlyContinue
+        } else {
+            $env:DEFENSECLAW_TRUSTED_BIN_PREFIXES = $trustedPrefixesBefore
+        }
+        if (Test-Path -LiteralPath $gateway -PathType Leaf) {
+            try { Invoke-Installed $gateway @('watchdog', 'stop') @(0, 1) 60 | Out-Null }
+            catch { Write-Warning "setup acceptance watchdog cleanup failed: $($_.Exception.Message)" }
+            try { Invoke-Installed $gateway @('stop') @(0, 1) 60 | Out-Null }
+            catch { Write-Warning "setup acceptance gateway cleanup failed: $($_.Exception.Message)" }
+            foreach ($configuredConnector in @('codex', 'claudecode')) {
+                try {
+                    Invoke-Installed $gateway @('connector', 'teardown', '--connector', $configuredConnector) `
+                        @(0, 1) 120 | Out-Null
+                } catch {
+                    Write-Warning "setup acceptance $configuredConnector teardown cleanup failed: $($_.Exception.Message)"
+                }
+            }
+        }
         if (Test-Path -LiteralPath $installRoot) {
             try {
                 Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
@@ -1394,6 +1955,9 @@ function Invoke-SetupAcceptance {
             Start-Sleep -Milliseconds 250
         }
         if (Test-Path -LiteralPath $cacheRoot) { throw "setup uninstall left installer cache behind: $cacheRoot" }
+        if ($disposableGithubRunner) {
+            Assert-NoDefenseClawRegistration $connectorConfigPaths
+        }
     }
 }
 
