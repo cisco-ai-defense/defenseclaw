@@ -1290,6 +1290,9 @@ The first release is complete when:
     authenticate both the UI and SDK, and may upload scoped execution events;
     member history is provenance-isolated and only the bootstrap administrator
     key is unscoped.
+17. Administrator Monitor results include the server-resolved owning user name
+    and stable user ID for each finding. Member responses omit owner metadata,
+    and SDK-supplied metadata cannot override administrator attribution.
 
 ## 21. External readiness requirements
 

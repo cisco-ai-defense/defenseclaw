@@ -359,14 +359,18 @@ in normal authenticated navigation. An administrator sees every
 enforcement action in the namespace. A member sees only actions owned by that
 member, even when another member has a grant to the same bucket. Both views
 show the decision, exact matched rule IDs, owning rule bucket, and correlation
-metadata. Neither role gains access to content that DefenseClaw redacted.
+metadata. Administrator results additionally show the server-resolved user
+name and stable user ID for every finding; Agent Control strips that reserved
+owner field from member responses. SDK-supplied metadata cannot spoof the
+administrator attribution. Neither role gains access to content that
+DefenseClaw redacted.
 
 With redaction enabled, the administrator's namespace-wide view shows an
 explicit **Redacted by DefenseClaw** badge and placeholders while retaining the
 matched `LOCAL-INJECTION-014` rule and `defenseclaw-local-prompt-injection`
 bucket:
 
-![Administrator Monitor view showing a DefenseClaw-redacted deny span with the matched rule and bucket](/images/agent-control/monitor-admin-redacted-span.png)
+![Administrator Monitor view showing a DefenseClaw-redacted deny span attributed to the owning user with the matched rule and bucket](/images/agent-control/monitor-admin-redacted-span.png)
 
 For a trusted single-tenant recording, stop the foreground synchronizer,
 explicitly disable redaction, and relaunch it before the request. The redaction
