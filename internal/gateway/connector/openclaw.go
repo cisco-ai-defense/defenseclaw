@@ -100,6 +100,30 @@ func openClawExtensionAvailable() bool {
 	return false
 }
 
+var openClawRequiredRuntimeFiles = []string{
+	"package.json",
+	"openclaw.plugin.json",
+	"dist/index.js",
+	"dist/fetch-interceptor.js",
+}
+
+func validateOpenClawEmbeddedRuntime() error {
+	if !openClawExtensionAvailable() {
+		return fmt.Errorf("openclaw extension is not bundled in this gateway build — run 'make extensions' (or 'make plugin') and rebuild the gateway, or pick a different connector with 'defenseclaw setup connector'")
+	}
+
+	missing := make([]string, 0, len(openClawRequiredRuntimeFiles))
+	for _, rel := range openClawRequiredRuntimeFiles {
+		if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, rel)); err != nil {
+			missing = append(missing, rel)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("openclaw extension bundle is incomplete (missing %s) — run 'make extensions' (or 'make plugin'), then rebuild the gateway", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // OpenClawExtensionAvailable reports whether this gateway build embeds the
 // optional OpenClaw extension bundle. Non-OpenClaw connectors do not require
 // it, and default builds may intentionally contain only the placeholder.
@@ -166,8 +190,8 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// TS plugin built (typical for non-OpenClaw operators) by embedding
 	// a placeholder. If the operator now actually wants OpenClaw, refuse
 	// to plant a corrupt extension and tell them how to fix it.
-	if !openClawExtensionAvailable() {
-		return fmt.Errorf("openclaw extension is not bundled in this gateway build — run 'make extensions' (or 'make plugin') and rebuild the gateway, or pick a different connector with 'defenseclaw setup connector'")
+	if err := validateOpenClawEmbeddedRuntime(); err != nil {
+		return err
 	}
 
 	// Surface 1: Install the embedded plugin into OpenClaw and register it
@@ -297,20 +321,23 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 		return fmt.Errorf("openclaw CLI not found on PATH — install OpenClaw before running setup: %w", err)
 	}
 
-	// Build the child environment and force OPENCLAW_HOME to match ocHome.
-	// openClawHome() is derived internally and does not read ambient
-	// OPENCLAW_HOME; without setting it here, the CLI can install into a
-	// different home than installDir expects, which makes post-install
-	// checks fail.
+	// Build the child environment for the OpenClaw CLI.
+	//
+	// Do not inject OPENCLAW_HOME: some OpenClaw builds treat it as a base
+	// home directory and append "/.openclaw" internally, which would produce
+	// a duplicated path like ~/.openclaw/.openclaw/extensions. Instead force
+	// HOME to the parent of ocHome and let the CLI resolve ~/.openclaw from
+	// that canonical root.
 	env := os.Environ()
-	// Remove any existing OPENCLAW_HOME entry then append the override.
+	// Remove existing OPENCLAW_HOME/HOME entries, then append our HOME.
 	filtered := env[:0]
 	for _, e := range env {
-		if !strings.HasPrefix(e, "OPENCLAW_HOME=") {
+		if !strings.HasPrefix(e, "OPENCLAW_HOME=") && !strings.HasPrefix(e, "HOME=") {
 			filtered = append(filtered, e)
 		}
 	}
-	env = append(filtered, "OPENCLAW_HOME="+ocHome)
+	homeParent := filepath.Dir(ocHome)
+	env = append(filtered, "HOME="+homeParent)
 
 	installCtx, cancel := context.WithTimeout(ctx, openClawPluginInstallTimeout)
 	defer cancel()
@@ -318,6 +345,9 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	out, err := execOpenClawPluginInstall(installCtx, insightClawNPMSource, env)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		if openClawPluginDirLooksUsable(installDir) && isLikelyNonFatalOpenClawInstallError(msg) {
+			return nil
+		}
 		if msg != "" {
 			return fmt.Errorf("openclaw plugins install %s: %w: %s", insightClawNPMSource, err, msg)
 		}
@@ -327,6 +357,15 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 		return fmt.Errorf("openclaw plugins install %s completed but %s is missing a package.json or openclaw.plugin.json", insightClawNPMSource, installDir)
 	}
 	return nil
+}
+
+func isLikelyNonFatalOpenClawInstallError(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "ENOTEMPTY") ||
+		strings.Contains(msg, "package.json missing openclaw.hooks") ||
+		strings.Contains(msg, "not a valid hook pack")
 }
 
 func openClawPluginDirLooksUsable(dir string) bool {

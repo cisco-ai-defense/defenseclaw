@@ -1155,6 +1155,69 @@ func stubInsightClawInstall(t *testing.T, ocHome string) {
 	})
 }
 
+func TestInstallInsightClawNPMPlugin_EnvUsesHomeParentWithoutOpenClawHome(t *testing.T) {
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, ".openclaw")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("OPENCLAW_HOME", "/tmp/incorrect-openclaw-home")
+	t.Setenv("HOME", "/tmp/incorrect-home")
+
+	origLookPath := execLookPath
+	execLookPath = func(file string) (string, error) {
+		if file == "openclaw" {
+			return "/usr/bin/openclaw", nil
+		}
+		return "", exec.ErrNotFound
+	}
+	defer func() { execLookPath = origLookPath }()
+
+	var capturedEnv []string
+	origInstall := execOpenClawPluginInstall
+	execOpenClawPluginInstall = func(_ context.Context, pluginName string, env []string) ([]byte, error) {
+		if pluginName != insightClawNPMSource {
+			return nil, fmt.Errorf("unexpected plugin install: %s", pluginName)
+		}
+		capturedEnv = append([]string(nil), env...)
+
+		installDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
+		if err := os.MkdirAll(installDir, 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(installDir, "package.json"), []byte(`{"name":"insightclaw","version":"0.1.3"}`), 0o644); err != nil {
+			return nil, err
+		}
+		return []byte("ok"), nil
+	}
+	defer func() { execOpenClawPluginInstall = origInstall }()
+
+	if err := installInsightClawNPMPlugin(context.Background(), ocHome); err != nil {
+		t.Fatalf("installInsightClawNPMPlugin failed: %v", err)
+	}
+
+	if len(capturedEnv) == 0 {
+		t.Fatal("installer did not receive environment")
+	}
+	for _, e := range capturedEnv {
+		if strings.HasPrefix(e, "OPENCLAW_HOME=") {
+			t.Fatalf("OPENCLAW_HOME leaked into install env: %q", e)
+		}
+	}
+	wantHome := "HOME=" + filepath.Dir(ocHome)
+	hasHome := false
+	for _, e := range capturedEnv {
+		if e == wantHome {
+			hasHome = true
+			break
+		}
+	}
+	if !hasHome {
+		t.Fatalf("install env missing %q", wantHome)
+	}
+}
+
 func TestOpenClaw_Route(t *testing.T) {
 	c := NewOpenClawConnector()
 	body := []byte(`{"model":"gpt-4o","stream":true,"messages":[]}`)
