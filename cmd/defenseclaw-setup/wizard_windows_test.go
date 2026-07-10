@@ -5,7 +5,60 @@
 
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestOwnedUserPathRoundTripPreservesExactSeparators(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	for _, before := range []string{
+		"",
+		`C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`,
+		`C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;`,
+		`C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;;`,
+	} {
+		installed, reusedSeparator := appendUserPathEntry(before, commandDir)
+		got := removeUserPathEntry(installed, commandDir, reusedSeparator)
+		if got != before {
+			t.Fatalf("PATH round trip for %q = %q, want exact original", before, got)
+		}
+	}
+}
+
+func TestOwnedUserPathRemovalPreservesLaterEntries(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	before := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;`
+	installed, reusedSeparator := appendUserPathEntry(before, commandDir)
+	current := installed + `;C:\Users\runneradmin\bin`
+	want := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;C:\Users\runneradmin\bin`
+	if got := removeUserPathEntry(current, commandDir, reusedSeparator); got != want {
+		t.Fatalf("PATH removal after a later user edit = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateInstalledPathOwnershipRecordsReusedSeparator(t *testing.T) {
+	installRoot := t.TempDir()
+	installerDir := filepath.Join(installRoot, "installer")
+	if err := os.MkdirAll(installerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(installerDir, "install-state.json")
+	if err := writeJSON(statePath, installState{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateInstalledPathOwnership(installRoot, true, true); err != nil {
+		t.Fatal(err)
+	}
+	var state installState
+	if err := readJSON(statePath, &state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.PathEntryOwned || !state.PathSeparatorReused {
+		t.Fatalf("updated PATH ownership = owned:%t reused:%t", state.PathEntryOwned, state.PathSeparatorReused)
+	}
+}
 
 func TestWizardChoiceMappings(t *testing.T) {
 	connectors := []wizardChoice{
