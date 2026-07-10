@@ -157,18 +157,27 @@ func TestSanitizePythonEnvRemovesAmbientPythonVariables(t *testing.T) {
 
 func TestManagedChildEnvPinsDataRoot(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", `C:\untrusted`)
+	t.Setenv("PYTHONUTF8", "0")
+	t.Setenv("PYTHONIOENCODING", "cp1252")
 	env := managedChildEnv(`C:\Users\test\.defenseclaw`)
-	count := 0
+	counts := map[string]int{}
 	for _, entry := range env {
-		if entry == `DEFENSECLAW_HOME=C:\Users\test\.defenseclaw` {
-			count++
-		}
 		if entry == `DEFENSECLAW_HOME=C:\untrusted` {
 			t.Fatal("ambient data root survived managedChildEnv")
 		}
+		if entry == "PYTHONUTF8=0" || entry == "PYTHONIOENCODING=cp1252" {
+			t.Fatalf("ambient Python encoding survived managedChildEnv: %q", entry)
+		}
+		counts[entry]++
 	}
-	if count != 1 {
-		t.Fatalf("managed data root count = %d, want 1", count)
+	for _, want := range []string{
+		`DEFENSECLAW_HOME=C:\Users\test\.defenseclaw`,
+		"PYTHONUTF8=1",
+		"PYTHONIOENCODING=utf-8",
+	} {
+		if counts[want] != 1 {
+			t.Fatalf("managed environment count for %q = %d, want 1", want, counts[want])
+		}
 	}
 }
 
