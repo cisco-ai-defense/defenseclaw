@@ -1189,88 +1189,20 @@ function Invoke-Acceptance {
     Invoke-GatewayLifecycleAcceptance -Profile $profile -Root $root -Artifacts $artifacts
 }
 
-function Get-NamedJsonStringValue {
-    param(
-        [AllowNull()][object]$Value,
-        [Parameter(Mandatory)][string]$Name
-    )
-    if ($null -eq $Value -or $Value -is [string]) { return }
-    if ($Value -is [Collections.IDictionary]) {
-        foreach ($key in $Value.Keys) {
-            $child = $Value[$key]
-            if ([string]::Equals([string]$key, $Name, [StringComparison]::Ordinal)) {
-                if ($child -isnot [string]) { throw "JSON property $Name must be a string" }
-                Write-Output $child
-            }
-            Get-NamedJsonStringValue -Value $child -Name $Name
-        }
-        return
-    }
-    if ($Value -is [Management.Automation.PSCustomObject]) {
-        foreach ($property in $Value.PSObject.Properties) {
-            if ([string]::Equals($property.Name, $Name, [StringComparison]::Ordinal)) {
-                if ($property.Value -isnot [string]) { throw "JSON property $Name must be a string" }
-                Write-Output $property.Value
-            }
-            Get-NamedJsonStringValue -Value $property.Value -Name $Name
-        }
-        return
-    }
-    if ($Value -is [Collections.IEnumerable]) {
-        foreach ($item in $Value) {
-            Get-NamedJsonStringValue -Value $item -Name $Name
-        }
-    }
-}
-
-function Assert-PackagedAntigravityHook(
+function Assert-PackagedAntigravityPlatformGate(
     [string]$Launcher,
-    [string]$ManagedHook,
     [string]$UserProfile,
     [string]$LogPath
 ) {
-    Invoke-Installed $Launcher @('setup', 'antigravity', '--yes', '--no-restart') `
-        -Timeout 300 -Log $LogPath | Out-Null
+    $result = Invoke-Installed $Launcher @('setup', 'antigravity', '--yes', '--no-restart') `
+        @(1) 300 $LogPath
+    $combined = $result.StdOut + "`n" + $result.StdErr
+    if ($combined -notmatch "connector 'antigravity' is not_certified on windows") {
+        throw "packaged Antigravity setup did not enforce its Windows certification gate: $combined"
+    }
     $hooksPath = Join-Path $UserProfile '.gemini\config\hooks.json'
-    if (-not (Test-Path -LiteralPath $hooksPath -PathType Leaf)) {
-        throw "packaged Antigravity setup did not create canonical hooks: $hooksPath"
-    }
-    $hooks = Get-Content -LiteralPath $hooksPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $commands = @(Get-NamedJsonStringValue -Value $hooks -Name 'command' | Sort-Object -Unique)
-    if ($commands.Count -ne 1) {
-        throw "packaged Antigravity hooks contain $($commands.Count) distinct command values; expected one"
-    }
-    $command = [string]$commands[0]
-    $systemPowerShell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
-    $prefix = "$systemPowerShell -NoLogo -NoProfile -NonInteractive -EncodedCommand "
-    if (-not $command.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "packaged Antigravity command does not use absolute system PowerShell: $command"
-    }
-    if ($command.Contains("'") -or $command.Contains('"')) {
-        throw 'packaged Antigravity direct-exec command contains visible quote characters'
-    }
-    if ($command -match '(?i)(^|\s)defenseclaw-hook(?:\.exe)?\s+hook\s+--connector\s+antigravity') {
-        throw 'packaged Antigravity command uses a vulnerable bare hook launcher lookup'
-    }
-    $encoded = $command.Substring($prefix.Length)
-    if ([string]::IsNullOrWhiteSpace($encoded) -or $encoded -notmatch '^[A-Za-z0-9+/]+={0,2}$') {
-        throw 'packaged Antigravity command has an invalid encoded-script token'
-    }
-    try {
-        $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
-    } catch {
-        throw "packaged Antigravity command has invalid UTF-16LE base64: $($_.Exception.Message)"
-    }
-    $hookLiteral = "'" + $ManagedHook.Replace("'", "''") + "'"
-    $expectedInvocation = "& $hookLiteral hook --connector antigravity"
-    if (-not $decoded.Contains($expectedInvocation)) {
-        throw "packaged Antigravity script does not invoke the absolute managed hook launcher: $decoded"
-    }
-    if (-not $decoded.Contains("`$env:NoDefaultCurrentDirectoryInExePath='1'")) {
-        throw 'packaged Antigravity script lost current-directory executable lookup hardening'
-    }
-    if ($decoded -match '(?i)&\s*defenseclaw-hook(?:\.exe)?\s+hook') {
-        throw 'packaged Antigravity encoded script contains a bare hook launcher lookup'
+    if (Test-Path -LiteralPath $hooksPath) {
+        throw "not-certified Antigravity setup unexpectedly wrote hooks: $hooksPath"
     }
 }
 
@@ -1345,7 +1277,12 @@ function Invoke-SetupAcceptance {
             'init', '--skip-install', '--non-interactive', '--yes', '--connector', 'claudecode',
             '--profile', 'observe', '--no-start-gateway', '--no-verify'
         ) -Timeout 300 -Log (Join-Path $logs 'setup-init-claudecode.log') | Out-Null
-        Assert-PackagedAntigravityHook $launcher $hook $userProfile `
+        # The packaged Go suite separately executes the hardened absolute-path
+        # Antigravity hook command from an untrusted working directory. The
+        # installer acceptance must preserve the product's current support
+        # contract: Antigravity is not yet certified on native Windows and may
+        # not be configured merely because the dormant writer is hardened.
+        Assert-PackagedAntigravityPlatformGate $launcher $userProfile `
             (Join-Path $logs 'setup-antigravity.log')
 
         $rosterProbe = 'import json; from defenseclaw.config import load; print("DC_ROSTER=" + json.dumps(load().active_connectors()))'
@@ -1357,7 +1294,7 @@ function Invoke-SetupAcceptance {
         }
         $rosterLine = $rosterLines[0]
         $roster = @($rosterLine.Substring('DC_ROSTER='.Length) | ConvertFrom-Json)
-        foreach ($expectedConnector in @('codex', 'claudecode', 'antigravity')) {
+        foreach ($expectedConnector in @('codex', 'claudecode')) {
             if ($expectedConnector -notin $roster) {
                 throw "packaged connector setup collapsed the existing roster; missing $expectedConnector"
             }
