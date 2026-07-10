@@ -234,34 +234,42 @@ func isReparsePoint(path string) (bool, error) {
 	return attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0, nil
 }
 
-func addUserPath(commandDir string) (bool, error) {
+func addUserPath(commandDir string) (bool, bool, error) {
 	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer key.Close()
 	current, valueType, err := key.GetStringValue("Path")
 	if err != nil && err != registry.ErrNotExist {
-		return false, err
+		return false, false, err
 	}
 	entries := strings.Split(current, ";")
 	if pathContains(entries, commandDir) {
 		updateCurrentProcessPath(commandDir, true)
-		return false, nil
+		return false, false, nil
 	}
-	separator := ";"
-	if current == "" || strings.HasSuffix(current, ";") {
-		separator = ""
-	}
-	if err := setRegistryPath(key, current+separator+commandDir, valueType); err != nil {
-		return false, err
+	next, reusedSeparator := appendUserPathEntry(current, commandDir)
+	if err := setRegistryPath(key, next, valueType); err != nil {
+		return false, false, err
 	}
 	updateCurrentProcessPath(commandDir, true)
 	broadcastEnvironmentChange()
-	return true, nil
+	return true, reusedSeparator, nil
 }
 
-func removeUserPath(commandDir string) error {
+func appendUserPathEntry(current, commandDir string) (string, bool) {
+	// Reuse a trailing separator instead of creating an empty PATH component,
+	// which Windows may interpret as the current working directory.
+	reusedSeparator := strings.HasSuffix(current, ";")
+	separator := ";"
+	if current == "" || reusedSeparator {
+		separator = ""
+	}
+	return current + separator + commandDir, reusedSeparator
+}
+
+func removeUserPath(commandDir string, reusedSeparator bool) error {
 	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return err
@@ -274,18 +282,33 @@ func removeUserPath(commandDir string) error {
 		}
 		return err
 	}
-	next := make([]string, 0)
-	for _, entry := range strings.Split(current, ";") {
-		if !samePathEntry(entry, commandDir) {
-			next = append(next, entry)
-		}
-	}
-	if err := setRegistryPath(key, strings.Join(next, ";"), valueType); err != nil {
+	next := removeUserPathEntry(current, commandDir, reusedSeparator)
+	if err := setRegistryPath(key, next, valueType); err != nil {
 		return err
 	}
 	updateCurrentProcessPath(commandDir, false)
 	broadcastEnvironmentChange()
 	return nil
+}
+
+func removeUserPathEntry(current, commandDir string, reusedSeparator bool) string {
+	entries := strings.Split(current, ";")
+	next := make([]string, 0, len(entries))
+	ownedEntrySeen := false
+	for index, entry := range entries {
+		if !samePathEntry(entry, commandDir) {
+			next = append(next, entry)
+			continue
+		}
+		if reusedSeparator && !ownedEntrySeen {
+			ownedEntrySeen = true
+			if index == len(entries)-1 {
+				// The separator preceded the owned entry before it was appended.
+				next = append(next, "")
+			}
+		}
+	}
+	return strings.Join(next, ";")
 }
 
 func setRegistryPath(key registry.Key, value string, valueType uint32) error {

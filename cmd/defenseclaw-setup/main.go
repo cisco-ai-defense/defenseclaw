@@ -85,6 +85,7 @@ type installState struct {
 	Runtime                string            `json:"runtime"`
 	MaintenancePath        string            `json:"maintenance_path"`
 	PathEntryOwned         bool              `json:"path_entry_owned"`
+	PathSeparatorReused    bool              `json:"path_separator_reused,omitempty"`
 	Connector              string            `json:"connector"`
 	Mode                   string            `json:"mode"`
 	UnsignedLocalArtifact  bool              `json:"unsigned_local_artifact"`
@@ -184,6 +185,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	}
 	configureFresh := !hadInstall && !hadData && opts.ConnectorSet && opts.Connector != "none"
 	pathEntryOwned := oldState != nil && oldState.PathEntryOwned
+	pathSeparatorReused := oldState != nil && oldState.PathSeparatorReused
 
 	staging := installRoot + ".staging." + strconv.Itoa(os.Getpid())
 	backup := installRoot + ".backup." + strconv.Itoa(os.Getpid())
@@ -218,7 +220,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		)
 	}
 
-	if err := stageInstallTree(payload, staging, installRoot, dataRoot, maintenancePath, pathEntryOwned, opts); err != nil {
+	if err := stageInstallTree(payload, staging, installRoot, dataRoot, maintenancePath, pathEntryOwned, pathSeparatorReused, opts); err != nil {
 		return 1, err
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
@@ -237,6 +239,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 
 	published := false
 	pathAdded := false
+	pathAddedReusedSeparator := false
 	registrationChanged := false
 	maintenance := maintenancePublication{}
 	startedNew := serviceState{}
@@ -256,7 +259,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 			}
 		}
 		if pathAdded {
-			_ = removeUserPath(filepath.Join(installRoot, "bin"))
+			_ = removeUserPath(filepath.Join(installRoot, "bin"), pathAddedReusedSeparator)
 		}
 		_ = maintenance.rollback()
 		if published {
@@ -303,11 +306,14 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err != nil {
 		return tryRestore(err)
 	}
-	pathAdded, err = addUserPath(filepath.Join(installRoot, "bin"))
+	pathAdded, pathAddedReusedSeparator, err = addUserPath(filepath.Join(installRoot, "bin"))
 	if err != nil {
 		return tryRestore(err)
 	}
-	if err := updateInstalledPathOwnership(installRoot, pathEntryOwned || pathAdded); err != nil {
+	if pathAdded {
+		pathSeparatorReused = pathAddedReusedSeparator
+	}
+	if err := updateInstalledPathOwnership(installRoot, pathEntryOwned || pathAdded, pathSeparatorReused); err != nil {
 		return tryRestore(err)
 	}
 	registrationChanged = true
@@ -378,7 +384,8 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 	}
 	if oldState == nil || oldState.PathEntryOwned {
-		if err := removeUserPath(filepath.Join(installRoot, "bin")); err != nil {
+		reusedSeparator := oldState != nil && oldState.PathSeparatorReused
+		if err := removeUserPath(filepath.Join(installRoot, "bin"), reusedSeparator); err != nil {
 			return 1, err
 		}
 	}
@@ -515,13 +522,14 @@ func loadExistingInstallState(installRoot string) (*installState, error) {
 	return &state, nil
 }
 
-func updateInstalledPathOwnership(installRoot string, owned bool) error {
+func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator bool) error {
 	path := filepath.Join(installRoot, "installer", "install-state.json")
 	var state installState
 	if err := readJSON(path, &state); err != nil {
 		return err
 	}
 	state.PathEntryOwned = owned
+	state.PathSeparatorReused = reusedSeparator
 	return writeJSON(path, state)
 }
 
@@ -615,7 +623,7 @@ func ensureTreeReplaceable(root string) error {
 	})
 }
 
-func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, pathEntryOwned bool, opts options) error {
+func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, pathEntryOwned, pathSeparatorReused bool, opts options) error {
 	if err := os.MkdirAll(filepath.Join(staging, "bin"), 0o755); err != nil {
 		return err
 	}
@@ -675,6 +683,7 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		Runtime:                filepath.Join(installRoot, "runtime", "python"),
 		MaintenancePath:        maintenancePath,
 		PathEntryOwned:         pathEntryOwned,
+		PathSeparatorReused:    pathSeparatorReused,
 		Connector:              opts.Connector,
 		Mode:                   opts.Mode,
 		UnsignedLocalArtifact:  payload.Manifest.Unsigned,
