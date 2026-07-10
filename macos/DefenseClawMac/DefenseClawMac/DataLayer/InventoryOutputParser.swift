@@ -22,12 +22,23 @@ struct InventoryOutputParseResult {
 }
 
 enum InventoryOutputParser {
+    static let maximumInputBytes = CLIOutputLimits.maximumOutputBytes
+    static let maximumCandidateCount = 64
+    private static let maximumNestingDepth = 512
+    private static let maximumScanWork = maximumInputBytes * 2
+
     /// First syntactically valid top-level JSON array in mixed CLI output.
     /// Diagnostics may contain stray brackets before the real payload.
     static func firstJSONArrayData(in output: String) -> Data? {
+        guard output.utf8.count <= maximumInputBytes else { return nil }
         let bytes = Array(output.utf8)
+        var budget = ScanBudget()
         for start in bytes.indices where bytes[start] == 0x5B {
-            guard let end = matchingJSONEnd(in: bytes, from: start) else { continue }
+            guard budget.canTryCandidate else { return nil }
+            budget.candidates += 1
+            guard let end = matchingJSONEnd(in: bytes, from: start, budget: &budget) else {
+                continue
+            }
             let data = Data(bytes[start...end])
             if (try? JSONSerialization.jsonObject(with: data)) is [Any] { return data }
         }
@@ -38,15 +49,23 @@ enum InventoryOutputParser {
     /// multiple connectors. CLI diagnostics may surround that JSON because the
     /// app combines stdout and stderr for Activity output.
     static func parse(_ output: String) -> InventoryOutputParseResult? {
+        guard output.utf8.count <= maximumInputBytes else { return nil }
         let bytes = Array(output.utf8)
         var candidateStart = 0
+        var budget = ScanBudget()
 
         while candidateStart < bytes.count {
             guard bytes[candidateStart] == 0x7B || bytes[candidateStart] == 0x5B else {
                 candidateStart += 1
                 continue
             }
-            guard let candidateEnd = matchingJSONEnd(in: bytes, from: candidateStart) else {
+            guard budget.canTryCandidate else { return nil }
+            budget.candidates += 1
+            guard let candidateEnd = matchingJSONEnd(
+                in: bytes,
+                from: candidateStart,
+                budget: &budget
+            ) else {
                 candidateStart += 1
                 continue
             }
@@ -87,12 +106,27 @@ enum InventoryOutputParser {
             || document["summary"] != nil
     }
 
-    private static func matchingJSONEnd(in bytes: [UInt8], from start: Int) -> Int? {
+    private struct ScanBudget {
+        var candidates = 0
+        var remainingWork = maximumScanWork
+
+        var canTryCandidate: Bool {
+            candidates < maximumCandidateCount && remainingWork > 0
+        }
+    }
+
+    private static func matchingJSONEnd(
+        in bytes: [UInt8],
+        from start: Int,
+        budget: inout ScanBudget
+    ) -> Int? {
         var expectedClosers: [UInt8] = []
         var inString = false
         var escaped = false
 
         for index in start..<bytes.count {
+            guard budget.remainingWork > 0 else { return nil }
+            budget.remainingWork -= 1
             let byte = bytes[index]
             if inString {
                 if escaped {
@@ -119,6 +153,7 @@ enum InventoryOutputParser {
             default:
                 break
             }
+            guard expectedClosers.count <= maximumNestingDepth else { return nil }
         }
         return nil
     }
