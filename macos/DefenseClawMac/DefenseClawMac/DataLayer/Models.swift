@@ -617,6 +617,18 @@ enum AIConfidence {
     }
 }
 
+enum AIPresenceAxis {
+    /// Current gateways omit an exact numeric zero but still send its
+    /// non-empty confidence band. Compatible gateways may send the zero
+    /// explicitly. Only a missing/null score with no band means the axis was
+    /// unavailable on an older payload.
+    static func wasReported(rawScore: Any?, band: String) -> Bool {
+        if !band.isEmpty { return true }
+        guard let rawScore else { return false }
+        return !(rawScore is NSNull)
+    }
+}
+
 struct AIUsageSnapshot: Sendable {
     var totalDetected: Int = 0
     var activeSignals: Int = 0
@@ -669,6 +681,10 @@ struct AISignal: Sendable, Hashable {
     var identityBand: String
     var presenceScore: Double
     var presenceBand: String
+    /// True when the gateway supplied the presence axis. Older gateways omit
+    /// both presence fields; a reported score of zero must remain distinct
+    /// because it means the signal is confidently no longer present.
+    var presenceAxisReported: Bool = false
     var firstSeen: Date?
     var lastSeen: Date?
     var lastActive: Date?
@@ -677,6 +693,10 @@ struct AISignal: Sendable, Hashable {
     var supportedConnector: String = ""
     var signalID: String = ""
     var signatureID: String = ""
+
+    func hasEligiblePresence(minimum: Double) -> Bool {
+        !presenceAxisReported || presenceScore >= minimum
+    }
 }
 
 /// Grouped product row — exact port of the TUI's AIDiscoveryRow (_rebuild()).
@@ -931,6 +951,31 @@ enum ConnectorAttribution {
               prefix.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" })
         else { return "" }
         return prefix
+    }
+}
+
+enum ActiveConnectorRoster {
+    /// Configured names lead, then live list entries, then the singular health
+    /// primary connector. Matching is case-insensitive while preserving the
+    /// spelling and order of the first occurrence.
+    static func names(
+        configured: [String],
+        legacy: String?,
+        live: [String],
+        primary: String?
+    ) -> [String] {
+        var names = configured
+        if names.isEmpty, let legacy = legacy?.nonEmpty {
+            names.append(legacy)
+        }
+
+        var seen = Set(names.map { $0.lowercased() })
+        for candidate in live + [primary].compactMap({ $0 }) {
+            guard !candidate.isEmpty,
+                  seen.insert(candidate.lowercased()).inserted else { continue }
+            names.append(candidate)
+        }
+        return names
     }
 }
 

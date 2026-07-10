@@ -621,9 +621,11 @@ macos-app-build: macos-app-license-check
 
 macos-app-test:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
+	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
+	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check extensions dist-cli

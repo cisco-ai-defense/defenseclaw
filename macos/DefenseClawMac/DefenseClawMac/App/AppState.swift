@@ -1093,9 +1093,10 @@ final class AppState {
                   score >= 0.8,
                   // Presence must agree (a leftover config dir from an
                   // uninstalled agent keeps identity high forever while
-                  // presence decays with the confidence half-life); zero
-                  // tolerates older gateways that omit the axis.
-                  signal.presenceScore == 0 || signal.presenceScore >= 0.8,
+                  // presence decays with the confidence half-life). Older
+                  // gateways that omit the axis remain compatible, but an
+                  // explicitly reported zero is a real very-low score.
+                  signal.hasEligiblePresence(minimum: 0.8),
                   // Only hook connectors have the additive one-click path;
                   // proxy connectors need their dedicated Setup flow.
                   TUIWizards.hookConnectors.contains(name),
@@ -1526,22 +1527,18 @@ final class AppState {
 
     // MARK: - Connector filter (multi-connector parity, connector_filter.py)
 
-    /// Active connector names in roster order — live health first, then config.
+    /// Active connector names in roster order — config first, then live health.
     /// ≤1 means single-connector: no filter chrome (the TUI hides the chip).
     /// TUI parity (connector_filter.active_connector_names is config-driven):
     /// the configured roster leads — disabled connectors stay filterable so
     /// their history can be scoped — and live-only names follow.
     var activeConnectorNames: [String] {
-        var names = config.connectors
-        if names.isEmpty, let legacy = config.connectorName?.nonEmpty {
-            names.append(legacy)
-        }
-        var seen = Set(names.map { $0.lowercased() })
-        for live in health.connectors.map(\.name)
-        where !live.isEmpty && seen.insert(live.lowercased()).inserted {
-            names.append(live)
-        }
-        return names
+        ActiveConnectorRoster.names(
+            configured: config.connectors,
+            legacy: config.connectorName,
+            live: health.connectors.map(\.name),
+            primary: health.primaryConnector?.name
+        )
     }
 
     /// Step the filter All → conn0 → conn1 → … → All (collapses to All when ≤1).

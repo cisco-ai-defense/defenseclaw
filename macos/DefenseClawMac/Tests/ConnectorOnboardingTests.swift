@@ -25,6 +25,7 @@ struct ConnectorOnboardingTests {
         fallsBackToLegacySingleConnectorOnlyWhenDiscoveryIsEmpty()
         singleRegisteredConnectorUsesLegacyContract()
         subsetRegistrationEmitsInitPlusAdditiveSetup()
+        multipleAdditiveSetupsRestartOnlyAfterTheFinalConnector()
         subsetActionLeadsWithAnEnforcedConnector()
         subsetWithoutGatewayStartNeverRestarts()
         emptyRegistrationDefensivelyRegistersEverything()
@@ -140,6 +141,27 @@ struct ConnectorOnboardingTests {
         let followUp = plan[1]
         expect(followUp.starts(with: ["setup", "codex", "--yes", "--mode", "observe"]),
                "non-enforced peer is added in observe mode")
+    }
+
+    private static func multipleAdditiveSetupsRestartOnlyAfterTheFinalConnector() {
+        let plan = makePlan(
+            detected: ["codex", "claudecode", "cursor", "openclaw"],
+            registered: ["codex", "claudecode", "cursor"],
+            action: [],
+            profile: "observe"
+        )
+        expect(plan.count == 3, "three selected connectors produce init plus two follow-ups")
+        expect(
+            plan[1].starts(with: ["setup", "claude-code", "--yes", "--mode", "observe"]),
+            "first additive setup preserves connector order and alias"
+        )
+        expect(plan[1].contains("--no-restart"), "intermediate additive setup does not restart")
+        expect(
+            plan[2].starts(with: ["setup", "cursor", "--yes", "--mode", "observe"]),
+            "final additive setup preserves connector order"
+        )
+        expect(!plan[2].contains("--no-restart"), "final additive setup performs the restart")
+        expect(!plan.contains { $0.contains("openclaw") }, "unregistered connector stays absent")
     }
 
     private static func subsetWithoutGatewayStartNeverRestarts() {

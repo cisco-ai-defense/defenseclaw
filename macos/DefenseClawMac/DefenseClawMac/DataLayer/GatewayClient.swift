@@ -520,6 +520,14 @@ actor GatewayClient {
 
     private func decodeSignal(_ r: [String: Any]) -> AISignal {
         let component = r["component"] as? [String: Any]
+        let presenceBand = (r["presence_band"] as? String) ?? ""
+        // Scores are `omitempty` in the current gateway, so an exact zero can
+        // arrive as a band without a numeric field. Also remember an explicit
+        // zero from other compatible gateways; both mean the axis was reported.
+        let presenceAxisReported = AIPresenceAxis.wasReported(
+            rawScore: r["presence_score"],
+            band: presenceBand
+        )
         return AISignal(
             state: (r["state"] as? String) ?? "",
             product: (r["product"] as? String) ?? (r["name"] as? String) ?? "?",
@@ -534,7 +542,8 @@ actor GatewayClient {
             identityScore: normalizeConfidence(r["identity_score"]),
             identityBand: (r["identity_band"] as? String) ?? "",
             presenceScore: normalizeConfidence(r["presence_score"]),
-            presenceBand: (r["presence_band"] as? String) ?? "",
+            presenceBand: presenceBand,
+            presenceAxisReported: presenceAxisReported,
             firstSeen: DCDates.parse(r["first_seen"]),
             lastSeen: DCDates.parse(r["last_seen"]),
             lastActive: DCDates.parse(r["last_active_at"]),

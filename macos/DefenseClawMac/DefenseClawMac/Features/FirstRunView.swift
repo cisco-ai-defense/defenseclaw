@@ -14,8 +14,33 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#if !CONNECTOR_DISCOVERY_SELECTION_TESTS
 import SwiftUI
+#endif
 
+struct ConnectorDiscoverySelection: Equatable {
+    let registered: Set<String>
+    let action: Set<String>
+
+    static func reconciling(
+        previouslyDetected: [String],
+        detected: [String],
+        registered: Set<String>,
+        action: Set<String>
+    ) -> ConnectorDiscoverySelection {
+        let detectedSet = Set(detected)
+        let newlyDetected = detectedSet.subtracting(previouslyDetected)
+        let reconciledRegistered = registered
+            .intersection(detectedSet)
+            .union(newlyDetected)
+        return ConnectorDiscoverySelection(
+            registered: reconciledRegistered,
+            action: action.intersection(reconciledRegistered)
+        )
+    }
+}
+
+#if !CONNECTOR_DISCOVERY_SELECTION_TESTS
 struct FirstRunView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
@@ -446,12 +471,18 @@ struct FirstRunView: View {
             ? ConnectorOnboarding.installedConnectors(from: result.output, supportedOrder: Self.connectors)
             : []
         let detected = allDetected.filter { TUIWizards.hookConnectors.contains($0) }
+        let selection = ConnectorDiscoverySelection.reconciling(
+            previouslyDetected: detectedConnectors,
+            detected: detected,
+            registered: registeredConnectors,
+            action: actionConnectors
+        )
         detectedProxyConnectors = allDetected.filter { TUIWizards.proxyConnectors.contains($0) }
         detectedConnectors = detected
-        // Pre-check everything detected (TUI first-run parity); the user
-        // unchecks what they don't want hooks installed into.
-        registeredConnectors = Set(detected)
-        actionConnectors.formIntersection(Set(detected))
+        // Pre-check the first discovery and later additions, while preserving
+        // explicit choices for connectors that remain installed.
+        registeredConnectors = selection.registered
+        actionConnectors = selection.action
         if allDetected.isEmpty {
             connectorDiscoveryError = result.succeeded
                 ? "Agent discovery completed but did not identify a supported connector."
@@ -511,3 +542,4 @@ struct FirstRunView: View {
         }
     }
 }
+#endif
