@@ -475,6 +475,28 @@ class AiUsageRendererTests(unittest.TestCase):
             [],
         )
 
+    def test_seen_and_active_state_filters_are_backward_compatible_aliases(self):
+        from defenseclaw.commands import cmd_agent
+
+        signals = [
+            {"signal_id": "current", "state": "seen"},
+            {"signal_id": "legacy", "state": "active"},
+            {"signal_id": "changed", "state": "changed"},
+        ]
+        for requested in ("seen", "active"):
+            with self.subTest(requested=requested):
+                filtered = cmd_agent._filter_ai_usage_signals(
+                    signals,
+                    states=(requested,),
+                    categories=(),
+                    products=(),
+                    show_gone=False,
+                )
+                self.assertEqual(
+                    [signal["signal_id"] for signal in filtered],
+                    ["current", "legacy"],
+                )
+
     def test_local_models_group_by_id_and_render_status(self):
         from defenseclaw.commands import cmd_agent
 
@@ -970,6 +992,15 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
             cleanup_app(app, db_path, tmp_dir)
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Invalid value for '--state'", result.output)
+
+    def test_state_flag_accepts_gateway_seen_spelling(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        try:
+            result = self._invoke(app, ["--state", "seen"])
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+        self.assertEqual(result.exit_code, 0, result.output)
 
     def test_negative_limit_is_rejected(self):
         app, tmp_dir, db_path = make_app_context()

@@ -158,7 +158,7 @@ def discover(
             click.echo(f"  OTel: not emitted ({otel_result['error']})", err=True)
 
 
-_AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "active", "gone")
+_AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
 
 
 @agent.command("usage")
@@ -178,7 +178,10 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "active", "gone")
     "states",
     multiple=True,
     type=click.Choice(_AI_USAGE_STATES),
-    help="Filter signals by state. Repeatable. When omitted, 'gone' is hidden.",
+    help=(
+        "Filter signals by state. Repeatable; 'active' is a backward-compatible "
+        "alias for 'seen'. When omitted, 'gone' is hidden."
+    ),
 )
 @click.option(
     "--category",
@@ -977,7 +980,10 @@ def discovery() -> None:
     "--include-network-domains/--no-include-network-domains",
     "include_network_domains",
     default=None,
-    help="Inspect /etc/hosts and SSH configs for AI provider domains (default: on).",
+    help=(
+        "Inspect /etc/hosts and SSH configs for AI provider domains, and probe "
+        "vetted loopback model metadata APIs (default: on)."
+    ),
 )
 @click.option(
     "--emit-otel/--no-emit-otel",
@@ -1480,7 +1486,7 @@ def discovery_setup(
         default=bool(ad.include_env_var_names),
     )
     include_network_domains = click.confirm(
-        "  Inspect /etc/hosts and SSH config for AI provider domains?",
+        "  Inspect provider domains and vetted loopback model metadata APIs?",
         default=bool(ad.include_network_domains),
     )
 
@@ -2261,9 +2267,22 @@ def _format_missing_token_error(app: AppContext) -> str:
 _AI_USAGE_STATE_ORDER: dict[str, int] = {
     "new": 0,
     "changed": 1,
+    "seen": 2,
     "active": 2,
     "gone": 3,
 }
+
+
+def _canonical_ai_usage_state(value: Any) -> str:
+    """Normalize the former ``active`` spelling to the gateway's ``seen``.
+
+    ``active`` shipped as the CLI filter spelling before the gateway snapshot
+    contract settled on ``seen``. Normalizing both the requested state and the
+    payload preserves old scripts and also lets current/legacy sidecars be
+    queried with either spelling.
+    """
+    state = str(value or "").lower()
+    return "seen" if state == "active" else state
 
 
 def _filter_ai_usage_signals(
@@ -2282,9 +2301,10 @@ def _filter_ai_usage_signals(
     call, so re-querying with different filters would only burn round
     trips. The matching rules:
 
-    * ``states`` — exact, case-insensitive set membership. When empty,
-      ``gone`` is suppressed unless ``show_gone`` is set; this is the
-      "default == not-noisy" behavior the rest of the command relies on.
+    * ``states`` — exact, case-insensitive set membership after treating the
+      former CLI spelling ``active`` as an alias for gateway state ``seen``.
+      When empty, ``gone`` is suppressed unless ``show_gone`` is set; this is
+      the "default == not-noisy" behavior the rest of the command relies on.
     * ``categories`` — exact, case-insensitive set membership against
       ``signal.category``.
     * ``products`` — case-insensitive **substring** match against
@@ -2297,14 +2317,14 @@ def _filter_ai_usage_signals(
       operator type ``--component openai`` and pick out every
       OpenAI-named SDK install across npm/pypi/go, or type a local model ID.
     """
-    state_set = {s.lower() for s in states} if states else set()
+    state_set = {_canonical_ai_usage_state(s) for s in states} if states else set()
     category_set = {c.lower() for c in categories} if categories else set()
     product_needles = [p.lower() for p in products] if products else []
     component_needles = [c.lower() for c in components] if components else []
 
     out: list[dict[str, Any]] = []
     for sig in signals or []:
-        state = str(sig.get("state", "")).lower()
+        state = _canonical_ai_usage_state(sig.get("state", ""))
         if state_set:
             if state not in state_set:
                 continue

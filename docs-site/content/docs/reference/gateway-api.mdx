@@ -218,9 +218,9 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/v1/agents/discovery` | Receive an agent-discovery report from the on-host scanner. |
-| `GET` | `/api/v1/ai-usage` | Snapshot of detected AI components by ecosystem. |
+| `GET` | `/api/v1/ai-usage` | Current continuous-discovery snapshot (`summary` plus agent, process, endpoint, component, and local-model signals). Local responses retain each model's dedicated `model` block. |
 | `POST` | `/api/v1/ai-usage/scan` | Trigger an on-demand AI usage scan. |
-| `GET` | `/api/v1/ai-usage/discovery` | Discovered agents, models, tools. |
+| `POST` | `/api/v1/ai-usage/discovery` | Ingest a validated external AI-discovery report. |
 | `GET` | `/api/v1/ai-usage/components` | Aggregated components across the active workspace. |
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/locations` | Where the component was detected. |
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/history` | Detection history for one component. |
