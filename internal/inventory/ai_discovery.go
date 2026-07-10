@@ -41,6 +41,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -68,6 +69,7 @@ const (
 	SignalWorkspaceArtifact  = "workspace_artifact"
 	SignalDesktopApp         = "desktop_app"
 	SignalLocalAIEndpoint    = "local_ai_endpoint"
+	SignalLocalModel         = "local_model"
 )
 
 const (
@@ -75,6 +77,9 @@ const (
 	AIStateSeen    = "seen"
 	AIStateChanged = "changed"
 	AIStateGone    = "gone"
+
+	maxIndeterminateModelAPIMisses   = 1
+	maxPersistedLocalModelAPISignals = 2 * maxLocalModelAPIItems
 )
 
 // aiDiscoveryStateVersion is the schema version of the on-disk state file
@@ -113,6 +118,7 @@ var allowedAISignalCategories = map[string]bool{
 	SignalWorkspaceArtifact:  true,
 	SignalDesktopApp:         true,
 	SignalLocalAIEndpoint:    true,
+	SignalLocalModel:         true,
 }
 
 // AIDiscoveryOptions is the sidecar-local runtime view of config.AIDiscoveryConfig.
@@ -216,14 +222,34 @@ type ProcessRuntime struct {
 	Comm      string    `json:"comm,omitempty"`
 }
 
+// LocalModelInfo describes one model observed through a vetted local-server
+// metadata endpoint or as an on-disk model artifact. Model IDs deliberately
+// live outside Product and AIComponent: both of those fields are used as OTel
+// metric labels, while model names are user-controlled and effectively
+// unbounded. Keeping the identity in this dedicated block makes it available
+// to local API/CLI/TUI consumers without creating a high-cardinality metric.
+type LocalModelInfo struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"` // installed | loaded
+	Format    string `json:"format,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Recipe    string `json:"recipe,omitempty"`
+	Modality  string `json:"modality,omitempty"`
+	Device    string `json:"device,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Pinned    bool   `json:"pinned,omitempty"`
+}
+
 // AISignal is the sanitized signal shape returned by API responses and used
 // in gateway/OTel telemetry. It carries hashes and basenames, never raw file
 // paths, command lines, prompt text, or secret values (unless the operator
 // has explicitly opted into `StoreRawLocalPaths`).
 //
-// The `Component` and `Runtime` blocks are nil-omitted: only detectors
-// that actually have framework / liveness fidelity populate them
-// (today: `package_manifest` for components, `process` for runtimes).
+// The `Component`, `Model`, and `Runtime` blocks are nil-omitted: only
+// detectors that actually have framework, local-model, or liveness fidelity
+// populate them (today: `package_manifest` for components, local model API /
+// artifact detectors for models, and process/model-runtime detectors for
+// runtimes).
 // `LastActiveAt` is a separate timestamp from `LastSeen` so consumers
 // can distinguish "we scanned and the signature still exists on disk"
 // (`LastSeen`) from "the underlying thing was running / used since the
@@ -247,11 +273,17 @@ type AISignal struct {
 	WorkspaceHash      string          `json:"workspace_hash,omitempty"`
 	Version            string          `json:"version,omitempty"`
 	Component          *AIComponent    `json:"component,omitempty"`
+	Model              *LocalModelInfo `json:"model,omitempty"`
 	Runtime            *ProcessRuntime `json:"runtime,omitempty"`
 	FirstSeen          time.Time       `json:"first_seen"`
 	LastSeen           time.Time       `json:"last_seen"`
 	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
 	EvidenceHash       string          `json:"-"`
+	// ModelAPISourceHash is an internal, privacy-preserving origin key used
+	// to apply lifecycle decisions only to the exact local server that was
+	// conclusively inventoried. It is persisted via aiStoredSignal but never
+	// returned by the API or emitted to remote sinks.
+	ModelAPISourceHash string `json:"-"`
 	// Identity / Presence are populated by
 	// EnrichSignalsWithComponentConfidence() at API-response time
 	// (NOT during scan/persist). They mirror the per-component
@@ -326,9 +358,15 @@ type AIDiscoveryReportObserver func(context.Context, AIDiscoveryReport)
 // per-evidence blob.
 type aiStoredSignal struct {
 	AISignal
-	RawPaths           []string     `json:"raw_paths,omitempty"`
-	StoredEvidenceHash string       `json:"evidence_hash,omitempty"`
-	StoredEvidence     []AIEvidence `json:"evidence,omitempty"`
+	RawPaths                 []string     `json:"raw_paths,omitempty"`
+	StoredEvidenceHash       string       `json:"evidence_hash,omitempty"`
+	StoredEvidence           []AIEvidence `json:"evidence,omitempty"`
+	StoredModelAPISourceHash string       `json:"model_api_source_hash,omitempty"`
+	// ModelAPIMisses provides one-scan hysteresis for model inventory read
+	// failures. A valid empty provider response is still conclusive and marks
+	// the old model gone immediately; an unreachable/malformed provider gets
+	// one grace scan so a transient restart does not flap seen -> gone -> new.
+	ModelAPIMisses int `json:"model_api_misses,omitempty"`
 }
 
 type aiStateFile struct {
@@ -360,6 +398,21 @@ type ContinuousDiscoveryService struct {
 	triggers        chan chan scanResponse
 	observerMu      sync.RWMutex
 	reportObservers []AIDiscoveryReportObserver
+	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
+	// a stalled or over-cap loopback provider cannot starve later providers.
+	modelAPIProbeCursor  atomic.Uint64
+	modelAPIItemCursorMu sync.Mutex
+	modelAPIItemCursors  map[string]int
+	modelAPICycleMu      sync.Mutex
+	modelAPICycles       map[string]*localModelAPICycle
+	// modelFileRootCursor rotates the first filesystem root. A busy cache can
+	// otherwise consume the global match budget on every pass and permanently
+	// starve later Ollama, LM Studio, MLX, or configured roots.
+	modelFileRootCursor atomic.Uint64
+	modelFileCursorMu   sync.Mutex
+	modelFileCursors    map[string]string
+	modelFileCycleMu    sync.Mutex
+	modelFileCycles     map[string]*modelFileCycle
 
 	// scanMu serializes runScan invocations so the scheduled-tick
 	// path, the process-tick path, and the API-triggered ScanNow
@@ -650,7 +703,7 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	// but two callers can leapfrog with stale data). See the
 	// comment on ContinuousDiscoveryService.scanMu for details.
 	//
-	// We honor ctx.Done() before blocking so a cancelled callerand
+	// We honor ctx.Done() before blocking so a cancelled caller
 	// (e.g. an API request whose client disconnected) returns
 	// promptly instead of queueing behind a slow scheduled scan.
 	if err := ctx.Err(); err != nil {
@@ -692,7 +745,17 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 		fmt.Fprintf(os.Stderr, "[ai-discovery] previous-scan load failed (treating workspace as new): %v\n", prevErr)
 		prev = aiStateFile{}
 	}
-	signals, stats := s.scanSignals(ctx, full)
+	signals, stats := s.scanSignals(ctx, full, priorModelAPIFingerprints(prev.Signals))
+	if err := ctx.Err(); err != nil {
+		// A canceled refresh/client request is not a complete inventory
+		// observation. Never classify omissions or overwrite the last durable
+		// snapshot from a partial pass.
+		span.SetStatus(codes.Error, err.Error())
+		s.mu.Lock()
+		s.lastErr = err
+		s.mu.Unlock()
+		return AIDiscoveryReport{}, err
+	}
 	if prevErr != nil {
 		stats.Errors++
 	}
@@ -772,9 +835,24 @@ type scanStats struct {
 	Errors            int
 	DedupeSuppressed  int
 	DetectorDurations map[string]int
+	// ModelAPIConclusive keys are provider + detector pairs for which a
+	// valid metadata response was decoded during this pass. The lifecycle
+	// classifier uses this to distinguish a definitive empty list from an
+	// indeterminate network/auth/parse failure.
+	ModelAPIConclusive  map[string]bool
+	ModelAPIAttempted   map[string]bool
+	ModelAPIDeferred    map[string]bool
+	ModelAPICycleSeen   map[string]map[string]struct{}
+	ModelFileConclusive map[string]bool
+	ModelFileAttempted  map[string]bool
+	ModelFileDeferred   map[string]bool
 }
 
-func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool) ([]AISignal, scanStats) {
+func (s *ContinuousDiscoveryService) scanSignals(
+	ctx context.Context,
+	full bool,
+	priorModelAPI map[string]map[string]struct{},
+) ([]AISignal, scanStats) {
 	stats := scanStats{DetectorDurations: map[string]int{}}
 	var signals []AISignal
 	seen := map[string]bool{}
@@ -826,7 +904,22 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 	measure("mcp", func() ([]AISignal, int, error) { return s.detectMCPPaths(), 0, nil })
 	if s.opts.IncludeNetworkDomains {
 		measure("local_endpoint", func() ([]AISignal, int, error) { return s.detectLocalEndpoints(), 0, nil })
+		measure("local_model_api", func() ([]AISignal, int, error) {
+			out, files, outcome, err := s.detectLocalAPIModelsWithPrior(ctx, priorModelAPI)
+			stats.ModelAPIConclusive = outcome.conclusive
+			stats.ModelAPIAttempted = outcome.attempted
+			stats.ModelAPIDeferred = outcome.deferred
+			stats.ModelAPICycleSeen = outcome.cycleSeen
+			return out, files, err
+		})
 	}
+	measure("model_file", func() ([]AISignal, int, error) {
+		out, files, outcome, err := s.detectModelFilesWithOutcome(ctx)
+		stats.ModelFileConclusive = outcome.conclusive
+		stats.ModelFileAttempted = outcome.attempted
+		stats.ModelFileDeferred = outcome.deferred
+		return out, files, err
+	})
 	if s.opts.IncludeEnvVarNames {
 		measure("env", func() ([]AISignal, int, error) { return s.detectEnvVars(), 0, nil })
 	}
@@ -883,11 +976,22 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		// `mtime`-style hint via signal.LastActiveAt, keep that
 		// value; otherwise default LastActiveAt to `now` so consumers
 		// always have *some* "freshness" timestamp to render.
-		if sig.LastActiveAt == nil {
+		if sig.LastActiveAt == nil && !(sig.Model != nil && sig.Model.Status == "installed") {
 			t := now
 			sig.LastActiveAt = &t
 		}
 		if old, ok := prevMap[sig.Fingerprint]; ok {
+			if full && sig.Detector == "model_file" && sig.WorkspaceHash != "" &&
+				stats.ModelFileDeferred[sig.WorkspaceHash] {
+				// A cursor page can contain only part of a sharded model. Preserve
+				// the last cycle-complete aggregate until this root reaches EOF;
+				// otherwise every prefix/suffix page would alternate size/hash and
+				// emit a false `changed` transition.
+				preserved := old.AISignal
+				preserved.SignalID = stableSignalID(sig.Fingerprint)
+				preserved.LastSeen = now
+				sig = preserved
+			}
 			sig.FirstSeen = old.FirstSeen
 			storedHash := old.EvidenceHash
 			if storedHash == "" {
@@ -915,12 +1019,58 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		out = append(out, sig)
 		counts[sig.State]++
 		emittedFps[sig.Fingerprint] = true
-		current[sig.Fingerprint] = aiStoredSignal{AISignal: sig, RawPaths: rawPathsForSignal(sig, s.opts.StoreRawLocalPaths)}
+		current[sig.Fingerprint] = aiStoredSignal{
+			AISignal: sig, RawPaths: rawPathsForSignal(sig, s.opts.StoreRawLocalPaths),
+			StoredModelAPISourceHash: sig.ModelAPISourceHash,
+		}
 	}
 
 	if full {
-		for fp, old := range prevMap {
+		apiCurrent, fileCurrent := 0, 0
+		for _, stored := range current {
+			switch stored.Detector {
+			case "model_api", "model_runtime":
+				if stored.Model != nil {
+					apiCurrent++
+				}
+			case "model_file":
+				if stored.Model != nil {
+					fileCurrent++
+				}
+			}
+		}
+		apiCarryRemaining := maxPersistedLocalModelAPISignals - apiCurrent
+		if apiCarryRemaining < 0 {
+			apiCarryRemaining = 0
+		}
+		filePersistLimit := s.opts.MaxFilesPerScan * 2
+		if s.opts.MaxFilesPerScan > maxModelFileVisitedEntries/2 {
+			filePersistLimit = maxModelFileVisitedEntries
+		}
+		fileCarryRemaining := filePersistLimit - fileCurrent
+		if fileCarryRemaining < 0 {
+			fileCarryRemaining = 0
+		}
+		prevFingerprints := make([]string, 0, len(prevMap))
+		for fp := range prevMap {
+			prevFingerprints = append(prevFingerprints, fp)
+		}
+		sort.Strings(prevFingerprints)
+		carry := carryForwardAccumulator{
+			current:    current,
+			out:        &out,
+			counts:     counts,
+			emittedFps: emittedFps,
+		}
+		for _, fp := range prevFingerprints {
+			old := prevMap[fp]
 			if _, ok := current[fp]; ok {
+				continue
+			}
+			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
+				continue
+			}
+			if carry.handleModelFileCarryForward(fp, old, stats, &fileCarryRemaining) {
 				continue
 			}
 			gone := old.AISignal
@@ -980,6 +1130,124 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 	// authoritative current snapshot.
 	s.recordScanIfPossible(report)
 	return report
+}
+
+func storedModelAPICoverageKey(stored aiStoredSignal) (string, bool) {
+	sig := stored.AISignal
+	if sig.Model == nil || (sig.Detector != "model_api" && sig.Detector != "model_runtime") {
+		return "", false
+	}
+	provider := strings.TrimSpace(sig.Model.Provider)
+	sourceHash := strings.TrimSpace(sig.ModelAPISourceHash)
+	if sourceHash == "" {
+		sourceHash = strings.TrimSpace(stored.StoredModelAPISourceHash)
+	}
+	if provider == "" || sourceHash == "" {
+		return "", false
+	}
+	return localModelAPIOutcomeKey(provider, sourceHash, sig.Detector), true
+}
+
+type carryForwardAccumulator struct {
+	current    map[string]aiStoredSignal
+	out        *[]AISignal
+	counts     map[string]int
+	emittedFps map[string]bool
+}
+
+func (c carryForwardAccumulator) persist(fp string, old aiStoredSignal, budget *int) {
+	carried := old.AISignal
+	carried.State = AIStateSeen
+	old.AISignal = carried
+	c.current[fp] = old
+	*budget = *budget - 1
+	*c.out = append(*c.out, carried)
+	c.counts[AIStateSeen]++
+	c.emittedFps[fp] = true
+}
+
+// handleModelAPICarryForward owns the lifecycle rules for an API model that
+// was not emitted on this scan. Its return value means the omission was
+// handled and must not become a gone transition; a bounded carry set may
+// intentionally handle an item without persisting it.
+func (c carryForwardAccumulator) handleModelAPICarryForward(
+	fp string,
+	old aiStoredSignal,
+	stats scanStats,
+	budget *int,
+) bool {
+	coverageKey, ok := storedModelAPICoverageKey(old)
+	if !ok {
+		return false
+	}
+	if stats.ModelAPIConclusive[coverageKey] {
+		if _, seenDuringCycle := stats.ModelAPICycleSeen[coverageKey][fp]; !seenDuringCycle {
+			return false
+		}
+		if *budget > 0 {
+			old.ModelAPIMisses = 0
+			c.persist(fp, old, budget)
+		}
+		return true
+	}
+
+	deferred := stats.ModelAPIDeferred[coverageKey]
+	attempted := stats.ModelAPIAttempted[coverageKey]
+	eligible := deferred || (attempted && old.ModelAPIMisses < maxIndeterminateModelAPIMisses)
+	if !eligible {
+		return false
+	}
+	if *budget > 0 {
+		// A deferred source was not fully observed because an earlier
+		// response exhausted an item/time/endpoint budget. Keep it until
+		// that exact source receives a conclusive observation. A request
+		// that was attempted but failed gets one grace pass for ordinary
+		// local-server restarts.
+		if attempted && !deferred {
+			old.ModelAPIMisses++
+		}
+		c.persist(fp, old, budget)
+	}
+	// Persistence is deliberately bounded. If the carry budget is full,
+	// evict silently rather than emit an unsupported gone transition from
+	// an incomplete observation.
+	return true
+}
+
+func (c carryForwardAccumulator) handleModelFileCarryForward(
+	fp string,
+	old aiStoredSignal,
+	stats scanStats,
+	budget *int,
+) bool {
+	if old.Detector != "model_file" || old.Model == nil || old.WorkspaceHash == "" ||
+		!stats.ModelFileDeferred[old.WorkspaceHash] {
+		return false
+	}
+	// The artifact's root was only partially walked (entry/match cap,
+	// cancellation-adjacent error, or permission failure). Preserve prior
+	// inventory until that exact hashed root is observed conclusively.
+	if *budget > 0 {
+		c.persist(fp, old, budget)
+	}
+	// If the bounded carry set is full, omit the row without a gone event.
+	// A partial walk cannot prove deletion.
+	return true
+}
+
+func priorModelAPIFingerprints(signals map[string]aiStoredSignal) map[string]map[string]struct{} {
+	out := make(map[string]map[string]struct{})
+	for fingerprint, stored := range signals {
+		coverageKey, ok := storedModelAPICoverageKey(stored)
+		if !ok {
+			continue
+		}
+		if out[coverageKey] == nil {
+			out[coverageKey] = make(map[string]struct{})
+		}
+		out[coverageKey][fingerprint] = struct{}{}
+	}
+	return out
 }
 
 // recordScanIfPossible writes a scan to the optional inventory
@@ -1191,12 +1459,16 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
 // metadata, and (2) matching the path against the same vendor's
 // signature.local_endpoints entry in ai_signatures.json.
 var safeLocalEndpointPaths = map[string]struct{}{
-	"/api/tags":    {}, // Ollama — list installed models
-	"/api/version": {}, // Ollama — server version
-	"/v1/models":   {}, // OpenAI-compatible (LM Studio, vLLM, LocalAI, llama.cpp server)
-	"/v1/health":   {}, // common health endpoint
-	"/health":      {}, // ditto
-	"/healthz":     {}, // Kubernetes-style health
+	"/api/tags":      {}, // Ollama-compatible — list installed models
+	"/api/ps":        {}, // Ollama-compatible — list loaded models
+	"/api/version":   {}, // Ollama — server version
+	"/v1/models":     {}, // OpenAI-compatible — list locally available models
+	"/api/v1/models": {}, // Lemonade legacy-compatible route
+	"/v1/health":     {}, // Lemonade — server status + loaded models
+	"/api/v1/health": {}, // Lemonade legacy-compatible route
+	"/live":          {}, // Lemonade unauthenticated liveness
+	"/health":        {}, // common health endpoint
+	"/healthz":       {}, // Kubernetes-style health
 }
 
 // detectLocalEndpoints probes the loopback HTTP endpoints declared in
@@ -1254,7 +1526,8 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 	}
 	var out []AISignal
 	for _, sig := range s.catalog {
-		for _, endpoint := range sig.LocalEndpoints {
+		isLemonade := localModelProviderForSignature(sig) == localModelProviderLemonade
+		for _, endpoint := range localEndpointsForSignature(sig) {
 			endpoint = strings.TrimSpace(endpoint)
 			if endpoint == "" || !isSafeLoopbackEndpoint(endpoint) {
 				continue
@@ -1269,8 +1542,17 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 			if _, ok := safeLocalEndpointPaths[u.Path]; !ok {
 				continue
 			}
+			// Lemonade exposes an unauthenticated, provider-specific
+			// liveness route. Restrict presence identification to that
+			// route so an unrelated service returning 404 from /v1/models
+			// on port 13305 is not misidentified as Lemonade. The dedicated
+			// model API detector handles /v1/models and /v1/health bodies.
+			if isLemonade && u.Path != "/live" {
+				continue
+			}
 			status, ok := probe(http.MethodHead, endpoint)
-			if !ok || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+			if !ok || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented ||
+				(isLemonade && (status < 200 || status >= 300)) {
 				// HEAD wasn't accepted; try GET as a fallback.
 				// (Already gated by safeLocalEndpointPaths above.)
 				status, ok = probe(http.MethodGet, endpoint)
@@ -1278,7 +1560,11 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 					continue
 				}
 			}
-			if status >= 200 && status < 500 {
+			reachable := status >= 200 && status < 500
+			if isLemonade {
+				reachable = status >= 200 && status < 300
+			}
+			if reachable {
 				ev := AIEvidence{Type: "local_endpoint", ValueHash: hashValue(endpoint)}
 				out = append(out, s.signalFromEvidence(sig, SignalLocalAIEndpoint, "local_endpoint", []AIEvidence{ev}))
 				break
@@ -2248,6 +2534,16 @@ func (s componentRollupSnapshot) ScoreFor(g componentSignalGroup) (ConfidenceRes
 // nil is the documented signal to BuildAIDiscoveryPayload that
 // the wire payload should not carry confidence fields.
 func (s componentRollupSnapshot) LookupSignal(sig AISignal) *ConfidenceResult {
+	// Local model IDs deliberately do not participate in product/component
+	// confidence rollups: they are unbounded identities held in sig.Model,
+	// while Product is the bounded serving runtime (for example, Lemonade
+	// Server). Reusing the runtime's confidence for every model would imply
+	// that a server binary proves each individual model is installed. The
+	// model status is instead asserted directly by the model_api,
+	// model_runtime, or model_file detector.
+	if sig.Model != nil {
+		return nil
+	}
 	if k, ok := keyForComponent(sig.Component); ok && s.Scores != nil {
 		if c, found := s.Scores[k]; found && c != nil {
 			return c
@@ -2335,6 +2631,12 @@ func groupSignalsByProduct(signals []AISignal) []productSignalGroup {
 	order := []productKey{}
 	for _, sig := range signals {
 		if sig.State == AIStateGone {
+			continue
+		}
+		// Model observations have their own unbounded identity in
+		// sig.Model and must not multiply the confidence of the bounded
+		// serving-runtime Product when several models are installed.
+		if sig.Model != nil {
 			continue
 		}
 		// Skip component-bearing signals -- those are already
@@ -2538,6 +2840,15 @@ func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gat
 		Basenames:     sig.Basenames,
 		WorkspaceHash: sig.WorkspaceHash,
 	}
+	// Model filenames commonly contain the same private repository/model
+	// identity as sig.Model.ID. Do not let that identity bypass the extended
+	// model-metadata privacy gate through the otherwise-safe basename field.
+	if (sig.Category == SignalLocalModel || sig.Model != nil) && !opts.DisableRedaction {
+		out.SignalID = redactedModelSignalID(sig)
+		out.PathHashes = nil
+		out.Basenames = nil
+		out.WorkspaceHash = ""
+	}
 	if !sig.LastSeen.IsZero() {
 		out.LastSeen = sig.LastSeen.UTC().Format(time.RFC3339)
 	}
@@ -2556,6 +2867,19 @@ func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gat
 			Name:      sig.Component.Name,
 			Version:   sig.Component.Version,
 			Framework: sig.Component.Framework,
+		}
+	}
+	if sig.Model != nil {
+		out.Model = &gatewaylog.AIDiscoveryModel{
+			ID:        sig.Model.ID,
+			Status:    sig.Model.Status,
+			Format:    sig.Model.Format,
+			Provider:  sig.Model.Provider,
+			Recipe:    sig.Model.Recipe,
+			Modality:  sig.Model.Modality,
+			Device:    sig.Model.Device,
+			SizeBytes: sig.Model.SizeBytes,
+			Pinned:    sig.Model.Pinned,
 		}
 	}
 	if sig.Runtime != nil {
@@ -2623,6 +2947,24 @@ func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gat
 		}
 	}
 	return out
+}
+
+func redactedModelSignalID(sig AISignal) string {
+	key := currentPathHashKey()
+	if len(key) == 0 {
+		// Detached/legacy callers have no installation secret with which to
+		// build a dictionary-resistant pseudonym. Omitting correlation is safer
+		// than shipping the reversible public fingerprint.
+		return ""
+	}
+	identity := sig.Fingerprint
+	if identity == "" {
+		identity = sig.SignalID
+	}
+	if identity == "" {
+		return ""
+	}
+	return "model_" + keyedHashHex(key, "ai-discovery/model-signal/v1\x00"+identity)
 }
 
 // clampPayloadScore mirrors the OTel-side clamp so the wire
@@ -2721,6 +3063,12 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		if !allowedAISignalCategories[sig.Category] {
 			return fmt.Errorf("unsupported category %q", sig.Category)
 		}
+		if sig.Category == SignalLocalModel && sig.Model == nil {
+			return errors.New("local_model signals require model metadata")
+		}
+		if sig.Category != SignalLocalModel && sig.Model != nil {
+			return errors.New("model metadata is only allowed on local_model signals")
+		}
 		for _, value := range sig.PathHashes {
 			if value != "" && !isSHA256Hash(value) {
 				return errors.New("path hashes must be sha256:<64 hex> or hmac-sha256:<64 hex>")
@@ -2732,6 +3080,30 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		for _, value := range sig.Basenames {
 			if strings.Contains(value, "/") || strings.Contains(value, "\\") {
 				return errors.New("raw paths are not allowed")
+			}
+		}
+		if sig.Model != nil {
+			model := sig.Model
+			if strings.TrimSpace(model.ID) == "" || len(model.ID) > 512 || containsUnicodeControl(model.ID) {
+				return errors.New("model id must be 1..512 printable characters")
+			}
+			if model.Status != "installed" && model.Status != "loaded" {
+				return fmt.Errorf("unsupported model status %q", model.Status)
+			}
+			for field, rule := range map[string]struct {
+				value string
+				max   int
+			}{
+				"format": {model.Format, 64}, "provider": {model.Provider, 96},
+				"recipe": {model.Recipe, 128}, "modality": {model.Modality, 64},
+				"device": {model.Device, 128},
+			} {
+				if len(rule.value) > rule.max || containsUnicodeControl(rule.value) {
+					return fmt.Errorf("model %s must be at most %d printable characters", field, rule.max)
+				}
+			}
+			if model.SizeBytes < 0 {
+				return errors.New("model size_bytes must be non-negative")
 			}
 		}
 		// Phase-2 evidence bounds: keep the per-signal Evidence
@@ -2751,6 +3123,10 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		}
 	}
 	return nil
+}
+
+func containsUnicodeControl(value string) bool {
+	return strings.IndexFunc(value, unicode.IsControl) >= 0
 }
 
 // SanitizeEvidenceForWire scrubs every AISignal.Evidence row to
@@ -2873,6 +3249,9 @@ func (s *AIStateStore) Load() (aiStateFile, error) {
 		if len(stored.AISignal.Evidence) == 0 && len(stored.StoredEvidence) > 0 {
 			stored.AISignal.Evidence = stored.StoredEvidence
 		}
+		if stored.AISignal.ModelAPISourceHash == "" && stored.StoredModelAPISourceHash != "" {
+			stored.AISignal.ModelAPISourceHash = stored.StoredModelAPISourceHash
+		}
 		out.Signals[fp] = stored
 	}
 	return out, nil
@@ -2896,6 +3275,9 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		}
 		if len(stored.StoredEvidence) == 0 && len(stored.AISignal.Evidence) > 0 {
 			stored.StoredEvidence = stored.AISignal.Evidence
+		}
+		if stored.StoredModelAPISourceHash == "" && stored.AISignal.ModelAPISourceHash != "" {
+			stored.StoredModelAPISourceHash = stored.AISignal.ModelAPISourceHash
 		}
 		state.Signals[fp] = stored
 	}

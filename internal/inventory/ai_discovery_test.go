@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,11 +40,70 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks", "lemonade"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}
 	}
+}
+
+func TestLoadAISignatures_LemonadeServerSurface(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var lemonade *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "lemonade" {
+			lemonade = &sigs[i]
+			break
+		}
+	}
+	if lemonade == nil {
+		t.Fatal("lemonade signature missing")
+	}
+	if lemonade.Name != "Lemonade Server" || lemonade.Vendor != "Lemonade" || lemonade.Category != SignalAICLI {
+		t.Fatalf("lemonade identity mismatch: %+v", *lemonade)
+	}
+
+	assertContains := func(field string, values []string, expected ...string) {
+		t.Helper()
+		seen := make(map[string]bool, len(values))
+		for _, value := range values {
+			seen[value] = true
+		}
+		for _, want := range expected {
+			if !seen[want] {
+				t.Errorf("lemonade %s missing %q: %v", field, want, values)
+			}
+		}
+	}
+	assertContains("binary_names", lemonade.BinaryNames, "lemonade", "lemond", "lemonade-tray", "LemonadeServer.exe")
+	assertContains("process_names", lemonade.ProcessNames, "lemonade", "lemond", "lemonade-tray", "LemonadeServer.exe")
+	assertContains("application_names", lemonade.ApplicationNames, "Lemonade.app", "Lemonade")
+	assertContains("config_paths", lemonade.ConfigPaths,
+		"~/.cache/lemonade/config.json",
+		"/Library/Application Support/lemonade/.cache/config.json",
+		"/var/lib/lemonade/.cache/lemonade/config.json",
+		"/opt/var/lib/lemonade/.cache/lemonade/config.json",
+	)
+	assertContains("env_var_names", lemonade.EnvVarNames,
+		"LEMONADE_HOST", "LEMONADE_PORT", "LEMONADE_CACHE_DIR", "LEMONADE_API_KEY", "LEMONADE_ADMIN_API_KEY",
+	)
+	for _, generic := range []string{"HF_HOME", "HF_HUB_CACHE", "FLM_MODEL_PATH"} {
+		if slices.Contains(lemonade.EnvVarNames, generic) {
+			t.Errorf("lemonade env_var_names contains generic model-cache variable %q", generic)
+		}
+	}
+	assertContains("domain_patterns", lemonade.DomainPatterns, "localhost:13305", "127.0.0.1:13305")
+	assertContains("history_patterns", lemonade.HistoryPatterns, "lemonade", "lemond")
+	assertContains("local_endpoints", lemonade.LocalEndpoints,
+		"http://127.0.0.1:13305/live",
+		"http://127.0.0.1:13305/v1/models",
+		"http://127.0.0.1:13305/api/v1/models",
+		"http://127.0.0.1:13305/v1/health",
+		"http://127.0.0.1:13305/api/v1/health",
+	)
 }
 
 func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
@@ -506,11 +566,61 @@ func TestDetectLocalEndpoints_PrefersHEADToAvoidTriggeringInference(t *testing.T
 		MaxFileBytes:          64 * 1024,
 	}, []AISignature{sig}, nil, nil)
 
-	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
-		t.Fatalf("runScan: %v", err)
+	// Exercise the presence detector directly. A full scan now also runs the
+	// separate local-model inventory detector, which intentionally performs a
+	// bounded GET of this vetted metadata path to enumerate model IDs.
+	if got := svc.detectLocalEndpoints(); len(got) != 1 {
+		t.Fatalf("detectLocalEndpoints signals = %d, want 1", len(got))
 	}
 	if sawGet {
 		t.Fatalf("detectLocalEndpoints issued a GET when HEAD was accepted; this can trigger inference on the local server")
+	}
+}
+
+func TestDetectLocalEndpoints_LemonadeRequiresSuccessfulLive(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		liveStatus int
+		want       int
+	}{
+		{name: "unrelated listener", liveStatus: http.StatusNotFound, want: 0},
+		{name: "lemonade live", liveStatus: http.StatusOK, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/live":
+					w.WriteHeader(tc.liveStatus)
+				case "/v1/models":
+					// A generic OpenAI-compatible listener alone must not be
+					// attributed to Lemonade.
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			t.Setenv("LEMONADE_HOST", "")
+			t.Setenv("LEMONADE_PORT", "")
+			t.Setenv("LEMONADE_CACHE_DIR", t.TempDir())
+			sig := AISignature{
+				ID:             "lemonade",
+				Name:           "Lemonade Server",
+				Vendor:         "Lemonade",
+				Category:       SignalAICLI,
+				Confidence:     0.95,
+				LocalEndpoints: []string{server.URL + "/v1/models"},
+			}
+			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+				Enabled: true, Mode: "enhanced", DataDir: t.TempDir(), HomeDir: t.TempDir(),
+			}, []AISignature{sig}, nil, nil)
+
+			if got := len(svc.detectLocalEndpoints()); got != tc.want {
+				t.Fatalf("Lemonade endpoint signals = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -762,6 +872,166 @@ func TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary(t *testing.T
 		t.Fatalf("non-full tick must not re-fire lifecycle classification: new=%d changed=%d",
 			second.Summary.NewSignals, second.Summary.ChangedSignals)
 	}
+}
+
+func TestCarryForwardAccumulatorModelAPIRules(t *testing.T) {
+	const fingerprint = "model-api-fingerprint"
+	old := aiStoredSignal{AISignal: AISignal{
+		Fingerprint:        fingerprint,
+		Detector:           "model_api",
+		ModelAPISourceHash: "source-hash",
+		Model:              &LocalModelInfo{Provider: "test-provider"},
+	}}
+	coverageKey, ok := storedModelAPICoverageKey(old)
+	if !ok {
+		t.Fatal("test model did not produce an API coverage key")
+	}
+	newAccumulator := func() (carryForwardAccumulator, *[]AISignal) {
+		out := []AISignal{}
+		return carryForwardAccumulator{
+			current:    map[string]aiStoredSignal{},
+			out:        &out,
+			counts:     map[string]int{},
+			emittedFps: map[string]bool{},
+		}, &out
+	}
+
+	t.Run("deferred source carries", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIDeferred: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || budget != 0 || len(*out) != 1 || carry.current[fingerprint].State != AIStateSeen {
+			t.Fatalf("deferred carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("attempted failure consumes grace", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIAttempted: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || carry.current[fingerprint].ModelAPIMisses != 1 {
+			t.Fatalf("attempted carry = handled:%v stored:%+v", handled, carry.current[fingerprint])
+		}
+	})
+
+	t.Run("miss limit falls through", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		atLimit := old
+		atLimit.ModelAPIMisses = maxIndeterminateModelAPIMisses
+		handled := carry.handleModelAPICarryForward(fingerprint, atLimit, scanStats{
+			ModelAPIAttempted: map[string]bool{coverageKey: true},
+		}, &budget)
+		if handled || budget != 1 || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("at-limit carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("completed cycle membership carries and clears misses", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		missed := old
+		missed.ModelAPIMisses = 1
+		handled := carry.handleModelAPICarryForward(fingerprint, missed, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen: map[string]map[string]struct{}{
+				coverageKey: {fingerprint: {}},
+			},
+		}, &budget)
+		if !handled || carry.current[fingerprint].ModelAPIMisses != 0 {
+			t.Fatalf("completed-cycle carry = handled:%v stored:%+v", handled, carry.current[fingerprint])
+		}
+	})
+
+	t.Run("completed cycle absence falls through", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen:  map[string]map[string]struct{}{coverageKey: {}},
+		}, &budget)
+		if handled {
+			t.Fatal("model absent from a completed cycle was carried")
+		}
+	})
+
+	t.Run("exhausted budget suppresses unsupported gone", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIDeferred: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
+
+	t.Run("completed membership respects exhausted budget", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen: map[string]map[string]struct{}{
+				coverageKey: {fingerprint: {}},
+			},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero completed carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
+}
+
+func TestCarryForwardAccumulatorModelFileRules(t *testing.T) {
+	const fingerprint = "model-file-fingerprint"
+	old := aiStoredSignal{AISignal: AISignal{
+		Fingerprint:   fingerprint,
+		Detector:      "model_file",
+		WorkspaceHash: "root-hash",
+		Model:         &LocalModelInfo{Format: "gguf"},
+	}}
+	newAccumulator := func() (carryForwardAccumulator, *[]AISignal) {
+		out := []AISignal{}
+		return carryForwardAccumulator{
+			current:    map[string]aiStoredSignal{},
+			out:        &out,
+			counts:     map[string]int{},
+			emittedFps: map[string]bool{},
+		}, &out
+	}
+
+	t.Run("deferred root carries", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		handled := carry.handleModelFileCarryForward(fingerprint, old, scanStats{
+			ModelFileDeferred: map[string]bool{"root-hash": true},
+		}, &budget)
+		if !handled || budget != 0 || len(*out) != 1 || carry.current[fingerprint].State != AIStateSeen {
+			t.Fatalf("file carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("conclusive root falls through", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		if carry.handleModelFileCarryForward(fingerprint, old, scanStats{}, &budget) {
+			t.Fatal("model from a non-deferred root was carried")
+		}
+	})
+
+	t.Run("exhausted budget suppresses unsupported gone", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelFileCarryForward(fingerprint, old, scanStats{
+			ModelFileDeferred: map[string]bool{"root-hash": true},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero file carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
 }
 
 // TestEnrichSignalsWithComponentConfidence pins the Bug B fix:
@@ -1043,6 +1313,49 @@ func TestValidateSanitizedAIDiscoveryReportRejectsRawPath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected raw path rejection")
+	}
+}
+
+func TestValidateSanitizedAIDiscoveryReportValidatesModelMetadata(t *testing.T) {
+	base := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "scan-model"},
+		Signals: []AISignal{{
+			Category: SignalLocalModel,
+			Model:    &LocalModelInfo{ID: "Qwen3-0.6B-GGUF", Status: "installed", Format: "gguf"},
+		}},
+	}
+	if err := ValidateSanitizedAIDiscoveryReport(base); err != nil {
+		t.Fatalf("valid model metadata rejected: %v", err)
+	}
+
+	badStatus := cloneAIDiscoveryReport(base)
+	badStatus.Signals[0].Model.Status = "executing"
+	if err := ValidateSanitizedAIDiscoveryReport(badStatus); err == nil {
+		t.Fatal("unsupported model status accepted")
+	}
+
+	badID := cloneAIDiscoveryReport(base)
+	badID.Signals[0].Model.ID = "private\nmodel"
+	if err := ValidateSanitizedAIDiscoveryReport(badID); err == nil {
+		t.Fatal("model id containing control characters accepted")
+	}
+	badUnicodeControl := cloneAIDiscoveryReport(base)
+	badUnicodeControl.Signals[0].Model.ID = "private\u009bmodel"
+	if err := ValidateSanitizedAIDiscoveryReport(badUnicodeControl); err == nil {
+		t.Fatal("model id containing a Unicode C1 control accepted")
+	}
+
+	missingModel := cloneAIDiscoveryReport(base)
+	missingModel.Signals[0].Model = nil
+	missingModel.Signals[0].Basenames = []string{"private-model.gguf"}
+	if err := ValidateSanitizedAIDiscoveryReport(missingModel); err == nil {
+		t.Fatal("local_model signal without model metadata accepted")
+	}
+
+	wrongCategory := cloneAIDiscoveryReport(base)
+	wrongCategory.Signals[0].Category = SignalAICLI
+	if err := ValidateSanitizedAIDiscoveryReport(wrongCategory); err == nil {
+		t.Fatal("model metadata on non-local_model signal accepted")
 	}
 }
 

@@ -1,6 +1,6 @@
 ---
 title: AI Discovery
-description: Find every AI agent, model, MCP server, skill, and provider running on the host. DefenseClaw runs a continuous fingerprinting scanner in the gateway and ships defenseclaw agent discover for an instant operator-side inventory.
+description: Find AI agents, installed local models, running model servers, MCP servers, skills, and providers on the host. DefenseClaw runs a continuous fingerprinting scanner in the gateway and ships defenseclaw agent discover for an instant connector inventory.
 keywords:
   - DefenseClaw AI discovery
   - defenseclaw agent discover
@@ -12,7 +12,7 @@ keywords:
   - defenseclaw aibom
 ---
 
-Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is even running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
+Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
 
 <DefenseClawDemo scenario="ai-discovery-evidence" />
 
@@ -22,7 +22,7 @@ Connector configuration, process, MCP, package, provider-domain, and environment
 
 ![DefenseClaw TUI · AI Discovery view showing detected AI connectors, processes, package dependencies, and provider domains with identity and presence confidence scores](/images/tui/ai-discovery.jpg)
 
-The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents — a live table of every detected AI agent, model, MCP server, skill, and package dependency with per-signal identity / presence confidence scores.
+The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents — a live table of every detected AI agent, model, MCP server, skill, and package dependency with per-signal identity / presence confidence scores. Model columns appear when the snapshot contains local models.
 
 <Cards>
   <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
@@ -74,27 +74,74 @@ defenseclaw agent discover --json --emit-otel
 
 ## What gets discovered
 
-The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every signal into one of the categories below. The on-demand CLI fills in connector-specific metadata for the same categories.
+The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every signal into one of the wire categories below. `agent discover` is a separate, connector-focused local inventory; the gateway-backed `agent usage` command renders these continuous-discovery signals.
 
 | Category | What it surfaces |
 | --- | --- |
-| `connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent |
-| `cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
-| `process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
-| `ide_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
-| `mcp` | MCP servers configured for any connector (`mcpServers` blocks) |
+| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent |
+| `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
+| `active_process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
+| `editor_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
+| `mcp_server` | MCP servers configured for any connector (`mcpServers` blocks) |
 | `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
 | `rule` | Rule packs and ruleset files referenced by config |
 | `plugin` | Connector plugins (TypeScript, Python, native) |
-| `package_dep` | `requirements.txt` / `package.json` / `pyproject.toml` AI deps |
-| `env_var` | AI provider env var *names* (never values) |
-| `shell_history` | Shell-history references to AI binaries (last-touched timestamps) |
+| `package_dependency` | `requirements.txt` / `package.json` / `pyproject.toml` AI deps |
+| `env_var_name` | AI provider env var *names* (never values) |
+| `shell_history_match` | Shell-history references to AI binaries (last-touched timestamps) |
 | `provider_domain` | DNS resolutions to known provider endpoints |
 | `workspace_artifact` | `.openclaw/`, `.claude/`, `.cursor/` directories in active workspaces |
 | `desktop_app` | Claude Desktop, Cursor, Windsurf macOS / Windows app installs |
-| `local_ai_endpoint` | Ollama, LM Studio, vLLM, llama.cpp listening sockets |
+| `local_ai_endpoint` | Vetted Ollama, Lemonade, LM Studio, LocalAI, and vLLM loopback metadata endpoints |
+| `local_model` | Models installed on disk or reported as loaded by a vetted loopback model server |
 
-Every signal carries `state ∈ {new, changed, gone}` with `last_seen` / `first_seen` timestamps so the dashboards can show drift over time, not just point-in-time snapshots.
+The local snapshot uses `state ∈ {new, seen, changed, gone}` with `last_seen` / `first_seen` timestamps. `seen` is the steady state for an unchanged signal. Outbound `ai_discovery` events remain delta-focused and emit only `new`, `changed`, or `gone` transitions.
+
+### Local model inventory
+
+Full continuous scans inventory local models through two metadata-only paths. The filesystem path does **not** require an inference engine to be installed or running: a standalone GGUF, MLX, safetensors, ONNX, or other recognized model artifact can produce a `local_model` row on its own.
+
+**Vetted loopback APIs.** Presence checks prefer `HEAD`; model inventory uses bounded, read-only `GET` requests only for explicitly allow-listed metadata routes.
+
+| Runtime | Installed / reported models | Loaded models |
+| --- | --- | --- |
+| Lemonade Server | [`/v1/models`](https://lemonade-server.ai/docs/api/openai/), `/api/v1/models` | [`/v1/health`](https://lemonade-server.ai/docs/api/lemonade/), `/api/v1/health` |
+| Ollama | `/api/tags` | `/api/ps` |
+| LM Studio | `/v1/models` | Not distinguished by the built-in route |
+| LocalAI | `/v1/models` | Not distinguished by the built-in route |
+| vLLM | `/v1/models` | Not distinguished by the built-in route |
+| llama.cpp | No built-in model-metadata endpoint | Process and filesystem discovery only |
+
+The generic `/v1/models` integrations are recorded with `status=installed`; `status=loaded` is reserved for a runtime health/status route that explicitly reports an in-memory model. The detector never calls completion, embedding, audio, pull, load, delete, or other inference/control endpoints.
+
+For [Lemonade Server](https://lemonade-server.ai/models.html), the built-in signature recognizes the `lemonade`, `lemond`, `lemonade-tray`, and `LemonadeServer.exe` binaries/processes, the desktop app, [documented configuration locations](https://lemonade-server.ai/docs/guide/configuration/), environment-variable names, and the default loopback port `13305`. Its model list includes only downloaded local entries; `downloaded=false` and cloud-recipe entries are ignored. Configured `models_dir` and `extra_models_dir` values are also added as filesystem model roots.
+
+**Bounded filesystem metadata.** The scanner recognizes GGUF/GGML, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama manifests/blob stores. It groups sharded weights and model-cache directories into model rows instead of reporting every shard or blob. Generic PyTorch extensions such as `.pt`, `.pth`, `.ckpt`, and `.bin` count only inside a strong model context. The scan emits at most `max_files_per_scan` matching artifacts and also enforces separate global and per-root traversal budgets; it never opens model binaries. Small Ollama manifest JSON is the only model-store content read, and that read is regular-file checked and bounded by the configured file-size limit.
+
+Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then the operator's `scan_roots`. Setting `--scan-roots` adds broad roots; it does not disable the specialized stores.
+
+Each `local_model` signal keeps its potentially high-cardinality identity under a dedicated `model` block. For example, an installed Lemonade model can appear as:
+
+```json
+{
+  "category": "local_model",
+  "detector": "model_api",
+  "model": {
+    "id": "Qwen3-0.6B-GGUF",
+    "status": "installed",
+    "format": "gguf",
+    "provider": "lemonade",
+    "recipe": "llamacpp",
+    "size_bytes": 380000000
+  }
+}
+```
+
+Loaded-model rows can additionally carry `modality`, `device`, and `pinned`, plus a separate runtime block when the server reports a PID. The model ID is not copied into `product` or `component`, which keeps product and telemetry labels bounded.
+
+### Model lifecycle and bounded scans
+
+Limits do not turn a partial observation into a false deletion. API inventories larger than 256 rows advance through per-source cursor pages; previous rows remain `seen` until that source reaches the end of a complete cycle. Only the completed cycle can mark an omitted model `gone`. Likewise, filesystem pages preserve the last complete model aggregate until a root reaches the end, so shards do not alternate between partial sizes or create false `changed` / `gone` transitions. A single failed API pass is carried as `seen` to tolerate a normal local-server restart, while a valid empty inventory is conclusive.
 
 ## Continuous discovery (gateway)
 
@@ -120,7 +167,7 @@ Prints what's enabled, the active scan roots, the loaded signature pack, the las
 defenseclaw agent discovery scan
 ```
 
-Triggers `POST /api/v1/ai-usage/scan`. The scanner runs immediately and fires fresh `ai_discovery` events into the audit pipeline. No restart needed.
+Triggers `POST /api/v1/ai-usage/scan`. The scanner runs immediately, refreshes the local snapshot, and emits `ai_discovery` events for any `new`, `changed`, or `gone` transitions. Unchanged `seen` rows are not replayed. No restart needed.
   </Tab>
   <Tab value="Disable">
 ```bash
@@ -137,11 +184,11 @@ Stops the scanner and clears the `ai_discovery.*` block. Existing audit events a
 
 | Knob | Purpose |
 | --- | --- |
-| `--scan-roots` | Comma-separated filesystem roots to walk. Defaults inherit from `ai_discovery.scan_roots` (typically `~`). |
+| `--scan-roots` | Additional comma-separated filesystem roots to walk. Defaults inherit from `ai_discovery.scan_roots` (typically `~`); known model stores are still added automatically. |
 | `--include-shell-history` / `--no-include-shell-history` | Read `~/.bash_history`, `~/.zsh_history` for AI invocations. |
 | `--include-package-manifests` / `--no-include-package-manifests` | Look at `package.json`, `pyproject.toml`, `requirements.txt`. |
 | `--include-env-var-names` / `--no-include-env-var-names` | Enumerate process env *names* (values are never read). |
-| `--include-network-domains` / `--no-include-network-domains` | Watch DNS for provider endpoints (Anthropic, OpenAI, Bedrock, …). |
+| `--include-network-domains` / `--no-include-network-domains` | Inspect provider-domain signals and probe vetted loopback model metadata APIs. |
 | `--scan-interval-min` | Minutes between rescans. Defaults inherit from `ai_discovery.scan_interval_min`. |
 
 Signature packs are managed separately under `defenseclaw agent signatures` (see below); there is no `--signature-pack` flag on `discovery enable`.
@@ -166,9 +213,9 @@ in [Capability matrix](/docs/capability-matrix). Custom packs are useful when
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
 
-## On-demand discovery (CLI)
+## Operator CLI
 
-`defenseclaw agent` is the operator-side surface — instant answers from a single shell invocation, no gateway required.
+The CLI has two distinct discovery paths. `agent discover` runs a connector inventory directly on the operator's machine and needs no gateway. `agent usage`, `processes`, and `components` query the continuous-discovery snapshot and therefore require a running gateway.
 
 ### `agent discover`
 
@@ -195,12 +242,17 @@ These three queries hit the **gateway's** AI usage view (built from continuous d
 <Tabs items={['Usage', 'Processes', 'Components']}>
   <Tab value="Usage">
 ```bash
-defenseclaw agent usage --state new --state changed --json
+defenseclaw agent usage --state new --state changed
+defenseclaw agent usage --refresh --category local_model
+defenseclaw agent usage --category local_model --detail
+defenseclaw agent usage --component Qwen3
+defenseclaw agent usage --category local_model --show-gone
+defenseclaw agent usage --json | jq '.signals[] | select(.category == "local_model")'
 ```
 
-Top-level rollup — what categories are present, how many of each, when each was last seen.
+Without `--refresh`, the command reads the most recent snapshot. `--refresh` first triggers a full scan and then renders its result. The default table groups repeated observations; `--detail` renders one row per signal. Local-model rows add model ID, installed/loaded status, and format columns when available.
 
-Useful flags: `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`.
+Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring. Table filters are client-side; `--json` intentionally returns the complete raw gateway snapshot, so filter JSON with `jq` when needed.
   </Tab>
   <Tab value="Processes">
 ```bash
@@ -219,6 +271,10 @@ defenseclaw agent components history ai-sdk
 Package-dependency view: every AI-adjacent npm/pip/cargo dep across your workspaces. `show` and `history` drill into a single component's identity score and detection trail.
   </Tab>
 </Tabs>
+
+### TUI behavior
+
+The full `AI Discovery` panel groups local models by model ID and conditionally adds `Model`, `Model status`, and `Format` columns. Its detail view shows the remaining model metadata, including recipe, modality, device, `size_bytes`, and pinned state. The separate Overview tile remains an **AI Agents** summary: it excludes `local_model` rows from its count and row cap so a large model inventory cannot hide agent rows.
 
 ### `agent confidence`
 
@@ -313,7 +369,10 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
 
 <Steps>
   <Step>
-    **No raw values.** Env var *names* are recorded, never values. File paths are hashed (`config_path_hash`, `binary_path_hash`) — only basenames are kept.
+    **No raw values by default.** Env var *names* are recorded, never values. File paths are hashed (`config_path_hash`, `binary_path_hash`) and only basenames are kept in the default redacted output.
+  </Step>
+  <Step>
+    **Metadata-only model discovery.** Model binaries are never opened, and API discovery never calls inference or model-control routes. API discovery caps each decoded response at 1 MiB, emits at most 256 model items, considers at most 24 endpoints, and has both per-request and whole-pass time budgets. Per-source cursors and rotating origins give later models/providers a bounded turn on subsequent passes. Authenticated Lemonade discovery uses only the least-privileged `LEMONADE_API_KEY`—never `LEMONADE_ADMIN_API_KEY`—and sends it only when the loopback origin came from explicit `LEMONADE_HOST`/`LEMONADE_PORT` settings or Lemonade's config and its credential-free `/live` check succeeds. The value is never stored in a signal, log, or event.
   </Step>
   <Step>
     **Trusted-prefix binary probing.** Version probes (`<binary> --version`) only run inside an allow-listed set of prefixes (`/usr/bin`, `/opt/homebrew`, …) plus anything in `DEFENSECLAW_TRUSTED_BIN_PREFIXES`. Untrusted binaries are recorded as present but not executed — `defenseclaw agent discover` prints the offending directory and the command to trust it. Manage the allow-list with `defenseclaw setup trusted-paths list|add|remove` (or the TUI's Trusted Paths panel): `add` validates the directory (refusing world-writable or relative paths unless `--force`) and persists it to `~/.defenseclaw/.env`; built-in defaults can never be removed.
@@ -325,9 +384,11 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     **Sanitized on-demand reports.** `defenseclaw agent discover --emit-otel` builds a `_sanitized_discovery_report` before posting to the gateway. The full unredacted report stays on the operator's machine.
   </Step>
   <Step>
-    **Off by default for the network-y bits.** DNS, shell history, and process scanning are individually toggleable. The defaults are conservative — opt in to the broader scan modes once you've cleared them with your privacy team.
+    **Scoped controls for broader surfaces.** Provider-domain and vetted loopback API checks follow `include_network_domains`; shell-history and environment-name collection have their own settings. Process discovery matches executable names without reading argv. Review these controls with your privacy team and disable any surface your deployment does not need.
   </Step>
 </Steps>
+
+The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; outbound gateway events, OTel logs, and webhooks apply the existing privacy gate: with normal redaction enabled, extended model metadata plus model basenames/path hashes are omitted, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Full metadata can be included only when `privacy.disable_redaction=true`; raw filesystem paths remain separately gated by `ai_discovery.store_raw_local_paths`.
 
 ## Use it alongside Registry
 
@@ -337,7 +398,7 @@ A common production pattern:
 
 <Steps>
   <Step>
-    Run `agent discover` and `aibom scan` to baseline what's installed.
+    Run `agent discover` and `aibom scan` to baseline connector assets. With continuous discovery enabled, run `agent usage --refresh --category local_model` to add installed and loaded local models to that baseline.
   </Step>
   <Step>
     Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
@@ -354,7 +415,7 @@ A common production pattern:
 
 <Accordions>
   <Accordion title="Audit shadow AI on a developer laptop">
-    `defenseclaw agent discover --json | jq '[.[] | select(.installed)]'`. Pipe into your asset inventory or open a ticket per unexpected agent. No gateway required.
+    `defenseclaw agent discover --json | jq '[.[] | select(.installed)]'` inventories connectors without a gateway. To include standalone model files and model-server inventories, enable continuous discovery and run `defenseclaw agent usage --refresh --category local_model --detail`.
   </Accordion>
   <Accordion title="Trigger a fresh scan after onboarding a tool">
     `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
@@ -366,7 +427,7 @@ A common production pattern:
     Two options: (1) author a custom signature pack and `defenseclaw agent signatures install ./my-pack` so continuous discovery learns it, or (2) run `defenseclaw agent confidence policy validate ./policy.yaml` and adjust the weights so the existing detectors score it correctly.
   </Accordion>
   <Accordion title="Discovery is too noisy on this host">
-    Scope it: `defenseclaw agent discovery enable --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. The defaults are conservative for privacy, but on shared dev hosts you may also want to drop the package-manifest walk with `--no-include-package-manifests`.
+    Reduce broad workspace traversal: `defenseclaw agent discovery enable --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. Known model stores remain additive to `scan_roots`; on shared dev hosts you may also want to disable package-manifest discovery with `--no-include-package-manifests`.
   </Accordion>
 </Accordions>
 

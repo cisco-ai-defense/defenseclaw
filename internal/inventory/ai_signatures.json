@@ -850,6 +850,62 @@
       ]
     },
     {
+      "id": "lemonade",
+      "name": "Lemonade Server",
+      "vendor": "Lemonade",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "supported_connector": "",
+      "binary_names": [
+        "lemonade",
+        "lemond",
+        "lemonade-tray",
+        "LemonadeServer.exe"
+      ],
+      "process_names": [
+        "lemonade",
+        "lemond",
+        "lemonade-tray",
+        "LemonadeServer.exe"
+      ],
+      "application_names": [
+        "Lemonade.app",
+        "Lemonade"
+      ],
+      "config_paths": [
+        "~/.cache/lemonade/config.json",
+        "/Library/Application Support/lemonade/.cache/config.json",
+        "/var/lib/lemonade/.cache/lemonade/config.json",
+        "/opt/var/lib/lemonade/.cache/lemonade/config.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [
+        "LEMONADE_HOST",
+        "LEMONADE_PORT",
+        "LEMONADE_CACHE_DIR",
+        "LEMONADE_API_KEY",
+        "LEMONADE_ADMIN_API_KEY"
+      ],
+      "domain_patterns": [
+        "localhost:13305",
+        "127.0.0.1:13305"
+      ],
+      "history_patterns": [
+        "lemonade",
+        "lemond",
+        "lemonade-server"
+      ],
+      "local_endpoints": [
+        "http://127.0.0.1:13305/live",
+        "http://127.0.0.1:13305/v1/models",
+        "http://127.0.0.1:13305/api/v1/models",
+        "http://127.0.0.1:13305/v1/health",
+        "http://127.0.0.1:13305/api/v1/health"
+      ]
+    },
+    {
       "id": "ai-sdks",
       "name": "AI SDKs",
       "vendor": "Multiple",

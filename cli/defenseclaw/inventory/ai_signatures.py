@@ -51,6 +51,7 @@ ALLOWED_CATEGORIES = {
     "workspace_artifact",
     "desktop_app",
     "local_ai_endpoint",
+    "local_model",
 }
 
 
