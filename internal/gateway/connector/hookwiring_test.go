@@ -311,13 +311,25 @@ func TestPackagedWindowsHookBinaryRejectsReparseInstallRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	linkRoot := filepath.Join(filepath.Dir(realRoot), "linked-install")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		// Standard Windows users may lack symbolic-link privilege, but creating
+		// a directory junction is permitted and exercises the same reparse-point
+		// rejection without weakening this security regression into a skip.
+		if output, junctionErr := exec.Command(
+			"cmd.exe", "/D", "/C", "mklink", "/J", linkRoot, realRoot,
+		).CombinedOutput(); junctionErr != nil {
+			t.Fatalf("create reparse-point fixture after symlink error %v: %v\n%s", err, junctionErr, output)
+		}
+	}
+	t.Cleanup(func() { _ = os.Remove(linkRoot) })
 	state := nativeWindowsInstallState{
 		SchemaVersion: 1,
 		InstallKind:   "native-windows-exe",
 		InstallScope:  "user",
-		InstallRoot:   realRoot,
-		CommandDir:    commandDir,
-		Runtime:       filepath.Join(realRoot, "runtime", "python"),
+		InstallRoot:   linkRoot,
+		CommandDir:    filepath.Join(linkRoot, "bin"),
+		Runtime:       filepath.Join(linkRoot, "runtime", "python"),
 	}
 	body, err := json.Marshal(state)
 	if err != nil {
@@ -325,10 +337,6 @@ func TestPackagedWindowsHookBinaryRejectsReparseInstallRoot(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(installerDir, "install-state.json"), body, 0o600); err != nil {
 		t.Fatal(err)
-	}
-	linkRoot := filepath.Join(filepath.Dir(realRoot), "linked-install")
-	if err := os.Symlink(realRoot, linkRoot); err != nil {
-		t.Skipf("symlink privilege unavailable: %v", err)
 	}
 	if got := packagedWindowsHookBinaryAtRoot(
 		filepath.Join(linkRoot, "bin", windowsGatewayBinaryName),
