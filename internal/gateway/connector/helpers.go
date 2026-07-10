@@ -195,12 +195,28 @@ type nativeWindowsInstallState struct {
 }
 
 func packagedWindowsHookBinary(executable string) string {
+	expectedRoot := canonicalNativeWindowsInstallRoot()
+	if strings.TrimSpace(expectedRoot) == "" {
+		return ""
+	}
+	return packagedWindowsHookBinaryAtRoot(executable, expectedRoot)
+}
+
+// packagedWindowsHookBinaryAtRoot verifies a packaged gateway and returns its
+// sibling hook launcher only when the installation is rooted at expectedRoot.
+// Production obtains expectedRoot from the Windows Known Folder API; accepting
+// it as an argument here keeps arbitrary fixture roots available to tests
+// without weakening the production trust boundary.
+func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
 	executable, err := filepath.Abs(executable)
 	if err != nil {
 		return ""
 	}
 	commandDir := filepath.Dir(executable)
 	installRoot := filepath.Dir(commandDir)
+	if strings.TrimSpace(expectedRoot) == "" || !sameWindowsInstallPath(installRoot, expectedRoot) {
+		return ""
+	}
 	expectedGateway := filepath.Join(installRoot, "bin", windowsGatewayBinaryName)
 	hookBinary := filepath.Join(installRoot, "bin", windowsHookBinaryName)
 	if !sameWindowsInstallPath(executable, expectedGateway) ||
