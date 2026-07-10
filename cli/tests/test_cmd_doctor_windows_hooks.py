@@ -20,6 +20,7 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
 )
 from defenseclaw.doctor_hooks import (
+    _packaged_windows_install_root,
     _split_windows,
     resolve_windows_command,
     validate_windows_hook_registration,
@@ -349,6 +350,81 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 self.assertNotRegex(result.checks[0]["detail"].lower(), r"\.sh\b|\bbash\b|\bwsl\b")
                 self.assertEqual(config.read_bytes(), config_before)
         self.assertEqual(runtime.read_bytes(), runtime_before)
+
+    def test_packaged_doctor_derives_native_install_root_from_verified_state(self) -> None:
+        bin_dir = self.install / "bin"
+        python_dir = self.install / "runtime" / "python"
+        installer_dir = self.install / "installer"
+        bin_dir.mkdir()
+        python_dir.mkdir(parents=True)
+        installer_dir.mkdir()
+        python = python_dir / "python.exe"
+        python.write_bytes(b"MZembedded-python")
+        runtime = bin_dir / "defenseclaw-hook.exe"
+        runtime.write_bytes(b"MZfixture")
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        state = {
+            "schema_version": 1,
+            "install_kind": "native-windows-exe",
+            "install_scope": "user",
+            "install_root": str(self.install),
+            "command_dir": str(bin_dir),
+            "runtime": str(python_dir),
+            "data_root": str(self.data),
+        }
+        (installer_dir / "install-state.json").write_text(json.dumps(state), encoding="utf-8")
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.doctor_hooks.sys.executable", str(python)),
+            patch.dict(os.environ, {"DEFENSECLAW_INSTALL_ROOT": str(self.install)}),
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+        ):
+            _check_codex_hooks(
+                self.cfg,
+                result,
+                platform_name="nt",
+                config_path=str(config),
+                search_path=str(bin_dir),
+                pathext=".EXE;.CMD",
+            )
+        self.assertEqual((result.passed, result.failed), (1, 0), result.checks)
+        self.assertIn(str(runtime), result.checks[0]["detail"])
+
+    def test_packaged_install_root_rejects_unbound_environment_or_state(self) -> None:
+        python_dir = self.install / "runtime" / "python"
+        installer_dir = self.install / "installer"
+        python_dir.mkdir(parents=True)
+        installer_dir.mkdir()
+        python = python_dir / "python.exe"
+        python.write_bytes(b"MZembedded-python")
+        state = {
+            "schema_version": 1,
+            "install_kind": "native-windows-exe",
+            "install_scope": "user",
+            "install_root": str(self.install),
+            "command_dir": str(self.install / "bin"),
+            "runtime": str(python_dir),
+            "data_root": str(self.data),
+        }
+        state_path = installer_dir / "install-state.json"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        with patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None):
+            self.assertIsNone(
+                _packaged_windows_install_root(
+                    str(self.data),
+                    executable=str(python),
+                    declared_root=str(self.root / "spoofed-install"),
+                )
+            )
+            state["data_root"] = str(self.root / "other-data")
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            self.assertIsNone(
+                _packaged_windows_install_root(
+                    str(self.data),
+                    executable=str(python),
+                    declared_root=str(self.install),
+                )
+            )
 
     def test_windows_contract_uses_live_codex_and_claude_runtime_in_human_and_json(self) -> None:
         runtime = self._runtime()

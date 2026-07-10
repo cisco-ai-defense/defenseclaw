@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import stat
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -226,6 +227,68 @@ def _stable_regular_file(path: str, root: str, *, read_limit: int = 0) -> bytes:
     if identity_before != identity_after or is_link_or_reparse(path):
         raise _InspectionError("stale", f"registered hook target changed during inspection: {path}")
     return body
+
+
+def _packaged_windows_install_root(
+    data_dir: str,
+    *,
+    executable: str | None = None,
+    declared_root: str | None = None,
+) -> str | None:
+    """Prove the install root used by the packaged Windows interpreter.
+
+    The launcher-provided environment value is only corroborating evidence:
+    the running interpreter layout and the installer's stable, non-reparse
+    state must independently agree with it and with the active data root.
+    """
+
+    def path_key(value: str) -> str:
+        return os.path.normcase(os.path.realpath(os.path.abspath(value)))
+
+    executable_path = os.path.abspath(executable or sys.executable)
+    python_dir = os.path.dirname(executable_path)
+    runtime_dir = os.path.dirname(python_dir)
+    install_root = os.path.dirname(runtime_dir)
+    expected_executable = os.path.join(install_root, "runtime", "python", "python.exe")
+    declared = os.environ.get("DEFENSECLAW_INSTALL_ROOT", "") if declared_root is None else declared_root
+    if not declared or not data_dir:
+        return None
+    try:
+        if path_key(executable_path) != path_key(expected_executable):
+            return None
+        if path_key(declared) != path_key(install_root):
+            return None
+        if _stable_regular_file(executable_path, install_root, read_limit=2) != b"MZ":
+            return None
+        state_path = os.path.join(install_root, "installer", "install-state.json")
+        state_bytes = _stable_regular_file(state_path, install_root, read_limit=128 * 1024 + 1)
+        if len(state_bytes) > 128 * 1024:
+            return None
+        state = json.loads(state_bytes.decode("utf-8-sig"))
+    except (_InspectionError, OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    if type(state.get("schema_version")) is not int or state["schema_version"] != 1:
+        return None
+    if state.get("install_kind") != "native-windows-exe" or state.get("install_scope") != "user":
+        return None
+    expected_paths = {
+        "install_root": install_root,
+        "command_dir": os.path.join(install_root, "bin"),
+        "runtime": os.path.join(install_root, "runtime", "python"),
+        "data_root": data_dir,
+    }
+    for field, expected in expected_paths.items():
+        recorded = state.get(field)
+        if not isinstance(recorded, str) or not recorded:
+            return None
+        try:
+            if path_key(recorded) != path_key(expected):
+                return None
+        except (OSError, ValueError):
+            return None
+    return install_root
 
 
 def _read_config(path: str, connector: str) -> dict[str, Any]:
