@@ -636,6 +636,12 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar]          The proxy binds 127.0.0.1 only. Set guardrail.host to \"127.0.0.1\" to avoid silent connection failures.\n")
 	}
 
+	// Initialize private-upstream allowlist from config + env var.
+	if allowedIPs := netguard.ParseAllowedPrivateUpstreams(s.currentConfig().Guardrail.AllowPrivateUpstreams); len(allowedIPs) > 0 {
+		netguard.SetAllowedPrivateIPs(allowedIPs)
+		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
+	}
+
 	// Initialize OPA engine before goroutines so both the watcher and the
 	// API reload handler share the same instance.
 	if s.currentConfig().PolicyDir != "" {

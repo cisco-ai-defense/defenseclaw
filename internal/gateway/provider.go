@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
 // ChatMessage is the OpenAI-compatible message format used as the canonical
@@ -545,22 +546,30 @@ func isUnsafeIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
+	// Hardcoded deny: loopback, link-local, multicast, unspecified are
+	// never allowed regardless of operator allowlist.
 	if ip.IsLoopback() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() ||
 		ip.IsUnspecified() ||
-		ip.IsPrivate() ||
 		ip.IsInterfaceLocalMulticast() {
+		return true
+	}
+	// Cloud metadata (169.254.x.x) — always blocked.
+	if v4 := ip.To4(); v4 != nil && v4[0] == 169 && v4[1] == 254 {
+		return true
+	}
+	// Operator allowlist: specific private IPs that are explicitly trusted.
+	if netguard.IsAllowedPrivateIP(ip) {
+		return false
+	}
+	if ip.IsPrivate() {
 		return true
 	}
 	// CGNAT: 100.64.0.0/10
 	if v4 := ip.To4(); v4 != nil {
 		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-			return true
-		}
-		// AWS / link-local metadata: 169.254.169.254 + 169.254.170.2 (ECS)
-		if v4[0] == 169 && v4[1] == 254 {
 			return true
 		}
 	}

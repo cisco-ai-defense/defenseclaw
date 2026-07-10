@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1399,6 +1400,11 @@ type GuardrailConfig struct {
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
 
+	// AllowPrivateUpstreams is a list of specific IP addresses that are
+	// exempt from the SSRF private-address block for LLM upstream forwarding.
+	// Loopback, link-local, and cloud-metadata IPs are never exempted.
+	AllowPrivateUpstreams []string `mapstructure:"allow_private_upstreams" yaml:"allow_private_upstreams,omitempty"`
+
 	// HookFailMode is the operator-chosen response-layer fail mode
 	// for every generated hook script (codex-hook, claude-code-hook,
 	// inspect-*). Two values are supported:
@@ -1701,6 +1707,9 @@ func (g *GuardrailConfig) Validate() error {
 			}
 		}
 	}
+	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1735,6 +1744,34 @@ func validateGuardrailMinSeverity(sev string) error {
 	default:
 		return fmt.Errorf("invalid hilt.min_severity %q (want LOW, MEDIUM, HIGH, or CRITICAL)", sev)
 	}
+}
+
+// validateAllowPrivateUpstreams checks that each entry is a valid IP
+// address (not CIDR, not loopback/link-local/metadata).
+func validateAllowPrivateUpstreams(ips []string) error {
+	for _, raw := range ips {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if strings.Contains(s, "/") {
+			return fmt.Errorf("guardrail.allow_private_upstreams: %q is a CIDR — specify individual IPs only (e.g. %q)", s, strings.SplitN(s, "/", 2)[0])
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return fmt.Errorf("guardrail.allow_private_upstreams: %q is not a valid IP address", s)
+		}
+		if ip.IsLoopback() {
+			return fmt.Errorf("guardrail.allow_private_upstreams: loopback address %q is not allowed (Ollama uses a dedicated bypass)", s)
+		}
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("guardrail.allow_private_upstreams: link-local address %q is not allowed", s)
+		}
+		if v4 := ip.To4(); v4 != nil && v4[0] == 169 && v4[1] == 254 {
+			return fmt.Errorf("guardrail.allow_private_upstreams: cloud metadata address %q is not allowed", s)
+		}
+	}
+	return nil
 }
 
 // EffectiveHookFailMode returns the operator-chosen hook fail mode,

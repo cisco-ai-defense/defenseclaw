@@ -16,6 +16,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
 // Layer 1 (shape detection) mirrors extensions/defenseclaw/src/fetch-interceptor.ts.
@@ -274,6 +276,37 @@ func isPrivateHost(host string) bool {
 			continue
 		}
 		if isUnsafeIP(resolved) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPrivateHostAllowlisted returns true when host resolves to an IP that is
+// in the operator allowlist (i.e. it would be private/blocked without the
+// allowlist). Used to emit the "private-ip-allowed" audit event.
+func isPrivateHostAllowlisted(host string) bool {
+	h := strings.TrimSpace(host)
+	if h == "" {
+		return false
+	}
+	if strings.HasPrefix(h, "[") {
+		if idx := strings.Index(h, "]"); idx > 0 {
+			h = h[1:idx]
+		}
+	} else if h2, _, err := net.SplitHostPort(h); err == nil {
+		h = h2
+	}
+	h = stripIPv6Zone(h)
+	if ip := net.ParseIP(h); ip != nil {
+		return netguard.IsAllowedPrivateIP(ip)
+	}
+	addrs, err := net.LookupHost(h)
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		if resolved := net.ParseIP(addr); resolved != nil && netguard.IsAllowedPrivateIP(resolved) {
 			return true
 		}
 	}

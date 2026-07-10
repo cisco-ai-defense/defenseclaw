@@ -53,6 +53,33 @@ def _cgnat_allowed() -> bool:
     """
     return os.environ.get("DEFENSECLAW_ALLOW_CGNAT") == "1"
 
+
+def _allowed_private_ips() -> frozenset[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Parse DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS into a set of IP addresses.
+
+    Read at call time so tests can mock the env var.
+    """
+    raw = os.environ.get("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "")
+    if not raw:
+        return frozenset()
+    result = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            result.add(ipaddress.ip_address(part))
+        except ValueError:
+            continue
+    return frozenset(result)
+
+
+def _is_allowed_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if ip is in the operator-configured private allowlist."""
+    if ip.is_loopback or ip.is_link_local:
+        return False
+    return ip in _allowed_private_ips()
+
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 """Schemes accepted for HTTP-style fetches.
 
@@ -175,10 +202,13 @@ def resolve_and_pin(
                 "(use --allow-private to opt in)"
             )
         if not allow_private and ip.is_private:
-            raise SSRFError(
-                f"host {host!r} resolves to private address {addr} "
-                "(use --allow-private to opt in)"
-            )
+            if _is_allowed_private_ip(ip):
+                pass  # operator allowlist exemption
+            else:
+                raise SSRFError(
+                    f"host {host!r} resolves to private address {addr} "
+                    "(use --allow-private to opt in)"
+                )
         # CGNAT (RFC 6598, 100.64.0.0/10) is not covered by
         # ipaddress.is_private but the Go-side dial guard refuses it,
         # so a CGNAT URL accepted here would still fail at dispatch

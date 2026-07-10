@@ -116,10 +116,19 @@ func IsPrivateOrReserved(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() {
+	// Hardcoded deny: loopback, link-local, multicast, unspecified, and
+	// cloud metadata are NEVER exempted by the allowlist.
+	if ip.IsLoopback() || ip.IsUnspecified() {
 		return true
 	}
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	// Operator allowlist: specific private IPs that are explicitly trusted.
+	if IsAllowedPrivateIP(ip) {
+		return false
+	}
+	if ip.IsPrivate() {
 		return true
 	}
 	for _, n := range parsedExtraReserved {

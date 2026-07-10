@@ -2373,21 +2373,34 @@ func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL st
 		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
 		return true
 	}
-	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
-		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
-		!passthroughAllowPrivateForTest {
-		emitEgress(r.Context(), gatewaylog.EgressPayload{
-			TargetHost:   host,
-			TargetPath:   r.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "chat",
-			Decision:     "block",
-			Reason:       "private-ip",
-			Source:       "go",
-		})
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
-		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
-		return true
+	if host := u.Hostname(); host != "" {
+		if isPrivateHostAllowlisted(host) {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   host,
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: true,
+				Branch:       "chat",
+				Decision:     "allow",
+				Reason:       "private-ip-allowed",
+				Source:       "go",
+			})
+			fmt.Fprintf(os.Stderr, "[guardrail] ALLOWED chat: private-host target %s (operator allowlist)\n", host)
+		} else if isPrivateHost(host) &&
+			!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+			!passthroughAllowPrivateForTest {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   host,
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: true,
+				Branch:       "chat",
+				Decision:     "block",
+				Reason:       "private-ip",
+				Source:       "go",
+			})
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+			writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+			return true
+		}
 	}
 	return false
 }

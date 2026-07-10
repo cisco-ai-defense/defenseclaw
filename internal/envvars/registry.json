@@ -1382,6 +1382,21 @@
       "security_note": "CGNAT egress guard — prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
     },
     {
+      "name": "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS",
+      "category": "security_opt_out",
+      "purpose": "Comma-separated list of specific IP addresses exempt from the SSRF private-address block for LLM upstream forwarding. Merges with guardrail.allow_private_upstreams in config.yaml. Loopback, link-local, and cloud metadata IPs are never exempted.",
+      "default": "unset (all private IPs blocked)",
+      "accepted_values": ["comma-separated IPs (e.g. 10.50.2.100,172.16.0.5)", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/netguard/allowlist.go:53", "description": "ParseAllowedPrivateUpstreams() reads this env var and merges with config.yaml entries"},
+        {"location": "cli/defenseclaw/registries/ssrf.py:60", "description": "_allowed_private_ips() reads this env var for Python-side SSRF guard exemption"}
+      ],
+      "since": "0.8.1",
+      "security_note": "Private-upstream SSRF guard exemption — allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR)."
+    },
+    {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
       "category": "security_opt_out",
       "purpose": "Bypass the action-mode fail-closed checks for unverified hook contracts and hook-contract lock drift during connector setup, allowing enforcing hooks to be installed against agent versions outside the verified contract matrix.",

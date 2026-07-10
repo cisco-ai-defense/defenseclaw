@@ -360,5 +360,63 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
         self.assertTrue(infos)
 
 
+    # --- Private upstream allowlist tests ---
+
+    def test_allowed_private_upstream_passes(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.50.2.100"},
+        ):
+            guard_url(
+                "https://llm.internal/v1",
+                resolver=stub({"llm.internal": ["10.50.2.100"]}),
+            )
+
+    def test_allowed_private_upstream_other_ip_still_blocked(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.50.2.100"},
+        ):
+            with self.assertRaises(SSRFError):
+                guard_url(
+                    "https://other.internal/v1",
+                    resolver=stub({"other.internal": ["10.50.2.101"]}),
+                )
+
+    def test_allowed_private_upstream_loopback_never_exempted(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "127.0.0.1"},
+        ):
+            with self.assertRaises(SSRFError):
+                guard_url(
+                    "https://localhost/v1",
+                    resolver=stub({"localhost": ["127.0.0.1"]}),
+                )
+
+    def test_allowed_private_upstream_multiple_ips(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.50.2.100,172.16.0.5"},
+        ):
+            guard_url(
+                "https://gw1.internal/v1",
+                resolver=stub({"gw1.internal": ["10.50.2.100"]}),
+            )
+            guard_url(
+                "https://gw2.internal/v1",
+                resolver=stub({"gw2.internal": ["172.16.0.5"]}),
+            )
+
+    def test_allowed_private_upstream_unset_blocks_all(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", None)
+            with self.assertRaises(SSRFError):
+                guard_url(
+                    "https://llm.internal/v1",
+                    resolver=stub({"llm.internal": ["10.50.2.100"]}),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
