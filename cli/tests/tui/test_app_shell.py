@@ -6340,6 +6340,11 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
     )
     overview = OverviewPanelModel(cfg, version="test")
     app = DefenseClawTUI(overview_model=overview)
+    # Full-suite coverage instrumentation can stretch the two picker actions
+    # beyond the 2 s passive-refresh interval. This test counts only the
+    # picker-triggered render contract, so keep unrelated periodic renders out
+    # of that counter.
+    app._periodic_refresh = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(170, 44)) as pilot:
         await pilot.pause()
