@@ -27,6 +27,7 @@ param(
     [string]$Mode = 'observe',
     [switch]$StartGateway,
     [switch]$ActivateInstall,
+    [switch]$InteropSelfTestOnly,
     [ValidateRange(30, 1800)]
     [int]$InstallTimeoutSeconds = 600
 )
@@ -74,10 +75,38 @@ namespace DefenseClaw
 {
     public static class SetupWizardSmokeNativeMethods
     {
+        [DllImport(
+            "user32.dll",
+            EntryPoint = "CreateWindowExW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
+        public static extern IntPtr CreateWindowExW(
+            uint extendedStyle,
+            string className,
+            string windowName,
+            uint style,
+            int x,
+            int y,
+            int width,
+            int height,
+            IntPtr parent,
+            IntPtr menu,
+            IntPtr instance,
+            IntPtr parameter);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DestroyWindow(IntPtr window);
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr GetDlgItem(IntPtr dialog, int controlId);
 
-        [DllImport("user32.dll", SetLastError = true)]
+        [DllImport(
+            "user32.dll",
+            EntryPoint = "PostMessageW",
+            ExactSpelling = true,
+            SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool PostMessage(
             IntPtr window,
@@ -85,7 +114,12 @@ namespace DefenseClaw
             UIntPtr wParam,
             IntPtr lParam);
 
-        [DllImport("user32.dll", SetLastError = true)]
+        [DllImport(
+            "user32.dll",
+            EntryPoint = "SendMessageTimeoutW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
         public static extern IntPtr SendMessageTimeout(
             IntPtr window,
             uint message,
@@ -135,6 +169,36 @@ function Get-BoundedWindowText([IntPtr]$Window) {
         return [Runtime.InteropServices.Marshal]::PtrToStringUni($buffer)
     } finally {
         [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer)
+    }
+}
+
+function Assert-UnicodeWindowTextInterop {
+    $expected = 'DefenseClaw → installed'
+    $window = [DefenseClaw.SetupWizardSmokeNativeMethods]::CreateWindowExW(
+        0,
+        'STATIC',
+        $expected,
+        0,
+        0,
+        0,
+        1,
+        1,
+        [IntPtr]::Zero,
+        [IntPtr]::Zero,
+        [IntPtr]::Zero,
+        [IntPtr]::Zero
+    )
+    if ($window -eq [IntPtr]::Zero) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Could not create the Unicode window-text interop probe (error $errorCode)."
+    }
+    try {
+        $observed = Get-BoundedWindowText $window
+        if (-not [string]::Equals($observed, $expected, [StringComparison]::Ordinal)) {
+            throw "Unicode window-text interop decoded '$observed'; expected '$expected'."
+        }
+    } finally {
+        $null = [DefenseClaw.SetupWizardSmokeNativeMethods]::DestroyWindow($window)
     }
 }
 
@@ -261,6 +325,19 @@ if ($ActivateInstall) {
         start_gateway  = $StartGateway.IsPresent
         timeout_seconds = $InstallTimeoutSeconds
     })
+}
+$unicodeInterop = [Diagnostics.Stopwatch]::StartNew()
+Assert-UnicodeWindowTextInterop
+$unicodeInterop.Stop()
+Write-WizardTrace 'unicode-interop-passed' ([ordered]@{
+    duration_ms = [Math]::Round($unicodeInterop.Elapsed.TotalMilliseconds, 1)
+})
+if ($InteropSelfTestOnly) {
+    [ordered]@{
+        unicode_window_text = 'pass'
+        duration_ms         = [Math]::Round($unicodeInterop.Elapsed.TotalMilliseconds, 1)
+    } | ConvertTo-Json -Compress
+    return
 }
 try {
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -402,6 +479,7 @@ try {
         connector        = $Connector
         mode             = $Mode
         start_gateway    = $StartGateway.IsPresent
+        unicode_interop_ms = [Math]::Round($unicodeInterop.Elapsed.TotalMilliseconds, 1)
         input_idle_ms    = [Math]::Round($inputIdle.Elapsed.TotalMilliseconds, 1)
         window_ready_ms  = [Math]::Round($windowReady.Elapsed.TotalMilliseconds, 1)
         responsive_ms    = [Math]::Round($ping.Elapsed.TotalMilliseconds, 1)
