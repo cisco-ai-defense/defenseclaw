@@ -78,6 +78,24 @@ class BootstrapEnvTests(unittest.TestCase):
         for d in (cfg.data_dir, cfg.quarantine_dir, cfg.plugin_dir, cfg.policy_dir):
             self.assertTrue(os.path.isdir(d), f"expected {d} to be created")
 
+    def test_first_run_uses_private_directory_creation_for_owned_state(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        created: list[str] = []
+
+        def record_private_directory(path):
+            created.append(os.path.abspath(os.fspath(path)))
+            os.makedirs(path, exist_ok=True)
+
+        with patch(
+            "defenseclaw.file_permissions.make_private_directory",
+            side_effect=record_private_directory,
+        ):
+            report = bootstrap_env(cfg)
+
+        self.assertEqual(report.errors, [], msg=report.errors)
+        for expected in (cfg.data_dir, cfg.quarantine_dir, cfg.plugin_dir, cfg.policy_dir):
+            self.assertIn(os.path.abspath(expected), created)
+
     def test_creates_audit_db_file(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         bootstrap_env(cfg)

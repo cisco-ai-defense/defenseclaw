@@ -68,7 +68,7 @@ def test_migration_writer_closes_and_removes_staging_file_when_permissions_fail(
     monkeypatch.setattr(
         migrations,
         "set_file_mode",
-        lambda *_args: (_ for _ in ()).throw(OSError("injected permission failure")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected permission failure")),
     )
 
     target = tmp_path / "migration-secret.yaml"
@@ -110,6 +110,23 @@ def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
     )
 
     assert calls == [(os.fspath(target.parent), 0o700, True)]
+
+
+def test_config_lock_secures_parent_before_creating_lock(monkeypatch, tmp_path):
+    parent = tmp_path / "elevated-profile" / ".defenseclaw"
+    config_path = parent / "config.yaml"
+    secured: list[str] = []
+
+    def secure_directory(path):
+        secured.append(os.path.abspath(os.fspath(path)))
+        os.makedirs(path, exist_ok=True)
+
+    monkeypatch.setattr(config_module, "make_private_directory", secure_directory)
+
+    with config_module.locked_config_yaml(os.fspath(config_path)):
+        assert (parent / "config.yaml.lock").is_file()
+
+    assert secured == [os.path.abspath(os.fspath(parent))]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACLs")
