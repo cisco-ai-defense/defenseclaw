@@ -1343,15 +1343,23 @@ func sanitizePythonEnv(input []string) []string {
 
 func managedChildEnv(dataRoot string) []string {
 	env := sanitizePythonEnv(os.Environ())
-	filtered := make([]string, 0, len(env)+1)
+	filtered := make([]string, 0, len(env)+3)
 	for _, entry := range env {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && strings.EqualFold(name, "DEFENSECLAW_HOME") {
-			continue
+		if ok {
+			switch strings.ToUpper(name) {
+			case "DEFENSECLAW_HOME", "PYTHONIOENCODING", "PYTHONUTF8":
+				continue
+			}
 		}
 		filtered = append(filtered, entry)
 	}
-	return append(filtered, "DEFENSECLAW_HOME="+dataRoot)
+	return append(
+		filtered,
+		"DEFENSECLAW_HOME="+dataRoot,
+		"PYTHONUTF8=1",
+		"PYTHONIOENCODING=utf-8",
+	)
 }
 
 func copyFile(source, target string) error {
