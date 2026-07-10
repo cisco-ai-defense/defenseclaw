@@ -15,7 +15,7 @@ func TestLauncherArgs(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{name: "cli", exe: "defenseclaw.exe", args: []string{"status"}, want: []string{"-I", "-m", "defenseclaw", "status"}},
+		{name: "cli", exe: "defenseclaw.exe", args: []string{"status"}, want: []string{"-I", "-m", "defenseclaw.main", "status"}},
 		{name: "scanner", exe: "skill-scanner.exe", args: []string{"scan", "fixture"}, want: []string{"-I", "-c", consoleEntryPointScript, "skill-scanner", "scan", "fixture"}},
 	}
 	for _, test := range tests {
