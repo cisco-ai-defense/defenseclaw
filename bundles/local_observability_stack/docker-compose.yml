@@ -23,7 +23,7 @@
 #   3100        — Loki HTTP (scraped by Grafana)
 #   3200        — Tempo HTTP
 #   9090        — Prometheus UI
-#   8888 / 8889 — Collector self-metrics + prom exporter
+#   8888        — Collector self-metrics
 #
 # SECURITY: all host-side port publishes are scoped to the loopback
 # interface (127.0.0.1) so a developer laptop joining a coffee-shop
@@ -49,7 +49,11 @@ volumes:
 
 services:
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.111.0
+    # v0.111.0 can panic while Prometheus scrapes the Collector's own
+    # metrics after the spanmetrics connector registers callbacks. Keep this
+    # pinned to a tested release so the metrics pipeline does not restart on
+    # every scrape and reset Agent360 counters.
+    image: otel/opentelemetry-collector-contrib:0.153.0
     container_name: defenseclaw-otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
@@ -58,7 +62,6 @@ services:
       - "${HOST_BIND:-127.0.0.1}:4317:4317"   # OTLP gRPC (traces, metrics, logs)
       - "${HOST_BIND:-127.0.0.1}:4318:4318"   # OTLP HTTP
       - "${HOST_BIND:-127.0.0.1}:8888:8888"   # Collector telemetry
-      - "${HOST_BIND:-127.0.0.1}:8889:8889"   # Prometheus-format exporter for scraping
       - "${HOST_BIND:-127.0.0.1}:13133:13133" # health check extension
     networks:
       - defenseclaw-o11y
@@ -83,14 +86,14 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=7d"
-      - "--web.enable-remote-write-receiver"
       - "--web.enable-lifecycle"
-      # admin api enables /api/v1/admin/tsdb/{delete_series,clean_tombstones}
-      # so operators can purge stale series after a sidecar restart that
-      # changed histogram bucket boundaries (or any schema change). Bound
-      # to 127.0.0.1 only via the ports stanza below, so the admin API
-      # surface stays inside the developer laptop.
+      # Developer-laptop stack, published on loopback only (see ports below).
+      # The admin + remote-write APIs are convenient for local work (purge
+      # stale series after a histogram-bucket change, push test data) and the
+      # 127.0.0.1 bind keeps them off the network. Drop these flags if you
+      # ever publish 9090 to a LAN via HOST_BIND=0.0.0.0.
       - "--web.enable-admin-api"
+      - "--web.enable-remote-write-receiver"
       - "--enable-feature=exemplar-storage,native-histograms"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -133,10 +136,17 @@ services:
     image: grafana/grafana:11.3.0
     container_name: defenseclaw-grafana
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # This is a developer-laptop stack: every host port is published on
+      # ${HOST_BIND:-127.0.0.1} (loopback), so the dashboard is only
+      # reachable from the same machine. A login prompt on a localhost-only
+      # dashboard is pure friction, so Grafana opens with no login —
+      # anonymous access with the Admin role and the login form disabled.
+      # The loopback bind is the security boundary here. If you expose this
+      # to a LAN (HOST_BIND=0.0.0.0), turn auth back on: set
+      # GF_AUTH_ANONYMOUS_ENABLED=false and GF_SECURITY_ADMIN_PASSWORD=<pw>.
       - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
       - GF_USERS_DEFAULT_THEME=dark
     volumes:

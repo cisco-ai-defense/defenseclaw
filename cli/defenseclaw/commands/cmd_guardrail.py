@@ -45,10 +45,13 @@ Antigravity / ZeptoClaw configure themselves.
 from __future__ import annotations
 
 import os
+import shutil
 
 import click
 
 from defenseclaw import ux
+from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 
 # Note: ``defenseclaw.commands.cmd_setup._restart_services`` is
@@ -74,7 +77,19 @@ _CONNECTOR_LABELS = {
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
+    "opencode": "OpenCode",
+    "omnigent": "OmniGent",
 }
+
+
+def _preflight_config_write(app: AppContext) -> None:
+    """Surface managed-mode write rejection before an interactive prompt."""
+    cfg_path = str(config_path_for_data_dir(app.cfg.data_dir))
+    try:
+        _assert_config_write_allowed(cfg_path)
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise SystemExit(1) from exc
 
 
 def _resolve_active_connector(cfg) -> str:
@@ -134,11 +149,11 @@ def _active_connector_display(cfg, fallback: str) -> str:
 
 def _resolve_member_connector(app, requested: str) -> str | None:
     """Return the canonical ``guardrail.connectors`` key matching
-    ``requested`` (case-insensitive), or ``None`` if it is not a member."""
+    ``requested`` (case/alias-insensitive), or ``None`` if it is not a member."""
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    req = requested.strip().lower()
+    req = normalize_connector(requested)
     for key in conns:
-        if key.strip().lower() == req:
+        if normalize_connector(key) == req:
             return key
     return None
 
@@ -184,6 +199,9 @@ def _toggle_connector_guardrail(
         state = "enabled" if enable else "disabled"
         click.echo(f"  {ux.dim(f'Connector {label} is already {state}.')}")
         return
+
+    if not enable:
+        _preflight_config_write(app)
 
     # Disabling the last remaining enabled connector is effectively a global
     # disable — warn so the operator can use the clearer command.
@@ -269,11 +287,12 @@ def guardrail() -> None:
     posture. Subcommands:
 
     \b
-      status         show enabled state + the roster of active connectors
+      status         enabled state + roster (mode/fail/rule-pack/hilt/judge)
       enable/disable flip enforcement on/off
       fail-mode      open vs closed when a hook fails
       hilt           human-in-the-loop prompting
       block-message  message shown when an action is blocked
+      list-packs     list rule packs + the dir each connector enforces
 
     \b
     Multi-connector: one gateway enforces N hook connectors. Each policy
@@ -284,9 +303,202 @@ def guardrail() -> None:
     """
 
 
+#: Sentinel the Go judge gate (``JudgeConfig.HookConnectorEnabled``) reads
+#: as "every hook connector". Mirrored locally so the status readout never
+#: disagrees with what the gateway enforces.
+_JUDGE_ALL_SENTINEL = "*"
+_JUDGE_RUNNING_STRATEGIES = frozenset({"regex_judge", "judge_first"})
+
+
+def _configured_hook_scan_strategies(gc) -> dict[str, str]:
+    """Return configured hook-lane scan strategies by user-facing lane.
+
+    Hook connectors expose prompt, tool-call, and tool-output surfaces. The
+    Go config still calls tool output ``completion`` because it shares the
+    proxy lane's output-shaped judge, but the status UI should speak in hook
+    terms. Empty per-lane fields inherit the global strategy.
+    """
+    base = (getattr(gc, "detection_strategy", "") or "regex_judge").strip() or "regex_judge"
+    prompt = (getattr(gc, "detection_strategy_prompt", "") or "").strip() or base
+    completion = (getattr(gc, "detection_strategy_completion", "") or "").strip() or base
+    tool_call = (getattr(gc, "detection_strategy_tool_call", "") or "").strip() or base
+    return {
+        "prompt": prompt,
+        "tool-call": tool_call,
+        "tool-output": completion,
+    }
+
+
+def _effective_hook_scan_strategies(gc, connector: str) -> dict[str, str]:
+    """Return the scan strategies that actually apply to one hook connector."""
+    judge_cfg = getattr(gc, "judge", None)
+    judge_enabled = bool(getattr(judge_cfg, "enabled", False))
+    judge_gate = list(getattr(judge_cfg, "hook_connectors", None) or [])
+    judge_selected = _judge_gated(judge_gate, connector)
+    effective: dict[str, str] = {}
+    for lane, strategy in _configured_hook_scan_strategies(gc).items():
+        normalized = (strategy or "").strip().lower() or "regex_judge"
+        if judge_enabled and judge_selected and normalized in _JUDGE_RUNNING_STRATEGIES:
+            effective[lane] = normalized
+        else:
+            effective[lane] = "regex_only"
+    return effective
+
+
+def _style_strategy(strategy: str) -> str:
+    if strategy == "judge_first":
+        return ux._style(strategy, fg="yellow", bold=True)
+    if strategy == "regex_judge":
+        return ux._style(strategy, fg="cyan", bold=True)
+    return ux.dim(strategy)
+
+
+def _scan_value(gc, connector: str) -> str:
+    strategies = _effective_hook_scan_strategies(gc, connector)
+    values = list(strategies.values())
+    if values and all(v == values[0] for v in values):
+        return values[0]
+    return ", ".join(f"{lane}:{strategy}" for lane, strategy in strategies.items())
+
+
+def _style_scan_value(value: str) -> str:
+    if "," not in value and ":" not in value:
+        return _style_strategy(value)
+    parts: list[str] = []
+    for part in value.split(", "):
+        if ":" not in part:
+            parts.append(part)
+            continue
+        lane, strategy = part.split(":", 1)
+        parts.append(f"{lane}:{_style_strategy(strategy)}")
+    return ", ".join(parts)
+
+
+def _judge_gated(gate, name: str) -> bool:
+    """True when the hook-lane judge gate covers ``name``.
+
+    Mirrors the Go gate match (TrimSpace + EqualFold, ``*`` = every
+    connector). Kept local rather than importing cmd_judge's private gate
+    helpers so this command stays self-contained across lanes.
+    """
+    want = (name or "").strip().lower()
+    for entry in gate or []:
+        e = (entry or "").strip()
+        if e == _JUDGE_ALL_SENTINEL or e.lower() == want:
+            return True
+    return False
+
+
+def _connector_judge_value(gc, name: str) -> str:
+    strategies = _effective_hook_scan_strategies(gc, name)
+    if any(strategy in _JUDGE_RUNNING_STRATEGIES for strategy in strategies.values()):
+        return "on"
+    return "off"
+
+
+def _style_judge_value(value: str) -> str:
+    if value == "on":
+        return ux._style(value, fg="green", bold=True)
+    return ux.dim(value)
+
+
+def _style_mode(mode: str) -> str:
+    if mode == "action":
+        return ux._style(mode, fg="green", bold=True)
+    return ux._style(mode, fg="yellow") if mode == "observe" else mode
+
+
+def _style_fail_mode(mode: str) -> str:
+    if mode == "closed":
+        return ux._style(mode, fg="yellow", bold=True)
+    if mode == "open":
+        return ux._style(mode, fg="green")
+    return mode
+
+
+def _visible_pad(styled: str, raw: str, width: int) -> str:
+    return styled + (" " * max(width - len(raw), 0))
+
+
+def _terminal_width() -> int:
+    try:
+        return shutil.get_terminal_size((120, 20)).columns
+    except OSError:
+        return 120
+
+
+def _render_connector_table(rows: list[dict[str, tuple[str, str]]]) -> None:
+    columns = [
+        ("label", "Connector"),
+        ("key", "Key"),
+        ("state", "State"),
+        ("mode", "Mode"),
+        ("fail", "Fail"),
+        ("rule_pack", "Rule pack"),
+        ("hilt", "HILT"),
+        ("scan", "Scan"),
+        ("judge", "Judge"),
+    ]
+    widths = {
+        key: max(len(header), *(len(row[key][0]) for row in rows))
+        for key, header in columns
+    }
+    gap = "  "
+    table_width = 6 + sum(widths[key] for key, _ in columns) + len(gap) * (len(columns) - 1)
+    if table_width > _terminal_width():
+        _render_connector_blocks(rows)
+        return
+
+    header = gap.join(
+        _visible_pad(ux._style(header, fg="bright_black", bold=True), header, widths[key])
+        for key, header in columns
+    )
+    separator = gap.join(ux.dim("-" * widths[key]) for key, _ in columns)
+    click.echo(f"      {header}")
+    click.echo(f"      {separator}")
+    for row in rows:
+        click.echo(
+            "      "
+            + gap.join(
+                _visible_pad(row[key][1], row[key][0], widths[key])
+                for key, _ in columns
+            )
+        )
+
+
+def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
+    fields = [
+        ("key", "key"),
+        ("state", "state"),
+        ("mode", "mode"),
+        ("fail", "fail"),
+        ("rule_pack", "rule-pack"),
+        ("hilt", "hilt"),
+        ("scan", "scan"),
+        ("judge", "judge"),
+    ]
+    label_width = max(len(label) for _, label in fields)
+    for row in rows:
+        click.echo(f"      - {row['label'][1]}")
+        for key, label in fields:
+            label_raw = label + ":"
+            label_styled = ux._style(label_raw, fg="bright_black", bold=True)
+            click.echo(
+                f"          {_visible_pad(label_styled, label_raw, label_width + 1)} "
+                f"{row[key][1]}"
+            )
+
+
 @guardrail.command("status")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default=None,
+    help="Scope the roster to a single active connector (multi-connector installs). "
+    "Omit to show every active connector.",
+)
 @pass_ctx
-def status_cmd(app: AppContext) -> None:
+def status_cmd(app: AppContext, connector_flag: str | None) -> None:
     """Show whether the guardrail is enabled and the active connector roster.
 
     The roster is rendered UNIFORMLY: one per-connector block for EACH
@@ -296,6 +508,13 @@ def status_cmd(app: AppContext) -> None:
     install, so the exact same layout covers both — the operator never has
     to reason about connector count. There is no separate single-vs-multi
     rendering and no "primary" connector line.
+
+    The connector row is the source of truth for hook posture: enabled state,
+    mode, fail mode, rule pack, HILT, effective hook scan strategy, and judge
+    state are shown together so the scan strategy cannot contradict the judge
+    gate. ``--connector X`` narrows the roster to one active peer. When no
+    connector is set up, status renders an explicit "none configured" state
+    rather than a phantom ``openclaw``.
     """
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
@@ -304,6 +523,7 @@ def status_cmd(app: AppContext) -> None:
     enabled_txt = "yes" if gc.enabled else "no"
     enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
     click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
+
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
     # returns [connector] on a single-connector install and the full set on
@@ -311,13 +531,57 @@ def status_cmd(app: AppContext) -> None:
     # branching, no singular "connector / mode / fail-mode" lines that would
     # imply one connector's posture is THE posture.
     try:
-        actives = app.cfg.active_connectors() if hasattr(app.cfg, "active_connectors") else [connector]
+        actives = (
+            list(app.cfg.active_connectors())
+            if hasattr(app.cfg, "active_connectors")
+            else [connector]
+        )
     except Exception:  # noqa: BLE001 — fall back to the primary connector.
         actives = [connector]
+
+    # G5 (phantom openclaw): when nothing is configured, active_connectors()
+    # returns [] — render an explicit empty state instead of flooring to
+    # ["openclaw"], which would imply a phantom connector is enforcing. The
+    # config root (active_connectors→[] + has_connector_configured) is already
+    # fixed; this is the command-layer consumer that must not re-introduce the
+    # floor.
+    configured = (
+        app.cfg.has_connector_configured()
+        if hasattr(app.cfg, "has_connector_configured")
+        else True
+    )
+    if not actives and not configured:
+        click.echo(
+            f"  • {ux._style('connectors:', fg='bright_black', bold=True)} "
+            f"{ux.dim('(none configured)')}"
+        )
+        ux.subhead(
+            "No connector configured — run 'defenseclaw setup <connector>' to "
+            "enable enforcement.",
+            indent="    ",
+        )
+        click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
+        click.echo()
+        return
     if not actives:
+        # Older config without active_connectors() but a connector IS set
+        # (has_connector_configured true) — keep the legacy single-connector
+        # floor so those installs still render their one block.
         actives = [connector]
 
-    click.echo(f"  • {ux._style('connectors:', fg='bright_black', bold=True)}")
+    # G3: optional --connector scoping. Default shows the full roster (uniform
+    # layout, unchanged); --connector X narrows it to one active peer, matched
+    # case-insensitively against the active set (mirrors the sibling commands).
+    if connector_flag:
+        want = connector_flag.strip().lower()
+        scoped = [n for n in actives if n.strip().lower() == want]
+        if not scoped:
+            ux.err(f"Connector {connector_flag!r} is not active.", indent="  ")
+            ux.subhead("Active connectors: " + ", ".join(actives), indent="    ")
+            raise SystemExit(1)
+        actives = scoped
+
+    rows: list[dict[str, tuple[str, str]]] = []
     for name in actives:
         cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
         cfm = (
@@ -340,12 +604,15 @@ def status_cmd(app: AppContext) -> None:
         # while the top-level line (and the gateway, which tears every
         # connector down when guardrail.enabled is false) report it off.
         if not gc.enabled:
-            state = ux._style("disabled (guardrail off)", fg="yellow")
+            state_raw = "disabled (guardrail off)"
+            state = ux._style(state_raw, fg="yellow")
         elif c_enabled:
-            state = ux._style("enabled", fg="green")
+            state_raw = "enabled"
+            state = ux._style(state_raw, fg="green")
         else:
-            state = ux._style("disabled", fg="yellow")
-        cfm_display = ux._style(cfm, fg="yellow") if cfm == "closed" else cfm
+            state_raw = "disabled"
+            state = ux._style(state_raw, fg="yellow")
+        cfm_display = _style_fail_mode(cfm)
         # Each connector can scan against its OWN rule pack (per-connector
         # override, else the global pack); surface it so the roster shows which
         # policy each peer is enforcing. Empty dir = the built-in default pack.
@@ -354,19 +621,35 @@ def status_cmd(app: AppContext) -> None:
             if hasattr(gc, "effective_rule_pack_dir")
             else ""
         )
-        rule_pack = os.path.basename(rp_dir.rstrip("/")) if rp_dir.strip() else "default"
+        rule_pack_raw = os.path.basename(rp_dir.rstrip("/")) if rp_dir.strip() else "default"
+        rule_pack = ux.accent(rule_pack_raw) if rule_pack_raw != "default" else ux.dim(rule_pack_raw)
         # Per-connector HILT (human-in-the-loop): on@<min-severity> or off, so
         # the roster reflects `guardrail hilt --connector X` overrides.
         hilt_eff = gc.effective_hilt(name) if hasattr(gc, "effective_hilt") else None
         if hilt_eff is not None and getattr(hilt_eff, "enabled", False):
-            hilt_str = f"hilt=on@{(getattr(hilt_eff, 'min_severity', '') or 'HIGH').upper()}"
+            hilt_raw = f"on@{(getattr(hilt_eff, 'min_severity', '') or 'HIGH').upper()}"
+            hilt_str = (
+                ux._style(hilt_raw, fg="yellow", bold=True)
+            )
         else:
-            hilt_str = "hilt=off"
-        click.echo(
-            f"      - {_connector_label(name)} ({name}): "
-            f"{state} mode={cmode or 'observe'} fail={cfm_display} "
-            f"rule-pack={rule_pack} {hilt_str}"
+            hilt_raw = "off"
+            hilt_str = ux.dim(hilt_raw)
+        scan_raw = _scan_value(gc, name)
+        judge_raw = _connector_judge_value(gc, name)
+        rows.append(
+            {
+                "label": (_connector_label(name), _connector_label(name)),
+                "key": (name, ux.dim(name)),
+                "state": (state_raw, state),
+                "mode": (cmode or "observe", _style_mode(cmode or "observe")),
+                "fail": (cfm, cfm_display),
+                "rule_pack": (rule_pack_raw, rule_pack),
+                "hilt": (hilt_raw, hilt_str),
+                "scan": (scan_raw, _style_scan_value(scan_raw)),
+                "judge": (judge_raw, _style_judge_value(judge_raw)),
+            }
         )
+    _render_connector_table(rows)
     click.echo(
         f"  • {ux.dim('fail = hook response-layer failures (4xx / bad JSON / missing action)')}"
     )
@@ -422,6 +705,8 @@ def disable_cmd(
     if not gc.enabled:
         click.echo(f"  {ux.dim('Guardrail is already disabled')} ({_active_connector_display(app.cfg, connector)}).")
         return
+
+    _preflight_config_write(app)
 
     click.echo()
     click.echo(f"  {ux.bold('Disabling guardrail')} for {_active_connector_display(app.cfg, connector)}")
@@ -741,6 +1026,18 @@ def _set_connector_fail_mode(
         )
 
 
+def _multi_connector_fail_mode_targets(app: AppContext) -> list[str]:
+    """Return active connectors for bare fail-mode writes in multi installs."""
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        return []
+    return [
+        name
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if name in conns
+    ]
+
+
 @guardrail.command("fail-mode")
 @click.argument("mode", required=False, type=click.Choice(["open", "closed"]))
 @click.option(
@@ -846,12 +1143,43 @@ def fail_mode_cmd(
         click.echo()
         return
 
-    if mode == current:
+    fail_mode_targets = _multi_connector_fail_mode_targets(app)
+    target_modes: dict[str, str] = {}
+    if fail_mode_targets:
+        target_modes = {
+            name: (
+                gc.effective_hook_fail_mode(name)
+                if hasattr(gc, "effective_hook_fail_mode")
+                else current
+            ).lower()
+            for name in fail_mode_targets
+        }
+
+    if fail_mode_targets and all(value == mode for value in target_modes.values()):
+        click.echo(
+            f"  {ux.dim('Hook fail mode is already')} {mode!r} "
+            f"{ux.dim('for all active connectors — nothing to do.')}"
+        )
+        return
+    if not fail_mode_targets and mode == current:
         click.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
     click.echo()
-    click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
+    if fail_mode_targets:
+        click.echo(
+            f"  {ux.bold('Changing hook fail mode for active connectors:')} "
+            f"{ux.accent(mode)}"
+        )
+        for name in fail_mode_targets:
+            old = target_modes.get(name, current)
+            if old != mode:
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): "
+                    f"{old} {ux.dim('→')} {ux.accent(mode)}"
+                )
+    else:
+        click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     if mode == "closed":
         ux.warn(
             "Response-layer failures will now BLOCK the agent.",
@@ -879,10 +1207,26 @@ def fail_mode_cmd(
         # SystemExit bypasses that machinery.
         raise click.Abort()
 
-    gc.hook_fail_mode = mode
+    if fail_mode_targets:
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        for name in fail_mode_targets:
+            entry = gc.connectors.get(name)
+            if entry is None:
+                entry = PerConnectorGuardrailConfig()
+                gc.connectors[name] = entry
+            entry.hook_fail_mode = mode
+    else:
+        gc.hook_fail_mode = mode
     try:
         app.cfg.save()
-        ux.ok(f"Config saved (guardrail.hook_fail_mode = {mode})", indent="  ")
+        if fail_mode_targets:
+            ux.ok(
+                f"Config saved ({len(fail_mode_targets)} connector hook_fail_mode overrides = {mode})",
+                indent="  ",
+            )
+        else:
+            ux.ok(f"Config saved (guardrail.hook_fail_mode = {mode})", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
@@ -912,7 +1256,11 @@ def fail_mode_cmd(
         app.logger.log_action(
             "guardrail-fail-mode",
             "config",
-            f"old={current} new={mode} restart={restart}",
+            (
+                f"scope=active-connectors count={len(fail_mode_targets)} new={mode} restart={restart}"
+                if fail_mode_targets
+                else f"old={current} new={mode} restart={restart}"
+            ),
         )
 
 
@@ -1065,6 +1413,18 @@ def _set_connector_hilt(
         )
 
 
+def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
+    """Return active connectors for bare HILT writes in multi installs."""
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        return []
+    return [
+        name
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if name in conns
+    ]
+
+
 @guardrail.command("hilt")
 @click.argument("state", required=False, type=click.Choice(["on", "off"]))
 @click.option(
@@ -1162,10 +1522,34 @@ def hilt_cmd(
         click.echo()
         return
 
+    hilt_targets = _multi_connector_hilt_targets(app)
+    target_hilts: dict[str, tuple[bool, str, bool, str]] = {}
+    if hilt_targets:
+        for name in hilt_targets:
+            eff = (
+                gc.effective_hilt(name)
+                if hasattr(gc, "effective_hilt")
+                else gc.hilt
+            )
+            old_enabled = bool(getattr(eff, "enabled", False))
+            old_min = (getattr(eff, "min_severity", "") or "HIGH").upper()
+            desired_enabled = old_enabled if state is None else (state == "on")
+            desired_min = old_min if min_severity is None else min_severity.upper()
+            target_hilts[name] = (old_enabled, old_min, desired_enabled, desired_min)
+
     new_enabled = cur_enabled if state is None else (state == "on")
     new_min = cur_min if min_severity is None else min_severity.upper()
 
-    if new_enabled == cur_enabled and new_min == cur_min:
+    if hilt_targets and all(
+        old_enabled == desired_enabled and old_min == desired_min
+        for old_enabled, old_min, desired_enabled, desired_min in target_hilts.values()
+    ):
+        click.echo(
+            f"  {ux.dim('HILT is already')} "
+            f"{ux.dim('in the requested state for all active connectors — nothing to do.')}"
+        )
+        return
+    if not hilt_targets and new_enabled == cur_enabled and new_min == cur_min:
         click.echo(
             f"  {ux.dim('HILT is already')} "
             f"enabled={str(new_enabled).lower()} min_severity={new_min} "
@@ -1174,27 +1558,57 @@ def hilt_cmd(
         return
 
     click.echo()
-    click.echo(
-        f"  {ux.bold('Updating HILT:')} "
-        f"enabled={str(cur_enabled).lower()} {ux.dim('→')} "
-        f"{ux.accent(str(new_enabled).lower())}, "
-        f"min_severity={cur_min} {ux.dim('→')} {ux.accent(new_min)}"
-    )
+    if hilt_targets:
+        click.echo(f"  {ux.bold('Updating HILT for active connectors:')}")
+        for name in hilt_targets:
+            old_enabled, old_min, desired_enabled, desired_min = target_hilts[name]
+            if old_enabled == desired_enabled and old_min == desired_min:
+                continue
+            click.echo(
+                f"      - {_connector_label(name)} ({name}): "
+                f"enabled={str(old_enabled).lower()} {ux.dim('→')} "
+                f"{ux.accent(str(desired_enabled).lower())}, "
+                f"min_severity={old_min} {ux.dim('→')} {ux.accent(desired_min)}"
+            )
+    else:
+        click.echo(
+            f"  {ux.bold('Updating HILT:')} "
+            f"enabled={str(cur_enabled).lower()} {ux.dim('→')} "
+            f"{ux.accent(str(new_enabled).lower())}, "
+            f"min_severity={cur_min} {ux.dim('→')} {ux.accent(new_min)}"
+        )
     click.echo()
 
     if not yes and not click.confirm("  Proceed?", default=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
-    gc.hilt.enabled = new_enabled
-    gc.hilt.min_severity = new_min
+    if hilt_targets:
+        from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig
+
+        for name in hilt_targets:
+            _, _, desired_enabled, desired_min = target_hilts[name]
+            entry = gc.connectors.get(name)
+            if entry is None:
+                entry = PerConnectorGuardrailConfig()
+                gc.connectors[name] = entry
+            entry.hilt = HILTConfig(enabled=desired_enabled, min_severity=desired_min)
+    else:
+        gc.hilt.enabled = new_enabled
+        gc.hilt.min_severity = new_min
     try:
         app.cfg.save()
-        ux.ok(
-            f"Config saved (guardrail.hilt: enabled={str(new_enabled).lower()} "
-            f"min_severity={new_min})",
-            indent="  ",
-        )
+        if hilt_targets:
+            ux.ok(
+                f"Config saved ({len(hilt_targets)} connector HILT overrides updated)",
+                indent="  ",
+            )
+        else:
+            ux.ok(
+                f"Config saved (guardrail.hilt: enabled={str(new_enabled).lower()} "
+                f"min_severity={new_min})",
+                indent="  ",
+            )
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
@@ -1206,7 +1620,8 @@ def hilt_cmd(
     # and intentionally not mirrored (data.json is global).
     from defenseclaw.commands import cmd_setup
 
-    cmd_setup._sync_guardrail_hilt_to_opa(getattr(app.cfg, "policy_dir", ""), gc)
+    if not hilt_targets:
+        cmd_setup._sync_guardrail_hilt_to_opa(getattr(app.cfg, "policy_dir", ""), gc)
 
     if restart and gc.enabled:
         cmd_setup._restart_services(
@@ -1229,7 +1644,12 @@ def hilt_cmd(
         app.logger.log_action(
             "guardrail-hilt",
             "config",
-            f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+            (
+                f"scope=active-connectors count={len(hilt_targets)} "
+                f"state={state or 'preserve'} min_severity={min_severity or 'preserve'} restart={restart}"
+                if hilt_targets
+                else f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}"
+            ),
         )
 
 
@@ -1355,6 +1775,18 @@ def _set_connector_block_message(
         )
 
 
+def _multi_connector_block_message_targets(app: AppContext) -> list[str]:
+    """Return active connectors for bare block-message writes in multi installs."""
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        return []
+    return [
+        name
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if name in conns
+    ]
+
+
 @guardrail.command("block-message")
 @click.argument("message", required=False)
 @click.option(
@@ -1442,13 +1874,55 @@ def block_message_cmd(
         click.echo()
         return
 
+    block_message_targets = _multi_connector_block_message_targets(app)
+    target_messages: dict[str, str] = {}
+    if block_message_targets:
+        target_messages = {
+            name: (
+                gc.effective_block_message(name)
+                if hasattr(gc, "effective_block_message")
+                else current
+            )
+            for name in block_message_targets
+        }
+
     new_msg = "" if clear else message
-    if new_msg == current:
+    if (
+        block_message_targets
+        and new_msg == current
+        and all(value == new_msg for value in target_messages.values())
+    ):
+        click.echo(
+            f"  {ux.dim('Block message unchanged for all active connectors — nothing to do.')}"
+        )
+        return
+    if not block_message_targets and new_msg == current:
         click.echo(f"  {ux.dim('Block message unchanged — nothing to do.')}")
         return
 
     click.echo()
-    if new_msg:
+    if block_message_targets:
+        if new_msg:
+            click.echo(
+                f"  {ux.bold('Setting block message for active connectors:')} "
+                f"{ux.accent(new_msg)}"
+            )
+        else:
+            click.echo(
+                f"  {ux.bold('Clearing block message for active connectors')} "
+                f"{ux.dim('(revert to built-in default)')}"
+            )
+        for name in block_message_targets:
+            old = target_messages.get(name, current)
+            if old == new_msg:
+                continue
+            old_label = old if old else "(built-in default)"
+            new_label = new_msg if new_msg else "(built-in default)"
+            click.echo(
+                f"      - {_connector_label(name)} ({name}): "
+                f"{old_label} {ux.dim('→')} {ux.accent(new_label)}"
+            )
+    elif new_msg:
         click.echo(f"  {ux.bold('Setting block message:')} {ux.accent(new_msg)}")
     else:
         click.echo(
@@ -1461,9 +1935,25 @@ def block_message_cmd(
         raise click.Abort()
 
     gc.block_message = new_msg
+    if block_message_targets:
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        for name in block_message_targets:
+            entry = gc.connectors.get(name)
+            if entry is None:
+                entry = PerConnectorGuardrailConfig()
+                gc.connectors[name] = entry
+            entry.block_message = new_msg
     try:
         app.cfg.save()
-        ux.ok("Config saved (guardrail.block_message updated)", indent="  ")
+        if block_message_targets:
+            ux.ok(
+                f"Config saved (guardrail.block_message and {len(block_message_targets)} "
+                "connector block_message overrides updated)",
+                indent="  ",
+            )
+        else:
+            ux.ok("Config saved (guardrail.block_message updated)", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
@@ -1491,5 +1981,103 @@ def block_message_cmd(
         app.logger.log_action(
             "guardrail-block-message",
             "config",
-            f"cleared={clear} restart={restart}",
+            (
+                f"scope=active-connectors count={len(block_message_targets)} "
+                f"cleared={clear} restart={restart}"
+                if block_message_targets
+                else f"cleared={clear} restart={restart}"
+            ),
         )
+
+
+#: Built-in guardrail rule-pack presets — parity with the ``--rule-pack``
+#: choice in ``setup`` (default | strict | permissive). ``setup`` owns the
+#: write side; this is the day-to-day listing surface. Descriptions are
+#: intentionally short. Kept local (not imported from cmd_setup) to preserve
+#: this module's lazy-import discipline for the read-only paths.
+_RULE_PACK_PRESETS = (
+    ("default", "Balanced built-in pack — the shipped baseline."),
+    ("strict", "Tighter thresholds; blocks more aggressively."),
+    ("permissive", "Looser thresholds; favors availability over blocking."),
+)
+
+
+@guardrail.command("list-packs")
+@pass_ctx
+def list_packs_cmd(app: AppContext) -> None:
+    """List the available guardrail rule packs and who enforces which.
+
+    Shows the built-in presets accepted by ``defenseclaw setup <connector>
+    --rule-pack`` alongside the resolved rule-pack directory each active
+    connector is actually enforcing (per-connector override > global pack >
+    built-in default). Read-only — it changes nothing.
+    """
+    gc = app.cfg.guardrail
+    ux.section("Guardrail rule packs", indent="  ")
+
+    click.echo(f"  • {ux._style('built-in presets:', fg='bright_black', bold=True)}")
+    for pname, desc in _RULE_PACK_PRESETS:
+        click.echo(f"      - {ux.accent(pname)}: {ux.dim(desc)}")
+    click.echo()
+
+    global_dir = (getattr(gc, "rule_pack_dir", "") or "").strip()
+    click.echo(
+        f"  • {ux._style('global rule-pack dir:', fg='bright_black', bold=True)} "
+        + (ux.accent(global_dir) if global_dir else ux.dim("(built-in default)"))
+    )
+
+    # Per-connector resolved dirs: which pack each active connector enforces.
+    # Mirrors the roster in `guardrail status`; an empty dir means the
+    # built-in default pack.
+    connector = _resolve_active_connector(app.cfg)
+    try:
+        actives = (
+            list(app.cfg.active_connectors())
+            if hasattr(app.cfg, "active_connectors")
+            else [connector]
+        )
+    except Exception:  # noqa: BLE001 — fall back to the primary connector.
+        actives = [connector]
+    configured = (
+        app.cfg.has_connector_configured()
+        if hasattr(app.cfg, "has_connector_configured")
+        else True
+    )
+    click.echo()
+    # G5 parity: don't fabricate a phantom openclaw row when nothing is set up.
+    if not actives and not configured:
+        click.echo(
+            f"  • {ux._style('per connector:', fg='bright_black', bold=True)} "
+            f"{ux.dim('(none configured)')}"
+        )
+        click.echo()
+        return
+    if not actives:
+        actives = [connector]
+
+    click.echo(f"  • {ux._style('per connector:', fg='bright_black', bold=True)}")
+    for name in actives:
+        rp_dir = (
+            (
+                gc.effective_rule_pack_dir(name)
+                if hasattr(gc, "effective_rule_pack_dir")
+                else global_dir
+            )
+            or ""
+        ).strip()
+        shown = ux.accent(rp_dir) if rp_dir else ux.dim("(built-in default)")
+        click.echo(f"      - {_connector_label(name)} ({name}): {shown}")
+    click.echo()
+
+
+# Register `defenseclaw guardrail judge` (hook-lane judge gate). The
+# judge is opt-in per hook connector via
+# ``guardrail.judge.hook_connectors`` — ``guardrail judge
+# add/remove/list`` is the authoring surface for that gate so operators
+# never have to hand-edit config.yaml. It lives here rather than under
+# ``setup`` because it is a day-to-day policy lever like ``hilt`` and
+# ``fail-mode``. cmd_judge keeps the same lazy-import discipline as
+# this module (see its docstring).
+from defenseclaw.commands.cmd_judge import judge as _judge_group  # noqa: E402
+
+guardrail.add_command(_judge_group)

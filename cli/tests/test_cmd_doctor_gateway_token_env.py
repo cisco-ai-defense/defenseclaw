@@ -45,18 +45,26 @@ def _clean_env(**overrides: str) -> dict[str, str]:
     return env
 
 
-def _make_cfg(*, token_env: str = "") -> SimpleNamespace:
+def _make_cfg(*, token_env: str = "", active=None) -> SimpleNamespace:
     """Minimal cfg surface the check/fixer actually reads.
 
     We use SimpleNamespace instead of a real Config dataclass because
     the check only ever touches ``cfg.gateway.token_env`` and the
     fixer only needs ``cfg.save()`` to mutate. Mocking the dataclass
     machinery would buy nothing and obscure intent.
+
+    ``active`` (a list of connector names) opts the cfg into the
+    connector-aware token-env path (D1): it is exposed as
+    ``active_connectors()`` only when a test asks for it, so the
+    legacy-config branch stays covered by the default ``None``.
     """
-    return SimpleNamespace(
+    cfg = SimpleNamespace(
         gateway=SimpleNamespace(token_env=token_env),
         save=MagicMock(),
     )
+    if active is not None:
+        cfg.active_connectors = lambda: list(active)
+    return cfg
 
 
 class CheckTests(unittest.TestCase):
@@ -136,6 +144,44 @@ class CheckTests(unittest.TestCase):
             _check_gateway_token_env_alignment(cfg, r)
         self.assertEqual(r.passed, 0)
         self.assertEqual(r.failed, 0)
+
+
+class ConnectorAwareCheckTests(unittest.TestCase):
+    """D1: on a non-OpenClaw install, a stale legacy ``OPENCLAW_GATEWAY_TOKEN``
+    sitting in ``token_env`` (both vars empty) must NOT be presented as the var
+    the operator has to set — it's drift to repoint, not a required OpenClaw
+    token. Only when OpenClaw is genuinely active is that var legitimate.
+    """
+
+    def test_reworded_both_empty_on_hook_install(self):
+        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=["hermes"])
+        r = _DoctorResult()
+        with patch.dict(os.environ, _clean_env(), clear=True):
+            _check_gateway_token_env_alignment(cfg, r)
+        self.assertEqual(r.warned, 1)
+        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+        self.assertIn("doctor --fix", msg)
+        self.assertIn("DEFENSECLAW_GATEWAY_TOKEN", msg)
+        # The non-OpenClaw operator is NOT told to set OPENCLAW via keys set.
+        self.assertNotIn("keys set", msg)
+
+    def test_openclaw_active_keeps_generic_message(self):
+        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=["openclaw"])
+        r = _DoctorResult()
+        with patch.dict(os.environ, _clean_env(), clear=True):
+            _check_gateway_token_env_alignment(cfg, r)
+        self.assertEqual(r.warned, 1)
+        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+        self.assertIn("defenseclaw keys set", msg)
+
+    def test_custom_token_env_both_empty_keeps_generic_message(self):
+        cfg = _make_cfg(token_env="MY_CUSTOM_TOKEN", active=["hermes"])
+        r = _DoctorResult()
+        with patch.dict(os.environ, _clean_env(), clear=True):
+            _check_gateway_token_env_alignment(cfg, r)
+        self.assertEqual(r.warned, 1)
+        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+        self.assertIn("defenseclaw keys set", msg)
 
 
 class FixerTests(unittest.TestCase):

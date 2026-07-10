@@ -32,14 +32,13 @@ Exit codes:
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import click
 
-from defenseclaw import __version__, ux
+from defenseclaw import __version__, gateway, ux
 from defenseclaw.paths import bundled_extensions_dir
 
 
@@ -81,8 +80,16 @@ def _gateway_component() -> Component:
     can also be a long-running daemon — ``--version`` short-circuits
     before Cobra touches any state, but a misconfigured shim could
     still hang.
+
+    Resolution goes through :func:`gateway.resolve_gateway_binary` — the
+    same resolver the rest of the CLI uses to actually launch the
+    gateway — so the version probe honours ``DEFENSECLAW_GATEWAY_BIN``
+    and the canonical install fallback. A bare ``shutil.which`` would
+    report the configured binary as "(not installed)", and because
+    missing components are excluded from drift comparison, the command
+    would falsely report no drift against the real binary (F-0001).
     """
-    bin_path = shutil.which("defenseclaw-gateway")
+    bin_path = gateway.resolve_gateway_binary()
     if not bin_path:
         return Component(
             name="gateway",

@@ -401,6 +401,103 @@ func TestForSinkEntity_ShortValuesHideFirstRune(t *testing.T) {
 	}
 }
 
+// TestIsPlaceholder_SpoofedFakeRedaction pins the
+// `<redacted secret>` and `<redacted-evidence secret>` spoof
+// rejection. The pre-fix grammar used a loose prefix/suffix check
+// that treated any `<redacted...>` shape as already-safe; the
+// strict grammar requires len= and sha= fields to match.
+func TestIsPlaceholder_SpoofedFakeRedaction(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	spoofs := []string{
+		"<redacted sk-ant-secret>",
+		"<redacted alice@example.com>",
+		"<redacted len=10>extra",
+		"<redacted len=10 sha=zzzzzzzz>",     // sha not hex
+		"<redacted len=10 sha=ABCDEF12>",     // sha not lowercase hex
+		"<redacted len=foo sha=abcdef12>",    // len not numeric
+		"<redacted-evidence sk-ant-secret>",  // missing len/sha
+		"<redacted-evidence len=10>",         // missing sha
+		"<redacted-evidence len=10 sha=zzz>", // sha wrong shape
+	}
+	for _, s := range spoofs {
+		if isPlaceholder(s) {
+			t.Errorf("isPlaceholder(%q) = true; want false (spoofed)", s)
+		}
+		if isEvidencePlaceholder(s) {
+			t.Errorf("isEvidencePlaceholder(%q) = true; want false (spoofed)", s)
+		}
+		// ForSinkString MUST re-redact the spoof so the secret
+		// suffix never reaches a persistent sink intact.
+		got := ForSinkString(s)
+		if got == s {
+			t.Errorf("ForSinkString(%q) returned spoof unchanged", s)
+		}
+	}
+	// ForSinkEvidence must also re-redact spoofed evidence shapes.
+	got := ForSinkEvidence("<redacted-evidence sk-ant-secret>", -1, -1)
+	if strings.Contains(got, "sk-ant-secret") {
+		t.Errorf("ForSinkEvidence leaked spoofed input: %q", got)
+	}
+}
+
+// TestForSinkReason_SeparatorSecretShapes pins the contract:
+// short separator-bearing credentials must be redacted, not
+// preserved by the safe-token allow-list.
+func TestForSinkReason_SeparatorSecretShapes(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	cases := []struct {
+		in   string
+		leak []string
+	}{
+		{in: "sk-test-123", leak: []string{"sk-test-123"}},
+		{in: "password=hunter-2", leak: []string{"hunter-2"}},
+		{in: "api_key=dev/token", leak: []string{"dev/token"}},
+		{in: "session=abc.def", leak: []string{"abc.def"}},
+		{in: "token=AKIAIOSFODNN7EXAMPLE", leak: []string{"AKIAIOSFODNN7EXAMPLE"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			got := ForSinkReason(tc.in)
+			for _, leak := range tc.leak {
+				if strings.Contains(got, leak) {
+					t.Errorf("ForSinkReason(%q) = %q; leaked %q", tc.in, got, leak)
+				}
+			}
+			if !strings.Contains(got, "<redacted") {
+				t.Errorf("ForSinkReason(%q) = %q; missing redacted marker", tc.in, got)
+			}
+		})
+	}
+}
+
+// TestForSinkReason_PositiveCatalog pins the well-known enum
+// constants and canonical-ID shapes that MUST continue to pass
+// through verbatim so operator-facing reasons stay readable.
+func TestForSinkReason_PositiveCatalog(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	cases := []string{
+		"action=allow",
+		"mode=observe",
+		"severity=HIGH",
+		"verdict=block",
+		"canonical=SEC-AWS-KEY",
+		"canonical=SEC-AWS-KEY,SEC-GITHUB-TOKEN",
+		"count=42",
+		"exit_code=0",
+		"direction=prompt",
+		"scanner=codeguard",
+		"connector=openclaw",
+		"rule=pii.phone",
+	}
+	for _, in := range cases {
+		got := ForSinkReason(in)
+		if got != in {
+			t.Errorf("ForSinkReason(%q) = %q; want unchanged", in, got)
+		}
+	}
+}
+
 func TestDeterministicHash(t *testing.T) {
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
 	a := String("4155551234")
@@ -411,5 +508,58 @@ func TestDeterministicHash(t *testing.T) {
 	c := String("4155551235")
 	if a == c {
 		t.Fatalf("hash collided across distinct inputs: %q == %q", a, c)
+	}
+}
+
+// TestForSinkReason_TrustedAIDPrefix pins the whitelist behavior for
+// the "Cisco AI Defense: <rule>" reason shape emitted by the AID
+// normalizer (see internal/gateway/cisco_inspect.go). Redaction must
+// leave those reasons intact so operators + agent-side surfaces
+// display the cloud rule name; otherwise Codex/Claude/etc. show a
+// wall of <redacted len=... sha=...> tokens for what are actually
+// hand-authored, ship-controlled labels.
+func TestForSinkReason_TrustedAIDPrefix(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	SetDisableAll(false)
+	t.Cleanup(func() { SetDisableAll(false) })
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"Cisco AI Defense: Prompt Injection", "Cisco AI Defense: Prompt Injection"},
+		{"Cisco AI Defense: PII Detection", "Cisco AI Defense: PII Detection"},
+		{"Cisco AI Defense: Prompt Injection, Jailbreak", "Cisco AI Defense: Prompt Injection, Jailbreak"},
+		{"Cisco AI Defense custom policy block", "Cisco AI Defense custom policy block"},
+	}
+	for _, tc := range cases {
+		got := ForSinkReason(tc.in)
+		if got != tc.want {
+			t.Errorf("ForSinkReason(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestForSinkReason_TrustedAIDPrefix_RejectsBadShapes verifies the
+// whitelist is narrow: any user-controllable content after "Cisco AI
+// Defense: " that contains characters outside the catalog charset
+// (letters/digits/space/hyphen/underscore/comma/period/&) must still
+// be redacted. Prevents a prompt injection like
+// "Cisco AI Defense: sk-ant-<literal secret>" from riding through.
+func TestForSinkReason_TrustedAIDPrefix_RejectsBadShapes(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	SetDisableAll(false)
+	t.Cleanup(func() { SetDisableAll(false) })
+	badShapes := []string{
+		"Cisco AI Defense: sk-ant-api03-secret-KEY_XYZ!!!", // '!' rejected
+		"Cisco AI Defense: /etc/passwd content leaked",     // '/' rejected
+		"Cisco AI Defense: some=key value",                 // '=' rejected
+		"Cisco AI Defense:noSpace",                         // wrong shape (no ": ")
+		"NotCisco AI Defense: Prompt Injection",            // wrong prefix
+	}
+	for _, in := range badShapes {
+		got := ForSinkReason(in)
+		if got == in {
+			t.Errorf("ForSinkReason(%q) MUST have redacted, but got the input verbatim", in)
+		}
 	}
 }

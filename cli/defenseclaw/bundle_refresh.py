@@ -183,6 +183,15 @@ _LOCAL_OBSERVABILITY_OPERATOR_PATHS: tuple[str, ...] = (
     "otel-collector",
 )
 
+# Maintainer-owned files removed from newer bundles.  The rsync-style refresh
+# intentionally preserves arbitrary destination-only files so operator-created
+# dashboards survive upgrades; explicit tombstones let us remove only retired
+# DefenseClaw assets without turning refresh into a destructive directory
+# mirror.
+_LOCAL_OBSERVABILITY_RETIRED_PATHS: tuple[str, ...] = (
+    "grafana/dashboards/defenseclaw-reliability.json",
+)
+
 _LOCAL_OBSERVABILITY_DEST_REL: str = "observability-stack"
 
 
@@ -236,8 +245,49 @@ def refresh_local_observability_stack(
     result.errors = errors
     result.refreshed = bool(refreshed)
 
+    if refresh_config:
+        removed, removal_errors = _remove_retired_paths(
+            Path(dest), _LOCAL_OBSERVABILITY_RETIRED_PATHS,
+        )
+        result.refreshed_paths.extend(f"{path} (removed)" for path in removed)
+        result.errors.extend(removal_errors)
+        result.refreshed = bool(result.refreshed_paths)
+
     _ensure_observability_executables(dest)
     return result
+
+
+def _remove_retired_paths(
+    dest: Path,
+    retired_paths: tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    """Remove explicit bundle tombstones while preserving custom files."""
+    removed: list[str] = []
+    errors: list[str] = []
+    root = dest.resolve()
+    for rel in retired_paths:
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or not rel_path.parts or ".." in rel_path.parts:
+            errors.append(f"refused invalid retired path: {rel}")
+            continue
+        candidate = dest.joinpath(*rel_path.parts)
+        try:
+            candidate.resolve().relative_to(root)
+        except ValueError:
+            errors.append(f"refused retired path outside bundle root: {rel}")
+            continue
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        try:
+            if candidate.is_dir() and not candidate.is_symlink():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+        except OSError as exc:
+            errors.append(f"remove retired {rel}: {exc}")
+            continue
+        removed.append(rel)
+    return removed, errors
 
 
 def _ensure_observability_executables(dest: str) -> None:

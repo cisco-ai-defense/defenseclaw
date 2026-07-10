@@ -40,6 +40,30 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed
 
 
+def _coerce_nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return parsed if parsed >= 0 else 0
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    return False
+
+
 @dataclass(frozen=True)
 class AIUsageComponent:
     ecosystem: str = ""
@@ -83,6 +107,35 @@ class AIUsageRuntime:
 
 
 @dataclass(frozen=True)
+class AIUsageModel:
+    id: str = ""
+    status: str = ""
+    format: str = ""
+    provider: str = ""
+    recipe: str = ""
+    modality: str = ""
+    device: str = ""
+    size_bytes: int = 0
+    pinned: bool = False
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> AIUsageModel | None:
+        if not raw:
+            return None
+        return cls(
+            id=str(raw.get("id") or ""),
+            status=str(raw.get("status") or ""),
+            format=str(raw.get("format") or ""),
+            provider=str(raw.get("provider") or ""),
+            recipe=str(raw.get("recipe") or ""),
+            modality=str(raw.get("modality") or ""),
+            device=str(raw.get("device") or ""),
+            size_bytes=_coerce_nonnegative_int(raw.get("size_bytes")),
+            pinned=_coerce_bool(raw.get("pinned")),
+        )
+
+
+@dataclass(frozen=True)
 class AIUsageSignal:
     signal_id: str = ""
     signature_id: str = ""
@@ -104,12 +157,14 @@ class AIUsageSignal:
     last_active_at: datetime | None = None
     version: str = ""
     component: AIUsageComponent | None = None
+    model: AIUsageModel | None = None
     runtime: AIUsageRuntime | None = None
     evidence_types: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> AIUsageSignal:
         component_raw = raw.get("component")
+        model_raw = raw.get("model")
         runtime_raw = raw.get("runtime")
         evidence = raw.get("evidence_types") or ()
         if isinstance(evidence, str):
@@ -137,6 +192,7 @@ class AIUsageSignal:
             last_active_at=_parse_datetime(raw.get("last_active_at")),
             version=str(raw.get("version") or ""),
             component=AIUsageComponent.from_mapping(component_raw if isinstance(component_raw, Mapping) else None),
+            model=AIUsageModel.from_mapping(model_raw if isinstance(model_raw, Mapping) else None),
             runtime=AIUsageRuntime.from_mapping(runtime_raw if isinstance(runtime_raw, Mapping) else None),
             evidence_types=evidence_types,
         )
@@ -212,6 +268,9 @@ class AIDiscoveryRow:
     ecosystem: str = ""
     component: str = ""
     version: str = ""
+    model: str = ""
+    model_statuses: tuple[str, ...] = ()
+    model_formats: tuple[str, ...] = ()
     categories: tuple[str, ...] = ()
     detectors: tuple[str, ...] = ()
     identity_score: float = 0.0
@@ -410,6 +469,8 @@ class AIDiscoveryPanelModel:
         segments = [row.state, row.product]
         if row.component:
             segments.append(row.component_label)
+        if row.model:
+            segments.append(row.model)
         return f"{' - '.join(part for part in segments if part)} x {row.count} signal(s)"
 
     def detail_lines(self, *, limit: int = 50, now: datetime | None = None) -> tuple[str, ...]:
@@ -428,6 +489,23 @@ class AIDiscoveryPanelModel:
             if signal.detector or signal.source:
                 source = f" source={signal.source}" if signal.source else ""
                 lines.append(f"detector={signal.detector}{source}".strip())
+            if signal.model:
+                model = signal.model
+                parts = [f"model: id={model.id or '(unknown)'}"]
+                for label, value in (
+                    ("status", model.status),
+                    ("format", model.format),
+                    ("recipe", model.recipe),
+                    ("modality", model.modality),
+                    ("device", model.device),
+                ):
+                    if value:
+                        parts.append(f"{label}={value}")
+                if model.size_bytes > 0:
+                    parts.append(f"size_bytes={model.size_bytes}")
+                if model.pinned:
+                    parts.append("pinned=true")
+                lines.append(" ".join(parts))
             if signal.runtime and signal.runtime.pid > 0:
                 parts = [f"runtime: pid={signal.runtime.pid}"]
                 if signal.runtime.user:
@@ -444,25 +522,34 @@ class AIDiscoveryPanelModel:
         return tuple(lines)
 
     def data_table_columns(self) -> tuple[str, ...]:
-        return (
+        columns = [
             "State",
             "Categories",
             "Product",
-            "Component",
-            "Version",
-            "Vendor",
-            "Detectors",
-            "Count",
-            "Identity",
-            "Presence",
-        )
+        ]
+        if any(row.model for row in self.rows):
+            columns.extend(("Model", "Model status", "Format"))
+        columns.extend((
+            "Component", "Version", "Vendor", "Detectors", "Count", "Identity", "Presence",
+        ))
+        return tuple(columns)
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
-        return tuple(
-            (
+        has_models = any(row.model for row in self.rows)
+        rendered: list[tuple[str, ...]] = []
+        for row in self.filtered:
+            cells = [
                 row.state,
                 format_csv_truncated(row.categories, 2),
                 row.product,
+            ]
+            if has_models:
+                cells.extend((
+                    row.model,
+                    format_csv_truncated(row.model_statuses, 2),
+                    format_csv_truncated(row.model_formats, 2),
+                ))
+            cells.extend((
                 row.component_label,
                 row.version,
                 row.vendor,
@@ -470,9 +557,9 @@ class AIDiscoveryPanelModel:
                 str(row.count),
                 row.identity_label,
                 row.presence_label,
-            )
-            for row in self.filtered
-        )
+            ))
+            rendered.append(tuple(cells))
+        return tuple(rendered)
 
     def _rebuild(self) -> None:
         self.rows = ()
@@ -480,8 +567,8 @@ class AIDiscoveryPanelModel:
             self._apply_filter()
             return
 
-        groups: dict[tuple[str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
-        order: list[tuple[str, str, str, str, str, str]] = []
+        groups: dict[tuple[str, str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
+        order: list[tuple[str, str, str, str, str, str, str]] = []
         for signal in self.snapshot.signals:
             ecosystem = ""
             component_name = ""
@@ -491,7 +578,8 @@ class AIDiscoveryPanelModel:
                 component_name = signal.component.name.lower()
                 if signal.component.version:
                     version = signal.component.version
-            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version)
+            model_id = signal.model.id if signal.model else ""
+            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version, model_id)
             row = groups.get(key)
             if row is None:
                 row = _MutableAIDiscoveryRow(
@@ -501,6 +589,7 @@ class AIDiscoveryPanelModel:
                     ecosystem=signal.component.ecosystem if signal.component else "",
                     component=signal.component.name if signal.component else "",
                     version=version,
+                    model=model_id,
                 )
                 groups[key] = row
                 order.append(key)
@@ -510,7 +599,7 @@ class AIDiscoveryPanelModel:
         self.rows = tuple(
             sorted(
                 rows,
-                key=lambda row: (state_weight(row.state), -row.count, row.product),
+                key=lambda row: (state_weight(row.state), -row.count, row.product, row.model),
             )
         )
         self._apply_filter()
@@ -529,6 +618,7 @@ class AIDiscoveryPanelModel:
                     row.ecosystem,
                     row.component,
                     row.version,
+                    row.model,
                     row.identity_band,
                     row.presence_band,
                     *row.categories,
@@ -548,6 +638,9 @@ class _MutableAIDiscoveryRow:
     ecosystem: str = ""
     component: str = ""
     version: str = ""
+    model: str = ""
+    model_statuses: list[str] = field(default_factory=list)
+    model_formats: list[str] = field(default_factory=list)
     categories: list[str] = field(default_factory=list)
     detectors: list[str] = field(default_factory=list)
     identity_score: float = 0.0
@@ -565,6 +658,11 @@ class _MutableAIDiscoveryRow:
             self.categories.append(signal.category)
         if signal.detector and signal.detector not in self.detectors:
             self.detectors.append(signal.detector)
+        if signal.model:
+            if signal.model.status and signal.model.status not in self.model_statuses:
+                self.model_statuses.append(signal.model.status)
+            if signal.model.format and signal.model.format not in self.model_formats:
+                self.model_formats.append(signal.model.format)
         if not self.identity_band and signal.identity_band:
             self.identity_band = signal.identity_band
             self.identity_score = signal.identity_score
@@ -584,6 +682,9 @@ class _MutableAIDiscoveryRow:
             ecosystem=self.ecosystem,
             component=self.component,
             version=self.version,
+            model=self.model,
+            model_statuses=tuple(self.model_statuses),
+            model_formats=tuple(self.model_formats),
             categories=tuple(self.categories),
             detectors=tuple(self.detectors),
             identity_score=self.identity_score,
@@ -672,6 +773,7 @@ __all__ = [
     "AIDiscoveryRow",
     "AIDiscoveryState",
     "AIUsageComponent",
+    "AIUsageModel",
     "AIUsageRuntime",
     "AIUsageSignal",
     "AIUsageSnapshot",

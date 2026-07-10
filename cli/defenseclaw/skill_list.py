@@ -52,6 +52,8 @@ import os
 import subprocess
 from typing import TYPE_CHECKING, Any
 
+from defenseclaw.safety import is_symlink
+
 if TYPE_CHECKING:
     from defenseclaw.config import Config
 
@@ -222,7 +224,13 @@ def _read_skill_description(path: str) -> str:
     """
     for marker in ("SKILL.md", "README.md"):
         marker_path = os.path.join(path, marker)
-        if not os.path.isfile(marker_path):
+        # F-0281: ``os.path.isfile`` follows symlinks, so a malicious skill
+        # dir could symlink SKILL.md/README.md to an arbitrary
+        # operator-readable file (``~/.netrc``, ``/etc/shadow`` …) and leak
+        # its first non-empty line into the skill listing. Skip the marker
+        # if it is a symlink — we only describe files the skill author
+        # actually authored inside the skill dir.
+        if is_symlink(marker_path) or not os.path.isfile(marker_path):
             continue
         try:
             with open(marker_path, encoding="utf-8", errors="replace") as f:

@@ -30,22 +30,48 @@ from io import StringIO
 from pathlib import Path
 from typing import NamedTuple
 
-from defenseclaw.config import default_data_path
-from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand
+import yaml
+
+# `grp` is POSIX-only. We import it lazily-but-at-module-load so the
+# group-ownership check below can run without an inline import,
+# while still keeping Windows hosts importable.
+try:  # pragma: no cover - Windows path
+    import grp as _grp
+except ImportError:  # pragma: no cover - non-POSIX
+    _grp = None  # type: ignore[assignment]
+
+from defenseclaw.config import config_path_for_data_dir, default_data_path
+from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_config_path
+
+# Sentinel error returned by ``_version_for_binary`` when a connector
+# binary resolves outside the trusted install prefixes. Callers (e.g.
+# ``cmd_setup``) key off this exact value to decide whether to offer the
+# "trust this directory" remediation, so it lives here as a shared
+# constant rather than being duplicated as a string literal on both
+# sides — if the wording ever changes, the consumer can't silently drift.
+UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 
 CACHE_SCHEMA_VERSION = 1
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
 
-# M-4: canonical install prefixes that we trust enough to exec
+# Canonical install prefixes that we trust enough to exec
 # `<binary> --version` against. Anything outside this allow-list is
 # refused — even when ``shutil.which`` returns it — because a user PATH
 # entry pointing to /tmp, the current directory, or some other
 # attacker-writable location could otherwise have us run a hostile
-# binary as part of a passive discovery scan. Operators with bespoke
-# install layouts can extend the allow-list at runtime via the
-# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (colon-separated).
+# binary as part of a passive discovery scan.
+#
+# The default list is restricted to system-managed prefixes that
+# require root / package-manager privilege to write. User-writable tool
+# directories (~/.local/bin, ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv,
+# ~/.pipx, ~/Library/Application Support, /Applications) are deliberately
+# excluded: a local agent process running as the operator can write to
+# those dirs, plant `codex` (or any other discovery target), and a
+# default-trusted prefix would let the passive scan exec it. Operators
+# with bespoke install layouts extend the allow-list at runtime via the
+# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (``os.pathsep``-separated).
 _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/usr/bin",
     "/usr/local/bin",
@@ -56,35 +82,23 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/opt/homebrew/Cellar",
+    "/opt/homebrew/Caskroom",
     "/opt/homebrew/lib/node_modules",
     "/usr/local/Cellar",
     "/usr/local/lib/node_modules",
     "/opt/local/bin",
     "/opt/local/sbin",
-    "~/.local/bin",
-    "~/.local/share/claude",
-    "~/.local/share/uv/tools",
-    # Codex CLI standalone install root. The installer drops a launcher
-    # symlink in ~/.local/bin but the real binary lives under
-    # ~/.codex/packages/standalone/releases/<ver>/bin/codex, and
-    # _is_trusted_binary_path resolves symlinks before the prefix check —
-    # so without this entry the modern Codex CLI is rejected as "not in a
-    # trusted install prefix" and `setup codex --mode action` fails out of
-    # the box. Scoped to packages/ (not all of ~/.codex, which also holds
-    # auth.json, session DBs, and caches) and still subject to the
-    # world-writable-parent guard, so this is a user-owned tool root in
-    # the same category as the npm/cargo/volta entries below.
-    "~/.codex/packages",
-    "~/.cargo/bin",
-    "~/.npm-global/bin",
-    "~/.volta/bin",
-    "~/.nvm",
-    "~/.fnm",
-    "~/.asdf",
-    "~/.pyenv",
-    "~/.pipx",
-    "~/Library/Application Support",
-    "/Applications",
+    # User-writable tool dirs (~/.local/bin, ~/.codex/packages,
+    # ~/.opencode/bin, ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx,
+    # ~/Library/Application Support, /Applications, …) are intentionally
+    # NOT trusted by default — a local agent running as the operator can
+    # plant a binary there (e.g. `codex` or `opencode`) and the passive
+    # scan would exec it. Operators who install discovery targets under a
+    # user-owned tool root (modern Codex CLI lives in
+    # ~/.codex/packages/standalone/...; opencode lives in ~/.opencode/bin)
+    # must opt in explicitly via DEFENSECLAW_TRUSTED_BIN_PREFIXES
+    # (``os.pathsep``-separated); the per-file/parent permission checks in
+    # _is_trusted_binary_path still apply on top of any extension.
 )
 
 DISCOVERY_PRECEDENCE: tuple[str, ...] = (
@@ -99,6 +113,8 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
+    "omnigent",
 )
 
 
@@ -170,6 +186,24 @@ _SPECS: dict[str, _AgentSpec] = {
         "agy",
         ("--version",),
     ),
+    "opencode": _AgentSpec(
+        # opencode auto-loads plugins from ~/.config/opencode/plugins/;
+        # DefenseClaw installs its bridge there. opencode.json / the
+        # .opencode project dir are also signals the agent is present.
+        (
+            "~/.config/opencode/plugins/defenseclaw.js",
+            "~/.config/opencode/opencode.json",
+            "~/.config/opencode",
+            ".opencode",
+        ),
+        "opencode",
+        ("--version",),
+    ),
+    "omnigent": _AgentSpec(
+        ("~/.omnigent/config.yaml", "~/.omnigent"),
+        "omnigent",
+        ("--version",),
+    ),
 }
 
 
@@ -186,8 +220,18 @@ def discover_agents(
             return cached
 
     scanned_at = _format_rfc3339(_now_utc())
+    require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        signals = list(pool.map(_scan_agent, KNOWN_CONNECTORS))
+        signals = list(
+            pool.map(
+                lambda name: _scan_agent(
+                    name,
+                    data_dir=data_dir,
+                    require_trusted_binary_paths=require_trusted,
+                ),
+                KNOWN_CONNECTORS,
+            )
+        )
     agents = {signal.name: signal for signal in signals}
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
     _write_cache(discovery, data_dir=data_dir)
@@ -242,16 +286,30 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
     return stream.getvalue()
 
 
-def _scan_agent(name: str) -> AgentSignal:
+def _scan_agent(
+    name: str,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    require_trusted_binary_paths: bool = False,
+) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
-    config_path = _first_existing_path(spec.config_candidates)
+    config_candidates = spec.config_candidates
+    if name == "omnigent":
+        config_path = omnigent_config_path()
+        config_candidates = (config_path, os.path.dirname(config_path))
+    config_path = _first_existing_path(config_candidates)
     binary_path = _which(spec.binary_name) if spec.binary_name else ""
     version = ""
     error = ""
     version_ok = False
 
     if binary_path:
-        version, error = _version_for_binary(binary_path, spec.version_args)
+        version, error = _version_for_binary(
+            binary_path,
+            spec.version_args,
+            require_trusted_binary_paths=require_trusted_binary_paths,
+            data_dir=data_dir,
+        )
         version_ok = bool(version) and not error
 
     installed = bool(config_path) or (bool(binary_path) and version_ok)
@@ -265,25 +323,59 @@ def _scan_agent(name: str) -> AgentSignal:
     )
 
 
-def _trusted_bin_prefixes() -> tuple[str, ...]:
+def _ai_discovery_trust_config(
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Return ``(require_trusted_paths, config_prefixes)`` from config.yaml."""
+    path = config_path_for_data_dir(data_dir)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except OSError:
+        raw = {}
+    if not isinstance(raw, dict):
+        return False, ()
+    block = raw.get("ai_discovery")
+    if not isinstance(block, dict):
+        return False, ()
+    prefixes = tuple(str(v).strip() for v in (block.get("trusted_binary_prefixes", []) or []) if str(v).strip())
+    return bool(block.get("require_trusted_binary_paths", False)), prefixes
+
+
+def _trusted_bin_prefixes(
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[str, ...]:
     """Return the allow-list of canonical install prefixes.
 
     The defaults cover platform-package, Homebrew, MacPorts, and common
     user-scoped tooling (cargo, npm, pyenv, asdf, pipx, etc.). Operators
     can extend the list at runtime via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``
-    (colon-separated). Each entry is tilde-expanded and absolutised
+    (``os.pathsep``-separated). Each entry is tilde-expanded and absolutised
     before comparison.
     """
     extras: list[str] = []
+    _require, config_prefixes = _ai_discovery_trust_config(data_dir)
+    extras.extend(config_prefixes)
     raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
-    for piece in raw.split(":"):
+    # Split on os.pathsep (':' POSIX, ';' Windows) so a Windows
+    # drive-qualified path like 'C:\\Tools' survives unmangled.
+    for piece in raw.split(os.pathsep):
         piece = piece.strip()
         if piece:
             extras.append(piece)
+    return tuple(_expand_bin_prefixes((*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras)))
+
+
+def _expand_bin_prefixes(prefixes: tuple[str, ...]) -> list[str]:
     expanded: list[str] = []
-    for prefix in (*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras):
+    for prefix in prefixes:
         try:
-            absolute = os.path.abspath(_expand(prefix))
+            # Binary admission compares against the binary's realpath, so
+            # trusted prefixes must use the same canonical form. This matters
+            # on macOS where /tmp and /var are symlinks into /private: an
+            # operator-approved /tmp/tool/bin prefix otherwise never matches
+            # the resolved /private/tmp/tool/bin/binary path.
+            absolute = os.path.realpath(os.path.abspath(_expand(prefix)))
         except Exception:
             continue
         # Refuse degenerate prefixes that would defeat the allow-list:
@@ -298,10 +390,124 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
         if absolute.count(os.sep) < 1 or normalized == "":
             continue
         expanded.append(absolute)
-    return tuple(expanded)
+    return expanded
 
 
-def _is_trusted_binary_path(binary_path: str) -> bool:
+def _default_trusted_bin_prefixes() -> frozenset[str]:
+    """The absolutised built-in (non-operator-supplied) trusted prefixes.
+
+    These are the prefixes we trust *by default*, without an operator
+    opting in via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``. They get a stricter
+    ownership requirement (see ``_is_trusted_binary_path``).
+    """
+    return frozenset(_expand_bin_prefixes(_TRUSTED_BIN_PREFIXES_DEFAULT))
+
+
+def _bin_chain_is_system_owned(resolved: str, prefix: str) -> bool:
+    """F-0421: require root ownership along the resolved→prefix chain.
+
+    For a *default* trusted prefix (e.g. ``/opt/homebrew/bin``) we refuse to
+    exec a binary when the binary itself, or any parent directory up to and
+    including the prefix, is owner-writable while owned by a NON-root user.
+    Such a path is swappable by that (non-root) owner — including
+    operator-level malware running as that user — before the passive
+    version probe execs it. Genuine system-managed prefixes are root-owned,
+    so they pass; a user-owned Homebrew/MacPorts tree does not (operators
+    who deliberately trust a user-owned root must opt in via
+    ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``, which routes around this check).
+    """
+    prefix_norm = prefix.rstrip(os.sep)
+    current = resolved
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            st = os.stat(current)
+        except OSError:
+            return False
+        # Owner-writable while owned by a non-root user → swappable by a
+        # non-root principal. (World/group-writable is already rejected by
+        # the per-node checks in the caller.)
+        if (st.st_mode & 0o200) and st.st_uid != 0:
+            return False
+        if current.rstrip(os.sep) == prefix_norm:
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return True
+
+
+def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
+    """Return a human-readable refusal when a directory mode is unsafe to trust.
+
+    Mirrors the parent-directory permission checks in ``_is_trusted_binary_path``
+    so ``trusted-paths add`` cannot succeed on directories discovery would still
+    reject for version probing.
+    """
+    if st.st_mode & 0o002:
+        return "directory is world-writable"
+    if st.st_mode & 0o020:
+        grp_name = ""
+        if _grp is not None:
+            try:
+                grp_name = _grp.getgrgid(st.st_gid).gr_name
+            except (KeyError, OSError):
+                grp_name = ""
+        if grp_name not in ("root", "wheel", "admin"):
+            return "directory is group-writable"
+    return None
+
+
+def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
+    """Validate a candidate trusted-bin-prefix directory.
+
+    Returns ``(resolved_abspath, error)`` where ``error`` is ``None`` when the
+    directory is a safe place to trust, or a short human-readable reason
+    otherwise. Shared by the ``setup trusted-paths`` CLI (and any other
+    caller) so the security rules can never drift from the discovery gate.
+
+    Rules:
+      * a *non-absolute* input is rejected — the resolved location would
+        otherwise depend on the caller's working directory;
+      * existing paths are canonicalised with ``realpath`` so symlink aliases
+        match the discovery gate;
+      * a *world-writable* or unsafe *group-writable* directory is rejected —
+        anyone on the host (or anyone sharing the group) could drop a malicious
+        binary into it, the exact threat the allow-list defends against;
+      * a path that exists but is not a directory is rejected;
+      * a path that does not yet exist is allowed (the caller may warn) — it
+        is not itself unsafe to trust.
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return "", "path is empty"
+    expanded = _expand(raw)
+    if not os.path.isabs(expanded):
+        return os.path.abspath(expanded), "path is not absolute"
+    try:
+        resolved = os.path.realpath(expanded)
+    except OSError:
+        resolved = os.path.abspath(expanded)
+    try:
+        st = os.stat(resolved)
+    except FileNotFoundError:
+        return resolved, None
+    except OSError as exc:  # pragma: no cover - rare stat failure
+        return resolved, f"cannot stat path ({exc})"
+    if not os.path.isdir(resolved):
+        return resolved, "path is not a directory"
+    mode_err = _trusted_prefix_dir_mode_error(st)
+    if mode_err:
+        return resolved, mode_err
+    return resolved, None
+
+
+def _is_trusted_binary_path(
+    binary_path: str,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
     """M-4: refuse to exec a binary that lives outside the allow-list.
 
     The check follows symlinks (``os.path.realpath``) so an attacker
@@ -331,26 +537,68 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
     # could swap the binary at any time. Treat as untrusted.
     if parent_st.st_mode & 0o002:
         return False
-    prefixes = _trusted_bin_prefixes()
+    # also reject group-writable parents unless the
+    # group is the system root group. A non-root user that shares a
+    # group with the parent dir can swap the binary.
+    if parent_st.st_mode & 0o020:
+        grp_name = ""
+        if _grp is not None:
+            try:
+                grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
+            except (KeyError, OSError):
+                grp_name = ""
+        if grp_name not in ("root", "wheel", "admin"):
+            return False
+    # refuse a binary whose own file is writable by
+    # anyone other than the trusted system owner. The user-writable
+    # ~/.local/bin/* case is the canonical exploit path; even if an
+    # operator extends DEFENSECLAW_TRUSTED_BIN_PREFIXES to include it,
+    # we still refuse the individual file when its mode bits expose
+    # group/world write.
+    try:
+        bin_st = os.stat(resolved)
+    except OSError:
+        return False
+    if bin_st.st_mode & 0o022:
+        return False
+    prefixes = _trusted_bin_prefixes(data_dir)
+    default_prefixes = _default_trusted_bin_prefixes()
     for prefix in prefixes:
         # Both the resolved binary and the candidate need to share a
         # path-component boundary; suffix-string match would let
         # /usr/binEvil sneak past /usr/bin.
-        if resolved == prefix:
-            return True
-        if resolved.startswith(prefix.rstrip(os.sep) + os.sep):
+        if resolved == prefix or resolved.startswith(prefix.rstrip(os.sep) + os.sep):
+            # F-0421: built-in default prefixes additionally require the
+            # resolved binary and its parent chain (up to the prefix) to be
+            # root-owned. A user-owned, owner-writable binary under a
+            # default "system" prefix (the classic /opt/homebrew/bin case)
+            # is swappable by a non-root principal, so we refuse to exec it
+            # during passive discovery. Operator opt-in prefixes
+            # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) keep the looser checks.
+            if prefix in default_prefixes and not _bin_chain_is_system_owned(resolved, prefix):
+                # A user-owned Homebrew tree can fail the default-prefix
+                # ownership gate while a narrower operator opt-in prefix
+                # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) still matches — keep
+                # scanning instead of rejecting early.
+                continue
             return True
     return False
 
 
-def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tuple[str, str]:
+def _version_for_binary(
+    binary_path: str,
+    version_args: tuple[str, ...],
+    *,
+    require_trusted_binary_paths: bool = True,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[str, str]:
     # M-4: the value of ``binary_path`` is sourced from
     # ``shutil.which(binary_name)`` which honours $PATH — an attacker
     # who can prepend a hostile directory to PATH can otherwise have us
     # exec their binary as part of a passive discovery scan. Refuse
     # anything outside the canonical install prefixes.
-    if not _is_trusted_binary_path(binary_path):
-        return "", "binary path is not in a trusted install prefix"
+    if require_trusted_binary_paths and not _is_trusted_binary_path(binary_path, data_dir=data_dir):
+        return "", UNTRUSTED_PREFIX_ERROR
     binary_name = os.path.basename(binary_path).lower()
     env = None
     timeout = VERSION_TIMEOUT_SECONDS

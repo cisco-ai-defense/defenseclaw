@@ -36,7 +36,9 @@
     %USERPROFILE%\.defenseclaw\.venv, so an installed setup upgrades in place.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1 | iex
+    $Version = "0.8.3"
+    $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
+    & ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
 
 .EXAMPLE
     # Pin a version and pick a connector, non-interactively:
@@ -81,11 +83,16 @@ $Venv = Join-Path $DefenseClawHome ".venv"
 # `defenseclaw upgrade` (which replaces the gateway there). The venv stays under
 # DEFENSECLAW_HOME so a custom home still relocates the heavy CLI environment.
 $InstallDir = Join-Path $env:USERPROFILE ".local\bin"
-$OpenClawVersion = "2026.3.24"
 
-# Keep in sync with scripts/install.sh CONNECTOR_CHOICES and
-# internal/gateway/connector/registry.go DefaultRegistry.
-$ConnectorChoices = @("codex", "claudecode", "zeptoclaw", "openclaw", "none")
+# Keep in sync with cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS.
+# PowerShell runs on Windows, where OpenClaw/ZeptoClaw proxy connectors are
+# intentionally hidden because the native Windows path is hook-only.
+$ConnectorChoices = @(
+    "codex", "claudecode", "hermes", "cursor",
+    "windsurf", "geminicli", "copilot", "openhands",
+    "antigravity", "opencode", "omnigent", "none"
+)
+$HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -102,14 +109,16 @@ function Show-Help {
 DefenseClaw Installer (Windows)
 
 Usage:
-  irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex
+  `$Version = "0.8.3"
+  `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
+  & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
   .\install.ps1 -Local .\dist                 # from a local build
   .\install.ps1 -Yes                          # non-interactive
   .\install.ps1 -Connector codex -Quickstart  # pick connector + bootstrap
 
 Options:
   -Connector <name>    Pick agent connector ($($ConnectorChoices -join '|'))
-  -NoOpenclaw          Skip OpenClaw (alias for -Connector none when alone)
+  -NoOpenclaw          Install gateway/CLI only when no connector is selected
   -Version <x.y.z>     Install a specific release version
   -Local <dir>         Install from a local dist directory instead of downloading
   -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install
@@ -128,15 +137,6 @@ Environment variables:
 function Test-HasCommand {
     param([string]$Name)
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
-}
-
-function Confirm-YesNo {
-    param([string]$Prompt, [string]$Default = "y")
-    if ($Yes) { return $true }
-    $suffix = if ($Default -eq "y") { "[Y/n]" } else { "[y/N]" }
-    $answer = Read-Host "  $Prompt $suffix"
-    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = $Default }
-    return $answer -match '^[Yy]'
 }
 
 # ── Platform detection ────────────────────────────────────────────────────────
@@ -363,9 +363,17 @@ function Select-Connector {
         switch ($v) {
             "codex"      { Write-Host "    $i) codex      - patch %USERPROFILE%\.codex\config.toml + hooks" }
             "claudecode" { Write-Host "    $i) claudecode - patch %USERPROFILE%\.claude\settings.json hooks" }
-            "zeptoclaw"  { Write-Host "    $i) zeptoclaw  - patch %USERPROFILE%\.zeptoclaw\config.json" }
-            "openclaw"   { Write-Host "    $i) openclaw   - install OpenClaw runtime + DefenseClaw plugin" }
+            "hermes"     { Write-Host "    $i) hermes     - configure Hermes Agent hooks" }
+            "cursor"     { Write-Host "    $i) cursor     - configure Cursor hooks" }
+            "windsurf"   { Write-Host "    $i) windsurf   - configure Windsurf hooks" }
+            "geminicli"  { Write-Host "    $i) geminicli  - configure Gemini CLI hooks" }
+            "copilot"    { Write-Host "    $i) copilot    - configure GitHub Copilot CLI hooks" }
+            "openhands"  { Write-Host "    $i) openhands  - configure OpenHands hooks" }
+            "antigravity" { Write-Host "    $i) antigravity - configure Antigravity hooks" }
+            "opencode"   { Write-Host "    $i) opencode   - configure OpenCode hooks" }
+            "omnigent"   { Write-Host "    $i) omnigent   - configure OmniGent hooks" }
             "none"       { Write-Host "    $i) none       - install gateway/CLI only; pick later" }
+            default      { Write-Host "    $i) $v" }
         }
         $i++
     }
@@ -386,26 +394,6 @@ function Save-PickedConnector {
     if (-not $script:PickedConnector -or $script:PickedConnector -eq "none") { return }
     New-Item -ItemType Directory -Force -Path $DefenseClawHome | Out-Null
     Set-Content -Path (Join-Path $DefenseClawHome "picked_connector") -Value $script:PickedConnector
-}
-
-# ── Optional: OpenClaw runtime (npm) ──────────────────────────────────────────
-
-function Install-OpenClaw {
-    if ($script:PickedConnector -ne "openclaw") { return }
-    Write-Step "Checking OpenClaw"
-    if (Test-HasCommand "openclaw") {
-        Write-Ok "OpenClaw found"
-        return
-    }
-    Write-Warn2 "OpenClaw is not installed (required $OpenClawVersion)."
-    if (-not (Test-HasCommand "npm")) {
-        Write-Info "Install Node.js + npm, then: npm install -g openclaw@$OpenClawVersion"
-        return
-    }
-    if (Confirm-YesNo "Install OpenClaw $OpenClawVersion via npm?") {
-        & npm install -g "openclaw@$OpenClawVersion" --loglevel=error
-        if ($LASTEXITCODE -eq 0) { Write-Ok "OpenClaw installed" } else { Write-Warn2 "OpenClaw install failed" }
-    }
 }
 
 # ── Optional: quickstart ──────────────────────────────────────────────────────
@@ -454,10 +442,11 @@ function Write-Success {
     Write-Host "  ============================================================" -ForegroundColor Green
     Write-Host ""
     switch ($script:PickedConnector) {
-        "openclaw"   { Write-Host "  Get started:`n`n    defenseclaw init --connector openclaw --profile observe`n" -ForegroundColor Cyan }
         "codex"      { Write-Host "  Get started (Codex):`n`n    defenseclaw init --connector codex`n" -ForegroundColor Cyan }
         "claudecode" { Write-Host "  Get started (Claude Code):`n`n    defenseclaw init --connector claudecode`n" -ForegroundColor Cyan }
-        "zeptoclaw"  { Write-Host "  Get started (ZeptoClaw):`n`n    defenseclaw init --connector zeptoclaw`n" -ForegroundColor Cyan }
+        { $_ -in $HookConnectors } {
+            Write-Host "  Get started ($script:PickedConnector):`n`n    defenseclaw init --connector $script:PickedConnector`n" -ForegroundColor Cyan
+        }
         default      { Write-Host "  Get started (pick a connector later):`n`n    defenseclaw init`n" -ForegroundColor Cyan }
     }
 }
@@ -475,7 +464,7 @@ function Main {
     $script:ChecksumsFile = $null
     $script:ReleaseVersion = $null
 
-    # Validate -Connector and reconcile with -NoOpenclaw, mirroring install.sh.
+    # Validate -Connector and reconcile with -NoOpenclaw.
     if ($Connector) {
         if ($ConnectorChoices -notcontains $Connector) {
             Die "Invalid -Connector '$Connector'. Choices: $($ConnectorChoices -join ', ')"
@@ -485,8 +474,6 @@ function Main {
     if ($NoOpenclaw) {
         if (-not $script:PickedConnector) {
             $script:PickedConnector = "none"
-        } elseif ($script:PickedConnector -eq "openclaw") {
-            Die "-NoOpenclaw is incompatible with -Connector openclaw"
         }
     }
 
@@ -503,9 +490,11 @@ function Main {
     Install-Gateway -Arch $arch
     Install-Cli
 
+    $cliWiredConnectors = @("codex", "claudecode") + $HookConnectors
     switch ($script:PickedConnector) {
-        "openclaw"   { Install-OpenClaw }
-        { $_ -in @("codex", "claudecode", "zeptoclaw") } { Write-Info "Connector '$script:PickedConnector' wires up via the CLI (no OpenClaw runtime needed)." }
+        { $_ -in $cliWiredConnectors } {
+            Write-Info "Connector '$script:PickedConnector' wires up via the CLI (no OpenClaw runtime needed)."
+        }
         default      { Write-Info "Skipping connector setup - run 'defenseclaw init' when ready" }
     }
 

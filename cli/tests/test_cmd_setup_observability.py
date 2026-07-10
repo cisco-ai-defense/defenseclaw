@@ -38,6 +38,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _interactive_guardrail_setup
 
 
@@ -62,6 +63,7 @@ def _make_app(connector: str):
         api_base="",
         api_key_env="",
         fallbacks=[],
+        hook_connectors=[],
     )
     # Human-In-the-Loop (HILT) sub-namespace mirrors GuardrailConfig.hilt.
     # Required because the wizard now asks about HILT inline whenever
@@ -145,6 +147,14 @@ class TestObservabilityWizard(unittest.TestCase):
                    return_value="1"), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
                    return_value=connector), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                 side_effect=AssertionError("setup guardrail should not ask for scan strategy"),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement",
+                 side_effect=lambda gc_arg, targets: cmd_setup._merge_batch_judge_selection(gc_arg, targets, set()),
+             ), \
              patch("defenseclaw.commands.cmd_setup._print_connector_info",
                    return_value=None), \
              patch("defenseclaw.commands.cmd_setup.click.echo",
@@ -162,8 +172,8 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.scanner_mode, "local")
         self.assertEqual(gc.detection_strategy, "regex_only")
         self.assertFalse(gc.judge.enabled,
-                         "Default-accept path declines the judge prompt; "
-                         "operators who want it can opt in on rerun")
+                         "Default scan strategy is regex_only; "
+                         "operators who want judge can opt in on rerun")
         # The observability-only branch now also surfaces the hook
         # fail-mode prompt on initial setup. The mocked ``click.prompt``
         # returns "1" (open), so the persisted value must reflect that —
@@ -177,6 +187,73 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.mode, "observe")
         self.assertFalse(gc.judge.enabled)
         self.assertEqual(gc.hook_fail_mode, "open")
+
+    def test_empty_judge_selection_skips_judge_model_prompt(self):
+        app, gc = _make_app("codex")
+
+        with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False]), \
+             patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                 side_effect=AssertionError("setup guardrail should not ask for scan strategy"),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement",
+                 side_effect=lambda gc_arg, targets: cmd_setup._merge_batch_judge_selection(gc_arg, targets, set()),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
+                 side_effect=AssertionError("judge model prompt should not run with no judge connectors"),
+             ), \
+             patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="codex"), \
+             patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None), \
+             patch("defenseclaw.commands.cmd_setup.click.echo", return_value=None):
+            _interactive_guardrail_setup(app, gc, agent_name="codex")
+        self.assertFalse(gc.judge.enabled)
+        self.assertEqual(gc.detection_strategy, "regex_only")
+
+    def test_judge_selection_enables_selected_hook_coverage_and_model(self):
+        app, gc = _make_app("codex")
+
+        confirm_answers = iter([True, False, False])
+
+        def _confirm(*args, **kwargs):
+            try:
+                return next(confirm_answers)
+            except StopIteration:
+                return kwargs.get("default", False)
+
+        def _prompt(label, *args, **kwargs):
+            if "Select mode" in str(label):
+                return "2"
+            return "1"
+
+        with patch("defenseclaw.commands.cmd_setup.click.confirm",
+                   side_effect=_confirm), \
+             patch("defenseclaw.commands.cmd_setup.click.prompt",
+                   side_effect=_prompt), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                 side_effect=AssertionError("setup guardrail should not ask for scan strategy"),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement",
+                 side_effect=lambda gc_arg, targets: cmd_setup._merge_batch_judge_selection(
+                     gc_arg,
+                     targets,
+                     {"codex"},
+                 ),
+             ), \
+             patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config") as model_prompt, \
+             patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="codex"), \
+             patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None), \
+             patch("defenseclaw.commands.cmd_setup.click.echo", return_value=None):
+            _interactive_guardrail_setup(app, gc, agent_name="codex")
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")
+        self.assertEqual(gc.judge.hook_connectors, ["codex"])
+        model_prompt.assert_called_once()
 
     def test_observability_decline_disables_connector(self):
         """When the operator declines the single confirm prompt, the
@@ -224,6 +301,49 @@ class TestObservabilityWizard(unittest.TestCase):
              patch("defenseclaw.commands.cmd_setup.click.echo",
                    return_value=None):
             _interactive_guardrail_setup(app, gc, agent_name="openclaw")
+
+
+class ObservabilitySecretDotenvInjectionTests(unittest.TestCase):
+    """F-1905: an observability/audit-sink token with an embedded newline
+    must not inject a second KEY=VALUE line into ~/.defenseclaw/.env.
+
+    Audit-sink tokens (e.g. Splunk HEC ``DEFENSECLAW_SPLUNK_HEC_TOKEN``) are
+    persisted by ``observability/writer._apply_secret`` via ``_write_dotenv``,
+    which now sanitizes (``sanitize_dotenv_value``). A token carrying a newline
+    would otherwise add a second assignment (e.g. DEFENSECLAW_DISABLE_REDACTION)
+    that the line-by-line config loader would honor.
+    """
+
+    def test_newline_secret_rejected_and_no_entry_injected(self):
+        import tempfile
+
+        from defenseclaw.observability import writer as obs_writer
+        from defenseclaw.observability.presets import resolve_preset
+        from defenseclaw.safety import DotenvValueError
+
+        preset = resolve_preset("splunk-hec")
+        self.assertTrue(preset.token_env)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Seed an existing legit secret so we can prove it survives.
+            obs_writer._apply_secret(tmp, preset, "legit-token-value", dry_run=False)
+            self.addCleanup(os.environ.pop, preset.token_env, None)
+
+            malicious = "tok\nDEFENSECLAW_DISABLE_REDACTION=1"
+            with self.assertRaises(DotenvValueError):
+                obs_writer._apply_secret(tmp, preset, malicious, dry_run=False)
+
+            dotenv = os.path.join(tmp, obs_writer.DOTENV_FILE_NAME)
+            body = open(dotenv, encoding="utf-8").read()
+            # Injected entry never written; prior legit entry preserved intact.
+            self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", body)
+            self.assertIn("legit-token-value", body)
+            keys = [
+                ln.split("=", 1)[0].strip()
+                for ln in body.splitlines()
+                if ln.strip() and not ln.strip().startswith("#") and "=" in ln
+            ]
+            self.assertEqual(keys, [preset.token_env])
 
 
 if __name__ == "__main__":

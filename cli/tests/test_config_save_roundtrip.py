@@ -170,7 +170,7 @@ class TestConfigSaveRoundtripPreservesAuditSinks(unittest.TestCase):
 class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
     """The deep-merge rescues operator-added unmodelled subkeys (e.g. a
     custom ``otel.exporter.foo``) without disturbing dataclass-owned
-    siblings. Modelled dict-typed leaves like ``otel.headers`` and
+    siblings. Modelled dict-typed leaves like
     ``otel.resource.attributes`` are NOT in this preserve set —
     they're dataclass-authoritative on save (see
     :class:`TestConfigSaveAuthoritativeNestedDicts`)."""
@@ -178,7 +178,7 @@ class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
     def test_otel_round_trip_preserves_attributes_when_dataclass_loads_them(self):
         """A load → save with no edits preserves operator-set
         otel.resource.attributes. The dataclass loader (_merge_otel)
-        copies headers / attributes from the YAML, so the dataclass
+        copies attributes from the YAML, so the dataclass
         round-trip output already contains them; the new
         authoritative-path replace happens with the same content,
         leaving the file functionally unchanged. This test guards
@@ -200,7 +200,6 @@ class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
                 tmpdir,
                 otel=OTelConfig(
                     enabled=True,
-                    protocol="http",
                     resource=OTelResourceConfig(
                         attributes={
                             "defenseclaw.preset": "splunk-o11y",
@@ -227,7 +226,7 @@ class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
         save where the dataclass leaves the parent ``otel`` block
         otherwise default. The recursion still preserves unmodelled
         keys at non-authoritative paths; only the explicit
-        ``otel.headers`` / ``otel.resource.attributes`` paths are
+        ``otel.resource.attributes`` path is
         replace-on-save."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_path = os.path.join(tmpdir, "config.yaml")
@@ -251,57 +250,7 @@ class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
 
 
 class TestConfigSaveAuthoritativeNestedDicts(unittest.TestCase):
-    """Security regression suite for the second P1 finding: when the
-    Python dataclass intentionally clears a modeled
-    secret-bearing dict (``cfg.otel.headers = {}`` for OTLP
-    credential rotation; ``cfg.otel.resource.attributes = {}`` for
-    tenant-identifier flip), the on-disk file MUST reflect the
-    clear. The pre-fix deep-merge preserved file keys whenever
-    ``new`` was empty, leaving stale ``Authorization`` headers and
-    stale ``service.name`` resource attributes on disk."""
-
-    def test_otel_headers_clear_overwrites_existing_authorization(self):
-        from defenseclaw.config import OTelConfig
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            seeded = {
-                "data_dir": tmpdir,
-                "otel": {
-                    "enabled": True,
-                    "headers": {
-                        # not a real token — placeholder that
-                        # would be a credential-class leak if it
-                        # survived a clear
-                        "Authorization": "Bearer test-stale-rotated-out",
-                        "x-honeycomb-team": "team-stale",
-                    },
-                },
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(seeded, f, sort_keys=False)
-
-            # Simulate an operator rotating credentials by
-            # clearing headers explicitly.
-            cfg = _make_cfg(
-                tmpdir,
-                otel=OTelConfig(enabled=True, headers={}),
-            )
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        headers = after.get("otel", {}).get("headers", {})
-        self.assertNotIn(
-            "Authorization", headers,
-            msg=("stale Authorization header survived an explicit "
-                 "cfg.otel.headers={} save — credential leak across rotation"),
-        )
-        self.assertNotIn("x-honeycomb-team", headers)
-        # The dataclass-emitted empty dict is allowed to render as
-        # `headers: {}` or to be stripped entirely; both encode
-        # "no headers". We only require the stale keys are gone.
-        self.assertEqual(headers, {})
+    """Clearing modeled process resource attributes must persist to disk."""
 
     def test_otel_resource_attributes_clear_drops_service_name(self):
         from defenseclaw.config import (
@@ -352,8 +301,8 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
     a temp via ``open(tmp, 'w')`` (umask-honoring, typically 0644)
     and ``os.replace``d it onto a 0600 live file, silently
     downgrading the mode to 0644 — exposing gateway / OTLP
-    credentials carried in the file (e.g. ``gateway.token``,
-    ``otel.headers.Authorization``)."""
+    credentials carried in the file (e.g. ``gateway.token`` and named
+    destination authorization headers)."""
 
     def test_save_preserves_existing_0600_mode(self):
         """A 0600 config.yaml stays 0600 across save."""
@@ -688,24 +637,6 @@ class TestMergeHelpers(unittest.TestCase):
         self.assertEqual(out["b"]["x"], 99)
         self.assertEqual(out["b"]["y"], 20)  # preserved nested
         self.assertTrue(out["preserved"])    # preserved top-of-recurse
-
-    def test_authoritative_otel_dict_preserves_concurrent_disk_update_when_unchanged(self):
-        merged = _merge_preserving_unmodeled(
-            existing={"otel": {"headers": {"Authorization": "Bearer new"}}},
-            new={"otel": {"headers": {}}},
-            owned_top_level=frozenset({"otel"}),
-            authoritative_base={"otel.headers": {}},
-        )
-        self.assertEqual(merged["otel"]["headers"], {"Authorization": "Bearer new"})
-
-    def test_authoritative_otel_dict_can_still_be_cleared_when_changed(self):
-        merged = _merge_preserving_unmodeled(
-            existing={"otel": {"headers": {"Authorization": "Bearer old"}}},
-            new={"otel": {"headers": {}}},
-            owned_top_level=frozenset({"otel"}),
-            authoritative_base={"otel.headers": {"Authorization": "Bearer old"}},
-        )
-        self.assertEqual(merged["otel"]["headers"], {})
 
     def test_load_existing_returns_empty_on_missing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:

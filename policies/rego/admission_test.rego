@@ -122,6 +122,73 @@ test_policy_allow_no_bypass_falls_through if {
 	result.verdict == "scan"
 }
 
+# --- F-0941: path-pinned allow entries must not be reused from a new path ---
+
+# A legacy allow entry with no source_path still matches on name+type.
+test_allow_no_source_path_matches if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "trusted-skill",
+		"path": "/tmp/anywhere",
+		"block_list": [],
+		"allow_list": [{"target_type": "skill", "target_name": "trusted-skill", "reason": "vendor"}],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+		with data.severity_ranking as {}
+
+	result.verdict == "allowed"
+}
+
+# A path-pinned allow entry matches when the presented path matches the pin.
+test_allow_path_pin_matches if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "trusted-skill",
+		"path": "/opt/vetted/trusted-skill",
+		"block_list": [],
+		"allow_list": [{
+			"target_type": "skill",
+			"target_name": "trusted-skill",
+			"reason": "vendor",
+			"source_path": "/opt/vetted/trusted-skill",
+		}],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+		with data.severity_ranking as {}
+
+	result.verdict == "allowed"
+}
+
+# F-0941 repro: the SAME allowed name presented from a DIFFERENT path must NOT
+# be honored — it falls through to a scan instead of an allow bypass.
+test_allow_path_pin_mismatch_does_not_allow if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "trusted-skill",
+		"path": "/tmp/attacker/trusted-skill",
+		"block_list": [],
+		"allow_list": [{
+			"target_type": "skill",
+			"target_name": "trusted-skill",
+			"reason": "vendor",
+			"source_path": "/opt/vetted/trusted-skill",
+		}],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+		with data.severity_ranking as {}
+
+	result.verdict == "scan"
+}
+
 # --- scan_on_install disabled ---
 
 test_scan_on_install_false_allows_without_scan if {

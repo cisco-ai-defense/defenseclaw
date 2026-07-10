@@ -57,7 +57,7 @@ defenseclaw setup redaction off --yes  # CI / TUI form (no confirmation)
 defenseclaw setup redaction on         # turn it back ON
 ```
 
-`setup redaction` updates `privacy.disable_redaction` in `~/.defenseclaw/config.yaml`, restarts the gateway by default (the kill-switch is read at sidecar boot), and logs an audit entry. Use `--no-restart` only when the sidecar is offline.
+`setup redaction` updates `privacy.disable_redaction` in `~/.defenseclaw/config.yaml` and logs an audit entry. The gateway config watcher hot-applies the kill-switch in the default reload mode; deployments using `gateway.config_reload.mode: restart` apply it through the full restart path.
 
 For a one-shell ephemeral reveal during incident triage:
 
@@ -67,8 +67,8 @@ DEFENSECLAW_REVEAL_PII=1 defenseclaw tui     # raw values in the Logs panel only
 
 — the audit DB and Splunk HEC will continue to receive redacted placeholders.
 
-<Callout title="Do not use `defenseclaw config set …`">
-There is no `defenseclaw config set` subcommand — `defenseclaw config` only exposes `show`, `path`, and `validate`. Use `defenseclaw setup redaction on|off` to flip the kill-switch. The Go and Python loaders emit a startup warning when `privacy.disable_redaction=true`; that warning has been corrected to point at this command.
+<Callout title="There is no config-set command">
+The `defenseclaw config` group only exposes `show`, `path`, and `validate`. Use `defenseclaw setup redaction on|off` to flip the kill-switch. The Go and Python loaders emit a startup warning when `privacy.disable_redaction=true`; that warning points at this command.
 </Callout>
 
 ## What `status` prints

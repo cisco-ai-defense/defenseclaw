@@ -24,6 +24,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
 
@@ -58,7 +60,16 @@ type NetworkEgressEvent struct {
 
 	// SessionID correlates this event to a specific agent session.
 	// Empty when the session is not known (e.g. pre-session bootstrap calls).
-	SessionID string `json:"session_id,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
+	Connector        string `json:"connector,omitempty"`
+	AgentID          string `json:"agent_id,omitempty"`
+	RootAgentID      string `json:"root_agent_id,omitempty"`
+	ParentAgentID    string `json:"parent_agent_id,omitempty"`
+	RootSessionID    string `json:"root_session_id,omitempty"`
+	AgentLifecycleID string `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID string `json:"agent_execution_id,omitempty"`
+	UserID           string `json:"user_id,omitempty"`
+	ToolID           string `json:"tool_id,omitempty"`
 
 	// Hostname is the destination host (no port). Required.
 	Hostname string `json:"hostname"`
@@ -116,22 +127,34 @@ func (e *NetworkEgressEvent) effectiveSeverity() string {
 
 // toRow converts the event to the store's persisted shape.
 func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
-	url := e.URL
+	url := netguard.ScrubURLString(e.URL)
+	if strings.TrimSpace(e.URL) == "" {
+		url = ""
+	}
 	if len(url) > 512 {
 		url = truncateUTF8(url, 512)
 	}
 	return NetworkEgressRow{
-		Timestamp:     e.Timestamp,
-		SessionID:     e.SessionID,
-		Hostname:      e.Hostname,
-		URL:           url,
-		HTTPMethod:    e.HTTPMethod,
-		Protocol:      e.Protocol,
-		PolicyOutcome: e.PolicyOutcome,
-		DecisionCode:  e.DecisionCode,
-		Blocked:       e.Blocked,
-		Severity:      e.effectiveSeverity(),
-		Details:       e.Details,
+		Timestamp:        e.Timestamp,
+		SessionID:        e.SessionID,
+		Connector:        e.Connector,
+		AgentID:          e.AgentID,
+		RootAgentID:      e.RootAgentID,
+		ParentAgentID:    e.ParentAgentID,
+		RootSessionID:    e.RootSessionID,
+		AgentLifecycleID: e.AgentLifecycleID,
+		AgentExecutionID: e.AgentExecutionID,
+		UserID:           e.UserID,
+		ToolID:           e.ToolID,
+		Hostname:         e.Hostname,
+		URL:              url,
+		HTTPMethod:       e.HTTPMethod,
+		Protocol:         e.Protocol,
+		PolicyOutcome:    e.PolicyOutcome,
+		DecisionCode:     e.DecisionCode,
+		Blocked:          e.Blocked,
+		Severity:         e.effectiveSeverity(),
+		Details:          e.Details,
 	}
 }
 
@@ -170,6 +193,14 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 	// Record OTel audit-event counter for every egress observation.
 	if otel != nil {
 		otel.RecordAuditEvent(ctx, "network-egress", e.effectiveSeverity())
+		otel.EmitNetworkEgressLog(ctx, telemetry.NetworkEgressLogAttrs{
+			SessionID: e.SessionID, Connector: e.Connector, AgentID: e.AgentID,
+			RootAgentID: e.RootAgentID, ParentAgentID: e.ParentAgentID, RootSessionID: e.RootSessionID,
+			LifecycleID: e.AgentLifecycleID, ExecutionID: e.AgentExecutionID, UserID: e.UserID,
+			ToolID: e.ToolID, Hostname: e.Hostname, HTTPMethod: e.HTTPMethod, Protocol: e.Protocol,
+			PolicyOutcome: e.PolicyOutcome, DecisionCode: e.DecisionCode, Blocked: e.Blocked,
+			Severity: e.effectiveSeverity(),
+		})
 	}
 
 	if !e.Blocked {
@@ -178,6 +209,10 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 
 	// Blocked call: raise an audit_events alert so the TUI and /alerts
 	// endpoint surface it without requiring a separate egress query.
+	redactedURL := row.URL
+	if len(redactedURL) > 200 {
+		redactedURL = truncateUTF8(redactedURL, 200)
+	}
 	alert := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: e.Timestamp,
@@ -185,7 +220,7 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 		Target:    e.Hostname,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",
-			truncateStr(e.URL, 200), e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
+			redactedURL, e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
 		Severity: "HIGH",
 		RunID:    currentRunID(),
 	})

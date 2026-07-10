@@ -128,6 +128,22 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},
+		{
+			connector:      "opencode",
+			event:          "tool.execute.before",
+			toolName:       "bash",
+			topLevelOutput: "hook_output",
+			expectAction:   "block",
+		},
+		{
+			connector: "omnigent",
+			event:     "PreToolUse",
+			toolName:  "bash",
+			// The Python policy consumes the canonical top-level action
+			// directly; OmniGent has no nested hook response envelope.
+			topLevelOutput: "",
+			expectAction:   "block",
+		},
 	}
 
 	// Set up a real in-memory tracer so we can assert that the
@@ -193,8 +209,10 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 					t.Errorf("response missing canonical field %q\nbody=%s", field, w.Body.String())
 				}
 			}
-			if _, ok := parsed[sh.topLevelOutput]; !ok {
-				t.Errorf("response missing connector output field %q\nbody=%s", sh.topLevelOutput, w.Body.String())
+			if sh.topLevelOutput != "" {
+				if _, ok := parsed[sh.topLevelOutput]; !ok {
+					t.Errorf("response missing connector output field %q\nbody=%s", sh.topLevelOutput, w.Body.String())
+				}
 			}
 			for _, forbidden := range []string{"claude_code_output", "codex_output", "hook_output"} {
 				if forbidden == sh.topLevelOutput {

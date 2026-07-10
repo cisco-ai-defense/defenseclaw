@@ -31,7 +31,7 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │  │ REST API  │ │ Audit /   │ │ Policy   │ │ OpenClaw WS     │       │    │
 │  │  │ Server    │ │ SIEM      │ │ Engine   │ │ Client          │       │    │
 │  │  │           │ │ Emitter   │ │          │ │                 │       │    │
-│  │  │ Accepts   │ │           │ │ Block /  │ │ WS protocol v3  │       │    │
+│  │  │ Accepts   │ │           │ │ Block /  │ │ WS protocol 3-4 │       │    │
 │  │  │ requests  │ │ Splunk    │ │ Allow /  │ │ Subscribes to   │       │    │
 │  │  │ from CLI  │ │ HEC, CSV  │ │ Scan     │ │ all events,     │       │    │
 │  │  │ & plugins │ │ export    │ │ gate     │ │ sends commands  │       │    │
@@ -154,7 +154,7 @@ only component with direct access to all subsystems.
 |----------------|--------|
 | REST API server (`:18970`) | Accepts requests from CLI and plugins; CSRF-protected, localhost-bound |
 | Guardrail proxy (`:4000`) | HTTP reverse proxy that inspects all LLM traffic; rate-limited (100/s, burst 200) |
-| OpenClaw WebSocket client | Connects via protocol v3, HMAC-SHA256 challenge-response auth, sequence tracking |
+| OpenClaw WebSocket client | Connects with a protocol v3-v4 range, Ed25519 device challenge-response auth, sequence tracking |
 | Event router | Dispatches WebSocket events (`tool_call`, `tool_result`, `exec.approval.requested`, `session.message`, `agent`) with judge semaphore (cap 16) |
 | Command dispatch | Sends RPC commands to OpenClaw: `exec.approval.resolve`, `skills.update`, `config.get`, `config.patch`, `tools.catalog`, `sessions.list` |
 | Enforcement engine | Manages block/allow lists in SQLite (`internal/enforce/`) — separate from OPA |
@@ -167,9 +167,9 @@ only component with direct access to all subsystems.
 | Inventory | Tracks installed skills/MCP servers (AIBOM) |
 | Daemon control | PID file management, process lifecycle (start/stop/restart), lumberjack log rotation |
 | Telemetry | OpenTelemetry tracing and metrics (spans for tools, approvals, LLM calls, guardrail stages, agent lifecycle) |
-| TUI dashboard | 12-panel Bubbletea terminal UI (Overview, Alerts, Skills, MCPs, Plugins, Inventory, Policy, Logs, Audit, Activity, Tools, Setup) |
+| TUI dashboard | 12-panel Python Textual terminal UI (Overview, Alerts, Skills, MCPs, Plugins, Inventory, Logs, Audit, Activity, AI Discovery, Registries, Setup) |
 | PII redaction | Two-layer redaction: `<redacted len=N sha=8hex>` — sink layer always redacts regardless of reveal flag |
-| Hot reload | `guardrail_runtime.json` checked every 5s; updates mode and blockMessage under RWMutex |
+| Hot reload | `config.yaml` watched with fsnotify; full config is reloaded, validated, diffed, and reconciled in-process. `gateway.config_reload.mode: restart` opts into a validated full gateway restart instead. |
 
 ### 4. SQLite Database
 
@@ -321,7 +321,7 @@ requires only a new case in `internal/config/claw.go`.
 ## Component Communication Summary
 
 ```
-┌─────────┐    REST     ┌──────────────┐    WS (v3)    ┌──────────────┐
+┌─────────┐    REST     ┌──────────────┐   WS (v3-v4)  ┌──────────────┐
 │   CLI   │───────────▶│  DefenseClaw │──────────────▶│   OpenClaw   │
 │ (Python)│            │   Gateway    │               │   Gateway    │
 └─────────┘            │   (Go)       │◀──────────────│              │
@@ -344,7 +344,7 @@ requires only a new case in `internal/config/claw.go`.
 
 ## Internal Packages (Go Gateway)
 
-The Go gateway is organized into 19 internal packages:
+The Go gateway's key internal packages are:
 
 | Package | Purpose |
 |---------|---------|
@@ -364,8 +364,10 @@ The Go gateway is organized into 19 internal packages:
 | `sandbox/` | NVIDIA OpenShell sandbox policy enforcement |
 | `scanner/` | 9 built-in scanner implementations: ClawShield (injection, malware, PII, secrets, vuln), CodeGuard, MCP scanner, Skill scanner, Plugin scanner. Common `Scanner` interface |
 | `telemetry/` | OpenTelemetry: `guardrail/{stage}` and `guardrail.{phase}` span hierarchy, `inspect/{tool}` spans, 20+ metric instruments (verdicts, judge latency, cache hits, sink delivery, stream lifecycle) |
-| `tui/` | 12-panel Bubbletea dashboard (Lipgloss + Bubbles) |
 | `watcher/` | File system monitoring (fsnotify) with 500ms debounce, three-phase admission gate (pre-scan OPA → scan → post-scan OPA), periodic rescan (60-min default) with 8-type drift detection, policy file watching (2s poll) |
+
+The Python operator surface lives outside the Go package tree. Its
+`cli/defenseclaw/tui/` package provides the 12-panel Textual dashboard.
 
 ## Multi-Turn Injection Detection
 

@@ -65,13 +65,17 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     # so a user passing a documented alias resolves the configured canonical
     # peer instead of hitting "not configured".
     from defenseclaw import connector_paths
+    from defenseclaw.connector_contracts import normalize_connector
 
-    by_norm = {connector_paths.normalize(name): name for name in configured if name}
-    match = by_norm.get(connector_paths.normalize(requested))
+    def _normalize_alias(name: str) -> str:
+        return connector_paths.normalize(normalize_connector(name))
+
+    by_norm = {_normalize_alias(name): name for name in configured if name}
+    match = by_norm.get(_normalize_alias(requested))
     if match is None:
         allowed = ", ".join(sorted(configured)) or active
         raise click.UsageError(
-            f"connector {requested!r} is not configured. Active connectors: {allowed}."
+            f"connector {requested!r} is not configured. Configured connectors: {allowed}."
         )
     return match
 
@@ -89,10 +93,30 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
       single-connector install and N names on a fan-out install, so the
       caller renders the same way regardless of count — the operator never
       has to think about "single vs multi".
+    * When **nothing is configured** (e.g. after ``setup remove`` clears the
+      last connector) this prints a one-line pointer to ``setup`` and exits
+      cleanly instead of fanning out to a phantom ``openclaw``. That keeps
+      every consumer — ``mcp/skill/plugin list``, ``codeguard``, and the
+      ``mcp set``/``unset`` mutators that share this resolver — from
+      silently operating against ``~/.openclaw`` when no connector exists.
     """
     if requested and requested.strip():
         return [resolve_list_connector(app, requested)]
     cfg = getattr(app, "cfg", None)
+    # Zero-config guard. ``active_connectors()`` already returns [] here, but
+    # the singular fallback at the bottom would otherwise floor back to
+    # "openclaw" — so intercept explicitly and surface the empty state. The
+    # message text mirrors the no-connector hint used elsewhere.
+    if cfg is not None and hasattr(cfg, "has_connector_configured"):
+        try:
+            configured = cfg.has_connector_configured()
+        except Exception:  # noqa: BLE001 — fail open to legacy behavior.
+            configured = True
+        if not configured:
+            click.echo(
+                "no connector configured — run 'defenseclaw setup <connector>'"
+            )
+            raise SystemExit(0)
     try:
         if cfg is not None and hasattr(cfg, "active_connectors"):
             names = [n for n in cfg.active_connectors() if n]

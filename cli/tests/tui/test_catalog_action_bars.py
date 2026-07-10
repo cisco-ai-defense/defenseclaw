@@ -1,5 +1,5 @@
-"""Click-first action bars for the catalog panels (Skills / MCPs /
-Plugins / Tools).
+"""Click-first action bars for the visible catalog panels (Skills / MCPs /
+Plugins).
 
 These tests cover the new control bars that mirror the keyboard flow:
 each catalog panel exposes a ``<panel>-controls`` ``Horizontal`` with a
@@ -23,7 +23,7 @@ from defenseclaw.tui.app import DefenseClawTUI
 from textual.containers import Horizontal
 from textual.widgets import Button, Input
 
-CATALOG_PANELS: tuple[str, ...] = ("skills", "mcps", "plugins", "tools")
+CATALOG_PANELS: tuple[str, ...] = ("skills", "mcps", "plugins")
 
 
 @pytest.mark.asyncio
@@ -194,36 +194,6 @@ async def test_catalog_refresh_button_routes_to_reload_intent(panel: str, monkey
         assert loaded == [panel], (
             f"Refresh on {panel} bar should re-run _load_catalog_model({panel!r})"
         )
-
-
-@pytest.mark.asyncio
-async def test_tools_refresh_button_refreshes_audit_store() -> None:
-    """The Tools panel refreshes in-place from the audit store rather
-    than re-spawning a CLI subprocess, so a Refresh click should hit
-    ``ToolsPanelModel.refresh()`` directly. Without this distinct test
-    a Tools-only regression that drops the in-place refresh would
-    sail through the parametrized ``_load_catalog_model`` coverage.
-    """
-
-    app = DefenseClawTUI()
-    calls: list[bool] = []
-
-    async with app.run_test(size=(140, 40)) as pilot:
-        await pilot.pause()
-        app.action_switch_panel("tools")
-        await pilot.pause()
-        # Wrap (not replace) so the underlying refresh still runs and
-        # ``handle_key`` still sees a healthy model.
-        original = app.tools_model.refresh
-
-        def _spy() -> None:
-            calls.append(True)
-            original()
-
-        app.tools_model.refresh = _spy  # type: ignore[method-assign]
-        app._handle_catalog_control("tools", "tools-refresh")  # noqa: SLF001
-        await pilot.pause()
-        assert calls == [True]
 
 
 @pytest.mark.asyncio

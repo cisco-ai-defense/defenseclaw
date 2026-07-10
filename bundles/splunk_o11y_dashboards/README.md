@@ -50,10 +50,14 @@ Preferred DefenseClaw CLI flow:
 
 The CLI automatically imports matching existing dashboards and detectors when they are already present in O11y, and creates fresh resources when they are not.
 
+Provide the API access token through the `SFX_AUTH_TOKEN` environment variable
+rather than a CLI flag: arguments are visible in the process list and shell
+history, so never put the API token on the command line.
+
 ```bash
+export SFX_AUTH_TOKEN=...
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --o11y-api-token <api-access-token> \
   --yes
 ```
 
@@ -63,7 +67,7 @@ defenseclaw setup splunk dashboards apply \
 | Flag | Purpose |
 |---|---|
 | `--api-url <url>` | Splunk Observability Cloud API URL|
-| `--o11y-api-token <token>` | Splunk O11y API access token. |
+| `SFX_AUTH_TOKEN` (env var) | Splunk O11y API access token. Pass it via the environment, never on the command line. |
 | `--with-detectors` | Create detectors along with dashboards. Omit this flag for dashboards only. |
 | `--enable-detectors` | Create detectors enabled instead of disabled. This only matters when `--with-detectors` is set. |
 | `--dashboards-only` | Explicitly skip detectors. This is the default when `--with-detectors` is not provided. |
@@ -71,9 +75,9 @@ defenseclaw setup splunk dashboards apply \
 | `--detector-notification <target>` | Repeatable detector notification target such as `Email,secops@example.com`. |
 
 ```bash
+export SFX_AUTH_TOKEN=...
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --o11y-api-token <api-access-token> \
   --dashboards-only \
   --yes
 ```
@@ -81,9 +85,9 @@ defenseclaw setup splunk dashboards apply \
 Create detectors, left disabled:
 
 ```bash
+export SFX_AUTH_TOKEN=...
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --o11y-api-token <api-access-token> \
   --with-detectors \
   --yes
 ```
@@ -91,9 +95,9 @@ defenseclaw setup splunk dashboards apply \
 Create detectors enabled:
 
 ```bash
+export SFX_AUTH_TOKEN=...
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --o11y-api-token <api-access-token> \
   --with-detectors \
   --enable-detectors \
   --yes

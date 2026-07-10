@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SIDECAR_URL="http://127.0.0.1:18970"
 OPENCLAW_URL="http://127.0.0.1:18789"
 GUARDRAIL_URL="http://127.0.0.1:4000"
-SPLUNK_HEC_URL="http://127.0.0.1:8088"
+SPLUNK_HEC_URL="https://127.0.0.1:8088"
 SPLUNK_HEC_TOKEN="00000000-0000-0000-0000-000000000001"
 SPLUNK_API_URL="https://127.0.0.1:8089"
 SPLUNK_CREDS="admin:DefenseClawLocalMode1!"
@@ -41,6 +41,7 @@ E2E_REQUIRE_RECOVERY="${E2E_REQUIRE_RECOVERY:-false}"
 OPENCLAW_MODEL_PATCHED="${OPENCLAW_MODEL_PATCHED:-false}"
 OPENCLAW_MODEL_BACKUP_PATH="${OPENCLAW_MODEL_BACKUP_PATH:-/tmp/defenseclaw-openclaw.full-live.backup.json}"
 ANTHROPIC_PASSTHROUGH_RAN="${ANTHROPIC_PASSTHROUGH_RAN:-false}"
+RUNTIME_TOOL_INSPECTION_EXERCISED=false
 
 sanitize_name() {
     printf '%s' "$1" | tr -cs '[:alnum:]._-' '-'
@@ -166,6 +167,7 @@ start_openclaw_gateway() {
     else
         openclaw gateway --force &
         OPENCLAW_PID=$!
+        sleep "${OPENCLAW_GATEWAY_START_GRACE:-4}"
     fi
 }
 
@@ -195,10 +197,61 @@ wait_for_openclaw_gateway() {
     return 1
 }
 
+repair_ci_product_state() {
+    local mode="${1:-state}"
+    if [ "$mode" = "permissions-only" ]; then
+        RUNNER_CLEANUP_PERMISSIONS_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+    else
+        RUNNER_CLEANUP_STATE_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+    fi
+}
+
+repair_ci_product_permissions() {
+    RUNNER_CLEANUP_REPAIR_PERMISSIONS_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+}
+
+ensure_openclaw_config_readable() {
+    local reason="${1:-OpenClaw config access}"
+    if [ -e "$HOME/.openclaw/openclaw.json" ] && [ ! -r "$HOME/.openclaw/openclaw.json" ]; then
+        echo "  [diag] repairing unreadable OpenClaw state before $reason..." >&2
+        repair_ci_product_permissions
+    fi
+}
+
+ensure_directory_writable() {
+    local dir="$1"
+    local reason="${2:-writing files}"
+    local probe
+
+    [ -n "$dir" ] || return 1
+    ensure_openclaw_config_readable "$reason"
+
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        echo "  [diag] repairing OpenClaw state permissions before creating $dir..." >&2
+        repair_ci_product_permissions
+        mkdir -p "$dir"
+    fi
+
+    if ! probe=$(mktemp "$dir/.defenseclaw-write-test.XXXXXX" 2>/dev/null); then
+        echo "  [diag] repairing OpenClaw state permissions before writing to $dir..." >&2
+        repair_ci_product_permissions
+        probe=$(mktemp "$dir/.defenseclaw-write-test.XXXXXX")
+    fi
+    rm -f "$probe" 2>/dev/null || true
+}
+
 restart_openclaw_gateway() {
     openclaw gateway stop 2>/dev/null || true
     sleep 1
     start_openclaw_gateway
+}
+
+repair_openclaw_gateway_startup_state() {
+    echo "  Repairing OpenClaw gateway startup state..."
+    repair_ci_product_state
+    openclaw doctor --fix >/tmp/openclaw-doctor-fix.log 2>&1 || true
+    repair_ci_product_state
+    prune_openclaw_config_for_prefix || true
 }
 
 ensure_openclaw_gateway_running() {
@@ -207,6 +260,7 @@ ensure_openclaw_gateway_running() {
         return 0
     fi
     echo "  OpenClaw gateway not reachable — restarting..."
+    repair_openclaw_gateway_startup_state
     restart_openclaw_gateway
     wait_for_openclaw_gateway "$timeout" 2
 }
@@ -217,6 +271,41 @@ extract_json() {
 
 count_nonempty_lines() {
     printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+}
+
+read_dotenv_value() {
+    local key="$1"
+    local env_path="$HOME/.defenseclaw/.env"
+    local line
+    [ -f "$env_path" ] || return 0
+    line=$(grep -E "^${key}=" "$env_path" 2>/dev/null | tail -n 1 || true)
+    [ -n "$line" ] || return 0
+    printf '%s\n' "${line#*=}" | sed "s/^['\"]//;s/['\"]$//"
+}
+
+sync_gateway_token_env_from_dotenv() {
+    local dc_token oc_token
+    local synced=false
+    dc_token="$(read_dotenv_value DEFENSECLAW_GATEWAY_TOKEN)"
+    oc_token="$(read_dotenv_value OPENCLAW_GATEWAY_TOKEN)"
+    if [ -n "$dc_token" ]; then
+        export DEFENSECLAW_GATEWAY_TOKEN="$dc_token"
+        synced=true
+    fi
+    if [ -n "$oc_token" ]; then
+        export OPENCLAW_GATEWAY_TOKEN="$oc_token"
+        synced=true
+    elif [ -n "$dc_token" ]; then
+        export OPENCLAW_GATEWAY_TOKEN="$dc_token"
+        synced=true
+    fi
+    if [ "$synced" = true ]; then
+        if [ -n "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+            GATEWAY_TOKEN_CACHE="$DEFENSECLAW_GATEWAY_TOKEN"
+        elif [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+            GATEWAY_TOKEN_CACHE="$OPENCLAW_GATEWAY_TOKEN"
+        fi
+    fi
 }
 
 splunk_search() {
@@ -281,8 +370,19 @@ get_gateway_token() {
         return
     fi
 
-    # Strategy 1: resolve via Python config (loads .env + config.yaml).
-    GATEWAY_TOKEN_CACHE=$(python3 - <<'PY' 2>/dev/null || true
+    # Strategy 1: token persisted by the sidecar/OpenClaw auth repair path.
+    # The CI shell can retain stale exported tokens while the daemon has
+    # already refreshed ~/.defenseclaw/.env after an OpenClaw token mismatch.
+    sync_gateway_token_env_from_dotenv
+    if [ "$GATEWAY_TOKEN_CACHE" != "__unset__" ]; then
+        printf '%s\n' "$GATEWAY_TOKEN_CACHE"
+        return
+    fi
+    GATEWAY_TOKEN_CACHE=""
+
+    # Strategy 2: resolve via Python config (loads .env + config.yaml).
+    if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
+        GATEWAY_TOKEN_CACHE=$(python3 - <<'PY' 2>/dev/null || true
 from defenseclaw.config import load
 try:
     print(load().gateway.resolved_token())
@@ -290,13 +390,19 @@ except Exception:
     print("")
 PY
 )
+    fi
 
-    # Strategy 2: env var directly (matches Go sidecar's ResolvedToken).
+    # Strategy 3: canonical sidecar API token from the current process env.
+    if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
+        GATEWAY_TOKEN_CACHE="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+    fi
+
+    # Strategy 4: legacy OpenClaw token from the current process env.
     if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
         GATEWAY_TOKEN_CACHE="${OPENCLAW_GATEWAY_TOKEN:-}"
     fi
 
-    # Strategy 3: read token_env name from config, then check that env var.
+    # Strategy 5: read token_env name from config, then check that env var.
     if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/config.yaml" ]; then
         local token_env_name
         token_env_name=$(grep 'token_env:' "$HOME/.defenseclaw/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
@@ -305,12 +411,13 @@ PY
         fi
     fi
 
-    # Strategy 4: parse ~/.defenseclaw/.env directly (same as Go loadDotEnvIntoOS).
-    if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/.env" ]; then
-        GATEWAY_TOKEN_CACHE=$(grep '^OPENCLAW_GATEWAY_TOKEN=' "$HOME/.defenseclaw/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" || true)
+    if [ -n "$GATEWAY_TOKEN_CACHE" ]; then
+        export DEFENSECLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN_CACHE"
+        printf '%s\n' "$GATEWAY_TOKEN_CACHE"
+    else
+        GATEWAY_TOKEN_CACHE="__unset__"
+        printf '\n'
     fi
-
-    printf '%s\n' "$GATEWAY_TOKEN_CACHE"
 }
 
 curl_with_gateway_headers() {
@@ -341,6 +448,27 @@ sidecar_post() {
     curl_with_gateway_headers POST "$SIDECAR_URL$path" "$body"
 }
 
+sidecar_post_retry_config_patch_rate_limit() {
+    local path="$1"
+    local body="${2:-}"
+    local attempts="${3:-3}"
+    local resp wait_s
+    for attempt in $(seq 1 "$attempts"); do
+        resp=$(sidecar_post "$path" "$body" 2>&1 || true)
+        if ! echo "$resp" | grep -Eqi 'rate limit exceeded( for config\.patch)?|rate_limit_error|UNAVAILABLE'; then
+            printf '%s\n' "$resp"
+            return 0
+        fi
+        wait_s=$(echo "$resp" | sed -nE 's/.*retry after ([0-9]+)s.*/\1/p' | head -1)
+        wait_s="${wait_s:-20}"
+        if [ "$attempt" -lt "$attempts" ]; then
+            echo "  config.patch rate-limited for ${path}; retrying in ${wait_s}s (attempt $((attempt + 1))/${attempts})" >&2
+            sleep "$wait_s"
+        fi
+    done
+    printf '%s\n' "$resp"
+}
+
 # sidecar_api_authenticated performs a lightweight authenticated GET to
 # /alerts?limit=1 and returns 0 if successful, 1 if unauthorized.
 # Call early (e.g. in phase_start) to detect token mismatches before
@@ -351,10 +479,27 @@ sidecar_api_authenticated() {
     if echo "$raw" | jq -e '.error' >/dev/null 2>&1; then
         echo "  [diag] sidecar API probe failed: $raw" >&2
         echo "  [diag] token resolved by test: '$(get_gateway_token | head -c6)...'" >&2
-        echo "  [diag] OPENCLAW_GATEWAY_TOKEN env: '${OPENCLAW_GATEWAY_TOKEN:+set (${#OPENCLAW_GATEWAY_TOKEN} chars)}${OPENCLAW_GATEWAY_TOKEN:-<empty>}'" >&2
+        echo "  [diag] DEFENSECLAW_GATEWAY_TOKEN env: '${DEFENSECLAW_GATEWAY_TOKEN:+set (${#DEFENSECLAW_GATEWAY_TOKEN} chars)}'" >&2
+        echo "  [diag] OPENCLAW_GATEWAY_TOKEN env: '${OPENCLAW_GATEWAY_TOKEN:+set (${#OPENCLAW_GATEWAY_TOKEN} chars)}'" >&2
         return 1
     fi
     return 0
+}
+
+restart_sidecar_after_openclaw_token_repair() {
+    local log_file="$HOME/.defenseclaw/gateway.log"
+    [ -f "$log_file" ] || return 0
+    if ! tail -n 120 "$log_file" 2>/dev/null | grep -q "gateway token refreshed from openclaw.json"; then
+        return 0
+    fi
+
+    echo "  Detected OpenClaw gateway token repair; restarting sidecar to reload API auth..."
+    sync_gateway_token_env_from_dotenv
+    defenseclaw-gateway restart 2>/dev/null || defenseclaw-gateway start 2>/dev/null || true
+    wait_for_url "$SIDECAR_URL/health" 60 2 || true
+    wait_for_sidecar_subsystems_running 60 || true
+    repair_ci_product_state permissions-only
+    sync_gateway_token_env_from_dotenv
 }
 
 alerts_for_run() {
@@ -585,6 +730,25 @@ find_runtime_plugin_path() {
     return 1
 }
 
+find_quarantined_plugin_path() {
+    local name="$1"
+    local root="$HOME/.defenseclaw/quarantine/plugins"
+    [ -n "$name" ] || return 1
+    if [ -d "$root/$name" ]; then
+        printf '%s\n' "$root/$name"
+        return 0
+    fi
+    if [ -d "$root" ]; then
+        local match
+        match=$(find "$root" -mindepth 2 -maxdepth 2 -type d -name "$name" -print -quit 2>/dev/null || true)
+        if [ -n "$match" ]; then
+            printf '%s\n' "$match"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 cleanup_skill_name() {
     local name="$1"
     while IFS= read -r dir; do
@@ -592,6 +756,7 @@ cleanup_skill_name() {
         rm -rf "$dir/$name" 2>/dev/null || true
     done < <(get_skill_dirs)
     rm -rf "$HOME/.defenseclaw/quarantine/skills/$name" 2>/dev/null || true
+    rm -rf "$HOME/.defenseclaw/quarantine/skills"/*/"$name" 2>/dev/null || true
 }
 
 cleanup_plugin_name() {
@@ -601,10 +766,21 @@ cleanup_plugin_name() {
         rm -rf "$dir/$name" 2>/dev/null || true
     done < <(get_plugin_dirs)
     rm -rf "$HOME/.defenseclaw/quarantine/plugins/$name" 2>/dev/null || true
+    rm -rf "$HOME/.defenseclaw/quarantine/plugins"/*/"$name" 2>/dev/null || true
 }
 
 skill_list_json() {
-    defenseclaw skill list --json 2>/dev/null || echo "[]"
+    local out
+    if out=$(defenseclaw skill list --json 2>/dev/null) && echo "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        printf '%s\n' "$out"
+        return
+    fi
+    repair_ci_product_permissions
+    if out=$(defenseclaw skill list --json 2>/dev/null) && echo "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        printf '%s\n' "$out"
+    else
+        echo "[]"
+    fi
 }
 
 plugin_list_json() {
@@ -697,16 +873,48 @@ copy_skill_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
-    mkdir -p "$dest_root/$dest_name"
-    cp -R "$fixture_dir"/. "$dest_root/$dest_name/"
+	local stage_parent stage_dir
+    if [ -z "$dest_root" ] || [ -z "$dest_name" ]; then
+        echo "missing destination for skill fixture copy" >&2
+        return 1
+    fi
+    ensure_directory_writable "$dest_root" "copying skill fixture"
+    stage_parent=$(dirname "$dest_root")
+    stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-skill-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-skill-fixture.XXXXXX")
+    if ! cp -R "$fixture_dir"/. "$stage_dir/"; then
+		rm -rf -- "${stage_dir:?}"
+        return 1
+    fi
+    chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
+    rm -rf -- "${dest_root:?}/${dest_name:?}" 2>/dev/null || true
+    if ! mv "$stage_dir" "${dest_root:?}/${dest_name:?}"; then
+		rm -rf -- "${stage_dir:?}"
+		return 1
+	fi
 }
 
 copy_plugin_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
-    mkdir -p "$dest_root/$dest_name"
-    cp -R "$fixture_dir"/. "$dest_root/$dest_name/"
+	local stage_parent stage_dir
+    if [ -z "$dest_root" ] || [ -z "$dest_name" ]; then
+        echo "missing destination for plugin fixture copy" >&2
+		return 1
+	fi
+	ensure_directory_writable "$dest_root" "copying plugin fixture"
+	stage_parent=$(dirname "$dest_root")
+    stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-plugin-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-plugin-fixture.XXXXXX")
+    if ! cp -R "$fixture_dir"/. "$stage_dir/"; then
+		rm -rf -- "${stage_dir:?}"
+        return 1
+    fi
+    chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
+    rm -rf -- "${dest_root:?}/${dest_name:?}" 2>/dev/null || true
+    if ! mv "$stage_dir" "${dest_root:?}/${dest_name:?}"; then
+		rm -rf -- "${stage_dir:?}"
+		return 1
+	fi
     if [ -f "$dest_root/$dest_name/package.json" ]; then
         PLUGIN_FIXTURE_PATH="$dest_root/$dest_name/package.json" PLUGIN_FIXTURE_NAME="$dest_name" python3 - <<'PY'
 import json
@@ -754,6 +962,19 @@ with cfg_path.open() as f:
     cfg = json.load(f)
 
 changed = False
+
+
+def is_dead_defenseclaw_load_path(value):
+    if isinstance(value, str):
+        path = Path(value.rstrip("/")).expanduser()
+        return path.name == "defenseclaw" and not path.exists()
+    if isinstance(value, dict):
+        return any(is_dead_defenseclaw_load_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(is_dead_defenseclaw_load_path(item) for item in value)
+    return False
+
+
 skills = cfg.setdefault("skills", {}).setdefault("entries", {})
 kept = {name: meta for name, meta in skills.items() if not name.startswith(prefix)}
 if kept != skills:
@@ -772,6 +993,15 @@ for bucket_name in ("entries", "installs"):
     if next_bucket != bucket:
         plugins[bucket_name] = next_bucket
         changed = True
+
+load = plugins.get("load")
+if isinstance(load, dict):
+    paths = load.get("paths")
+    if isinstance(paths, list):
+        next_paths = [path for path in paths if not is_dead_defenseclaw_load_path(path)]
+        if next_paths != paths:
+            load["paths"] = next_paths
+            changed = True
 
 if changed:
     with cfg_path.open("w") as f:
@@ -792,12 +1022,24 @@ state = {
     "current_prefix_skill_entries": 0,
     "current_prefix_plugin_entries": 0,
     "defenseclaw_plugin_entries": 0,
+    "stale_defenseclaw_plugin_load_paths": 0,
 }
 if cfg_path.exists():
     with cfg_path.open() as f:
         cfg = json.load(f)
     skills = cfg.get("skills", {}).get("entries", {})
     plugins = cfg.get("plugins", {})
+
+    def is_dead_defenseclaw_load_path(value):
+        if isinstance(value, str):
+            path = Path(value.rstrip("/")).expanduser()
+            return path.name == "defenseclaw" and not path.exists()
+        if isinstance(value, dict):
+            return any(is_dead_defenseclaw_load_path(item) for item in value.values())
+        if isinstance(value, list):
+            return any(is_dead_defenseclaw_load_path(item) for item in value)
+        return False
+
     state["current_prefix_skill_entries"] = sum(
         1 for name in skills if str(name).startswith(prefix)
     )
@@ -812,12 +1054,20 @@ if cfg_path.exists():
         for bucket_name in ("entries", "installs")
         if "defenseclaw" in (plugins.get(bucket_name, {}) or {})
     )
+    load = plugins.get("load")
+    if isinstance(load, dict):
+        paths = load.get("paths")
+        if isinstance(paths, list):
+            state["stale_defenseclaw_plugin_load_paths"] = sum(
+                1 for path in paths if is_dead_defenseclaw_load_path(path)
+            )
 print(json.dumps(state))
 PY
 }
 
 openclaw_skill_enabled_state() {
     local name="$1"
+    ensure_openclaw_config_readable "reading OpenClaw skill state"
     E2E_SKILL_NAME="$name" python3 - <<'PY'
 import json
 import os
@@ -829,8 +1079,12 @@ if not cfg_path.exists():
     print("missing")
     raise SystemExit(0)
 
-with cfg_path.open() as f:
-    cfg = json.load(f)
+try:
+    with cfg_path.open() as f:
+        cfg = json.load(f)
+except PermissionError:
+    print("unreadable")
+    raise SystemExit(0)
 
 entry = ((cfg.get("skills") or {}).get("entries") or {}).get(name)
 if not isinstance(entry, dict):
@@ -844,6 +1098,7 @@ PY
 
 openclaw_plugin_enabled_state() {
     local name="$1"
+    ensure_openclaw_config_readable "reading OpenClaw plugin state"
     E2E_PLUGIN_NAME="$name" python3 - <<'PY'
 import json
 import os
@@ -855,8 +1110,12 @@ if not cfg_path.exists():
     print("missing")
     raise SystemExit(0)
 
-with cfg_path.open() as f:
-    cfg = json.load(f)
+try:
+    with cfg_path.open() as f:
+        cfg = json.load(f)
+except PermissionError:
+    print("unreadable")
+    raise SystemExit(0)
 
 plugins = cfg.get("plugins") or {}
 entry = (plugins.get("entries") or {}).get(name)
@@ -966,6 +1225,12 @@ run_agent_prompt() {
     timeout "$timeout_s" openclaw agent --session-id "$session_id" -m "$prompt" 2>&1 || true
 }
 
+agent_backend_unavailable_output() {
+    local output="$1"
+    echo "$output" | grep -Eqi \
+        'LLM request failed|Smithy package patch skipped|could not resolve @smithy|AWS_BEDROCK_FORCE_HTTP1|BadRequestError|rate limit|too many requests|credit balance|model.*not.*found|provider.*not provided|temporar(y|ily)'
+}
+
 guardrail_prompt_strategy() {
     python3 - <<'PY'
 import os
@@ -1051,6 +1316,8 @@ cleanup_current_run_artifacts() {
 
     rm -rf "$HOME/.defenseclaw/quarantine/skills"/"$E2E_PREFIX"* 2>/dev/null || true
     rm -rf "$HOME/.defenseclaw/quarantine/plugins"/"$E2E_PREFIX"* 2>/dev/null || true
+    find "$HOME/.defenseclaw/quarantine/skills" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
+    find "$HOME/.defenseclaw/quarantine/plugins" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
     rm -rf "$HOME/.openclaw/extensions"/"$E2E_PREFIX"* 2>/dev/null || true
     rm -rf /tmp/"$E2E_PREFIX"* 2>/dev/null || true
     prune_openclaw_config_for_prefix
@@ -1064,23 +1331,53 @@ inspect_tool() {
     sidecar_post "/api/v1/inspect/tool" "$payload"
 }
 
+# dump_artifacts is invoked from an EXIT trap when
+# any phase records FAIL>0. The legacy implementation cat'd
+# ~/.defenseclaw/config.yaml and ~/.openclaw/openclaw.json directly
+# and tail'd gateway.log / gateway.jsonl without redaction. The
+# DefenseClaw config schema permits inline llm.api_key,
+# splunk.hec_token, gateway.token, and OpenClaw gateway.auth.token
+# values, and the gateway logs include raw audit/prompt material.
+# A single failed assertion therefore leaked provider keys, gateway
+# tokens, and prompt content into CI logs.
+#
+# We redact secret-bearing keys (and well-known token formats) from
+# every dumped artifact via _redact_secrets, and we cap the dumped
+# files to a small tail. Operators that explicitly want full bytes
+# in CI can set DEFENSECLAW_DUMP_RAW_SECRETS=1 (NOT recommended).
+_redact_secrets() {
+    if [[ "${DEFENSECLAW_DUMP_RAW_SECRETS:-0}" == "1" ]]; then
+        cat
+        return
+    fi
+    # Redact:
+    #  * common token shapes (sk-*, ghp_*, AKIA*, eyJ* JWTs, hex-32+)
+    #  * any line whose key matches an obvious-secret name
+    sed -E \
+        -e 's/(api[-_]?key|secret|token|password|hec_token|auth_token|gateway_token|provider_key|client_secret|private_key|aws_secret_access_key)([[:space:]]*[:=][[:space:]]*)("?)[^"[:space:],}]+("?)/\1\2\3<redacted>\4/Ig' \
+        -e 's/sk-[A-Za-z0-9_-]{16,}/<redacted-sk>/g' \
+        -e 's/ghp_[A-Za-z0-9]{20,}/<redacted-gh>/g' \
+        -e 's/AKIA[0-9A-Z]{12,20}/<redacted-aws>/g' \
+        -e 's/eyJ[A-Za-z0-9_=-]{20,}\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_.+/=-]+/<redacted-jwt>/g'
+}
+
 dump_artifacts() {
     echo ""
-    echo "=== Artifact Dump (on failure) ==="
+    echo "=== Artifact Dump (on failure, secrets redacted) ==="
     echo "--- Run Context ---"
     echo "profile=$E2E_PROFILE"
     echo "run_id=$DEFENSECLAW_RUN_ID"
     echo "prefix=$E2E_PREFIX"
-    echo "--- ~/.defenseclaw/config.yaml ---"
-    cat ~/.defenseclaw/config.yaml 2>/dev/null || echo "  (not found)"
-    echo "--- .env key names ---"
+    echo "--- ~/.defenseclaw/config.yaml (redacted) ---"
+    cat ~/.defenseclaw/config.yaml 2>/dev/null | _redact_secrets || echo "  (not found)"
+    echo "--- .env key names (values redacted) ---"
     grep -oP '^\w+(?==)' ~/.defenseclaw/.env 2>/dev/null || echo "  (none)"
     echo "--- defenseclaw-gateway status ---"
-    defenseclaw-gateway status 2>/dev/null || echo "  (not running)"
-    echo "--- gateway.log (last 60 lines) ---"
-    tail -60 ~/.defenseclaw/gateway.log 2>/dev/null || echo "  (not found)"
-    echo "--- gateway.jsonl (last 60 lines) ---"
-    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null || echo "  (not found)"
+    defenseclaw-gateway status 2>/dev/null | _redact_secrets || echo "  (not running)"
+    echo "--- gateway.log (last 60 lines, redacted) ---"
+    tail -60 ~/.defenseclaw/gateway.log 2>/dev/null | _redact_secrets || echo "  (not found)"
+    echo "--- gateway.jsonl (last 60 lines, redacted) ---"
+    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- SQLite direct event count (via Python) ---"
     python3 -c "
 import sqlite3, os
@@ -1115,8 +1412,8 @@ conn.close()
     snapshot_skill_paths | grep "$E2E_PREFIX" || echo "  (none)"
     echo "--- current test plugin directories ---"
     snapshot_plugin_paths | grep "$E2E_PREFIX" || echo "  (none)"
-    echo "--- ~/.openclaw/openclaw.json ---"
-    cat ~/.openclaw/openclaw.json 2>/dev/null || echo "  (not found)"
+    echo "--- ~/.openclaw/openclaw.json (redacted) ---"
+    cat ~/.openclaw/openclaw.json 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- Splunk current-run actions ---"
     splunk_run_results_json 'action=* | head 20' | jq '.' 2>/dev/null || echo "[]"
     echo "--- splunk container logs (last 30) ---"
@@ -1140,6 +1437,7 @@ phase_start() {
         restore_openclaw_model_backup
     fi
 
+    repair_ci_product_state
     cleanup_current_run_artifacts
 
     local stale_skills stale_plugins stale_quarantine cfg_state
@@ -1184,10 +1482,21 @@ phase_start() {
         fail "preflight: no stale defenseclaw plugin config entry" "$cfg_state"
     fi
 
+    if [ "$(echo "$cfg_state" | jq -r '.stale_defenseclaw_plugin_load_paths' 2>/dev/null || echo 99)" = "0" ]; then
+        pass "preflight: no stale DefenseClaw plugin load paths"
+    else
+        fail "preflight: no stale DefenseClaw plugin load paths" "$cfg_state"
+    fi
+
     echo "  Starting OpenClaw gateway..."
     start_openclaw_gateway
     if ! wait_for_openclaw_gateway 30 2; then
-        echo "  [diag] OpenClaw gateway did not become reachable before sidecar start"
+        echo "  [diag] OpenClaw gateway did not become reachable; repairing and retrying once"
+        repair_openclaw_gateway_startup_state
+        restart_openclaw_gateway
+        if ! wait_for_openclaw_gateway 30 2; then
+            echo "  [diag] OpenClaw gateway did not become reachable before sidecar start"
+        fi
     fi
 
     echo "  Starting DefenseClaw sidecar (with up to 3 bring-up attempts)..."
@@ -1260,6 +1569,9 @@ phase_start() {
     if [ "$sidecar_healthy" = "1" ]; then
         pass "sidecar health endpoint reachable"
         rm -f "$mem_trace_file"
+        restart_sidecar_after_openclaw_token_repair
+        repair_ci_product_state permissions-only
+        GATEWAY_TOKEN_CACHE="__unset__"
     else
         fail "sidecar health endpoint reachable" "unhealthy after 3 attempts (60s each)"
         echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
@@ -1744,7 +2056,7 @@ phase_skill_scanner() {
 
     local clean_out clean_json clean_findings
     echo "  Scanning clean skill..."
-    clean_out=$(defenseclaw skill scan "$clean_skill" --json 2>&1 || true)
+    clean_out=$(defenseclaw skill scan clean-skill --path "$clean_skill" --json --no-use-llm 2>&1 || true)
     echo "$clean_out"
     clean_json=$(echo "$clean_out" | extract_json || true)
     if [ -n "$clean_json" ]; then
@@ -1760,7 +2072,7 @@ phase_skill_scanner() {
 
     local mal_out mal_json mal_findings mal_severity
     echo "  Scanning malicious skill..."
-    mal_out=$(defenseclaw skill scan "$malicious_skill" --json 2>&1 || true)
+    mal_out=$(defenseclaw skill scan malicious-skill --path "$malicious_skill" --json --no-use-llm 2>&1 || true)
     echo "$mal_out"
     mal_json=$(echo "$mal_out" | extract_json || true)
     if [ -n "$mal_json" ]; then
@@ -1873,7 +2185,7 @@ phase_block_allow() {
         phase_timer_end "Phase 4B"
         return
     fi
-    mkdir -p "$skill_dir_root"
+    ensure_directory_writable "$skill_dir_root" "block/allow skill setup"
 
     local blocked_skill="${E2E_PREFIX}-blocked-skill"
     local allowed_skill="${E2E_PREFIX}-allowed-skill"
@@ -1974,7 +2286,10 @@ phase_block_allow() {
         echo "$allow_out"
         allow_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
+            RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent could use exec before block"
+        elif agent_backend_unavailable_output "$allow_out"; then
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent could use exec before block" "live agent backend unavailable"
         else
             fail "block/allow: agent could use exec before block" "$allow_out"
         fi
@@ -1995,7 +2310,10 @@ phase_block_allow() {
         echo "$block_out"
         block_after=$(alerts_action_count "inspect-tool-block" "$tool_name")
         if { [ ! -f "$tool_file" ] || ! grep -Fxq "$tool_expected" "$tool_file"; } && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
+            RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent was blocked from exec after block"
+        elif agent_backend_unavailable_output "$block_out"; then
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent was blocked from exec after block" "live agent backend unavailable"
         else
             fail "block/allow: agent was blocked from exec after block" "$block_out"
         fi
@@ -2024,7 +2342,10 @@ phase_block_allow() {
         echo "$recover_out"
         recover_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
+            RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent recovered exec after unblock"
+        elif agent_backend_unavailable_output "$recover_out"; then
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent recovered exec after unblock" "live agent backend unavailable"
         else
             fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
@@ -2134,7 +2455,7 @@ phase_quarantine() {
     fi
 
     cleanup_skill_name "$skill_name"
-    mkdir -p "$skill_dir_root"
+    ensure_directory_writable "$skill_dir_root" "quarantine skill setup"
     copy_skill_fixture "$malicious_skill" "$skill_dir_root" "$skill_name"
 
     if [ -d "$skill_dir_root/$skill_name" ]; then
@@ -2155,10 +2476,14 @@ phase_quarantine() {
         pass "quarantine: skill removed from watched dir"
     fi
 
-    if [ -d "$HOME/.defenseclaw/quarantine/skills/$skill_name" ]; then
+    local quarantine_root flat_quarantine_path connector_quarantine_path
+    quarantine_root="$HOME/.defenseclaw/quarantine/skills"
+    flat_quarantine_path="$quarantine_root/$skill_name"
+    connector_quarantine_path=$(find "$quarantine_root" -mindepth 2 -maxdepth 2 -type d -name "$skill_name" -print -quit 2>/dev/null || true)
+    if [ -d "$flat_quarantine_path" ] || [ -n "$connector_quarantine_path" ]; then
         pass "quarantine: skill present in quarantine area"
     else
-        fail "quarantine: skill present in quarantine area" "expected $HOME/.defenseclaw/quarantine/skills/$skill_name"
+        fail "quarantine: skill present in quarantine area" "expected $flat_quarantine_path or connector-scoped quarantine entry"
     fi
 
     local r_out
@@ -2195,7 +2520,7 @@ phase_watcher_auto_scan() {
     fi
 
     cleanup_skill_name "$watcher_skill"
-    mkdir -p "$skill_dir_root"
+    ensure_directory_writable "$skill_dir_root" "watcher auto-scan skill setup"
     copy_skill_fixture "$malicious_skill" "$skill_dir_root" "$watcher_skill"
 
     watcher_entry=$(wait_for_skill_scan "$watcher_skill" 90 || true)
@@ -2326,6 +2651,7 @@ phase_aibom() {
     # Capturing multi‑MB JSON into a shell variable and `echo`ing it can hit
     # EAGAIN ("Resource temporarily unavailable") on constrained CI runners.
     out_file="$(mktemp -t dc-aibom.XXXXXX.jsonl)"
+    ensure_openclaw_config_readable "AIBOM inventory"
     defenseclaw aibom scan --json >"$out_file" 2>&1 || true
     sz=$(wc -c <"$out_file" | tr -d ' ')
     echo "[aibom] scan output: ${sz} bytes"
@@ -2405,7 +2731,7 @@ phase_skill_api() {
 
     if [ -n "$skill_dir_root" ] && [ -d "$REPO_ROOT/test/fixtures/skills/clean-skill" ]; then
         cleanup_skill_name "$unique_skill"
-        mkdir -p "$skill_dir_root"
+        ensure_directory_writable "$skill_dir_root" "skill API fixture setup"
         copy_skill_fixture "$REPO_ROOT/test/fixtures/skills/clean-skill" "$skill_dir_root" "$unique_skill"
         if wait_for_skill_entry "$unique_skill" 30 >/dev/null 2>&1; then
             pass "skill api: unique test skill became visible to DefenseClaw"
@@ -2994,13 +3320,14 @@ phase_agent_chat() {
     local skill_dirs disk_before skills_before before_names
     local ping_out install_out installed_skill installed_path dc_entry
     local install_verified=false used_local_fallback=false
+    local install_backend_unavailable=false
 
     skill_dirs=$(get_skill_dirs)
     echo "  Skill directories watched by DefenseClaw:"
     while IFS= read -r dir; do
         [ -n "$dir" ] || continue
         echo "    - $dir"
-        mkdir -p "$dir"
+        ensure_directory_writable "$dir" "agent chat skill directory setup"
     done <<< "$skill_dirs"
 
     cleanup_skill_name "$install_slug"
@@ -3074,6 +3401,9 @@ phase_agent_chat() {
             sleep $((attempt * 15))
             continue
         fi
+        if agent_backend_unavailable_output "$install_out"; then
+            install_backend_unavailable=true
+        fi
 
         break
     done
@@ -3084,7 +3414,7 @@ phase_agent_chat() {
         fallback_dir=$(first_skill_dir || true)
         fallback_skill="${E2E_PREFIX}-agent-local-skill"
         if [ -d "$fallback_source" ] && [ -n "$fallback_dir" ]; then
-            mkdir -p "$fallback_dir"
+            ensure_directory_writable "$fallback_dir" "agent fallback skill setup"
             echo "  Falling back to agent-managed local skill install: $fallback_skill"
             fallback_out=$(run_agent_prompt \
                 "$(agent_session_id agent-install-local)" \
@@ -3098,12 +3428,18 @@ phase_agent_chat() {
                 used_local_fallback=true
                 pass "agent chat: fallback skill '$installed_skill' installed on disk"
                 install_verified=true
+            elif agent_backend_unavailable_output "$fallback_out"; then
+                install_backend_unavailable=true
             fi
         fi
     fi
 
     if [ "$install_verified" = false ]; then
-        skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent install could not be verified"
+        if [ "$install_backend_unavailable" = true ]; then
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "live agent backend unavailable"
+        else
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent install could not be verified"
+        fi
     fi
 
     if [ -n "${installed_skill:-}" ]; then
@@ -3182,7 +3518,7 @@ phase_plugin_lifecycle() {
     local malicious_plugin="${E2E_PREFIX}-malicious-plugin"
     local clean_source="$staging_root/$clean_plugin"
     local malicious_source="$staging_root/$malicious_plugin"
-    local clean_path malicious_path runtime_install_out runtime_clean_path
+    local clean_path malicious_path runtime_install_out runtime_clean_path governance_dir quarantined_path
     local clean_entry malicious_entry
     local install_out agent_out scan_out scan_json findings
     local disable_out enable_out resp payload
@@ -3197,14 +3533,14 @@ phase_plugin_lifecycle() {
 
     agent_out=$(run_agent_prompt "$(agent_session_id plugin-install)" "Run this exact command: DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID defenseclaw plugin install $clean_source. Reply with exactly INSTALLED once the command succeeds." 180)
     echo "$agent_out"
-    clean_path=$(find_governance_plugin_path "$clean_plugin" || true)
+    clean_path=$(find_runtime_plugin_path "$clean_plugin" || true)
     if [ -n "$clean_path" ]; then
         pass "plugin lifecycle: agent installed clean plugin"
     else
         skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: agent install" "agent-admin install could not be verified"
         install_out=$(defenseclaw plugin install "$clean_source" 2>&1 || true)
         echo "$install_out"
-        clean_path=$(find_governance_plugin_path "$clean_plugin" || true)
+        clean_path=$(find_runtime_plugin_path "$clean_plugin" || true)
         if [ -n "$clean_path" ]; then
             pass "plugin lifecycle: clean plugin installed via CLI fallback"
         else
@@ -3233,8 +3569,18 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: malicious plugin scan produced findings" "scanner did not produce valid JSON"
     fi
 
-    install_out=$(defenseclaw plugin install "$malicious_source" --force 2>&1 || true)
-    echo "$install_out"
+    # Keep the deliberately malicious fixture out of OpenClaw's live runtime
+    # config. Quarantine/restore are DefenseClaw governance operations, so a
+    # direct governance-dir fixture is enough and cannot leave OpenClaw pointing
+    # at a missing malicious manifest after watcher enforcement.
+    governance_dir=$(first_governance_plugin_dir || true)
+    if [ -z "$governance_dir" ]; then
+        fail "plugin lifecycle: malicious plugin installed for governance checks" "governance plugin directory not configured"
+    else
+        ensure_directory_writable "$governance_dir" "plugin governance fixture setup"
+        rm -rf "$governance_dir/$malicious_plugin" 2>/dev/null || true
+        copy_plugin_fixture "$malicious_fixture" "$governance_dir" "$malicious_plugin"
+    fi
     malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     if [ -n "$malicious_path" ]; then
         pass "plugin lifecycle: malicious plugin installed for governance checks"
@@ -3246,13 +3592,6 @@ phase_plugin_lifecycle() {
         pass "plugin lifecycle: malicious plugin scan visible in plugin list"
     else
         fail "plugin lifecycle: malicious plugin scan visible in plugin list" "scan entry missing for $malicious_plugin"
-    fi
-
-    defenseclaw plugin block "$malicious_plugin" --reason "E2E plugin block" >/dev/null 2>&1 || true
-    if [ "$(db_has_action plugin "$malicious_plugin" install block)" = "true" ]; then
-        pass "plugin lifecycle: plugin block state recorded"
-    else
-        fail "plugin lifecycle: plugin block state recorded" "block action missing for $malicious_plugin"
     fi
 
     defenseclaw plugin allow "$clean_plugin" --reason "E2E plugin allow" >/dev/null 2>&1 || true
@@ -3311,7 +3650,7 @@ phase_plugin_lifecycle() {
     fi
 
     payload=$(jq -cn --arg pluginName "$clean_plugin" '{pluginName: $pluginName}')
-    resp=$(sidecar_post "/plugin/disable" "$payload" 2>&1 || true)
+    resp=$(sidecar_post_retry_config_patch_rate_limit "/plugin/disable" "$payload" 3)
     echo "$resp"
     if echo "$resp" | jq -e '.status == "disabled"' >/dev/null 2>&1 && wait_for_openclaw_plugin_enabled_state "$clean_plugin" "false" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: API disable updated OpenClaw plugin state"
@@ -3319,7 +3658,7 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: API disable updated OpenClaw plugin state" "$resp"
     fi
 
-    resp=$(sidecar_post "/plugin/enable" "$payload" 2>&1 || true)
+    resp=$(sidecar_post_retry_config_patch_rate_limit "/plugin/enable" "$payload" 3)
     echo "$resp"
     if echo "$resp" | jq -e '.status == "enabled"' >/dev/null 2>&1 && wait_for_openclaw_plugin_enabled_state "$clean_plugin" "true" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: API enable updated OpenClaw plugin state"
@@ -3330,7 +3669,8 @@ phase_plugin_lifecycle() {
     malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     install_out=$(defenseclaw plugin quarantine "$malicious_plugin" --reason "E2E plugin quarantine" 2>&1 || true)
     echo "$install_out"
-    if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -d "$HOME/.defenseclaw/quarantine/plugins/$malicious_plugin" ]; then
+    quarantined_path=$(find_quarantined_plugin_path "$malicious_plugin" || true)
+    if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -n "$quarantined_path" ]; then
         pass "plugin lifecycle: plugin quarantine moved files"
     else
         fail "plugin lifecycle: plugin quarantine moved files" "$install_out"
@@ -3345,9 +3685,16 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: plugin restore restored files" "$install_out"
     fi
 
+    defenseclaw plugin block "$malicious_plugin" --reason "E2E plugin block" >/dev/null 2>&1 || true
+    if [ "$(db_has_action plugin "$malicious_plugin" install block)" = "true" ]; then
+        pass "plugin lifecycle: plugin block state recorded"
+    else
+        fail "plugin lifecycle: plugin block state recorded" "block action missing for $malicious_plugin"
+    fi
+
     install_out=$(defenseclaw plugin remove "$clean_plugin" 2>&1 || true)
     echo "$install_out"
-    if [ -z "$(find_governance_plugin_path "$clean_plugin" || true)" ]; then
+    if [ -z "$(find_plugin_path "$clean_plugin" || true)" ]; then
         pass "plugin lifecycle: plugin remove removed clean plugin"
     else
         fail "plugin lifecycle: plugin remove removed clean plugin" "$install_out"
@@ -3552,7 +3899,7 @@ phase_splunk() {
     phase_timer_start
 
     local hec_health hec_response schema_result
-    hec_health=$(curl -sf --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
+    hec_health=$(curl -sfk --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
     echo "  HEC health response: $hec_health"
     if [ "$hec_health" = "unreachable" ] || [ -z "$hec_health" ]; then
         fail "Splunk HEC reachable" "HEC health endpoint is unreachable"
@@ -3562,6 +3909,7 @@ phase_splunk() {
     pass "Splunk HEC reachable"
 
     hec_response=$(curl -sf --max-time 5 \
+        -k \
         -H "Authorization: Splunk $SPLUNK_HEC_TOKEN" \
         -H "Content-Type: application/json" \
         -d "{\"event\":{\"action\":\"e2e-suite-marker\",\"run_id\":\"$DEFENSECLAW_RUN_ID\",\"source\":\"test-e2e-full-stack\",\"timestamp\":\"$(date -u +%FT%TZ)\"},\"index\":\"$SPLUNK_INDEX\"}" \
@@ -3647,7 +3995,11 @@ phase_splunk() {
             skip "Splunk: guardrail passthrough events present" "Anthropic passthrough was not exercised in this run"
         fi
         splunk_assert_results "Splunk: agent lifecycle events present" '(action=gateway-agent-start OR action=gateway-agent-end) | head 5'
-        splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
+        if [ "${RUNTIME_TOOL_INSPECTION_EXERCISED:-false}" = "true" ]; then
+            splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
+        else
+            skip "Splunk: runtime tool inspection events present" "live agent tool calls were not exercised"
+        fi
         if is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then
             splunk_assert_results "Splunk: plugin scan events present" 'action=scan details="*scanner=plugin-scanner*" | head 5'
             splunk_assert_results "Splunk: plugin block/allow events present" '(action=plugin-block OR action=plugin-allow) | head 5'
@@ -3678,6 +4030,20 @@ phase_teardown() {
 
     defenseclaw-gateway stop 2>/dev/null || true
     openclaw gateway stop 2>/dev/null || true
+    if [ -n "$OPENCLAW_PID" ] && kill -0 "$OPENCLAW_PID" 2>/dev/null; then
+        kill -TERM "$OPENCLAW_PID" 2>/dev/null || true
+        for _ in $(seq 1 30); do
+            kill -0 "$OPENCLAW_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+    fi
+    if [ -n "$OPENCLAW_PID" ]; then
+        if kill -0 "$OPENCLAW_PID" 2>/dev/null; then
+            kill -KILL "$OPENCLAW_PID" 2>/dev/null || true
+        fi
+        wait "$OPENCLAW_PID" 2>/dev/null || true
+        OPENCLAW_PID=""
+    fi
 
     # Verify connector teardown cleaned up stale artifacts.
     local shims_dir="$HOME/.defenseclaw/shims"

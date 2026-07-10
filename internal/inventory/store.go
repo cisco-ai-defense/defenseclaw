@@ -388,6 +388,15 @@ var inventoryMigrations = []invMigration{
 			return nil
 		},
 	},
+	{
+		description: "v3: preserve local-model metadata in signal history",
+		apply: func(ex invDBExecer) error {
+			if _, err := ex.Exec(`ALTER TABLE ai_signals ADD COLUMN model_json TEXT`); err != nil {
+				return fmt.Errorf("ai inventory: v3 migration: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 type invMigration struct {
@@ -520,6 +529,13 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 				return fmt.Errorf("inventory store: marshal runtime for %s: %w", sig.SignalID, err)
 			}
 		}
+		var modelJSON []byte
+		if sig.Model != nil {
+			modelJSON, err = json.Marshal(sig.Model)
+			if err != nil {
+				return fmt.Errorf("inventory store: marshal model for %s: %w", sig.SignalID, err)
+			}
+		}
 
 		var compEco, compName, compFw, compVer sql.NullString
 		if sig.Component != nil {
@@ -545,8 +561,8 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
 			 category, detector, state, confidence,
 			 component_ecosystem, component_name, component_framework, component_version,
-			 last_seen, last_active_at, evidence_json, runtime_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 last_seen, last_active_at, evidence_json, runtime_json, model_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			report.Summary.ScanID,
 			sig.Fingerprint,
 			sig.SignalID,
@@ -563,6 +579,7 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			lastActive,
 			string(evidenceJSON),
 			nullStringFromBytes(runtimeJSON),
+			nullStringFromBytes(modelJSON),
 		); err != nil {
 			return fmt.Errorf("inventory store: insert signal %s: %w", sig.SignalID, err)
 		}

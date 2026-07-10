@@ -36,10 +36,14 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw.inventory import agent_discovery
+
 if TYPE_CHECKING:
-    from defenseclaw.config import Config
+    from defenseclaw.config import Config, PerConnectorGuardrailConfig
     from defenseclaw.logger import Logger
 
 
@@ -102,6 +106,7 @@ class FirstRunOptions:
     profile: str = "observe"  # observe | action
     scanner_mode: str = "local"  # local | remote | both
     with_judge: bool = False
+    judge_hook_connectors: list[str] | None = None
     skip_install: bool = False
     sandbox: bool = False
     start_gateway: bool = False
@@ -164,9 +169,10 @@ class FirstRunReport:
     setup: list[StepResult] = field(default_factory=list)
     readiness: list[StepResult] = field(default_factory=list)
     next_commands: list[str] = field(default_factory=list)
+    connector_mode_warnings: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "status": self.status,
             "config_file": self.config_file,
             "data_dir": self.data_dir,
@@ -176,6 +182,9 @@ class FirstRunReport:
             "readiness": [s.to_dict() for s in self.readiness],
             "next_commands": self.next_commands,
         }
+        if self.connector_mode_warnings:
+            data["connector_mode_warnings"] = self.connector_mode_warnings
+        return data
 
 
 def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
@@ -284,6 +293,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     connector = _normalize_connector(options.connector)
     profile = _normalize_profile(options.profile, connector)
     scanner_mode = _normalize_scanner_mode(options.scanner_mode)
+    connector_mode_warnings: list[dict] = []
 
     new_config = not os.path.exists(cfg_mod.config_path())
     try:
@@ -293,6 +303,12 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         new_config = True
 
     cfg.environment = cfg_mod.detect_environment()
+    if profile == "action":
+        mode_warning = _first_run_action_mode_warning(connector, getattr(cfg, "data_dir", ""))
+        if mode_warning:
+            connector_mode_warnings.append(mode_warning)
+            profile = "observe"
+
     _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
 
     try:
@@ -337,13 +353,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     app.logger = logger
 
     setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
+    setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
 
     if options.sandbox:
         setup.append(
             StepResult(
                 "Sandbox",
                 "warn",
-                "sandbox bootstrap remains Linux-only; run the dedicated sandbox setup",
+                "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
                 "defenseclaw sandbox setup",
             )
         )
@@ -380,13 +397,16 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         setup=setup,
         readiness=readiness,
         next_commands=next_commands,
+        connector_mode_warnings=connector_mode_warnings,
     )
 
 
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
     """Run scoped readiness checks for the choices made during first run."""
+    from defenseclaw.config import config_path_for_data_dir
+
     steps: list[StepResult] = []
-    cfg_path = os.path.join(cfg.data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(cfg.data_dir))
     steps.append(
         StepResult(
             "Config file",
@@ -487,6 +507,87 @@ def _normalize_profile(raw: str, connector: str) -> str:
     return "observe"
 
 
+def _first_run_action_mode_warning(connector: str, data_dir: str) -> dict | None:
+    """Return structured action-to-observe remediation for first-run flows."""
+    from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+    if _check_connector_version_supported_for_setup(
+        connector,
+        mode="action",
+        emit=False,
+        data_dir=data_dir,
+        _allow_prompt=False,
+    ):
+        return None
+
+    discovery = None
+    try:
+        discovery = agent_discovery.discover_agents(
+            use_cache=False,
+            refresh=True,
+            data_dir=data_dir,
+        )
+    except Exception:
+        discovery = None
+    return _action_downgrade_record(connector, discovery)
+
+
+def _action_downgrade_record(connector: str, discovery=None) -> dict:
+    """Structured report for an action request that had to fall back to observe."""
+    key = _normalize_connector(connector)
+    record = {
+        "connector": key,
+        "requested_mode": "action",
+        "actual_mode": "observe",
+        "status": "needs_attention",
+        "reason": "connector version could not be verified against a known hook contract",
+        "next_command": f"defenseclaw setup {key} --mode action",
+    }
+    signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
+    if (
+        signal is not None
+        and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
+        and getattr(signal, "binary_path", "")
+    ):
+        resolved_bin = os.path.realpath(signal.binary_path)
+        parent = os.path.dirname(resolved_bin)
+        record.update(
+            {
+                "reason": "binary path outside trusted prefixes; version was not probed",
+                "binary_path": resolved_bin,
+                "trusted_path": parent,
+                "next_command": f"defenseclaw setup trusted-paths add {parent}",
+            }
+        )
+    elif signal is not None and getattr(signal, "error", ""):
+        record["reason"] = f"connector version could not be verified: {signal.error}"
+    return record
+
+
+def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
+    if not warnings:
+        return []
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+
+    steps: list[StepResult] = []
+    for warning in warnings:
+        connector = warning.get("connector", "")
+        label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
+        detail = (
+            f"requested action, configured observe: "
+            f"{warning.get('reason', 'connector version could not be verified')}"
+        )
+        steps.append(
+            StepResult(
+                f"{label} mode",
+                "fail",
+                detail,
+                warning.get("next_command", ""),
+            )
+        )
+    return steps
+
+
 def _normalize_scanner_mode(raw: str) -> str:
     value = (raw or "").strip().lower()
     return value if value in {"local", "remote", "both"} else "local"
@@ -502,11 +603,47 @@ def _apply_first_run_choices(
     cfg.claw.mode = connector
     cfg.claw.workspace_dir = ""
     cfg.guardrail.connector = connector
+    # A first-run walkthrough that asks for connector selection should not
+    # inherit stale peers from a previous multi-connector config. Preserve the
+    # selected connector's existing override when present, and let
+    # cmd_init._activate_additional_connectors rebuild any selected extras.
+    existing_connectors = getattr(cfg.guardrail, "connectors", None) or {}
+    if existing_connectors:
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        selected_override = None
+        wanted = _normalize_connector(connector)
+        for key, pc in existing_connectors.items():
+            if _normalize_connector(str(key)) == wanted:
+                selected_override = pc
+                break
+        cfg.guardrail.connectors = {
+            connector: selected_override or PerConnectorGuardrailConfig()
+        }
+    else:
+        cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
-    cfg.guardrail.mode = "action" if profile == "action" else "observe"
+    profile_mode = "action" if profile == "action" else "observe"
+    cfg.guardrail.mode = profile_mode
     cfg.guardrail.enabled = True
-    cfg.guardrail.judge.enabled = bool(options.with_judge)
+    if options.with_judge:
+        cfg.guardrail.judge.enabled = True
+        cfg.guardrail.judge.hook_connectors = (
+            list(options.judge_hook_connectors)
+            if options.judge_hook_connectors is not None
+            else ["*"]
+        )
+        if not cfg.guardrail.detection_strategy or cfg.guardrail.detection_strategy == "regex_only":
+            cfg.guardrail.detection_strategy = "regex_judge"
+        completion_strategy = (
+            getattr(cfg.guardrail, "detection_strategy_completion", "") or ""
+        ).strip().lower()
+        if completion_strategy in ("", "regex_only"):
+            cfg.guardrail.detection_strategy_completion = "regex_judge"
+    else:
+        cfg.guardrail.judge.enabled = False
     cfg.guardrail.detection_strategy = cfg.guardrail.detection_strategy or "regex_judge"
+    _apply_first_run_connector_override(cfg, connector, profile_mode)
 
     # Honor an explicit operator choice supplied via flag/prompt.
     # Empty string means "leave whatever was loaded alone" — usually
@@ -545,6 +682,20 @@ def _apply_first_run_choices(
     if cfg.guardrail.hilt.enabled and not cfg.guardrail.hilt.min_severity:
         cfg.guardrail.hilt.min_severity = "HIGH"
 
+    selected_pc = _first_run_selected_connector_override(cfg, connector)
+    if options.human_approval is not None and selected_pc is not None:
+        from defenseclaw.config import HILTConfig
+
+        min_severity = cfg.guardrail.hilt.min_severity or "HIGH"
+        if not severity and selected_pc.hilt is not None and selected_pc.hilt.min_severity:
+            min_severity = selected_pc.hilt.min_severity
+        selected_pc.hilt = HILTConfig(
+            enabled=bool(options.human_approval),
+            min_severity=min_severity,
+        )
+    elif severity and selected_pc is not None and selected_pc.hilt is not None:
+        selected_pc.hilt.min_severity = cfg.guardrail.hilt.min_severity
+
     if options.llm_provider:
         cfg.llm.provider = options.llm_provider.strip()
     if options.llm_model:
@@ -561,6 +712,49 @@ def _apply_first_run_choices(
         cfg.cisco_ai_defense.endpoint = options.cisco_endpoint.strip()
     if options.cisco_api_key_env:
         cfg.cisco_ai_defense.api_key_env = options.cisco_api_key_env.strip()
+
+
+def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) -> None:
+    """Keep an existing multi-connector map aligned with first-run choices."""
+    gc = cfg.guardrail
+    if not getattr(gc, "connectors", None):
+        return
+
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    key = connector
+    pc = gc.connectors.get(key)
+    if pc is None:
+        wanted = _normalize_connector(connector)
+        for existing_key, existing_pc in gc.connectors.items():
+            if _normalize_connector(existing_key) == wanted:
+                key = existing_key
+                pc = existing_pc
+                break
+    if pc is None:
+        pc = PerConnectorGuardrailConfig()
+    pc.mode = "action" if mode == "action" else "observe"
+    if pc.enabled is False:
+        pc.enabled = True
+    gc.connectors[key] = pc
+
+
+def _first_run_selected_connector_override(
+    cfg: Config,
+    connector: str,
+) -> PerConnectorGuardrailConfig | None:
+    gc = cfg.guardrail
+    connectors = getattr(gc, "connectors", None)
+    if not connectors:
+        return None
+    pc = connectors.get(connector)
+    if pc is not None:
+        return pc
+    wanted = _normalize_connector(connector)
+    for existing_key, existing_pc in connectors.items():
+        if _normalize_connector(existing_key) == wanted:
+            return existing_pc
+    return None
 
 
 def _persist_first_run_secrets(cfg: Config, options: FirstRunOptions, steps: list[StepResult]) -> None:
@@ -636,7 +830,12 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             detail += " | " + buf.getvalue().strip().splitlines()[-1]
         return StepResult("Guardrail", "fail", detail, "defenseclaw setup guardrail")
     if ok and not warnings:
-        return StepResult("Guardrail", "pass", f"{connector}, mode={app.cfg.guardrail.mode}")
+        mode = (
+            app.cfg.guardrail.effective_mode(connector)
+            if hasattr(app.cfg.guardrail, "effective_mode")
+            else app.cfg.guardrail.mode
+        )
+        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}")
     if ok:
         return StepResult("Guardrail", "warn", "; ".join(warnings), "defenseclaw doctor")
     return StepResult("Guardrail", "fail", "setup returned false", "defenseclaw setup guardrail")
@@ -770,12 +969,53 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
 
 def _pid_file_running(pid_file: str) -> bool:
-    # Cross-platform liveness: a bare ``os.kill(pid, 0)`` is wrong on Windows
-    # (signal 0 is routed to a console-control event, not an existence probe),
-    # so a running gateway reads as stopped and init/restart decisions break.
-    from defenseclaw.process_liveness import pid_file_alive
+    """Return True only when pid_file points at a live process whose
+    identity looks like the DefenseClaw gateway.
 
-    return pid_file_alive(pid_file)
+    Liveness is delegated to :func:`defenseclaw.process_liveness.pid_alive`
+    so the probe is correct cross-platform. A bare ``os.kill(pid, 0)`` is
+    wrong on Windows — signal 0 is routed to a console-control event rather
+    than an existence probe, so a running gateway reads as stopped and
+    ``init``/``--restart`` decisions break.
+
+    On top of liveness we verify process identity. The legacy implementation
+    accepted any PID that passed the liveness probe, so a local process that
+    planted or staled gateway.pid could make ``quickstart``/``init`` skip
+    starting the sidecar — generated hooks then forwarded uninspected traffic
+    because the default fail mode for the inspect hook is "open" until the
+    gateway is up. We additionally require the PID's argv0 to match a known
+    gateway binary name (POSIX, via /proc or ``ps``). Windows has no equally
+    cheap argv0 probe and the Go daemon's ``processExists``
+    (internal/daemon/proc_windows.go) is liveness-only too, so there a live
+    PID is accepted.
+    """
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
+
+    pid = read_pid_file(pid_file)
+    if pid is None or pid <= 1:
+        return False
+    if not pid_alive(pid):
+        return False
+    if os.name == "nt":
+        return True
+    return _pid_looks_like_gateway(pid)
+
+
+def _pid_looks_like_gateway(pid: int) -> bool:
+    """Verify that /proc/<pid>/cmdline (Linux) or `ps -o command=`
+    (macOS) advertises the DefenseClaw gateway binary name *exactly*.
+
+    Delegates to the shared, fail-closed identity check in
+    ``process_liveness`` so the setup, bootstrap and init paths all agree
+    on what "is the gateway" means. Avarice F-0101: the previous check
+    accepted any argv0 basename starting with the generic ``defenseclaw``
+    prefix, so a planted process named e.g. ``defenseclaw-not-gateway``
+    was treated as the live gateway. We now require an exact match against
+    the known gateway binary names.
+    """
+    from defenseclaw.process_liveness import process_is_gateway
+
+    return process_is_gateway(pid)
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
@@ -787,7 +1027,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "Connector",
             "warn",
             f"OpenClaw config missing: {cfg.claw.config_file}",
-            "defenseclaw setup mode openclaw",
+            "defenseclaw setup openclaw",
         )
     if connector == "codex":
         path = os.path.expanduser("~/.codex/config.toml")
@@ -803,27 +1043,27 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = os.path.expanduser("~/.zeptoclaw/config.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "ZeptoClaw config found")
-        return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup mode zeptoclaw")
+        return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
         path = os.path.expanduser("~/.hermes/config.yaml")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
-        return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup mode hermes")
+        return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")
     if connector == "cursor":
         path = os.path.expanduser("~/.cursor/hooks.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Cursor hooks found")
-        return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup mode cursor")
+        return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup cursor")
     if connector == "windsurf":
         path = os.path.expanduser("~/.codeium/windsurf/hooks.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Windsurf hooks found")
-        return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup mode windsurf")
+        return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup windsurf")
     if connector == "geminicli":
         path = os.path.expanduser("~/.gemini/settings.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Gemini CLI settings found")
-        return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup mode geminicli")
+        return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup geminicli")
     if connector == "copilot":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
@@ -833,7 +1073,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             path = os.path.expanduser("~/.copilot/hooks/defenseclaw.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
-        return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup mode copilot")
+        return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup copilot")
     if connector == "openhands":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
@@ -844,7 +1084,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
         if any(os.path.isfile(path) for path in candidates):
             return StepResult("Connector", "pass", "OpenHands hooks found")
-        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup mode openhands")
+        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup openhands")
     if connector == "antigravity":
         # Antigravity is global-only by design — agy merges discovered
         # hooks files, so DefenseClaw never writes to a workspace copy.
@@ -862,7 +1102,37 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "Connector",
             "warn",
             "Antigravity hooks not found yet",
-            "defenseclaw setup mode antigravity",
+            "defenseclaw setup antigravity",
+        )
+    if connector == "opencode":
+        # opencode is governed by a bridge plugin DefenseClaw writes into
+        # opencode's auto-load plugin directory (no hooks.json to patch).
+        path = os.path.expanduser("~/.config/opencode/plugins/defenseclaw.js")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "OpenCode bridge plugin found")
+        return StepResult(
+            "Connector",
+            "warn",
+            "OpenCode bridge plugin not found yet",
+            "defenseclaw setup opencode",
+        )
+    if connector == "omnigent":
+        path = omnigent_config_path()
+        try:
+            config_text = Path(path).read_text(encoding="utf-8")
+            configured = all(
+                marker in config_text
+                for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+            )
+        except (OSError, UnicodeError):
+            configured = False
+        if configured:
+            return StepResult("Connector", "pass", f"OmniGent custom policy found at {path}")
+        return StepResult(
+            "Connector",
+            "warn",
+            f"OmniGent custom policy not found at {path}",
+            "defenseclaw setup omnigent",
         )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
@@ -1053,17 +1323,24 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
-        _resolve_openclaw_gateway,
+        _resolve_gateway_for_connector,
     )
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
-    oc_gw = _resolve_openclaw_gateway(cfg.claw.config_file)
+    # SU-03/ND-2: this used to read openclaw.json unconditionally and pin
+    # OPENCLAW_GATEWAY_TOKEN whenever a token was reachable — with NO connector
+    # gate at all — leaking a proxy secret (and OpenClaw's gateway endpoint)
+    # onto hook-only installs that never touch the proxy. Route through the
+    # shared _resolve_gateway_for_connector, which resolves the OpenClaw gateway
+    # (host/port/token) only when openclaw is a genuinely active connector and
+    # returns loopback defaults with no token otherwise.
+    gw = _resolve_gateway_for_connector(cfg)
     if is_new_config:
-        cfg.gateway.host = oc_gw["host"]
-        cfg.gateway.port = oc_gw["port"]
+        cfg.gateway.host = gw["host"]
+        cfg.gateway.port = gw["port"]
 
     token_configured = False
-    token = oc_gw.get("token", "")
+    token = gw.get("token", "")
     if token:
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
         cfg.gateway.token = ""

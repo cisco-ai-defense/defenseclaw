@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -73,6 +74,13 @@ type APIServer struct {
 	// ScannerMode) which can be changed at runtime via the PATCH
 	// /v1/guardrail/config endpoint while other goroutines read them.
 	cfgMu sync.RWMutex
+
+	// configReloader and configSnapshot bind API writes to the same central
+	// transaction and immutable snapshot used by live enforcement. The PATCH
+	// endpoint refuses to write when this coordination is unavailable.
+	configReloader func(context.Context, string) error
+	configSnapshot func() *config.Config
+	configWriteMu  sync.Mutex
 
 	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
 	// per-source OTLP path tokens loaded from
@@ -109,19 +117,43 @@ type APIServer struct {
 	otlpPathTokenReloadAt   map[connector.OTLPPathTokenScope]time.Time
 	otlpPathTokenLastStatAt map[connector.OTLPPathTokenScope]time.Time
 
+	hookAPITokenMu sync.RWMutex
+	hookAPITokens  map[string]string
+
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
 
-	claudeCodeMu                 sync.Mutex
-	claudeCodeLastComponentScan  time.Time
-	codexMu                      sync.Mutex
-	codexLastComponentScan       time.Time
-	rawTelemetryMu               sync.RWMutex
-	rawTelemetryDedupe           *rawTelemetryDeduper
-	llmPromptMu                  sync.Mutex
-	llmPromptBySourceSession     map[string]string
-	llmPromptBySourceSessionTurn map[string]string
+	claudeCodeMu                      sync.Mutex
+	claudeCodeLastComponentScan       time.Time
+	codexMu                           sync.Mutex
+	codexLastComponentScan            time.Time
+	rawTelemetryMu                    sync.RWMutex
+	rawTelemetryDedupe                *rawTelemetryDeduper
+	llmPromptMu                       sync.Mutex
+	llmPromptBySourceSession          map[string]string
+	llmPromptBySourceSessionOrder     []string
+	llmPromptBySourceSessionTurn      map[string]string
+	llmPromptBySourceSessionTurnOrder []string
+	hookLLMSpanPrompts                map[string]hookLLMSpanPrompt
+	hookLLMSpanPromptOrder            []string
+	hookLLMSpanCompleted              map[string]struct{}
+	hookLLMSpanCompletedOrder         []string
+	hookLLMSpanUsage                  map[string]hookLLMSpanUsage
+	hookLLMSpanUsageOrder             []string
+	hookLifecycleTransitions          map[string]struct{}
+	hookLifecycleTransitionOrder      []string
+	hookReportedCostTotals            map[string]float64
+	hookReportedCostTotalOrder        []string
+	hookToolInvocations               map[string][]hookToolInvocation
+	hookToolInvocationOrder           []string
+	hookSessionTraces                 map[string]hookSessionTrace
+	hookSessionTraceOrder             []string
+	hookPhaseStates                   map[string]hookPhaseState
+	hookPhaseStateOrder               []string
+	otlpMetricMu                      sync.Mutex
+	otlpMetricCumulative              map[string]otlpCumulativePoint
+	otlpMetricCumulativeOrder         []string
 
 	// stepIdxMu guards stepIdxBySession, the per-session 1-indexed
 	// turn counter used to populate audit.Event.StepIdx. A "turn" is
@@ -146,20 +178,59 @@ type APIServer struct {
 	// hook surface (Codex / Claude Code / Cursor / Windsurf /
 	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
 	// reach AID without per-script changes.
-	ciscoInspector *CiscoInspectClient
+	// Widened from *CiscoInspectClient to the Inspector interface so
+	// managed_enterprise installs can inject the token-authenticated
+	// *CiscoDefenseClawInspectClient instead. Callers still hold the
+	// same nil-guard semantics: only assign non-nil concrete values to
+	// this field (see inspector.go for the nil-interface trap).
+	ciscoInspector Inspector
+
+	// hookJudge forwards hook-lane message content (prompts + tool
+	// results delivered by hook connectors) to the LLM judge — the
+	// same judge instance the proxy lane uses, so a custom provider
+	// configured via guardrail.judge.llm sees live hook content too.
+	// nil unless guardrail.judge.enabled; wired by the sidecar at
+	// boot via SetHookJudge. Per-connector gating happens in
+	// hookJudgeInspect via guardrail.judge.hook_connectors.
+	hookJudge *LLMJudge
+	// hookJudgeSem bounds concurrent hook-lane judge executions,
+	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
+	// the judge is skipped (fail-open to the regex/AID verdict)
+	// rather than queued — a queued hook would stall the agent past
+	// the hook scripts' curl --max-time budget.
+	hookJudgeSem chan struct{}
 }
 
 // SetCiscoInspector wires the Cisco AI Defense client onto the API
-// server. Pass nil to disable the hook-lane AID call (e.g. when the
-// operator did not configure cisco_ai_defense.api_key_env).
-func (a *APIServer) SetCiscoInspector(c *CiscoInspectClient) {
+// server. Accepts any Inspector implementation — opensource installs
+// pass *CiscoInspectClient, managed_enterprise installs pass
+// *CiscoDefenseClawInspectClient. Pass a nil INTERFACE (not a typed-nil
+// concrete pointer) to disable the hook-lane AID call. Callers should
+// only invoke this when their concrete constructor returned a non-nil
+// value.
+func (a *APIServer) SetCiscoInspector(c Inspector) {
 	a.ciscoInspector = c
+}
+
+// SetHookJudge wires the LLM judge onto the API server so the hook
+// content lane (inspectMessageContent) can adjudicate prompts and
+// tool results for connectors listed in
+// guardrail.judge.hook_connectors. Pass nil to disable (the default
+// when guardrail.judge is off).
+func (a *APIServer) SetHookJudge(j *LLMJudge) {
+	a.hookJudge = j
+	if j != nil && a.hookJudgeSem == nil {
+		a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges)
+	}
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events
 // can be recorded as metrics.
 func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
+	if a.ciscoInspector != nil {
+		a.ciscoInspector.SetTelemetry(p)
+	}
 }
 
 // otlpPathTokenEntry bundles the cached path-token with the mtime of
@@ -208,6 +279,27 @@ func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]st
 		cp[k] = entry
 	}
 	a.otlpPathTokens = cp
+}
+
+// SetHookAPITokens replaces the in-memory snapshot of connector-scoped hook
+// API tokens. These tokens are narrower than gateway.token: tokenAuth accepts
+// them only for the matching connector hook/notify routes.
+func (a *APIServer) SetHookAPITokens(tokens map[string]string) {
+	a.hookAPITokenMu.Lock()
+	defer a.hookAPITokenMu.Unlock()
+	if tokens == nil {
+		a.hookAPITokens = nil
+		return
+	}
+	cp := make(map[string]string, len(tokens))
+	for k, v := range tokens {
+		name := strings.ToLower(strings.TrimSpace(k))
+		tok := strings.TrimSpace(v)
+		if name != "" && tok != "" {
+			cp[name] = tok
+		}
+	}
+	a.hookAPITokens = cp
 }
 
 // otlpPathTokenReloadMinInterval bounds disk I/O on the loopback OTLP auth
@@ -393,6 +485,67 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	return tok
 }
 
+func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	presented = strings.TrimSpace(presented)
+	if name == "" || presented == "" {
+		return false
+	}
+
+	dataDir := a.configDataDir()
+	if dataDir == "" {
+		a.hookAPITokenMu.RLock()
+		cached := ""
+		if a.hookAPITokens != nil {
+			cached = a.hookAPITokens[name]
+		}
+		a.hookAPITokenMu.RUnlock()
+		return cached != "" && constantTimeStringMatch(presented, cached)
+	}
+	tok, err := connector.LoadHookAPIToken(dataDir, name)
+	if err != nil || tok == "" {
+		a.hookAPITokenMu.Lock()
+		if a.hookAPITokens != nil {
+			delete(a.hookAPITokens, name)
+		}
+		a.hookAPITokenMu.Unlock()
+		return false
+	}
+	a.hookAPITokenMu.Lock()
+	if a.hookAPITokens == nil {
+		a.hookAPITokens = map[string]string{}
+	}
+	a.hookAPITokens[name] = tok
+	a.hookAPITokenMu.Unlock()
+	return constantTimeStringMatch(presented, tok)
+}
+
+func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
+	if path == "/api/v1/codex/notify" {
+		return "codex", true
+	}
+	if a.connectorRegistry != nil {
+		for _, name := range a.connectorRegistry.Names() {
+			conn, ok := a.connectorRegistry.Get(name)
+			if !ok {
+				continue
+			}
+			he, ok := conn.(connector.HookEndpoint)
+			if ok && he.HookAPIPath() == path {
+				return strings.ToLower(name), true
+			}
+		}
+		return "", false
+	}
+	switch path {
+	case "/api/v1/codex/hook":
+		return "codex", true
+	case "/api/v1/claude-code/hook":
+		return "claudecode", true
+	}
+	return "", false
+}
+
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 	a.hilt = m
 }
@@ -495,7 +648,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -538,6 +691,28 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 		s.scannerCfg = cfg[0]
 	}
 	return s
+}
+
+// SetConfigRuntime connects configuration mutations to ConfigManager and the
+// authoritative live sidecar snapshot.
+func (a *APIServer) SetConfigRuntime(reload func(context.Context, string) error, snapshot func() *config.Config) {
+	if a == nil {
+		return
+	}
+	a.configReloader = reload
+	a.configSnapshot = snapshot
+}
+
+func (a *APIServer) runtimeConfigSnapshot() *config.Config {
+	if a == nil {
+		return nil
+	}
+	if a.configSnapshot != nil {
+		return a.configSnapshot()
+	}
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return cloneConfig(a.scannerCfg)
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
@@ -628,6 +803,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.Handle("/api/v1/inspect/", hookLimiter(inspectMux))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
+	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
@@ -704,7 +880,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// API never comes up, and every connector hook posting to this port fails.
 	// Retrying for a few seconds lets the OS reclaim the port so the restarted
 	// gateway binds the same address the agent's hooks call.
-	ln, lnErr := listenWithRetry(ctx, a.addr, 6*time.Second)
+	ln, lnErr := listenWithRetry(ctx, a.addr, 30*time.Second)
 	if lnErr != nil {
 		a.health.SetAPI(StateError, lnErr.Error(), nil)
 		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
@@ -731,6 +907,53 @@ func (a *APIServer) Run(ctx context.Context) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// handleTelemetryCanary exercises the real runtime trace pipeline. The global
+// token/CSRF middleware protects this diagnostic endpoint like every other
+// mutating API route.
+func (a *APIServer) handleTelemetryCanary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if a.otel == nil || !a.otel.TracesEnabled() {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "OTel traces are not enabled"})
+		return
+	}
+	var request struct {
+		Destination string `json:"destination"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if strings.TrimSpace(request.Destination) == "" {
+		request.Destination = "galileo"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	traceID, err := a.otel.EmitGenAICanaryToDestination(ctx, request.Destination)
+	after := a.otel.DestinationDeliveryStats(request.Destination)
+	acknowledged := a.otel.DestinationAcknowledgedCanaryTrace(request.Destination, traceID)
+	if err != nil && !acknowledged {
+		a.writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+			"error": err.Error(), "trace_id": traceID, "delivery": after,
+		})
+		return
+	}
+	status := http.StatusOK
+	if !acknowledged {
+		status = http.StatusBadGateway
+	}
+	payload := map[string]interface{}{
+		"trace_id": traceID, "destination": request.Destination,
+		"acknowledged": acknowledged, "delivery": after,
+	}
+	if err != nil {
+		payload["flush_warning"] = err.Error()
+	}
+	a.writeJSON(w, status, payload)
 }
 
 func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -766,14 +989,21 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		reg = getFallbackConnectorRegistry()
 	}
 	type connectorEntry struct {
-		Name               string                           `json:"name"`
-		Description        string                           `json:"description"`
-		Source             string                           `json:"source"`
-		ToolInspectionMode string                           `json:"tool_inspection_mode"`
-		SubprocessPolicy   string                           `json:"subprocess_policy"`
-		HookCapabilities   *connector.HookCapability        `json:"hook_capabilities,omitempty"`
-		Capabilities       *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
-		Locations          *connector.ConnectorLocations    `json:"locations,omitempty"`
+		Name               string `json:"name"`
+		Description        string `json:"description"`
+		Source             string `json:"source"`
+		ToolInspectionMode string `json:"tool_inspection_mode"`
+		SubprocessPolicy   string `json:"subprocess_policy"`
+		// LLMTrafficMode ("proxy" | "hooks-only") tells the CLI whether a
+		// custom provider bound to this connector is enforced on the
+		// agent's own model traffic or only configures DefenseClaw's
+		// judge/aux model. Set for every connector (proxy connectors do
+		// not emit the ConnectorCapabilities struct, so it cannot live
+		// solely there).
+		LLMTrafficMode   string                           `json:"llm_traffic_mode"`
+		HookCapabilities *connector.HookCapability        `json:"hook_capabilities,omitempty"`
+		Capabilities     *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
+		Locations        *connector.ConnectorLocations    `json:"locations,omitempty"`
 	}
 	avail := reg.Available()
 	entries := make([]connectorEntry, len(avail))
@@ -784,6 +1014,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			Source:             info.Source,
 			ToolInspectionMode: string(info.ToolInspectionMode),
 			SubprocessPolicy:   string(info.SubprocessPolicy),
+			LLMTrafficMode:     connector.LLMTrafficModeForConnector(info.Name),
 		}
 		if conn, ok := reg.Get(info.Name); ok {
 			opts := connector.SetupOpts{
@@ -851,27 +1082,37 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, status)
 }
 
-// connectorModeSummary returns the per-connector enforcement /
-// observability mode for the active connector. The shape is:
+// connectorModeSummary returns the per-connector runtime summary for the
+// active connector. The shape is:
 //
 //	{
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
-//	  "mode":       "guardrail" | "observability",
+//	  "mode":       "guardrail" | "observability", // legacy data-path field
+//	  "policy_mode": "observe" | "action",
+//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks" | "omnigent_policy_api",
 //	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
 //	  "proxy_intercept": true | false,
 //	}
 //
-// "guardrail" means the proxy listener is bound and inline blocking
-// is active; "observability" means traffic is NOT intercepted and
-// the gateway only ingests telemetry. Telemetry channels reflect
-// what Setup() actually wired (hooks always on; otel + notify are
-// codex/claude-only; openclaw/zeptoclaw enumerate "hooks" alone).
+// "guardrail" means the proxy listener is bound; "observability" is the
+// legacy name for a direct-to-upstream data path. Enforcement on that direct
+// path is described separately by policy_mode and enforcement_surface.
 //
 // This is the singular (active-connector) view kept for back-compat;
 // connectorModesSummary fans the same shape out across every active
 // connector for the multi-connector status surface.
 func (a *APIServer) connectorModeSummary() map[string]interface{} {
-	return connectorModeFor(a.connectorName())
+	if a.scannerCfg != nil && !a.scannerCfg.HasConnectorConfigured() {
+		return map[string]interface{}{
+			"connector":           "",
+			"mode":                "unconfigured",
+			"policy_mode":         "",
+			"enforcement_surface": "",
+			"telemetry":           []string{},
+			"proxy_intercept":     false,
+		}
+	}
+	return connectorModeForConfig(a.scannerCfg, a.connectorName())
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -885,13 +1126,16 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 	var names []string
 	if a.scannerCfg != nil {
 		names = a.scannerCfg.ActiveConnectors()
+		if !a.scannerCfg.HasConnectorConfigured() {
+			return []map[string]interface{}{}
+		}
 	}
 	if len(names) == 0 {
 		names = []string{a.connectorName()}
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		out = append(out, connectorModeFor(strings.ToLower(strings.TrimSpace(name))))
+		out = append(out, connectorModeForConfig(a.scannerCfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -900,31 +1144,44 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 // single connector name. Pure function of the name so it can be mapped over
 // the whole active set (connectorModesSummary) or applied to just the
 // primary (connectorModeSummary).
-func connectorModeFor(name string) map[string]interface{} {
+func connectorModeFor(name, policyMode string) map[string]interface{} {
 	mode := "guardrail"
 	intercept := true
+	surface := "llm_proxy"
 	var telemetry []string
+	policyMode = strings.ToLower(strings.TrimSpace(policyMode))
+	if policyMode != "action" {
+		policyMode = "observe"
+	}
 
 	switch name {
 	case "codex":
 		mode = "observability"
 		intercept = false
+		surface = "agent_lifecycle_hooks"
 		// codex telemetry always wires all three channels (hooks,
 		// the [otel.exporter.otlp-http] block, the notify bridge).
 		telemetry = []string{"hooks", "otel", "notify"}
 	case "claudecode":
 		mode = "observability"
 		intercept = false
+		surface = "agent_lifecycle_hooks"
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
 		mode = "observability"
 		intercept = false
+		surface = "agent_lifecycle_hooks"
 		telemetry = []string{"hooks"}
 		if name == "geminicli" || name == "copilot" {
 			telemetry = append(telemetry, "otel")
 		}
+	case "omnigent":
+		mode = "observability"
+		intercept = false
+		surface = "omnigent_policy_api"
+		telemetry = []string{"policy-api"}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;
@@ -933,11 +1190,27 @@ func connectorModeFor(name string) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"connector":       name,
-		"mode":            mode,
-		"telemetry":       telemetry,
-		"proxy_intercept": intercept,
+		"connector":           name,
+		"mode":                mode,
+		"policy_mode":         policyMode,
+		"enforcement_surface": surface,
+		"telemetry":           telemetry,
+		"proxy_intercept":     intercept,
 	}
+}
+
+func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
+	guardrailMode := "observe"
+	if cfg != nil {
+		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+	}
+	out := connectorModeFor(name, guardrailMode)
+	if guardrailMode != "" {
+		out["guardrail_mode"] = guardrailMode
+	}
+	proxyIntercept, _ := out["proxy_intercept"].(bool)
+	out["hook_enforcement"] = !proxyIntercept && strings.EqualFold(guardrailMode, "action")
+	return out
 }
 
 type skillActionRequest struct {
@@ -1172,6 +1445,12 @@ type policyEvaluateInput struct {
 type policyEvaluateScanResult struct {
 	MaxSeverity   string `json:"max_severity"`
 	TotalFindings int    `json:"total_findings"`
+	// DeepSec hardening (S2.scanners): expose the scanner failure
+	// signal so callers driving this debug endpoint can reproduce
+	// the post-scan admission decision a non-zero scanner exit
+	// would yield. Mirrors policy.ScanResultInput.
+	ExitCode  int    `json:"exit_code,omitempty"`
+	ScanError string `json:"scan_error,omitempty"`
 }
 
 func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
@@ -1545,6 +1824,8 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		input.ScanResult = &policy.ScanResultInput{
 			MaxSeverity:   req.Input.ScanResult.MaxSeverity,
 			TotalFindings: req.Input.ScanResult.TotalFindings,
+			ExitCode:      req.Input.ScanResult.ExitCode,
+			ScanError:     req.Input.ScanResult.ScanError,
 		}
 	}
 
@@ -1851,6 +2132,68 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Target == "" {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
+	}
+
+	// Avarice F-3287: the legacy handler accepted any directory the
+	// gateway process could read and streamed every regular file
+	// inside it. A caller with the sidecar bearer token could ask
+	// for ~/.defenseclaw, ~/.ssh, /etc, /private/etc/ssh, etc., and
+	// receive a tarball of readable host files. Constrain req.Target
+	// to a directory under one of the configured skill or plugin
+	// roots, after fully resolving symlinks on both sides.
+	resolvedTarget, err := filepath.EvalSymlinks(req.Target)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("target directory not found: %s", req.Target),
+		})
+		return
+	}
+	resolvedAbs, err := filepath.Abs(resolvedTarget)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("target directory not resolvable: %s", req.Target),
+		})
+		return
+	}
+	a.cfgMu.RLock()
+	cfgSnap := a.scannerCfg
+	a.cfgMu.RUnlock()
+	var allowedRoots []string
+	if cfgSnap != nil {
+		allowedRoots = append(allowedRoots, cfgSnap.SkillDirs()...)
+		allowedRoots = append(allowedRoots, cfgSnap.PluginDirs()...)
+	}
+	rootOK := false
+	for _, root := range allowedRoots {
+		if root == "" {
+			continue
+		}
+		rr, rerr := filepath.EvalSymlinks(root)
+		if rerr != nil {
+			continue
+		}
+		rrAbs, aerr := filepath.Abs(rr)
+		if aerr != nil {
+			continue
+		}
+		if resolvedAbs == rrAbs {
+			rootOK = true
+			break
+		}
+		if strings.HasPrefix(resolvedAbs, rrAbs+string(os.PathSeparator)) {
+			rootOK = true
+			break
+		}
+	}
+	if !rootOK {
+		if a.logger != nil {
+			_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch-rejected", req.Target,
+				"reason=outside-skill-roots (F-3287)")
+		}
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "target is not under a configured skill or plugin root (F-3287)",
+		})
 		return
 	}
 
@@ -2215,15 +2558,18 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 			"mode":         "observe",
 			"scanner_mode": "local",
 		}
-		if a.scannerCfg != nil {
-			a.cfgMu.RLock()
-			cfg["mode"] = a.scannerCfg.Guardrail.Mode
-			cfg["scanner_mode"] = a.scannerCfg.Guardrail.ScannerMode
-			a.cfgMu.RUnlock()
+		if live := a.runtimeConfigSnapshot(); live != nil {
+			cfg["mode"] = live.Guardrail.Mode
+			cfg["scanner_mode"] = live.Guardrail.ScannerMode
+			cfg["block_message"] = live.Guardrail.BlockMessage
+			cfg["connector"] = live.Guardrail.Connector
+			cfg["hilt_enabled"] = live.Guardrail.HILT.Enabled
+			cfg["hilt_min_severity"] = live.Guardrail.HILT.MinSeverity
 		}
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	case http.MethodPatch:
+		current := a.runtimeConfigSnapshot()
 		// PR #141 audit C1: defense-in-depth gate. tokenAuth already
 		// fail-closes when no gateway token is configured, but mode
 		// changes are too security-sensitive to depend on a single
@@ -2232,110 +2578,363 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		// custom mux) must not silently downgrade `action` → `observe`
 		// without an authenticated caller. Re-validate here with the
 		// same constant-time compare tokenAuth uses.
-		if a.scannerCfg != nil {
-			token := ""
-			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				token = strings.TrimPrefix(auth, "Bearer ")
-			}
-			if token == "" {
-				token = r.Header.Get("X-DefenseClaw-Token")
-			}
-			expected := a.scannerCfg.Gateway.Token
-			if expected == "" || token == "" || !constantTimeStringMatch(token, expected) {
-				a.writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN",
-				})
-				return
-			}
+		if status, authErr := guardrailConfigPatchAuthorization(r, current); authErr != "" {
+			a.writeJSON(w, status, map[string]string{"error": authErr})
+			return
 		}
 
-		var req map[string]string
+		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
 
-		if a.scannerCfg == nil {
+		if current == nil {
 			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not available"})
 			return
 		}
-
-		a.cfgMu.Lock()
-
-		oldMode := a.scannerCfg.Guardrail.Mode
-		oldScannerMode := a.scannerCfg.Guardrail.ScannerMode
-
-		changed := []string{}
-		if mode, ok := req["mode"]; ok && (mode == "observe" || mode == "action") {
-			a.scannerCfg.Guardrail.Mode = mode
-			changed = append(changed, "mode="+mode)
-		}
-		if sm, ok := req["scanner_mode"]; ok && (sm == "local" || sm == "remote" || sm == "both") {
-			a.scannerCfg.Guardrail.ScannerMode = sm
-			changed = append(changed, "scanner_mode="+sm)
-		}
-
-		if len(changed) == 0 {
-			a.cfgMu.Unlock()
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no valid fields to update"})
+		if a.configReloader == nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": "central config reload is unavailable; refusing an uncoordinated config write",
+			})
 			return
 		}
 
-		if err := a.writeGuardrailRuntime(); err != nil {
-			a.scannerCfg.Guardrail.Mode = oldMode
-			a.scannerCfg.Guardrail.ScannerMode = oldScannerMode
-			a.cfgMu.Unlock()
+		changed := []string{}
+		updates := map[string]any{}
+		if raw, ok := req["mode"]; ok {
+			mode, ok := raw.(string)
+			if !ok || (mode != "observe" && mode != "action") {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be observe or action"})
+				return
+			}
+			updates["guardrail.mode"] = mode
+			changed = append(changed, "mode="+mode)
+		}
+		if raw, ok := req["scanner_mode"]; ok {
+			sm, ok := raw.(string)
+			if !ok || (sm != "local" && sm != "remote" && sm != "both") {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "scanner_mode must be local, remote, or both"})
+				return
+			}
+			updates["guardrail.scanner_mode"] = sm
+			changed = append(changed, "scanner_mode="+sm)
+		}
+		if raw, ok := req["block_message"]; ok {
+			bm, ok := raw.(string)
+			if !ok {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "block_message must be a string"})
+				return
+			}
+			updates["guardrail.block_message"] = bm
+			changed = append(changed, "block_message")
+		}
+		if raw, ok := req["connector"]; ok {
+			conn, ok := raw.(string)
+			if !ok || strings.TrimSpace(conn) == "" {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "connector must be a non-empty string"})
+				return
+			}
+			conn = strings.ToLower(strings.TrimSpace(conn))
+			updates["guardrail.connector"] = conn
+			changed = append(changed, "connector="+conn)
+		}
+		if raw, ok := req["hilt_enabled"]; ok {
+			enabled, ok := raw.(bool)
+			if !ok {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_enabled must be a boolean"})
+				return
+			}
+			updates["guardrail.hilt.enabled"] = enabled
+			changed = append(changed, fmt.Sprintf("hilt_enabled=%v", enabled))
+		}
+		if raw, ok := req["hilt_min_severity"]; ok {
+			minSev, ok := raw.(string)
+			if !ok || strings.TrimSpace(minSev) == "" {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_min_severity must be a non-empty string"})
+				return
+			}
+			minSev = strings.ToUpper(strings.TrimSpace(minSev))
+			updates["guardrail.hilt.min_severity"] = minSev
+			changed = append(changed, "hilt_min_severity="+minSev)
+		}
+
+		if len(updates) == 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no valid fields to update"})
+			return
+		}
+		a.configWriteMu.Lock()
+		defer a.configWriteMu.Unlock()
+
+		// Re-snapshot after entering the write transaction. An administrator
+		// may have switched the gateway into managed mode, rotated the token,
+		// or changed the authoritative config path while this request body was
+		// being decoded or waiting behind another PATCH.
+		current = a.runtimeConfigSnapshot()
+		if current == nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not available"})
+			return
+		}
+		if status, authErr := guardrailConfigPatchAuthorization(r, current); authErr != "" {
+			a.writeJSON(w, status, map[string]string{"error": authErr})
+			return
+		}
+
+		configPath := configFilePathForSnapshot(current)
+		original, err := captureConfigFileState(configPath)
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := a.patchGuardrailConfigFile(configPath, updates); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		candidate, err := config.LoadFromFile(configPath)
+		if err != nil {
+			_ = restoreConfigFileState(configPath, original)
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		diff := diffConfigs(current, candidate)
+		if configReloadMode(candidate) == "hot" && len(diff.RestartRequired) > 0 {
+			if err := restoreConfigFileState(configPath, original); err != nil {
+				a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			a.writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":            "guardrail config change requires gateway restart",
+				"restart_required": diff.RestartRequired,
+				"changed":          changed,
+			})
+			return
+		}
+
+		if err := a.configReloader(r.Context(), "guardrail_api"); err != nil {
+			rollbackErr := restoreConfigFileState(configPath, original)
+			if rollbackErr == nil {
+				rollbackErr = a.configReloader(r.Context(), "guardrail_api_rollback")
+			}
+			if rollbackErr != nil {
+				err = fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+			}
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 
-		resp := map[string]interface{}{
-			"status":       "updated",
-			"changed":      changed,
-			"mode":         a.scannerCfg.Guardrail.Mode,
-			"scanner_mode": a.scannerCfg.Guardrail.ScannerMode,
+		statusCode := http.StatusOK
+		status := "updated"
+		live := true
+		responseCfg := a.runtimeConfigSnapshot()
+		if configReloadMode(candidate) == "restart" && !onlyConfigReloadModeChanged(current, candidate) {
+			statusCode = http.StatusAccepted
+			status = "restart_requested"
+			live = false
+			responseCfg = candidate
+		} else if !guardrailConfigContainsUpdates(responseCfg, updates) {
+			rollbackErr := restoreConfigFileState(configPath, original)
+			if rollbackErr == nil {
+				rollbackErr = a.configReloader(r.Context(), "guardrail_api_rollback")
+			}
+			err := fmt.Errorf("central config reload returned without applying the guardrail update")
+			if rollbackErr != nil {
+				err = fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+			}
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
 
-		a.cfgMu.Unlock()
+		resp := guardrailConfigResponse(responseCfg)
+		resp["status"] = status
+		resp["live"] = live
+		resp["changed"] = changed
 
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailConfigReload), "", strings.Join(changed, " "))
 		}
 
-		a.writeJSON(w, http.StatusOK, resp)
+		a.writeJSON(w, statusCode, resp)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (a *APIServer) writeGuardrailRuntime() error {
-	if a.scannerCfg == nil {
-		return fmt.Errorf("api: no config available")
+func guardrailConfigPatchAuthorization(r *http.Request, current *config.Config) (int, string) {
+	if current == nil {
+		return 0, ""
 	}
-	runtimeFile := filepath.Join(a.scannerCfg.DataDir, "guardrail_runtime.json")
-	data, err := json.Marshal(map[string]string{
-		"mode":          a.scannerCfg.Guardrail.Mode,
-		"scanner_mode":  a.scannerCfg.Guardrail.ScannerMode,
-		"block_message": a.scannerCfg.Guardrail.BlockMessage,
-	})
-	if err != nil {
-		return fmt.Errorf("api: marshal runtime config: %w", err)
+	if managed.IsManagedEnterprise(current.DeploymentMode) {
+		return http.StatusForbidden, "managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian"
 	}
-	return os.WriteFile(runtimeFile, data, 0o600)
+	token := ""
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		token = strings.TrimPrefix(auth, "Bearer ")
+	}
+	if token == "" {
+		token = r.Header.Get("X-DefenseClaw-Token")
+	}
+	expected := current.Gateway.Token
+	if expected == "" || token == "" || !constantTimeStringMatch(token, expected) {
+		return http.StatusForbidden, "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN"
+	}
+	return 0, ""
 }
 
-func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
-	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err == nil {
-			out, evalErr := engine.EvaluateGuardrail(ctx, input)
-			if evalErr == nil {
-				return out, nil
+func (a *APIServer) configFilePath() string {
+	return configFilePathForSnapshot(a.runtimeConfigSnapshot())
+}
+
+func configFilePathForSnapshot(cfg *config.Config) string {
+	if cfg != nil {
+		if p := strings.TrimSpace(cfg.ConfigFilePath); p != "" {
+			return p
+		}
+		if d := strings.TrimSpace(cfg.DataDir); d != "" {
+			return filepath.Join(d, config.DefaultConfigName)
+		}
+	}
+	return config.ConfigPath()
+}
+
+type configFileState struct {
+	data    []byte
+	mode    os.FileMode
+	existed bool
+}
+
+func captureConfigFileState(path string) (configFileState, error) {
+	state := configFileState{mode: 0o600}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return state, nil
+		}
+		return state, fmt.Errorf("api: read config before patch: %w", err)
+	}
+	state.data = data
+	state.existed = true
+	if info, statErr := os.Stat(path); statErr == nil {
+		state.mode = info.Mode().Perm()
+	}
+	return state, nil
+}
+
+func restoreConfigFileState(path string, state configFileState) error {
+	if state.existed {
+		if err := config.WriteFileAtomic(path, state.data, state.mode); err != nil {
+			return fmt.Errorf("api: restore config after failed live apply: %w", err)
+		}
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("api: remove config after failed live apply: %w", err)
+	}
+	return nil
+}
+
+func (a *APIServer) patchGuardrailConfigFile(path string, updates map[string]any) error {
+	original, err := captureConfigFileState(path)
+	if err != nil {
+		return err
+	}
+	if err := config.PatchYAMLFile(path, updates); err != nil {
+		return err
+	}
+	if _, err := config.LoadFromFile(path); err != nil {
+		if restoreErr := restoreConfigFileState(path, original); restoreErr != nil {
+			return fmt.Errorf("api: patched config invalid: %w; restore failed: %v", err, restoreErr)
+		}
+		return fmt.Errorf("api: patched config invalid: %w", err)
+	}
+	return nil
+}
+
+func guardrailConfigContainsUpdates(cfg *config.Config, updates map[string]any) bool {
+	if cfg == nil {
+		return false
+	}
+	for key, value := range updates {
+		switch key {
+		case "guardrail.mode":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.Mode != want {
+				return false
+			}
+		case "guardrail.scanner_mode":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.ScannerMode != want {
+				return false
+			}
+		case "guardrail.block_message":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.BlockMessage != want {
+				return false
+			}
+		case "guardrail.connector":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.Connector != want {
+				return false
+			}
+		case "guardrail.hilt.enabled":
+			want, ok := value.(bool)
+			if !ok || cfg.Guardrail.HILT.Enabled != want {
+				return false
+			}
+		case "guardrail.hilt.min_severity":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.HILT.MinSeverity != want {
+				return false
 			}
 		}
 	}
+	return true
+}
 
+func guardrailConfigResponse(cfg *config.Config) map[string]interface{} {
+	resp := map[string]interface{}{}
+	if cfg == nil {
+		return resp
+	}
+	resp["mode"] = cfg.Guardrail.Mode
+	resp["scanner_mode"] = cfg.Guardrail.ScannerMode
+	resp["block_message"] = cfg.Guardrail.BlockMessage
+	resp["connector"] = cfg.Guardrail.Connector
+	resp["hilt_enabled"] = cfg.Guardrail.HILT.Enabled
+	resp["hilt_min_severity"] = cfg.Guardrail.HILT.MinSeverity
+	return resp
+}
+
+func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
+	// Avarice F-3288: when a policy bundle is configured but
+	// either the engine constructor or evaluation fails, the
+	// previous code silently fell back to a built-in
+	// severity-derived decision that allows clean/missing scanner
+	// results and downgrades MEDIUM/HIGH to alert. That converted
+	// every policy outage into a quiet enforcement bypass for
+	// action-mode prompts. We now fail closed: any configured
+	// policy directory whose engine/eval fails returns block in
+	// action mode (and an explicit alert in observe mode for
+	// audit visibility).
+	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
+		engine, err := policy.New(a.scannerCfg.PolicyDir)
+		if err != nil {
+			return policyOutageVerdict(input,
+				fmt.Sprintf("policy engine load failed: %v", err)), nil
+		}
+		out, evalErr := engine.EvaluateGuardrail(ctx, input)
+		if evalErr != nil {
+			return policyOutageVerdict(input,
+				fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
+		}
+		return out, nil
+	}
+
+	// No policy directory configured at all — keep the legacy
+	// severity-derived fallback. Operators that want strict
+	// fail-closed behavior on missing policy must configure a
+	// PolicyDir; the absence of one is treated as "no policy"
+	// rather than "policy outage".
 	sev := "NONE"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
@@ -2359,9 +2958,26 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	return &policy.GuardrailOutput{
 		Action:         action,
 		Severity:       sev,
-		Reason:         "built-in fallback (OPA unavailable)",
+		Reason:         "built-in fallback (no policy configured)",
 		ScannerSources: sources,
 	}, nil
+}
+
+// policyOutageVerdict builds a fail-closed verdict for guardrail
+// evaluations when a configured policy bundle cannot be loaded or
+// evaluated. Action mode blocks; observe mode keeps the request
+// flowing but loud-flags it via alert + would_block-style telemetry.
+func policyOutageVerdict(input policy.GuardrailInput, reason string) *policy.GuardrailOutput {
+	action := "block"
+	if input.Mode == "observe" {
+		action = "alert"
+	}
+	return &policy.GuardrailOutput{
+		Action:         action,
+		Severity:       "HIGH",
+		Reason:         "guardrail failing closed: " + reason,
+		ScannerSources: []string{"policy-outage"},
+	}
 }
 
 // metricsMiddleware records HTTP request count and duration via OTel.
@@ -2471,6 +3087,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
+			if a.hookAPITokenMatches(hookScope, token) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
+			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
+			registered := false
+			if a.connectorRegistry != nil {
+				_, registered = a.connectorRegistry.Get(hookScope)
+			}
+			if registered && a.hookAPITokenMatches(hookScope, token) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -2482,6 +3115,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 
+		// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+		// unauthenticated agent sessions"): now that auth has
+		// succeeded, upgrade the previously peeked agent identity
+		// to a fully minted entry so authenticated traffic still
+		// gets a stable agent_instance_id on its emissions.
+		r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -3047,8 +3686,9 @@ type codeScanRequest struct {
 	Path string `json:"path"`
 }
 
-// handleCodeScan runs CodeGuard on the given filesystem path and returns
-// the ScanResult with OTel signals emitted via the shared audit logger.
+// handleCodeScan runs the built-in source-code scanner suite on the given
+// filesystem path and returns the ScanResult with OTel signals emitted via
+// the shared audit logger.
 func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3069,9 +3709,8 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
 
-	result, err := cg.Scan(r.Context(), req.Path)
+	result, err := scanner.ScanCode(r.Context(), req.Path, rulesDir)
 	if err != nil {
 		if a.otel != nil {
 			a.otel.RecordScanError(r.Context(), "codeguard", "code", classifyScanError(err))
@@ -3082,6 +3721,30 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.logger != nil {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+	}
+
+	// DeepSec H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
+	// findings"): the persistent path (LogScanWithCorrelation →
+	// audit.scan_persist.go) already runs Description / Location /
+	// Remediation through redaction.ForSinkString before INSERT, and
+	// `defenseclaw scan code --json` (internal/cli/scan_v7.go::findingToV7)
+	// applies the same redaction before serialization. The REST API used
+	// to bypass both — serializing the raw scanner.ScanResult straight to
+	// the response body and leaking matched source lines, raw absolute
+	// paths, and operator-supplied remediation text to any caller. Apply
+	// the same field-level redaction here so all three surfaces (DB row,
+	// CLI JSON, REST response) treat scanner output identically. We
+	// redact AFTER LogScanWithCorrelation has been called: scan_persist.go
+	// re-applies its own redaction before INSERT, so the in-place mutation
+	// here only affects the response body — keeping the existing audit
+	// DB contract untouched. Title is intentionally NOT redacted to stay
+	// symmetric with the persistence path (Title is the rule-name /
+	// operator-searchable summary, not the matched bytes).
+	for i := range result.Findings {
+		f := &result.Findings[i]
+		f.Description = redaction.ForSinkString(f.Description)
+		f.Location = redaction.ForSinkString(f.Location)
+		f.Remediation = redaction.ForSinkString(f.Remediation)
 	}
 
 	a.writeJSON(w, http.StatusOK, result)
@@ -3130,9 +3793,12 @@ func (a *APIServer) handleNetworkEgressList(w http.ResponseWriter, r *http.Reque
 	}
 
 	f := audit.NetworkEgressFilter{
-		Hostname:  q.Get("hostname"),
-		SessionID: q.Get("session_id"),
-		Limit:     limit,
+		Hostname:    q.Get("hostname"),
+		SessionID:   q.Get("session_id"),
+		AgentID:     q.Get("agent_id"),
+		RootAgentID: q.Get("root_agent_id"),
+		UserID:      q.Get("user_id"),
+		Limit:       limit,
 	}
 
 	// ?blocked=true|false — optional boolean filter
@@ -3186,6 +3852,30 @@ func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Req
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	env := audit.EnvelopeFromContext(r.Context())
+	identity := AgentIdentityFromContext(r.Context())
+	evt.SessionID = firstNonEmpty(SessionIDFromContext(r.Context()), env.SessionID, evt.SessionID)
+	evt.Connector = firstNonEmpty(env.Connector, evt.Connector)
+	evt.AgentID = firstNonEmpty(identity.AgentID, env.AgentID, evt.AgentID)
+	evt.ToolID = firstNonEmpty(env.ToolID, evt.ToolID)
+	userID, _ := userFromHTTPRequest(r, nil)
+	evt.UserID = firstNonEmpty(userID, evt.UserID)
+	if evt.AgentLifecycleID == "" && evt.Connector != "" && evt.SessionID != "" && evt.AgentID != "" {
+		evt.AgentLifecycleID = stableLLMEventID("lifecycle", evt.Connector, evt.SessionID, evt.AgentID)
+	}
+	if snapshot, ok := a.hookLifecycleSnapshot(evt.Connector, evt.SessionID, evt.AgentID); ok {
+		evt.RootAgentID = firstNonEmpty(evt.RootAgentID, snapshot.RootAgentID, snapshot.AgentID)
+		evt.ParentAgentID = firstNonEmpty(evt.ParentAgentID, snapshot.ParentAgentID)
+		evt.RootSessionID = firstNonEmpty(evt.RootSessionID, snapshot.RootSessionID, snapshot.SessionID)
+		if snapshot.LifecycleID != "" {
+			evt.AgentLifecycleID = snapshot.LifecycleID
+		}
+		if snapshot.ExecutionID != "" {
+			evt.AgentExecutionID = snapshot.ExecutionID
+		}
+	}
+	evt.RootAgentID = firstNonEmpty(evt.RootAgentID, evt.AgentID)
+	evt.RootSessionID = firstNonEmpty(evt.RootSessionID, evt.SessionID)
 
 	if a.logger == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit logger not configured"})

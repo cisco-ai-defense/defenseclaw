@@ -36,7 +36,7 @@ The wrapper accepts the same hook-alias flags as the other hook connectors. The 
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
 | `--workspace / --workspace-dir` | unset | Opt into repo-local `.openhands/hooks.json`; unset means global `~/.openhands/hooks.json`. |
 
-Pinned by the alias regardless of flags: `claw.mode=openhands`, `guardrail.connector=openhands`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. `claw.workspace_dir` is cleared for global setup and set only when `--workspace` is supplied. `guardrail.mode` defaults to `observe` and changes to `action` only when `--mode action` is passed. To tune the broader guardrail matrix after install, use [`defenseclaw setup guardrail --connector openhands`](/docs/setup/guardrail).
+`setup openhands` is shorthand for `setup guardrail --connector openhands`: it adds or reconfigures OpenHands, defaults the connector to observe mode, and can join an existing hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared for global setup and set only when `--workspace` is supplied. `guardrail.mode` changes to `action` only when `--mode action` is passed. To tune OpenHands after install, keep using [`defenseclaw setup guardrail --connector openhands`](/docs/setup/guardrail).
 
 #### Version contract
 
@@ -108,7 +108,7 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 <HookEventsList connector="openhands" />
 
 <Callout>
-OpenHands can block supported hook events but has no native human-approval surface; HITL approvals fall back to confirm verdicts in the DefenseClaw TUI / audit log, with `raw_action: "confirm"` preserved.
+OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only.
 </Callout>
 
 ## Disable

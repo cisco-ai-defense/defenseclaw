@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -115,15 +116,14 @@ type GuardrailProxy struct {
 	// Defaults to 100 req/s with a burst of 200.
 	limiter *rate.Limiter
 
-	// Runtime config protected by rtMu. The PATCH /v1/guardrail/config
-	// endpoint on the API server writes guardrail_runtime.json; the proxy
-	// reads it with a TTL cache.
+	// Runtime config protected by rtMu. The central config reconciler pushes
+	// validated config.yaml snapshots into these fields.
 	rtMu         sync.RWMutex
 	mode         string
 	blockMessage string
 
 	// registry + setupOpts enable runtime connector hot-swap when the
-	// "connector" key appears in guardrail_runtime.json.
+	// active connector changes in config.yaml.
 	registry  *connector.Registry
 	setupOpts connector.SetupOpts
 
@@ -180,6 +180,54 @@ func (p *GuardrailProxy) SetHILTApprovalManager(m *HILTApprovalManager) {
 // stays clean.
 func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 	p.notifier = n
+}
+
+func (p *GuardrailProxy) SetOTelProvider(tel *telemetry.Provider) {
+	if p == nil {
+		return
+	}
+	p.otel = tel
+	if inspector, ok := p.inspector.(*GuardrailInspector); ok {
+		configureGuardrailInspectorTelemetry(inspector, tel)
+		if inspector.ciscoClient != nil {
+			inspector.ciscoClient.SetTelemetry(tel)
+		}
+	}
+	if p.hookGuard != nil {
+		p.hookGuard.SetOTelProvider(tel)
+	}
+}
+
+func configureGuardrailInspectorTelemetry(inspector *GuardrailInspector, tel *telemetry.Provider) {
+	if inspector == nil {
+		return
+	}
+	if tel == nil {
+		inspector.SetPanicRecorderFunc(nil)
+		inspector.SetTracerFunc(nil)
+		inspector.SetPhaseTracerFunc(nil)
+		return
+	}
+	inspector.SetPanicRecorderFunc(func(ctx context.Context) {
+		tel.RecordPanic(ctx, gatewaylog.SubsystemGuardrail)
+	})
+	if !tel.TracesEnabled() {
+		inspector.SetTracerFunc(nil)
+		inspector.SetPhaseTracerFunc(nil)
+		return
+	}
+	inspector.SetTracerFunc(func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)) {
+		ctx, span := tel.StartGuardrailStageSpan(ctx, stage, direction, model)
+		return ctx, func(action, severity, reason string, latencyMs int64) {
+			tel.EndGuardrailStageSpan(span, action, severity, reason, latencyMs)
+		}
+	})
+	inspector.SetPhaseTracerFunc(func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
+		ctx, span := tel.StartGuardrailPhaseSpan(ctx, phase)
+		return ctx, func(action, severity string, latencyMs int64) {
+			tel.EndGuardrailPhaseSpan(span, action, severity, latencyMs)
+		}
+	})
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -370,31 +418,7 @@ func NewGuardrailProxy(
 	// over `data.guardrail.hilt` (the data path is preserved as a fallback
 	// for non-gateway callers like direct `opa eval` runs).
 	inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
-	if otel != nil {
-		inspector.SetPanicRecorderFunc(func(ctx context.Context) {
-			otel.RecordPanic(ctx, gatewaylog.SubsystemGuardrail)
-		})
-	}
-	// Wire OTel span emission when telemetry is enabled. The
-	// inspector only sees a closure, so the telemetry dep stays
-	// localized to the proxy wiring layer.
-	if otel != nil && otel.TracesEnabled() {
-		inspector.SetTracerFunc(func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)) {
-			ctx, span := otel.StartGuardrailStageSpan(ctx, stage, direction, model)
-			return ctx, func(action, severity, reason string, latencyMs int64) {
-				otel.EndGuardrailStageSpan(span, action, severity, reason, latencyMs)
-			}
-		})
-		// Phase 2: child spans for each sub-stage so operators can
-		// drill into latency per phase (regex, cisco_ai_defense,
-		// judge.*, opa) without sampling every span at the same depth.
-		inspector.SetPhaseTracerFunc(func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
-			ctx, span := otel.StartGuardrailPhaseSpan(ctx, phase)
-			return ctx, func(action, severity string, latencyMs int64) {
-				otel.EndGuardrailPhaseSpan(span, action, severity, latencyMs)
-			}
-		})
-	}
+	configureGuardrailInspectorTelemetry(inspector, otel)
 
 	masterKey := deriveMasterKey(dataDir)
 
@@ -436,10 +460,68 @@ func NewGuardrailProxy(
 }
 
 // SetConnectorSwitchState stores the registry and setup options so the proxy
-// can hot-swap connectors at runtime when guardrail_runtime.json changes.
+// can hot-swap connectors when config.yaml changes.
 func (p *GuardrailProxy) SetConnectorSwitchState(reg *connector.Registry, opts connector.SetupOpts) {
 	p.registry = reg
 	p.setupOpts = opts
+}
+
+// SetManagedInspection swaps in a managed-mode AID inspector after
+// construction and toggles the managed verdict-merge dispatch on the
+// underlying GuardrailInspector. Called only by the sidecar boot path
+// when deployment_mode = managed_enterprise (see
+// Sidecar.runActiveGuardrail). Pass replacement == nil with
+// managed == true to explicitly disable remote inspection in managed
+// mode (fail-closed when the managed cloud auth provider is unavailable).
+//
+// The proxy stores its inspector under the ContentInspector interface,
+// so this method type-asserts down to *GuardrailInspector to reach the
+// concrete setters. A non-matching implementation (test double) is a
+// no-op — the managed toggle only matters for the real inspector wired
+// by NewGuardrailProxy.
+func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspector) {
+	if p == nil {
+		return
+	}
+	g, ok := p.inspector.(*GuardrailInspector)
+	if !ok {
+		return
+	}
+	if managed {
+		g.SetManagedMode(true)
+		g.SetCiscoInspector(replacement)
+	}
+}
+
+// ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
+// the live proxy without rereading any side files.
+func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
+	if p == nil || cfg == nil {
+		return
+	}
+	p.rtMu.Lock()
+	p.cfg = cfg
+	p.mode = cfg.Mode
+	p.blockMessage = cfg.BlockMessage
+	if cfg.ScannerMode == "local" || cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
+		p.inspector.SetScannerMode(cfg.ScannerMode)
+	}
+	p.inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
+	if strategySetter, ok := p.inspector.(interface {
+		SetDetectionStrategy(global, prompt, completion, toolCall string, sweep bool)
+	}); ok {
+		strategySetter.SetDetectionStrategy(
+			cfg.DetectionStrategy,
+			cfg.DetectionStrategyPrompt,
+			cfg.DetectionStrategyCompletion,
+			cfg.DetectionStrategyToolCall,
+			cfg.JudgeSweep,
+		)
+	}
+	if newName := strings.TrimSpace(cfg.Connector); newName != "" {
+		p.switchConnectorLocked(strings.ToLower(newName))
+	}
+	p.rtMu.Unlock()
 }
 
 // StartHookConfigGuard launches the connector hook self-heal guard bound to
@@ -886,7 +968,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	_ = json.Unmarshal(body, &partial)
 
-	p.reloadRuntimeConfig()
 	p.rtMu.RLock()
 	mode := p.mode
 	customBlockMsg := p.blockMessage
@@ -986,15 +1067,29 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectionText := promptInspectionText(userText)
+	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, partial.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, partial.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
+		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
@@ -1095,6 +1190,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			upstreamAuth = "Bearer " + xKey
 		} else if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
 			upstreamAuth = auth
+		}
+	}
+	// Fallback: when the caller supplied X-DC-Target-URL but no credential
+	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
+	// consult the enterprise token resolver (secrets-sidecar hydrated key)
+	// so the proxy injects the upstream LLM credential on behalf of the
+	// caller. This mirrors the resolveConfiguredProvider path that
+	// handleChatCompletion already uses for direct-provider hydration.
+	if upstreamAuth == "" && tokenResolver != nil {
+		providerPrefix := provider
+		if providerPrefix == "" {
+			providerPrefix = inferProvider(partial.Model, "")
+		}
+		resolvedKey, err := tokenResolver(r.Context(), providerPrefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: token resolver error: %v\n", err)
+		} else if resolvedKey != "" {
+			upstreamAuth = "Bearer " + resolvedKey
 		}
 	}
 
@@ -1221,6 +1334,23 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if verdict.Action == "block" && mode == "action" {
 				msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
 				p.enqueueBlockNotification(verdict, "completion", partial.Model)
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
+				return
+			}
+		}
+
+		// Avarice F-1188: scan provider-native tool calls (Anthropic
+		// tool_use, Gemini functionCall, Bedrock toolUse, OpenAI
+		// Responses function_call, OpenAI Chat Completions tool_calls).
+		// Pre-fix only the OpenAI chat-completion JSON path scanned tool
+		// calls; Anthropic / Gemini / Bedrock tool-call payloads were
+		// forwarded unchecked and the agent could execute them without
+		// the configured tool-call rules ever running.
+		if toolCallsRaw := extractPassthroughToolCalls(respBody, provider); toolCallsRaw != nil {
+			if verdict := p.inspectToolCalls(r.Context(), toolCallsRaw); verdict != nil &&
+				verdict.Action == "block" && mode == "action" {
+				msg := blockMessage(customBlockMsg, "tool_call", verdict.Reason)
+				p.enqueueBlockNotification(verdict, "tool_call", partial.Model)
 				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
 				return
 			}
@@ -1387,8 +1517,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 }
 
 // extractPassthroughResponseContent extracts assistant text from a non-streaming
-// provider-native response body. Supports Anthropic Messages API, Gemini, and
-// OpenAI Responses API formats.
+// provider-native response body. Supports Anthropic Messages API, Gemini,
+// OpenAI Responses API, OpenAI Chat Completions, Ollama native chat/generate,
+// and Bedrock Converse.
+//
+// Avarice F-1186: pre-fix Ollama and Bedrock envelopes were ignored, so
+// completion inspection silently skipped any prompt-injection that triggered
+// `block` because `content` came back empty and the proxy short-circuited
+// the inspector call. The new branches keep parity with the providers that
+// `inferProviderFromURL` recognises so action-mode passthrough enforcement
+// is uniform across the supported provider surface.
 func extractPassthroughResponseContent(body []byte, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1430,6 +1568,48 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			return sb.String()
 		}
 
+	case "ollama":
+		// F-1186: Ollama native chat: {"message": {"content": "..."}}
+		// Ollama native generate: {"response": "..."}
+		var chatResp struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal(body, &chatResp) == nil {
+			if chatResp.Message.Content != "" {
+				return chatResp.Message.Content
+			}
+			if chatResp.Response != "" {
+				return chatResp.Response
+			}
+		}
+
+	case "bedrock":
+		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
+		// Bedrock InvokeModel responses are model-shaped and re-routed through
+		// the matching provider extractor (anthropic / cohere / etc.) by the
+		// caller, so this branch only handles the Converse envelope.
+		var bedrockResp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &bedrockResp) == nil {
+			var sb strings.Builder
+			for _, c := range bedrockResp.Output.Message.Content {
+				sb.WriteString(c.Text)
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+		}
+
 	default:
 		// OpenAI Responses API: {"output": [{"content": [{"text": "..."}]}]}
 		var respAPI struct {
@@ -1466,8 +1646,192 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 	return ""
 }
 
+// extractPassthroughToolCalls returns provider-native tool-call payloads
+// found in a non-streaming response body, normalised into the OpenAI Chat
+// Completions tool_calls shape — a JSON array of
+// {"type":"function","function":{"name","arguments"}} objects. That nested
+// shape is the exact contract inspectToolCalls parses: emitting the flat
+// {"name","arguments"} shape here would make the inspector decode every
+// Function.Name / Function.Arguments as the empty string, so Anthropic
+// `tool_use`, Gemini `functionCall`, Bedrock `toolUse`, and OpenAI Responses
+// `function_call` outputs would forward uninspected. Returns nil when the
+// body contains no recognised tool-call shape so the caller can short-circuit
+// inspection.
+func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
+	type out struct {
+		Name      string
+		Arguments string
+	}
+	var calls []out
+	addCall := func(name string, args interface{}) {
+		if name == "" {
+			return
+		}
+		argStr := ""
+		switch a := args.(type) {
+		case string:
+			argStr = a
+		case json.RawMessage:
+			if len(a) > 0 {
+				// OpenAI Responses encodes `arguments` as a JSON string
+				// (a quoted string whose contents are themselves JSON).
+				// Unwrap that single layer so the inspector sees the same
+				// Go-string shape Chat Completions produces natively
+				// (`{"cmd":"..."}` rather than `"{\"cmd\":\"...\"}"`).
+				// Object-shaped arguments (Anthropic / Gemini / Bedrock
+				// tool inputs) pass through verbatim.
+				if a[0] == '"' {
+					var s string
+					if json.Unmarshal(a, &s) == nil {
+						argStr = s
+						break
+					}
+				}
+				argStr = string(a)
+			}
+		case nil:
+			argStr = ""
+		default:
+			b, err := json.Marshal(a)
+			if err == nil {
+				argStr = string(b)
+			}
+		}
+		calls = append(calls, out{Name: name, Arguments: argStr})
+	}
+
+	switch provider {
+	case "anthropic":
+		var resp struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Content {
+				if c.Type == "tool_use" {
+					addCall(c.Name, c.Input)
+				}
+			}
+		}
+	case "gemini":
+		var resp struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						FunctionCall struct {
+							Name string          `json:"name"`
+							Args json.RawMessage `json:"args"`
+						} `json:"functionCall"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Candidates {
+				for _, p := range c.Content.Parts {
+					addCall(p.FunctionCall.Name, p.FunctionCall.Args)
+				}
+			}
+		}
+	case "bedrock":
+		var resp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						ToolUse struct {
+							Name  string          `json:"name"`
+							Input json.RawMessage `json:"input"`
+						} `json:"toolUse"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Output.Message.Content {
+				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+	default:
+		// OpenAI Responses API: {"output": [{"type":"function_call","name":"...","arguments":"..."}]}
+		var respAPI struct {
+			Output []struct {
+				Type      string          `json:"type"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &respAPI) == nil {
+			for _, o := range respAPI.Output {
+				if o.Type == "function_call" {
+					addCall(o.Name, o.Arguments)
+				}
+			}
+		}
+		// OpenAI Chat Completions tool calls: {"choices":[{"message":{"tool_calls":[{"function":{"name":"...","arguments":"..."}}]}}]}
+		var respCC struct {
+			Choices []struct {
+				Message struct {
+					ToolCalls []struct {
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(body, &respCC) == nil {
+			for _, c := range respCC.Choices {
+				for _, tc := range c.Message.ToolCalls {
+					addCall(tc.Function.Name, tc.Function.Arguments)
+				}
+			}
+		}
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	// Emit the nested OpenAI Chat Completions tool_calls shape so the payload
+	// round-trips through inspectToolCalls' parse contract (function.name /
+	// function.arguments). See the function doc for why the flat shape breaks
+	// inspection.
+	type fnPart struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type nestedCall struct {
+		Type     string `json:"type"`
+		Function fnPart `json:"function"`
+	}
+	out2 := make([]nestedCall, len(calls))
+	for i, c := range calls {
+		out2[i] = nestedCall{
+			Type:     "function",
+			Function: fnPart{Name: c.Name, Arguments: c.Arguments},
+		}
+	}
+	encoded, err := json.Marshal(out2)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
 // extractSSEChunkText extracts the assistant text delta from a single SSE
 // data JSON object in a streaming provider-native response.
+//
+// Avarice F-1187: pre-fix the default branch only parsed OpenAI Chat
+// Completions `choices[].delta.content`, so OpenAI Responses streams
+// (`response.output_text.delta`), Bedrock Converse streams
+// (`contentBlockDelta`), and Ollama native streams (`message.content`)
+// returned an empty string for every chunk. Empty deltas skipped both
+// the initial-buffer flush and the final completion scan, and the
+// stream was delivered to the client unchanged. The new branches
+// keep the streaming inspector in lockstep with the non-streaming
+// extractor.
 func extractSSEChunkText(data string, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1501,7 +1865,52 @@ func extractSSEChunkText(data string, provider string) string {
 			return sb.String()
 		}
 
+	case "bedrock":
+		// F-1187: Bedrock Converse streaming uses contentBlockDelta frames
+		// shaped {"contentBlockDelta":{"delta":{"text":"..."}}}.
+		var chunk struct {
+			ContentBlockDelta struct {
+				Delta struct {
+					Text string `json:"text"`
+				} `json:"delta"`
+			} `json:"contentBlockDelta"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			return chunk.ContentBlockDelta.Delta.Text
+		}
+
+	case "ollama":
+		// F-1187: Ollama native streaming chat: {"message":{"content":"..."}}
+		// generate: {"response":"..."}
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			if chunk.Message.Content != "" {
+				return chunk.Message.Content
+			}
+			return chunk.Response
+		}
+
 	default:
+		// F-1187: OpenAI Responses API streaming uses event-shaped frames
+		// keyed by `type`, e.g.:
+		//   {"type":"response.output_text.delta","delta":"..."}
+		// Pre-fix the default branch only parsed Chat Completions, so
+		// every Responses chunk yielded an empty string. Detect the
+		// Responses shape first, then fall back to Chat Completions.
+		var rspChunk struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		}
+		if json.Unmarshal([]byte(data), &rspChunk) == nil &&
+			strings.HasPrefix(rspChunk.Type, "response.") &&
+			strings.Contains(rspChunk.Type, ".delta") {
+			return rspChunk.Delta
+		}
 		// OpenAI Chat Completions streaming: {"choices":[{"delta":{"content":"..."}}]}
 		var chunk struct {
 			Choices []struct {
@@ -1914,6 +2323,75 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	return provider
 }
 
+// guardUpstreamTargetURL applies the userinfo / scheme / private-host SSRF
+// guards to the resolved upstream target URL before the request is forwarded
+// to the provider (Bifrost performs the actual dial). The URL may come from
+// the X-DC-Target-URL header (fetch-interceptor connectors) or be hydrated
+// from the active connector's captured config snapshot (native-binary
+// connectors such as Codex / ZeptoClaw, which have no fetch interceptor).
+//
+// It must run AFTER connector hydration so a connector-resolved
+// private / IMDS / CGNAT / IPv6-ULA / userinfo / non-http upstream is rejected
+// with the same structured 400/403 + labeled egress block event as the header
+// path, instead of slipping past the guard and only failing opaquely at dial
+// time in ssrfSafeDialContext.
+//
+// Returns true when the request was rejected and the caller must stop
+// processing. An empty targetURL is a no-op (no upstream override in play).
+func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL string) bool {
+	if targetURL == "" {
+		return false
+	}
+	u, perr := url.Parse(targetURL)
+	if perr != nil {
+		return false
+	}
+	if u.User != nil {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "userinfo-in-target-url",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in upstream target URL\n")
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must not contain userinfo")
+		return true
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "non-http-scheme",
+			Source:       "go",
+		})
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
+		return true
+	}
+	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
+		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+		!passthroughAllowPrivateForTest {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   host,
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "private-ip",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+		return true
+	}
+	return false
+}
+
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1938,15 +2416,19 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		redactAuthValue(r.Header.Get("Authorization")),
 		redactAuthValue(r.Header.Get("api-key")),
 		scrubURLSecrets(r.Header.Get("X-DC-Target-URL")))
-	// The raw LLM request body frequently contains user prompts
-	// (SSNs, emails, passwords, API keys). Stderr is operator-
-	// facing, so we honor DEFENSECLAW_REVEAL_PII via
-	// redaction.MessageContent: set DEFENSECLAW_REVEAL_PII=1 to
-	// get the raw body back for live debugging. Every persistent
-	// sink (audit store, webhooks, OTel) already redacts further
-	// downstream and never consults this flag.
-	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n",
-		len(body), truncateLog(redaction.MessageContent(string(body)), 2000))
+	// Request bodies contain prompts, conversation history, and tool
+	// results. Keep only their size in the pretty stderr stream because
+	// the daemon persists that stream to gateway.log and deployments may
+	// forward it to a centralized log service. This omission is
+	// unconditional: diagnostic reveal/redaction switches must not turn
+	// gateway.log into a transcript store.
+	//
+	// TODO(v8-logging-refactor): Re-evaluate an explicit, safe local-debug
+	// channel before restoring the former preview path below. Do not uncomment
+	// it while stderr is persisted or forwarded as an operational log.
+	// fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n",
+	// 	len(body), truncateLog(redaction.MessageContent(string(body)), 2000))
+	logRequestBodyMetadata(body)
 
 	var req ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -1995,6 +2477,17 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// SSRF / userinfo / scheme guards run here — AFTER connector hydration —
+	// so they see the *final* upstream, whether it came from the
+	// X-DC-Target-URL header (fetch-interceptor connectors) or was resolved by
+	// a native-binary connector's config snapshot (Codex / ZeptoClaw). Running
+	// before hydration would leave the connector-resolved upstream unguarded
+	// (it would only fail opaquely at dial time in ssrfSafeDialContext, with no
+	// structured 400/403 + labeled egress block event).
+	if guardUpstreamTargetURL(w, r, req.TargetURL) {
+		return
+	}
+
 	// Forward inbound HTTP headers to the upstream provider via
 	// Bifrost's per-request schemas.BifrostContextKeyExtraHeaders
 	// context value (honored by every Bifrost provider through
@@ -2041,7 +2534,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	p.reloadRuntimeConfig()
 	p.rtMu.RLock()
 	mode := p.mode
 	customBlockMsg := p.blockMessage
@@ -2117,21 +2609,36 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		agentName := p.agentNameForRequest(r.Header.Get("X-Agent-Name"))
 		agentCtx, agentSpan = p.otel.StartAgentSpan(
 			context.Background(),
-			conversationID, agentName, agentName, p.agentIDForRequest(), "",
+			conversationID, agentName, agentName, p.agentIDForRequest(), "", agentName,
 		)
 	}
 	if agentCtx == nil {
 		agentCtx = context.Background()
 	}
+	agentSpanEnded := false
+	endAgentSpan := func(errMsg string) {
+		if p.otel != nil && agentSpan != nil && !agentSpanEnded {
+			p.otel.EndAgentSpan(agentSpan, errMsg)
+			agentSpanEnded = true
+		}
+	}
+	agentSpanErr := ""
+	defer func() { endAgentSpan(agentSpanErr) }()
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	inspectionText := promptInspectionText(userText)
+	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, req.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, req.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
@@ -2148,6 +2655,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, req.Messages, req.Model, mode)
+		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, req.Messages, req.Model, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		elapsed := time.Since(t0)
 
@@ -2167,9 +2682,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			rawTelemetryField{key: "raw_request_body", raw: req.RawBody})
 
 		if verdict.Action == "block" && mode == "action" {
-			if p.otel != nil && agentSpan != nil {
-				p.otel.EndAgentSpan(agentSpan, "guardrail blocked")
-			}
+			endAgentSpan("guardrail blocked")
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			if req.Stream {
@@ -2181,13 +2694,25 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// For fetch-intercepted OpenAI-compatible requests, preserve the
+	// original request body when forwarding to the real upstream. This is
+	// required because provider-specific extension fields such as
+	// chat_template_kwargs, extra_body, and parallel_tool_calls must not be
+	// dropped by the structured provider translation path.
+	if req.TargetURL != "" {
+		p.rawForwardChatCompletion(w, r, body, &req, mode, customBlockMsg)
+		return
+	}
+
 	// --- Forward to upstream provider ---
 	if p.resolveProviderFn == nil {
+		agentSpanErr = "proxy misconfigured"
 		writeOpenAIError(w, http.StatusInternalServerError, "proxy misconfigured: no provider resolver")
 		return
 	}
 	upstream := p.resolveProviderFn(&req)
 	if upstream == nil {
+		agentSpanErr = "unsupported provider"
 		provName, _ := splitModel(req.Model)
 		msg := fmt.Sprintf("provider %q is not supported by DefenseClaw guardrail — traffic blocked", provName)
 		if req.Stream {
@@ -2205,9 +2730,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// End invoke_agent span after the full request completes.
-	if p.otel != nil && agentSpan != nil {
-		p.otel.EndAgentSpan(agentSpan, "")
-	}
+	endAgentSpan("")
 }
 
 func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context, promptID string) {
@@ -2233,6 +2756,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			system, aliasModel, providerName,
 			maxTokens, temperature,
 		)
+		p.otel.SetGenAIInput(llmSpan, lastUserText(req.Messages))
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.request.body", string(req.RawBody))
 	}
 
@@ -2240,6 +2764,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
+			p.otel.SetGenAIOutput(llmSpan, "")
 			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
@@ -2261,13 +2786,9 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			finishReasons = append(finishReasons, *c.FinishReason)
 		}
 	}
-	if p.otel != nil && llmSpan != nil {
-		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.body", string(resp.RawResponse))
-	}
 	responseMeta := proxyLLMEventMeta(p, r, req, providerName)
 	responseMeta.PromptID = promptID
 	responseMeta.ResponseID = firstNonEmpty(resp.ID, stableLLMEventID("response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, req.Model))
-	emitLLMResponseEvent(r.Context(), responseMeta, content, string(resp.RawResponse), finishReasons)
 
 	guardrail := "none"
 	guardrailResult := ""
@@ -2318,6 +2839,8 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 		}
 
 		if verdict.Action == "block" && mode == "action" {
+			finishReasons = append(finishReasons, "blocked")
+			emitLLMResponseEvent(r.Context(), responseMeta, "", "", finishReasons)
 			if p.otel != nil && llmSpan != nil {
 				promptTok, completionTok := 0, 0
 				if resp.Usage != nil {
@@ -2339,6 +2862,8 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil,
 				rawTelemetryField{key: "raw_tool_calls", raw: resp.Choices[0].Message.ToolCalls})
 			if verdict.Action == "block" && mode == "action" {
+				finishReasons = append(finishReasons, "blocked")
+				emitLLMResponseEvent(r.Context(), responseMeta, "", "", finishReasons)
 				if p.otel != nil && llmSpan != nil {
 					promptTok, completionTok := 0, 0
 					if resp.Usage != nil {
@@ -2365,9 +2890,18 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		emitOpenAIToolCallEvents(r.Context(), responseMeta, resp.Choices[0].Message.ToolCalls)
 	}
+	emitLLMResponseEvent(r.Context(), responseMeta, content, string(resp.RawResponse), finishReasons)
 
 	// End LLM span with response data.
 	if p.otel != nil && llmSpan != nil {
+		spanOutput := content
+		if strings.TrimSpace(spanOutput) == "" && len(resp.Choices) > 0 && resp.Choices[0].Message != nil && len(resp.Choices[0].Message.ToolCalls) > 0 {
+			if encoded, err := json.Marshal(resp.Choices[0].Message.ToolCalls); err == nil {
+				spanOutput = string(encoded)
+			}
+		}
+		p.otel.SetGenAIOutput(llmSpan, spanOutput)
+		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.body", string(resp.RawResponse))
 		promptTok, completionTok := 0, 0
 		if resp.Usage != nil {
 			promptTok = int(resp.Usage.PromptTokens)
@@ -2451,6 +2985,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			system, aliasModel, providerName,
 			maxTokens, temperature,
 		)
+		p.otel.SetGenAIInput(llmSpan, lastUserText(req.Messages))
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.request.body", string(req.RawBody))
 	}
 
@@ -2588,7 +3123,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta := proxyLLMEventMeta(p, r, req, providerName)
 		blockedMeta.PromptID = promptID
 		blockedMeta.ResponseID = stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked")
-		emitLLMResponseEvent(r.Context(), blockedMeta, accumulated.String(), accumulated.String(), append(streamFinishReasons, "blocked"))
+		emitLLMResponseEvent(r.Context(), blockedMeta, "", "", append(streamFinishReasons, "blocked"))
 		if p.otel != nil && llmSpan != nil {
 			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 		}
@@ -2665,7 +3200,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	streamResponseMeta := proxyLLMEventMeta(p, r, req, providerName)
 	streamResponseMeta.PromptID = promptID
 	streamResponseMeta.ResponseID = stableLLMEventID("response", streamResponseMeta.Source, streamResponseMeta.SessionID, streamResponseMeta.RequestID, req.Model)
-	emitLLMResponseEvent(r.Context(), streamResponseMeta, accumulated.String(), accumulated.String(), streamFinishReasons)
 	if len(assembledTC) > 0 {
 		if verdict := p.inspectToolCalls(r.Context(), assembledTC); verdict != nil {
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil,
@@ -2686,7 +3220,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				flusher.Flush()
 			}
 		}
-		emitOpenAIToolCallEvents(r.Context(), streamResponseMeta, assembledTC)
+		if !tcBlocked {
+			emitOpenAIToolCallEvents(r.Context(), streamResponseMeta, assembledTC)
+		}
+	}
+	if tcBlocked {
+		streamFinishReasons = append(streamFinishReasons, "blocked")
+		emitLLMResponseEvent(r.Context(), streamResponseMeta, "", "", streamFinishReasons)
+	} else {
+		emitLLMResponseEvent(r.Context(), streamResponseMeta, accumulated.String(), accumulated.String(), streamFinishReasons)
 	}
 
 	if p.otel != nil && llmSpan != nil {
@@ -2695,8 +3237,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			promptTok = int(usage.PromptTokens)
 			completionTok = int(usage.CompletionTokens)
 		}
-		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.content", accumulated.String())
-		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.tool_calls", string(assembledTC))
+		if !tcBlocked {
+			spanOutput := accumulated.String()
+			if strings.TrimSpace(spanOutput) == "" && len(assembledTC) > 0 {
+				spanOutput = string(assembledTC)
+			}
+			p.otel.SetGenAIOutput(llmSpan, spanOutput)
+			p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.content", accumulated.String())
+			p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.tool_calls", string(assembledTC))
+		}
 		p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 	}
 
@@ -3373,52 +3922,8 @@ func deriveMasterKey(dataDir string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime config hot-reload
+// Runtime config apply helpers
 // ---------------------------------------------------------------------------
-
-var (
-	runtimeCacheMu sync.Mutex
-	runtimeCache   map[string]any
-	runtimeCacheTs time.Time
-)
-
-const runtimeCacheTTL = 5 * time.Second
-
-func (p *GuardrailProxy) reloadRuntimeConfig() {
-	runtimeCacheMu.Lock()
-	defer runtimeCacheMu.Unlock()
-
-	if time.Since(runtimeCacheTs) < runtimeCacheTTL && runtimeCache != nil {
-		p.applyRuntime(runtimeCache)
-		return
-	}
-
-	runtimeFile := filepath.Join(p.dataDir, "guardrail_runtime.json")
-	data, err := os.ReadFile(runtimeFile)
-	if err != nil {
-		runtimeCache = nil
-		runtimeCacheTs = time.Now()
-		return
-	}
-
-	// Decode into map[string]any so heterogeneous value types
-	// (string for mode, bool for hilt_enabled, etc.) round-trip
-	// without breaking the whole reload. The Python writer in
-	// cli/defenseclaw/commands/cmd_setup.py::_write_guardrail_runtime
-	// owns the wire schema; per-key extraction below validates each
-	// field independently so a future schema addition can't poison
-	// existing fields.
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		runtimeCache = nil
-		runtimeCacheTs = time.Now()
-		return
-	}
-
-	runtimeCache = cfg
-	runtimeCacheTs = time.Now()
-	p.applyRuntime(cfg)
-}
 
 // runtimeString extracts a string value from the heterogeneous runtime
 // cache and reports whether the caller should treat it as set. We
@@ -3479,15 +3984,10 @@ func (p *GuardrailProxy) applyRuntime(cfg map[string]any) {
 		p.switchConnectorLocked(newName)
 	}
 
-	// HILT hot-reload. The inspector caches the HILT view that the
-	// Rego policy reads as `input.hilt`; without re-applying it here
-	// an operator who flips guardrail.hilt.enabled in config.yaml (or
-	// runs ``defenseclaw config set guardrail.hilt.enabled ...``)
-	// keeps the boot-time value until the next sidecar restart. Both
-	// fields must be present together — a partial update (just one
-	// of the two) would let a half-edited runtime file rotate the
-	// inspector into an unintended state, so we only re-sync when
-	// hilt_enabled is explicitly set.
+	// Legacy map-based apply path retained for focused proxy tests and older
+	// in-process callers. The file-backed runtime overlay has been removed;
+	// production reloads now call ApplyGuardrailConfig with a validated
+	// config.yaml snapshot.
 	if enabled, ok := runtimeBool(cfg, "hilt_enabled"); ok {
 		minSev, _ := runtimeString(cfg, "hilt_min_severity")
 		p.inspector.SetHILTConfig(enabled, minSev)
@@ -3519,7 +4019,9 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	// this the guard (still pointed at oldConn until Repoint) could race the
 	// teardown and re-install hooks for a connector we just deactivated.
 	// Repoint at the end re-targets the guard at newConn.
-	p.hookGuard.SuppressHealing(hookGuardSwitchSuppressWindow)
+	if p.hookGuard != nil {
+		p.hookGuard.SuppressHealing(hookGuardSwitchSuppressWindow)
+	}
 
 	if oldConn != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", oldConn.Name())
@@ -3533,7 +4035,11 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 
 	fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: setting up %s\n", newName)
 	if err := newConn.Setup(ctx, p.setupOpts); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] setup %s failed: %v — rolling back to %s\n", newName, err, oldConn.Name())
+		oldName := "<none>"
+		if oldConn != nil {
+			oldName = oldConn.Name()
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] setup %s failed: %v — rolling back to %s\n", newName, err, oldName)
 		if oldConn != nil {
 			if reErr := oldConn.Setup(ctx, p.setupOpts); reErr != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] rollback setup %s also failed: %v\n", oldConn.Name(), reErr)
@@ -3549,7 +4055,9 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 
 	// Follow the active connector so self-heal watches the new
 	// connector's config file rather than the torn-down one's.
-	p.hookGuard.Repoint(newConn, p.setupOpts)
+	if p.hookGuard != nil {
+		p.hookGuard.Repoint(newConn, p.setupOpts)
+	}
 
 	if p.health != nil {
 		p.health.SetConnector(newConn.Name(), newConn.ToolInspectionMode(), newConn.SubprocessPolicy())
@@ -3561,6 +4069,10 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 // Logging
 // ---------------------------------------------------------------------------
 
+func logRequestBodyMetadata(body []byte) {
+	fmt.Fprintf(os.Stderr, "[guardrail] raw body: %d bytes (content omitted)\n", len(body))
+}
+
 func (p *GuardrailProxy) logPreCall(model string, messages []ChatMessage, verdict *ScanVerdict, elapsed time.Duration) {
 	ts := time.Now().UTC().Format("15:04:05")
 	severity := verdict.Severity
@@ -3571,13 +4083,15 @@ func (p *GuardrailProxy) logPreCall(model string, messages []ChatMessage, verdic
 		ts, model, len(messages), float64(elapsed.Milliseconds()))
 
 	for i, msg := range messages {
-		// Message bodies are verbatim user/assistant text. The
-		// original length is preserved in the log so operators
-		// can still see whether a payload was trimmed by the
-		// caller; only the preview itself is masked when
-		// Reveal is off.
-		preview := truncateLog(redaction.MessageContent(msg.Content), 500)
-		fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars): %s\n", i, msg.Role, len(msg.Content), preview)
+		// Keep role and length for diagnostics without persisting a
+		// transcript in gateway.log (or any collector fed from stderr).
+		// Content remains omitted even when diagnostic reveal is enabled.
+		//
+		// TODO(v8-logging-refactor): Preserve the former bounded preview for
+		// consideration when v8 separates local debugging from shipped logs.
+		// preview := truncateLog(redaction.MessageContent(msg.Content), 500)
+		// fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars): %s\n", i, msg.Role, len(msg.Content), preview)
+		fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars; content omitted)\n", i, msg.Role, len(msg.Content))
 	}
 
 	logVerdict(severity, action, verdict, elapsed)
@@ -3597,13 +4111,15 @@ func (p *GuardrailProxy) logPostCall(model, content string, verdict *ScanVerdict
 	}
 	fmt.Fprintf(os.Stderr, "\033[92m[%s]\033[0m \033[1mPOST-CALL\033[0m  model=%s%s  \033[2m%.0fms\033[0m\n",
 		ts, model, tokStr, float64(elapsed.Milliseconds()))
-	// LLM responses can echo user PII (the model re-emits
-	// personal data verbatim in summaries, translations, etc.)
-	// or surface new secrets authored by the model itself. Both
-	// flows are operator-facing; the Reveal flag gates
-	// unredacted output for live debugging.
-	preview := truncateLog(redaction.MessageContent(content), 800)
-	fmt.Fprintf(os.Stderr, "  response (%d chars): %s\n", len(content), preview)
+	// Responses can echo prompts or author new sensitive content. Retain
+	// only the size so pretty logs remain useful without becoming a
+	// transcript store. Diagnostic reveal does not override this rule.
+	//
+	// TODO(v8-logging-refactor): Preserve the former bounded preview for
+	// consideration when v8 separates local debugging from shipped logs.
+	// preview := truncateLog(redaction.MessageContent(content), 800)
+	// fmt.Fprintf(os.Stderr, "  response (%d chars): %s\n", len(content), preview)
+	fmt.Fprintf(os.Stderr, "  response (%d chars; content omitted)\n", len(content))
 
 	logVerdict(severity, action, verdict, elapsed)
 	fmt.Fprintf(os.Stderr, "\033[92m%s\033[0m\n", strings.Repeat("─", 60))
@@ -3762,13 +4278,32 @@ func isKnownProviderDomain(targetURL string) bool {
 }
 
 // matchProviderDomain performs safe domain matching:
-//   - Domains ending in "." are hostname prefixes (e.g. "bedrock-runtime.")
-//   - Domains containing "/" match hostname+path prefix
-//   - All others require exact hostname or subdomain match
+//   - Domains containing "*" wildcard a single DNS label
+//     (e.g. "bedrock-runtime.*.amazonaws.com" matches
+//     "bedrock-runtime.us-east-1.amazonaws.com" but rejects
+//     "bedrock-runtime.attacker.example").
+//   - Domains containing "/" match hostname+path prefix.
+//   - All others require exact hostname or subdomain match.
+//
+// Avarice F-1185: pre-fix the "ends-with-dot" form was treated as a
+// raw hostname prefix, so "bedrock-runtime." matched any host that
+// began with that string — e.g. "bedrock-runtime.attacker.example".
+// An attacker-chosen X-DC-Target-URL could be admitted as a known
+// provider, bypass the unknown-domain / private-host checks, and
+// receive the upstream Authorization header. The new wildcard form
+// pins the trailing TLD, which is what the original Bedrock entry
+// always meant.
 func matchProviderDomain(host, urlPath, domain string) bool {
 	d := strings.ToLower(domain)
-	if strings.HasSuffix(d, ".") {
-		return strings.HasPrefix(host, d)
+	// Reject the legacy bare-prefix form ("bedrock-runtime.") so an
+	// older operator-supplied providers.json that still uses it
+	// can never be silently honoured: callers must migrate to the
+	// wildcard form ("bedrock-runtime.*.amazonaws.com").
+	if strings.HasSuffix(d, ".") && !strings.Contains(d, "*") {
+		return false
+	}
+	if strings.Contains(d, "*") {
+		return matchWildcardDomain(host, d)
 	}
 	if strings.Contains(d, "/") {
 		parts := strings.SplitN(d, "/", 2)
@@ -3779,6 +4314,31 @@ func matchProviderDomain(host, urlPath, domain string) bool {
 		return strings.HasPrefix(urlPath, pathPart)
 	}
 	return host == d || strings.HasSuffix(host, "."+d)
+}
+
+// matchWildcardDomain compares a hostname against a domain containing
+// one or more "*" wildcards. Each "*" matches exactly one DNS label
+// (no embedded dot, non-empty). Pattern and host are dot-split and
+// compared label-for-label so a wildcard cannot smuggle a malicious
+// suffix into the trailing components.
+func matchWildcardDomain(host, pattern string) bool {
+	hostLabels := strings.Split(host, ".")
+	patternLabels := strings.Split(pattern, ".")
+	if len(hostLabels) != len(patternLabels) {
+		return false
+	}
+	for i := range patternLabels {
+		if patternLabels[i] == "*" {
+			if hostLabels[i] == "" {
+				return false
+			}
+			continue
+		}
+		if hostLabels[i] != patternLabels[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // patchRawResponseModel overwrites only the "model" field in raw JSON bytes,
@@ -4348,6 +4908,19 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		args := tc.Function.Arguments
 
 		findings := ScanAllRules(args, toolName)
+		// Stamp the tool's capability class (read_fs / exec_shell /
+		// network_fetch / …) onto each finding from this call so the
+		// sliding-window correlator can reason about capability
+		// sequences (DESTRUCTIVE-FLOW). Content-only
+		// matches with an unknown tool fall back to the rule-id based
+		// capability in the emission pipeline.
+		if cap := guardrail.ClassifyToolName(toolName); cap != guardrail.CapUnknown {
+			for i := range findings {
+				if findings[i].ToolCapabilityClass == "" {
+					findings[i].ToolCapabilityClass = string(cap)
+				}
+			}
+		}
 		allFindings = append(allFindings, findings...)
 	}
 
@@ -4617,4 +5190,606 @@ func (s *sseByteMeter) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// rawForwardChatCompletion preserves the original OpenAI-compatible JSON body
+// for fetch-intercepted requests while keeping DefenseClaw PRE-CALL and
+// POST-CALL guardrail checks active.
+func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http.Request, body []byte, req *ChatRequest, mode, customBlockMsg string) {
+	targetOrigin := strings.TrimRight(req.TargetURL, "/")
+	if targetOrigin == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
+		return
+	}
+
+	upstreamURL := rawForwardUpstreamURL(targetOrigin, r.URL.RequestURI())
+
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+
+	forwardBody := body
+	if len(req.RawBody) > 0 {
+		forwardBody = req.RawBody
+	}
+	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL)
+
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request")
+		return
+	}
+
+	providerName := inferProviderFromURL(upstreamURL)
+	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
+
+	resp, err := providerHTTPClient.Do(upReq)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if req.Stream {
+		p.rawForwardChatCompletionStream(w, r, resp, req, mode, customBlockMsg)
+		return
+	}
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
+		return
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		copyRawForwardResponseHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respBody)
+		return
+	}
+
+	completion, usage := extractRawForwardCompletion(respBody, req.Stream)
+
+	if completion != "" {
+		postCtx, postCancel := p.postCallContext(r.Context())
+		defer postCancel()
+
+		postStart := time.Now()
+		respMessages := []ChatMessage{{Role: "assistant", Content: completion}}
+		verdict := p.inspector.Inspect(postCtx, "completion", completion, respMessages, req.Model, mode)
+		p.logPostCall(req.Model, completion, verdict, time.Since(postStart), usage)
+		p.recordTelemetry(r.Context(), "completion", req.Model, verdict, time.Since(postStart), nil, nil)
+
+		if verdict != nil && verdict.Action == "block" && mode == "action" {
+			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
+			p.enqueueBlockNotification(verdict, "completion", req.Model)
+			if req.Stream {
+				p.writeBlockedStream(w, req.Model, msg)
+			} else {
+				p.writeBlockedResponse(w, req.Model, msg)
+			}
+			return
+		}
+	}
+
+	if toolCalls := extractRawForwardToolCalls(respBody, false); len(toolCalls) > 0 {
+		if verdict := p.inspectToolCalls(r.Context(), toolCalls); verdict != nil {
+			p.recordTelemetry(r.Context(), "tool-call", req.Model, verdict, 0, nil, nil,
+				rawTelemetryField{key: "raw_tool_calls", raw: toolCalls})
+			if verdict.Action == "block" && mode == "action" {
+				msg := blockMessage(customBlockMsg, "completion",
+					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
+				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				p.writeBlockedResponse(w, req.Model, msg)
+				return
+			}
+		}
+	}
+
+	copyRawForwardResponseHeaders(w.Header(), resp.Header)
+	if w.Header().Get("Content-Type") == "" {
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(respBody)
+}
+
+func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r *http.Request, resp *http.Response, req *ChatRequest, mode, customBlockMsg string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	copyRawForwardResponseHeaders(w.Header(), resp.Header)
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(w, resp.Body)
+		flusher.Flush()
+		return
+	}
+
+	const maxBufferedTCBytes = 10 << 20
+	var accumulated strings.Builder
+	var tcAcc toolCallAccumulator
+	var bufferedTCFrames [][]byte
+	bufferedTCSize := 0
+	streamBlocked := false
+
+	blockStream := func(reason string) {
+		streamBlocked = true
+		msg := blockMessage(customBlockMsg, "completion", reason)
+		writeRawForwardBlockedStreamChunk(w, flusher, req.Model, msg)
+	}
+	inspectFinalText := func() bool {
+		if mode != "action" || accumulated.Len() == 0 {
+			return true
+		}
+		content := accumulated.String()
+		postCtx, postCancel := p.postCallContext(r.Context())
+		verdict := p.inspector.Inspect(postCtx, "completion", content,
+			[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
+		postCancel()
+		p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
+		p.recordTelemetry(r.Context(), "completion", req.Model, verdict, 0, nil, nil,
+			rawTelemetryString("raw_response_content", content))
+		if verdict != nil && verdict.Action == "block" {
+			p.enqueueBlockNotification(verdict, "completion", req.Model)
+			blockStream(verdict.Reason)
+			return false
+		}
+		return true
+	}
+	inspectBufferedToolCalls := func() bool {
+		assembled := tcAcc.JSON()
+		if len(assembled) == 0 {
+			return true
+		}
+		if verdict := p.inspectToolCalls(r.Context(), assembled); verdict != nil {
+			p.recordTelemetry(r.Context(), "tool-call", req.Model, verdict, 0, nil, nil,
+				rawTelemetryField{key: "raw_tool_calls", raw: assembled})
+			if verdict.Action == "block" && mode == "action" {
+				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				blockStream(fmt.Sprintf("tool call blocked — %s", verdict.Reason))
+				return false
+			}
+		}
+		emitOpenAIToolCallEvents(r.Context(), proxyLLMEventMeta(p, r, req, inferProviderFromURL(req.TargetURL+req.TargetPath)), assembled)
+		return true
+	}
+	flushBufferedToolCalls := func() {
+		for _, frame := range bufferedTCFrames {
+			_, _ = w.Write(frame)
+		}
+		if len(bufferedTCFrames) > 0 {
+			flusher.Flush()
+		}
+		bufferedTCFrames = nil
+		bufferedTCSize = 0
+	}
+	processFrame := func(frame []byte) bool {
+		if len(frame) == 0 {
+			return true
+		}
+
+		payloads := rawForwardSSEDataPayloads(frame)
+		frameDone := false
+		frameHasToolCalls := false
+		frameToolCallFinish := false
+		frameText := ""
+		for _, payload := range payloads {
+			if payload == "[DONE]" {
+				frameDone = true
+				continue
+			}
+			text, toolCalls, finishReason := parseRawForwardSSEPayload(payload)
+			if text != "" {
+				frameText += text
+				accumulated.WriteString(text)
+			}
+			if len(toolCalls) > 0 {
+				tcAcc.Merge(toolCalls)
+				frameHasToolCalls = true
+			}
+			if finishReason == "tool_calls" {
+				frameToolCallFinish = true
+			}
+		}
+
+		if mode == "action" && frameText != "" {
+			content := accumulated.String()
+			verdict := p.inspector.InspectMidStream(r.Context(), "completion", content,
+				[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
+			p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
+			if verdict != nil && verdict.Action == "block" {
+				p.recordTelemetry(r.Context(), "completion", req.Model, verdict, 0, nil, nil,
+					rawTelemetryString("raw_response_content", content))
+				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				blockStream(verdict.Reason)
+				return false
+			}
+		}
+
+		if frameDone {
+			if !inspectFinalText() || !inspectBufferedToolCalls() {
+				return false
+			}
+			flushBufferedToolCalls()
+			_, _ = w.Write(frame)
+			flusher.Flush()
+			return true
+		}
+
+		if mode == "action" && (frameHasToolCalls || frameToolCallFinish || len(bufferedTCFrames) > 0) {
+			bufferedTCSize += len(frame)
+			if bufferedTCSize > maxBufferedTCBytes {
+				blockStream(fmt.Sprintf("tool call blocked — buffered tool-call data exceeds %d bytes", maxBufferedTCBytes))
+				return false
+			}
+			bufferedTCFrames = append(bufferedTCFrames, append([]byte(nil), frame...))
+			if frameToolCallFinish {
+				if !inspectBufferedToolCalls() {
+					return false
+				}
+				flushBufferedToolCalls()
+			}
+			return true
+		}
+
+		_, _ = w.Write(frame)
+		flusher.Flush()
+		return true
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10<<20)
+	var frame bytes.Buffer
+	for scanner.Scan() {
+		line := scanner.Text()
+		frame.WriteString(line)
+		frame.WriteByte('\n')
+		if line == "" {
+			if !processFrame(frame.Bytes()) {
+				return
+			}
+			frame.Reset()
+		}
+	}
+	if frame.Len() > 0 && !processFrame(frame.Bytes()) {
+		return
+	}
+	if streamBlocked {
+		return
+	}
+	if !inspectFinalText() || !inspectBufferedToolCalls() {
+		return
+	}
+	flushBufferedToolCalls()
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] raw stream read error: %v\n", err)
+	}
+}
+
+func writeRawForwardBlockedStreamChunk(w http.ResponseWriter, flusher http.Flusher, model, msg string) {
+	blockChunk := StreamChunk{
+		ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
+		Created: time.Now().Unix(), Model: model,
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: "\n\n" + msg}}},
+	}
+	data, _ := json.Marshal(blockChunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func rawForwardUpstreamURL(targetURL, requestURI string) string {
+	base := strings.TrimRight(targetURL, "/")
+	if base == "" {
+		return requestURI
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return base + requestURI
+	}
+	reqURL, err := url.ParseRequestURI(requestURI)
+	if err != nil {
+		return base + requestURI
+	}
+
+	basePath := strings.TrimRight(u.EscapedPath(), "/")
+	requestPath := reqURL.EscapedPath()
+	if basePath != "" && basePath != "/" {
+		requestPath = stripDuplicateRawForwardPathPrefix(basePath, requestPath)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + strings.TrimLeft(requestPath, "/")
+	u.RawQuery = reqURL.RawQuery
+	return u.String()
+}
+
+func stripDuplicateRawForwardPathPrefix(basePath, requestPath string) string {
+	baseParts := splitURLPathSegments(basePath)
+	reqParts := splitURLPathSegments(requestPath)
+	max := len(baseParts)
+	if len(reqParts) < max {
+		max = len(reqParts)
+	}
+	for n := max; n > 0; n-- {
+		match := true
+		for i := 0; i < n; i++ {
+			if baseParts[len(baseParts)-n+i] != reqParts[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			reqParts = reqParts[n:]
+			break
+		}
+	}
+	if len(reqParts) == 0 {
+		return "/"
+	}
+	return "/" + strings.Join(reqParts, "/")
+}
+
+func splitURLPathSegments(path string) []string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
+}
+
+func applyRawForwardRequestHeaders(upReq *http.Request, r *http.Request, providerName, targetAPIKey string) {
+	if fwd, ok := r.Context().Value(schemas.BifrostContextKeyExtraHeaders).(map[string][]string); ok {
+		for name, values := range fwd {
+			upReq.Header.Del(name)
+			for _, value := range values {
+				upReq.Header.Add(name, value)
+			}
+		}
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+	if upReq.Header.Get("Accept") == "" {
+		if v := r.Header.Get("Accept"); v != "" {
+			upReq.Header.Set("Accept", v)
+		}
+	}
+	if targetAPIKey != "" {
+		key := strings.TrimPrefix(targetAPIKey, "Bearer ")
+		if strings.EqualFold(providerName, "azure") {
+			upReq.Header.Set("api-key", key)
+		} else {
+			upReq.Header.Set("Authorization", "Bearer "+key)
+		}
+	}
+}
+
+func copyRawForwardResponseHeaders(dst, src http.Header) {
+	for k, vals := range src {
+		if strings.EqualFold(k, "Content-Length") {
+			continue
+		}
+		for _, v := range vals {
+			dst.Add(k, v)
+		}
+	}
+}
+
+// extractRawForwardCompletion extracts assistant-visible text only.
+//
+// For non-streaming responses, it reads choices[].message.content.
+// For streaming responses, it reads choices[].delta.content.
+// It deliberately does not scan the original request body, tool schemas,
+// system prompts, or raw SSE JSON.
+func extractRawForwardCompletion(respBody []byte, stream bool) (string, *ChatUsage) {
+	if !stream {
+		var parsed ChatResponse
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			return "", nil
+		}
+
+		out := strings.Builder{}
+		for _, ch := range parsed.Choices {
+			if ch.Message != nil && ch.Message.Content != "" {
+				out.WriteString(ch.Message.Content)
+			}
+		}
+		return out.String(), parsed.Usage
+	}
+
+	out := strings.Builder{}
+
+	lines := strings.Split(string(respBody), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				Message *ChatMessage `json:"message,omitempty"`
+			} `json:"choices"`
+		}
+
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+
+		for _, ch := range chunk.Choices {
+			if ch.Delta.Content != "" {
+				out.WriteString(ch.Delta.Content)
+			}
+			if ch.Message != nil && ch.Message.Content != "" {
+				out.WriteString(ch.Message.Content)
+			}
+		}
+	}
+
+	return out.String(), nil
+}
+
+func extractRawForwardToolCalls(respBody []byte, stream bool) json.RawMessage {
+	if !stream {
+		var parsed ChatResponse
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			return nil
+		}
+		var out json.RawMessage
+		for _, ch := range parsed.Choices {
+			if ch.Message != nil && len(ch.Message.ToolCalls) > 0 {
+				out = mergeToolCallChunks(out, ch.Message.ToolCalls)
+			}
+		}
+		return out
+	}
+
+	var acc toolCallAccumulator
+	for _, line := range strings.Split(string(respBody), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		_, toolCalls, _ := parseRawForwardSSEPayload(payload)
+		if len(toolCalls) > 0 {
+			acc.Merge(toolCalls)
+		}
+	}
+	return acc.JSON()
+}
+
+func rawForwardSSEDataPayloads(frame []byte) []string {
+	var payloads []string
+	for _, line := range strings.Split(string(frame), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload != "" {
+			payloads = append(payloads, payload)
+		}
+	}
+	return payloads
+}
+
+func parseRawForwardSSEPayload(payload string) (string, json.RawMessage, string) {
+	var chunk struct {
+		Choices []struct {
+			Delta        *ChatMessage `json:"delta,omitempty"`
+			Message      *ChatMessage `json:"message,omitempty"`
+			FinishReason *string      `json:"finish_reason,omitempty"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+		return "", nil, ""
+	}
+
+	var out strings.Builder
+	var toolCalls json.RawMessage
+	finishReason := ""
+	for _, ch := range chunk.Choices {
+		if ch.Delta != nil {
+			out.WriteString(ch.Delta.Content)
+			if len(ch.Delta.ToolCalls) > 0 {
+				toolCalls = mergeToolCallChunks(toolCalls, ch.Delta.ToolCalls)
+			}
+		}
+		if ch.Message != nil {
+			out.WriteString(ch.Message.Content)
+			if len(ch.Message.ToolCalls) > 0 {
+				toolCalls = mergeToolCallChunks(toolCalls, ch.Message.ToolCalls)
+			}
+		}
+		if ch.FinishReason != nil && *ch.FinishReason != "" {
+			finishReason = *ch.FinishReason
+		}
+	}
+	return out.String(), toolCalls, finishReason
+}
+
+func applyProviderRequestOverrides(body []byte, targetURL string) []byte {
+	overrides := providerRequestOverridesForTarget(targetURL)
+	if len(overrides) == 0 {
+		return body
+	}
+
+	var root map[string]interface{}
+	if err := json.Unmarshal(body, &root); err != nil {
+		return body
+	}
+
+	patched := mergeRequestJSON(root, overrides)
+	out, err := json.Marshal(patched)
+	if err != nil {
+		return body
+	}
+
+	return out
+}
+
+func providerRequestOverridesForTarget(targetURL string) map[string]interface{} {
+	providerName := inferProviderFromURL(targetURL)
+	if providerName == "" {
+		return nil
+	}
+
+	cfg, err := configs.LoadProviders()
+	if err != nil || cfg == nil {
+		return nil
+	}
+
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(provider.Name, providerName) {
+			return provider.RequestOverrides
+		}
+	}
+
+	return nil
+}
+
+func mergeRequestJSON(base, overlay map[string]interface{}) map[string]interface{} {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+
+	out := make(map[string]interface{}, len(base)+len(overlay))
+	for k, v := range base {
+		out[k] = v
+	}
+
+	for k, v := range overlay {
+		if ov, ok := v.(map[string]interface{}); ok {
+			if bv, ok := out[k].(map[string]interface{}); ok {
+				out[k] = mergeRequestJSON(bv, ov)
+				continue
+			}
+		}
+		out[k] = v
+	}
+
+	return out
 }

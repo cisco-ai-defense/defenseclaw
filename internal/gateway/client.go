@@ -64,7 +64,12 @@ type Client struct {
 	OnEvent func(EventFrame)
 }
 
-const connectRPCTimeout = 45 * time.Second
+const (
+	connectRPCTimeout = 45 * time.Second
+
+	openClawMinProtocol = 3
+	openClawMaxProtocol = 4
+)
 
 // NewClient creates a gateway client. The device identity is loaded or created
 // automatically from the configured key file path.
@@ -95,8 +100,8 @@ func (c *Client) wsURL() string {
 	return u.String()
 }
 
-// Connect establishes the WebSocket connection and completes the protocol v3
-// handshake including device challenge-response authentication.
+// Connect establishes the WebSocket connection and completes the OpenClaw
+// gateway handshake including device challenge-response authentication.
 func (c *Client) Connect(ctx context.Context) error {
 	target := c.wsURL()
 	fmt.Fprintf(os.Stderr, "[gateway] dialing %s ...\n", target)
@@ -135,8 +140,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.startHandshakeEventBuffer()
 	go c.readLoop()
 
-	fmt.Fprintf(os.Stderr, "[gateway] sending connect (protocol=3, role=operator, device=%s) ...\n",
-		c.device.DeviceID)
+	fmt.Fprintf(os.Stderr, "[gateway] sending connect (protocol=%d..%d, role=operator, device=%s) ...\n",
+		openClawMinProtocol, openClawMaxProtocol, c.device.DeviceID)
 	hello, err := c.sendConnect(ctx, nonce)
 	buf := c.stopHandshakeEventBuffer()
 	if err != nil {
@@ -261,8 +266,8 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 	}
 
 	params := map[string]interface{}{
-		"minProtocol": 3,
-		"maxProtocol": 3,
+		"minProtocol": openClawMinProtocol,
+		"maxProtocol": openClawMaxProtocol,
 		"client": map[string]interface{}{
 			"id":       clientID,
 			"version":  "1.0.0",
@@ -717,6 +722,19 @@ func isAuthError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	// role-upgrade and scope-upgrade rejections
+	// MUST NOT trigger auto-repair. RepairPairing hard-codes
+	// operator.admin and operator.approvals into the pairing record,
+	// so treating "higher role than" / "more scopes than" as a
+	// repairable auth failure converted an explicit-approval reject
+	// from OpenClaw into a local self-elevation. We short-circuit
+	// these explicit-approval-only sub-reasons to false BEFORE the
+	// generic "pairing required" needle below would otherwise match
+	// them.
+	if strings.Contains(msg, "higher role than") ||
+		strings.Contains(msg, "more scopes than") {
+		return false
+	}
 	for _, needle := range []string{
 		"token_missing", "token_mismatch",
 		"auth_token_mismatch", "auth_unauthorized", "auth_required",
@@ -726,8 +744,6 @@ func isAuthError(err error) bool {
 		"pairing required",
 		"pairing_required",
 		"device identity changed",
-		"higher role than",
-		"more scopes than",
 	} {
 		if strings.Contains(msg, needle) {
 			return true

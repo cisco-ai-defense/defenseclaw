@@ -9,7 +9,11 @@ datasources:
     isDefault: true
     jsonData:
       httpMethod: POST
-      timeInterval: 15s
+      # DefenseClaw's default OTel metric push interval is 60s. Grafana uses
+      # this value to calculate $__rate_interval; advertising Prometheus'
+      # internal 15s scrape interval produced 1m rate windows with only one
+      # application sample, so otherwise healthy panels rendered "No data".
+      timeInterval: 60s
       exemplarTraceIdDestinations:
         - name: trace_id
           datasourceUid: defenseclaw-tempo
@@ -22,7 +26,9 @@ datasources:
     jsonData:
       derivedFields:
         - datasourceUid: defenseclaw-tempo
-          matcherRegex: "trace_id=([a-f0-9]+)"
+          # Gateway OTel logs are JSON ("trace_id":"..."); keep support for
+          # the legacy key=value debug rendering as well.
+          matcherRegex: '(?:"trace_id"\s*:\s*"|trace_id=)([a-f0-9]{32})'
           name: trace_id
           url: "$${__value.raw}"
 

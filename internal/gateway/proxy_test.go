@@ -1628,6 +1628,7 @@ func TestHandlePassthrough_AuthRejection(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
 	proxy.gatewayToken = "secret-token"
+	proxy.skipAuthForTest = false
 
 	t.Run("missing_auth_rejected", func(t *testing.T) {
 		body := mustJSON(t, map[string]interface{}{
@@ -2090,6 +2091,15 @@ func TestIsKnownProviderDomain(t *testing.T) {
 		{"chatgpt backend-api full", "https://chatgpt.com/backend-api/codex/responses", true},
 		{"chatgpt backend-api origin only", "https://chatgpt.com/", false},
 		{"chatgpt wrong path", "https://chatgpt.com/static/app.js", false},
+		// Avarice F-1185: pre-fix the legacy "bedrock-runtime." prefix
+		// matched any host that began with that string, including
+		// attacker-controlled domains. The wildcard form pins the AWS
+		// suffix and rejects host shapes that don't terminate in
+		// .amazonaws.com.
+		{"bedrock attacker prefix spoof", "https://bedrock-runtime.attacker.example", false},
+		{"bedrock missing aws tld", "https://bedrock-runtime.us-east-1.evil.com", false},
+		{"bedrock label injection", "https://bedrock-runtime.us-east-1.evil.amazonaws.com.evil.com", false},
+		{"bedrock case insensitive", "https://Bedrock-Runtime.us-east-1.amazonaws.com/model/invoke", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3535,6 +3545,8 @@ func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
 
+	applyHermeticConnectorHomes(t)
+
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 
@@ -3614,6 +3626,8 @@ func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
 
+	applyHermeticConnectorHomes(t)
+
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 	codexConn, _ := reg.Get("codex")
@@ -3641,14 +3655,9 @@ func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
 	}
 }
 
-// TestApplyRuntime_HILTHotReload pins the contract that
-// `_write_guardrail_runtime`'s hilt_enabled / hilt_min_severity fields
-// are routed into the inspector via SetHILTConfig. Without this, an
-// operator who flips guardrail.hilt.enabled in config.yaml (and
-// re-runs the wizard or `setup guardrail`) would keep the boot-time
-// HILT view inside the live inspector — the same SSOT staleness the
-// input.hilt change was meant to fix, just relocated to in-memory
-// state.
+// TestApplyRuntime_HILTHotReload pins the legacy map-apply contract that
+// HILT fields are routed into the inspector via SetHILTConfig. Production
+// reloads now flow from config.yaml through ApplyGuardrailConfig.
 func TestApplyRuntime_HILTHotReload(t *testing.T) {
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()

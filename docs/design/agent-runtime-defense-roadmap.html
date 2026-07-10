@@ -1,0 +1,1213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DefenseClaw Agent Runtime Defense Roadmap</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --paper: #ffffff;
+      --ink: #102033;
+      --muted: #526173;
+      --line: #dbe3ee;
+      --blue: #0f6cbd;
+      --blue-2: #dff0ff;
+      --green: #157347;
+      --green-2: #e6f4ea;
+      --amber: #946200;
+      --amber-2: #fff4ce;
+      --red: #b42318;
+      --red-2: #fde8e7;
+      --violet: #6846c6;
+      --violet-2: #efeafd;
+      --slate: #354052;
+      --shadow: 0 14px 36px rgba(16, 32, 51, .12);
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+
+    header.hero {
+      background:
+        linear-gradient(135deg, rgba(15, 108, 189, .95), rgba(16, 32, 51, .97)),
+        radial-gradient(circle at 80% 20%, rgba(255,255,255,.18), transparent 28%);
+      color: white;
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: rgba(255,255,255,.78);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 52px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 38px 0 14px;
+      font-size: 28px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 24px 0 10px;
+      font-size: 19px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    a {
+      color: var(--blue);
+    }
+
+    .lead {
+      max-width: 850px;
+      margin: 18px 0 0;
+      color: rgba(255,255,255,.88);
+      font-size: 18px;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    .meta > div {
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: var(--radius);
+      padding: 12px;
+      background: rgba(255,255,255,.08);
+    }
+
+    .meta b {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: 0 1px 1px rgba(16,32,51,.03);
+    }
+
+    .card h3:first-child {
+      margin-top: 0;
+    }
+
+    .callout {
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      margin: 18px 0;
+      border: 1px solid var(--line);
+      background: var(--paper);
+    }
+
+    .callout.info {
+      border-color: #a9d6ff;
+      background: var(--blue-2);
+    }
+
+    .callout.success {
+      border-color: #b7dfc8;
+      background: var(--green-2);
+    }
+
+    .callout.warning {
+      border-color: #f5d37e;
+      background: var(--amber-2);
+    }
+
+    .callout.danger {
+      border-color: #f5b5b0;
+      background: var(--red-2);
+    }
+
+    .label {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #edf2f7;
+      color: var(--slate);
+      white-space: nowrap;
+    }
+
+    .label.blue {
+      background: var(--blue-2);
+      color: var(--blue);
+    }
+
+    .label.green {
+      background: var(--green-2);
+      color: var(--green);
+    }
+
+    .label.amber {
+      background: var(--amber-2);
+      color: var(--amber);
+    }
+
+    .label.red {
+      background: var(--red-2);
+      color: var(--red);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 22px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eef3f8;
+      color: #253247;
+      font-size: 13px;
+    }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    pre {
+      margin: 10px 0 14px;
+      padding: 13px;
+      border-radius: var(--radius);
+      background: #162233;
+      color: #ecf2f8;
+      overflow: auto;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    code {
+      background: #eef3f8;
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: .92em;
+    }
+
+    pre code {
+      background: transparent;
+      padding: 0;
+      color: inherit;
+    }
+
+    blockquote {
+      margin: 10px 0 16px;
+      padding: 10px 16px;
+      border-left: 4px solid var(--blue);
+      background: #f0f6ff;
+      color: #253247;
+      font-size: 18px;
+      font-style: italic;
+    }
+
+    .diagram {
+      margin: 16px 0 24px;
+      padding: 12px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow-x: auto;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      min-width: 720px;
+    }
+
+    .svg-title {
+      font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      fill: #102033;
+    }
+
+    .svg-label {
+      font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      fill: #102033;
+    }
+
+    .svg-small {
+      font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      fill: #526173;
+    }
+
+    .node {
+      fill: #ffffff;
+      stroke: #b8c4d4;
+      stroke-width: 1.2;
+      rx: 8;
+    }
+
+    .node.blue {
+      fill: #e7f3ff;
+      stroke: #74b7ef;
+    }
+
+    .node.green {
+      fill: #e8f5ec;
+      stroke: #7cc696;
+    }
+
+    .node.amber {
+      fill: #fff5d6;
+      stroke: #e3b445;
+    }
+
+    .node.red {
+      fill: #fdebea;
+      stroke: #e49791;
+    }
+
+    .node.violet {
+      fill: #f0ecff;
+      stroke: #a995e8;
+    }
+
+    .arrow {
+      stroke: #516174;
+      stroke-width: 2;
+      fill: none;
+      marker-end: url(#arrow);
+    }
+
+    .arrow-blue {
+      stroke: var(--blue);
+      stroke-width: 2.3;
+      fill: none;
+      marker-end: url(#arrow-blue);
+    }
+
+    .section-note {
+      color: var(--muted);
+      max-width: 900px;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0 24px;
+    }
+
+    .phase {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-top: 4px solid var(--blue);
+      border-radius: var(--radius);
+      padding: 12px;
+      min-height: 150px;
+    }
+
+    .phase b {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .phase span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .footer {
+      margin-top: 40px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media print {
+      body {
+        background: white;
+      }
+
+      .page {
+        max-width: none;
+        padding: 0;
+      }
+
+      header.hero,
+      .card,
+      .callout,
+      .diagram,
+      table {
+        box-shadow: none;
+      }
+
+      .diagram {
+        break-inside: avoid;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .page {
+        padding: 14px;
+      }
+
+      header.hero {
+        padding: 22px;
+      }
+
+      .grid,
+      .grid.three,
+      .meta,
+      .timeline {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">DefenseClaw Product Roadmap</p>
+      <h1>Agent Runtime Defense, Network Protection, and Credential Injection</h1>
+      <p class="lead">
+        A static architecture explainer for Confluence: how DefenseClaw moves from hook-only
+        cooperative enforcement to layered OS-backed runtime control, credential-aware network
+        gateways, Splunk observability, and Duo identity mapping.
+      </p>
+      <div class="meta">
+        <div><b>Status</b> Product architecture draft</div>
+        <div><b>Audience</b> Security, platform, product, enterprise IT</div>
+        <div><b>Updated</b> June 17, 2026</div>
+      </div>
+    </header>
+
+    <section>
+      <h2>Executive Positioning</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Current DefenseClaw</h3>
+          <p>
+            DefenseClaw already inspects agent intent through hooks, guardrail rules, OPA/Rego
+            verdicts, scanner findings, audit, OpenTelemetry, Splunk, and TUI surfaces.
+          </p>
+          <p>
+            It answers whether the prompt, tool call, command text, file path argument, MCP server,
+            or provider request should be allowed.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Next Runtime Layer</h3>
+          <p>
+            The new layer enforces what the workstation actually does: process launches, child
+            processes, file opens, file writes, network flows, and credential use.
+          </p>
+          <p>
+            This creates defense in depth for Codex, Claude Code, Cursor, Windsurf, Gemini CLI,
+            Copilot CLI, and future coding agents.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout success">
+        <strong>Product thesis:</strong> hooks remain the semantic layer, OS runtime controls become
+        the truth layer, and credential injection becomes the high-assurance managed-run layer.
+      </div>
+    </section>
+
+    <section>
+      <h2>Core Upgrade</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Hooks Answer</h3>
+          <blockquote>What did the agent say it wanted to do?</blockquote>
+          <p>
+            Hooks are high-signal because they see intent: prompt text, tool names, command strings,
+            MCP metadata, file arguments, and model/provider context.
+          </p>
+        </div>
+        <div class="card">
+          <h3>OS Runtime Controls Answer</h3>
+          <blockquote>What did the machine actually do?</blockquote>
+          <p>
+            Runtime controls observe and block the concrete operating-system behavior, even when the
+            agent uses a subprocess or native API that bypasses the hook payload.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Defense-in-Depth Architecture</h2>
+      <p class="section-note">
+        DefenseClaw should support both already-installed/running agents and managed-run sessions.
+        Transparent protection gives broad enterprise coverage; managed run gives the strongest
+        sandboxing and credential guarantees.
+      </p>
+      <div class="diagram" aria-label="Defense in depth architecture">
+        <svg viewBox="0 0 1080 560" role="img">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#516174"></path>
+            </marker>
+            <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#0f6cbd"></path>
+            </marker>
+          </defs>
+          <text x="22" y="30" class="svg-title">Layered Runtime Defense Model</text>
+
+          <rect x="40" y="70" width="220" height="78" class="node blue"></rect>
+          <text x="60" y="100" class="svg-label">AI Coding Agents</text>
+          <text x="60" y="122" class="svg-small">Codex, Claude Code, Cursor</text>
+
+          <rect x="40" y="190" width="220" height="78" class="node violet"></rect>
+          <text x="60" y="220" class="svg-label">DefenseClaw Managed Run</text>
+          <text x="60" y="242" class="svg-small">run, shims, MDM, IDE launch</text>
+
+          <rect x="320" y="70" width="220" height="78" class="node"></rect>
+          <text x="340" y="100" class="svg-label">Hooks + Broker Tools</text>
+          <text x="340" y="122" class="svg-small">intent, commands, MCP, prompts</text>
+
+          <rect x="320" y="190" width="220" height="78" class="node amber"></rect>
+          <text x="340" y="220" class="svg-label">Runtime Target Registry</text>
+          <text x="340" y="242" class="svg-small">agent, user, device, process tree</text>
+
+          <rect x="600" y="70" width="220" height="78" class="node green"></rect>
+          <text x="620" y="100" class="svg-label">OPA/Rego Policy</text>
+          <text x="620" y="122" class="svg-small">semantic + runtime verdicts</text>
+
+          <rect x="600" y="190" width="220" height="78" class="node blue"></rect>
+          <text x="620" y="220" class="svg-label">Policy Compiler</text>
+          <text x="620" y="242" class="svg-small">fast local profiles for OS providers</text>
+
+          <rect x="860" y="70" width="180" height="78" class="node red"></rect>
+          <text x="878" y="100" class="svg-label">OS Enforcement</text>
+          <text x="878" y="122" class="svg-small">file, exec, network</text>
+
+          <rect x="860" y="190" width="180" height="78" class="node green"></rect>
+          <text x="878" y="220" class="svg-label">Credential Gateway</text>
+          <text x="878" y="242" class="svg-small">inject only after allow</text>
+
+          <rect x="180" y="355" width="220" height="78" class="node"></rect>
+          <text x="202" y="385" class="svg-label">Audit + OTel Events</text>
+          <text x="202" y="407" class="svg-small">runtime.*, hook.*, scan.*</text>
+
+          <rect x="430" y="355" width="220" height="78" class="node blue"></rect>
+          <text x="452" y="385" class="svg-label">Splunk + Dashboards</text>
+          <text x="452" y="407" class="svg-small">HEC, OTel Collector, saved searches</text>
+
+          <rect x="680" y="355" width="220" height="78" class="node violet"></rect>
+          <text x="702" y="385" class="svg-label">Duo Identity Map</text>
+          <text x="702" y="407" class="svg-small">user, group, device, MFA posture</text>
+
+          <path d="M260 109 H320" class="arrow"></path>
+          <path d="M260 229 H320" class="arrow"></path>
+          <path d="M540 109 H600" class="arrow"></path>
+          <path d="M540 229 H600" class="arrow"></path>
+          <path d="M820 109 H860" class="arrow"></path>
+          <path d="M820 229 H860" class="arrow"></path>
+          <path d="M950 268 V316 C950 340 930 394 900 394" class="arrow"></path>
+          <path d="M290 355 V304 C290 282 340 270 390 268" class="arrow"></path>
+          <path d="M400 394 H430" class="arrow-blue"></path>
+          <path d="M650 394 H680" class="arrow-blue"></path>
+          <path d="M790 355 V305 C790 286 742 270 710 268" class="arrow"></path>
+        </svg>
+      </div>
+    </section>
+
+    <section>
+      <h2>Policy and Enforcement Flow</h2>
+      <p class="section-note">
+        Full OPA/Rego policy should not run inside kernel callbacks, System Extension callbacks, or
+        driver hot paths. The gateway evaluates rich policy, compiles compact runtime profiles, and
+        OS providers enforce locally.
+      </p>
+      <div class="diagram" aria-label="Policy to enforcement flow">
+        <svg viewBox="0 0 1080 430" role="img">
+          <defs>
+            <marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#516174"></path>
+            </marker>
+          </defs>
+          <text x="22" y="30" class="svg-title">Policy Evaluation to Runtime Enforcement</text>
+
+          <rect x="40" y="75" width="220" height="86" class="node blue"></rect>
+          <text x="60" y="106" class="svg-label">Policy Sources</text>
+          <text x="60" y="128" class="svg-small">hooks, guardrails, runtime events</text>
+          <text x="60" y="146" class="svg-small">sensitive paths, network policy</text>
+
+          <rect x="305" y="75" width="210" height="86" class="node green"></rect>
+          <text x="325" y="106" class="svg-label">OPA/Rego Decision</text>
+          <text x="325" y="128" class="svg-small">allow, deny, observe, approve</text>
+          <text x="325" y="146" class="svg-small">severity + reason + rule id</text>
+
+          <rect x="560" y="75" width="210" height="86" class="node amber"></rect>
+          <text x="580" y="106" class="svg-label">Compiled Runtime Profile</text>
+          <text x="580" y="128" class="svg-small">path prefixes, CIDRs, processes</text>
+          <text x="580" y="146" class="svg-small">credential bindings, modes</text>
+
+          <rect x="815" y="50" width="220" height="70" class="node red"></rect>
+          <text x="835" y="80" class="svg-label">File / Exec Provider</text>
+          <text x="835" y="102" class="svg-small">ES, minifilter, eBPF LSM</text>
+
+          <rect x="815" y="140" width="220" height="70" class="node red"></rect>
+          <text x="835" y="170" class="svg-label">Network Provider</text>
+          <text x="835" y="192" class="svg-small">NE, WFP, cgroup/tc eBPF</text>
+
+          <rect x="815" y="230" width="220" height="70" class="node violet"></rect>
+          <text x="835" y="260" class="svg-label">Credential Gateway</text>
+          <text x="835" y="282" class="svg-small">inject after policy allow</text>
+
+          <rect x="305" y="285" width="465" height="72" class="node"></rect>
+          <text x="325" y="314" class="svg-label">Unified Event Stream</text>
+          <text x="325" y="336" class="svg-small">runtime.exec, runtime.file_open, runtime.network_flow, runtime.credential_use, runtime.bypass_suspected</text>
+
+          <path d="M260 118 H305" class="arrow" marker-end="url(#arrow2)"></path>
+          <path d="M515 118 H560" class="arrow" marker-end="url(#arrow2)"></path>
+          <path d="M770 118 C790 118 790 85 815 85" class="arrow" marker-end="url(#arrow2)"></path>
+          <path d="M770 118 C790 118 790 175 815 175" class="arrow" marker-end="url(#arrow2)"></path>
+          <path d="M770 118 C795 118 790 265 815 265" class="arrow" marker-end="url(#arrow2)"></path>
+          <path d="M925 300 C925 346 830 321 770 321" class="arrow" marker-end="url(#arrow2)"></path>
+        </svg>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Runtime Event</th>
+            <th>Enforced By</th>
+            <th>Policy Inputs</th>
+            <th>Typical Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>runtime.file_open</code></td>
+            <td>macOS EndpointSecurity, Windows minifilter, Linux eBPF LSM</td>
+            <td>path, operation, process tree, workspace, user, sensitivity</td>
+            <td>Deny reads of SSH keys, cloud credentials, <code>.env</code>, browser profiles</td>
+          </tr>
+          <tr>
+            <td><code>runtime.exec</code></td>
+            <td>macOS EndpointSecurity, Windows process controls, Linux eBPF LSM/seccomp</td>
+            <td>binary path, signer, argv, parent process, connector, managed mode</td>
+            <td>Observe or block suspicious exec and known exfiltration helpers</td>
+          </tr>
+          <tr>
+            <td><code>runtime.network_flow</code></td>
+            <td>macOS NetworkExtension, Windows WFP, Linux cgroup/tc eBPF</td>
+            <td>host, IP, port, protocol, process identity, route policy</td>
+            <td>Block metadata endpoints, non-allowlisted egress, provider bypass</td>
+          </tr>
+          <tr>
+            <td><code>runtime.credential_use</code></td>
+            <td>Credential gateway and policy service</td>
+            <td>Duo user, group, device, repository, API action, destination</td>
+            <td>Inject, deny, or require approval/step-up</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Concrete Defense Examples</h2>
+      <div class="grid three">
+        <div class="card">
+          <h3>1. Sensitive File Protection</h3>
+          <p><span class="label amber">Hook flow</span></p>
+          <pre><code>Codex asks to read ~/.ssh/id_rsa
+Hook sees path
+DefenseClaw blocks</code></pre>
+          <p><span class="label red">Bypass problem</span></p>
+          <pre><code>Codex launches python script
+python opens ~/.ssh/id_rsa
+Hook may only see script execution</code></pre>
+          <p><span class="label green">Runtime flow</span></p>
+          <pre><code>python open("/Users/alice/.ssh/id_rsa")
+EndpointSecurity / minifilter / eBPF LSM blocks it
+DefenseClaw emits runtime.file_open deny</code></pre>
+        </div>
+
+        <div class="card">
+          <h3>2. Network Egress Protection</h3>
+          <p><span class="label amber">Hook flow</span></p>
+          <pre><code>Agent asks to curl example.com
+Hook inspects command text</code></pre>
+          <p><span class="label red">Bypass problem</span></p>
+          <pre><code>npm postinstall script
+python requests
+git credential helper
+browser helper process</code></pre>
+          <p><span class="label green">Runtime flow</span></p>
+          <pre><code>OS sees outbound flow
+DefenseClaw maps it to agent session
+NE / WFP / eBPF blocks or redirects</code></pre>
+        </div>
+
+        <div class="card">
+          <h3>3. Broker Tool Backstop</h3>
+          <p><span class="label blue">Cooperative path</span></p>
+          <pre><code>defenseclaw.exec
+defenseclaw.read_file
+defenseclaw.write_file</code></pre>
+          <p><span class="label red">If ignored</span></p>
+          <pre><code>Agent uses native write
+Path is outside workspace
+OS runtime provider blocks write</code></pre>
+          <p><span class="label green">Audit</span></p>
+          <pre><code>runtime.file_write deny
+runtime.policy_verdict
+runtime.bypass_suspected</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Credential Injection Flow</h2>
+      <p class="section-note">
+        Credential injection requires a network path DefenseClaw controls. The agent receives only a
+        placeholder. The gateway injects the real credential after identity, destination, and action
+        policy allow the request.
+      </p>
+      <div class="diagram" aria-label="Credential injection sequence">
+        <svg viewBox="0 0 1080 500" role="img">
+          <defs>
+            <marker id="arrow3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#516174"></path>
+            </marker>
+          </defs>
+          <text x="22" y="30" class="svg-title">Managed-Run Credential Gateway</text>
+
+          <rect x="45" y="75" width="180" height="64" class="node blue"></rect>
+          <text x="65" y="104" class="svg-label">Managed Agent</text>
+          <text x="65" y="126" class="svg-small">placeholder only</text>
+
+          <rect x="270" y="75" width="180" height="64" class="node violet"></rect>
+          <text x="290" y="104" class="svg-label">OS Network Provider</text>
+          <text x="290" y="126" class="svg-small">redirect or tunnel flow</text>
+
+          <rect x="495" y="75" width="180" height="64" class="node green"></rect>
+          <text x="515" y="104" class="svg-label">DefenseClaw Gateway</text>
+          <text x="515" y="126" class="svg-small">parse protocol action</text>
+
+          <rect x="720" y="75" width="150" height="64" class="node amber"></rect>
+          <text x="740" y="104" class="svg-label">OPA + Duo</text>
+          <text x="740" y="126" class="svg-small">allow, deny, step-up</text>
+
+          <rect x="915" y="75" width="130" height="64" class="node red"></rect>
+          <text x="935" y="104" class="svg-label">Upstream</text>
+          <text x="935" y="126" class="svg-small">GitHub, k8s, DB</text>
+
+          <line x1="135" y1="139" x2="135" y2="430" stroke="#c8d3e0"></line>
+          <line x1="360" y1="139" x2="360" y2="430" stroke="#c8d3e0"></line>
+          <line x1="585" y1="139" x2="585" y2="430" stroke="#c8d3e0"></line>
+          <line x1="795" y1="139" x2="795" y2="430" stroke="#c8d3e0"></line>
+          <line x1="980" y1="139" x2="980" y2="430" stroke="#c8d3e0"></line>
+
+          <path d="M135 185 H360" class="arrow" marker-end="url(#arrow3)"></path>
+          <text x="155" y="175" class="svg-small">request with placeholder token</text>
+
+          <path d="M360 235 H585" class="arrow" marker-end="url(#arrow3)"></path>
+          <text x="382" y="225" class="svg-small">flow redirected to gateway</text>
+
+          <path d="M585 285 H795" class="arrow" marker-end="url(#arrow3)"></path>
+          <text x="610" y="275" class="svg-small">policy facts: user, group, repo, action</text>
+
+          <path d="M795 335 H585" class="arrow" marker-end="url(#arrow3)"></path>
+          <text x="625" y="325" class="svg-small">allow / deny / require Duo step-up</text>
+
+          <path d="M585 385 H980" class="arrow" marker-end="url(#arrow3)"></path>
+          <text x="620" y="375" class="svg-small">inject real credential and send upstream if allowed</text>
+        </svg>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Service / Protocol</th>
+            <th>Policy Facts</th>
+            <th>Injection Slot</th>
+            <th>Example Control</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>HTTPS / REST</td>
+            <td>host, method, path, headers, body metadata</td>
+            <td>Authorization header, cookie, custom header, mTLS identity</td>
+            <td>Allow GET, require approval for DELETE, deny unknown hosts</td>
+          </tr>
+          <tr>
+            <td>GitHub</td>
+            <td>org, repo, endpoint, action, token scope</td>
+            <td>Bearer token or Git credential helper path</td>
+            <td>Map Duo group to org/repo credential binding</td>
+          </tr>
+          <tr>
+            <td>Kubernetes</td>
+            <td>verb, resource, namespace, object name</td>
+            <td>API bearer token or client certificate</td>
+            <td>Deny secrets; step-up for prod deploys</td>
+          </tr>
+          <tr>
+            <td>Postgres</td>
+            <td>database, user, statement type, table names</td>
+            <td>startup/auth handshake</td>
+            <td>Read-only for dev; approval for prod mutation</td>
+          </tr>
+          <tr>
+            <td>SSH</td>
+            <td>command, subsystem, forwarding mode, destination</td>
+            <td>gateway-owned upstream key or certificate</td>
+            <td>Block port forwarding; log exec commands</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Duo Identity and Credential Mapping</h2>
+      <p class="section-note">
+        Duo can supply the user identity and authentication assurance needed to decide whether a
+        managed agent session may receive a credential at the gateway.
+      </p>
+      <div class="diagram" aria-label="Duo identity mapping">
+        <svg viewBox="0 0 1080 420" role="img">
+          <defs>
+            <marker id="arrow4" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#516174"></path>
+            </marker>
+          </defs>
+          <text x="22" y="30" class="svg-title">Identity-Aware Credential Mapping</text>
+
+          <rect x="45" y="80" width="210" height="76" class="node violet"></rect>
+          <text x="65" y="110" class="svg-label">Duo SSO / Universal Prompt</text>
+          <text x="65" y="132" class="svg-small">OIDC/SAML identity + MFA</text>
+
+          <rect x="45" y="205" width="210" height="76" class="node blue"></rect>
+          <text x="65" y="235" class="svg-label">Duo Admin API Sync</text>
+          <text x="65" y="257" class="svg-small">users, groups, devices, logs</text>
+
+          <rect x="320" y="140" width="210" height="86" class="node green"></rect>
+          <text x="340" y="170" class="svg-label">DefenseClaw Identity Map</text>
+          <text x="340" y="192" class="svg-small">duo_user_id, email, groups</text>
+          <text x="340" y="210" class="svg-small">device, OS user, agent session</text>
+
+          <rect x="595" y="80" width="210" height="76" class="node amber"></rect>
+          <text x="615" y="110" class="svg-label">Credential Binding Policy</text>
+          <text x="615" y="132" class="svg-small">who can use which credential</text>
+
+          <rect x="595" y="205" width="210" height="76" class="node red"></rect>
+          <text x="615" y="235" class="svg-label">Step-Up and Approval</text>
+          <text x="615" y="257" class="svg-small">MFA, HILT, manager approval</text>
+
+          <rect x="860" y="140" width="180" height="86" class="node green"></rect>
+          <text x="880" y="170" class="svg-label">Gateway Verdict</text>
+          <text x="880" y="192" class="svg-small">inject, deny, observe</text>
+          <text x="880" y="210" class="svg-small">emit Splunk evidence</text>
+
+          <path d="M255 118 C282 118 292 170 320 170" class="arrow" marker-end="url(#arrow4)"></path>
+          <path d="M255 243 C282 243 292 198 320 198" class="arrow" marker-end="url(#arrow4)"></path>
+          <path d="M530 168 C560 168 565 118 595 118" class="arrow" marker-end="url(#arrow4)"></path>
+          <path d="M530 198 C560 198 565 243 595 243" class="arrow" marker-end="url(#arrow4)"></path>
+          <path d="M805 118 C838 118 830 170 860 170" class="arrow" marker-end="url(#arrow4)"></path>
+          <path d="M805 243 C838 243 830 198 860 198" class="arrow" marker-end="url(#arrow4)"></path>
+        </svg>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Duo Signal</th>
+            <th>DefenseClaw Mapping</th>
+            <th>Credential Gateway Use</th>
+            <th>Splunk Field Examples</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>SSO OIDC/SAML subject, username, email</td>
+            <td>Runtime user identity and agent session owner</td>
+            <td>Associate managed-run session with human user</td>
+            <td><code>user.name</code>, <code>user.email</code>, <code>duo.subject</code></td>
+          </tr>
+          <tr>
+            <td>Duo group membership</td>
+            <td>Credential binding and policy scope</td>
+            <td>Map group to GitHub org, Kubernetes namespace, DB role</td>
+            <td><code>duo.groups</code>, <code>credential.binding_id</code></td>
+          </tr>
+          <tr>
+            <td>Duo devices / phones / hardware tokens</td>
+            <td>Known user authentication factors and device context</td>
+            <td>Require step-up for sensitive credential injection</td>
+            <td><code>duo.device_id</code>, <code>auth.factor</code></td>
+          </tr>
+          <tr>
+            <td>Duo authentication logs</td>
+            <td>Recent MFA outcome and assurance evidence</td>
+            <td>Correlate credential injection with strong authentication</td>
+            <td><code>duo.auth.result</code>, <code>duo.auth.time</code></td>
+          </tr>
+          <tr>
+            <td>DefenseClaw device identity</td>
+            <td>Gateway-side Ed25519 device fingerprint and endpoint context</td>
+            <td>Bind user + device + agent session before injection</td>
+            <td><code>defenseclaw.device.fingerprint</code>, <code>host.name</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout info">
+        <strong>Recommended model:</strong> use Duo SSO or Universal Prompt for interactive
+        authentication and step-up, use the Duo Admin API to sync users/groups/devices/logs into a
+        DefenseClaw identity map, then use that identity map in credential binding policy.
+      </div>
+    </section>
+
+    <section>
+      <h2>Splunk and Observability Sync</h2>
+      <p class="section-note">
+        DefenseClaw already has Splunk HEC support, OpenTelemetry schemas, runtime alert schemas,
+        and local Splunk dashboards. The runtime-control roadmap should extend those same channels
+        instead of creating a separate event stream.
+      </p>
+      <div class="diagram" aria-label="Splunk sync architecture">
+        <svg viewBox="0 0 1080 460" role="img">
+          <defs>
+            <marker id="arrow5" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#516174"></path>
+            </marker>
+          </defs>
+          <text x="22" y="30" class="svg-title">Runtime Evidence to Splunk</text>
+
+          <rect x="45" y="70" width="190" height="74" class="node blue"></rect>
+          <text x="65" y="100" class="svg-label">Hook Events</text>
+          <text x="65" y="122" class="svg-small">prompt, tool, command</text>
+
+          <rect x="45" y="180" width="190" height="74" class="node red"></rect>
+          <text x="65" y="210" class="svg-label">Runtime Events</text>
+          <text x="65" y="232" class="svg-small">file, exec, network</text>
+
+          <rect x="45" y="290" width="190" height="74" class="node violet"></rect>
+          <text x="65" y="320" class="svg-label">Duo Events</text>
+          <text x="65" y="342" class="svg-small">identity, MFA, groups</text>
+
+          <rect x="310" y="145" width="210" height="96" class="node green"></rect>
+          <text x="330" y="174" class="svg-label">DefenseClaw Gateway</text>
+          <text x="330" y="196" class="svg-small">normalize, correlate, redact</text>
+          <text x="330" y="214" class="svg-small">trace ids + runtime verdicts</text>
+
+          <rect x="595" y="80" width="190" height="80" class="node amber"></rect>
+          <text x="615" y="110" class="svg-label">Splunk HEC</text>
+          <text x="615" y="132" class="svg-small">token-authenticated JSON</text>
+
+          <rect x="595" y="230" width="190" height="80" class="node blue"></rect>
+          <text x="615" y="260" class="svg-label">OTel Collector</text>
+          <text x="615" y="282" class="svg-small">logs, metrics, traces</text>
+
+          <rect x="850" y="80" width="190" height="80" class="node green"></rect>
+          <text x="870" y="110" class="svg-label">Splunk Enterprise</text>
+          <text x="870" y="132" class="svg-small">indexes + saved searches</text>
+
+          <rect x="850" y="230" width="190" height="80" class="node green"></rect>
+          <text x="870" y="260" class="svg-label">Splunk O11y Cloud</text>
+          <text x="870" y="282" class="svg-small">APM + dashboards</text>
+
+          <rect x="460" y="355" width="420" height="64" class="node"></rect>
+          <text x="482" y="383" class="svg-label">Executive + SOC Views</text>
+          <text x="482" y="405" class="svg-small">policy decisions, bypasses, credential injection, Duo identity, runtime denies</text>
+
+          <path d="M235 107 C268 107 270 170 310 170" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M235 217 H310" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M235 327 C268 327 270 220 310 220" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M520 174 C555 174 558 120 595 120" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M520 214 C555 214 558 270 595 270" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M785 120 H850" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M785 270 H850" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M945 310 C945 385 900 387 880 387" class="arrow" marker-end="url(#arrow5)"></path>
+          <path d="M690 310 V355" class="arrow" marker-end="url(#arrow5)"></path>
+        </svg>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Signal</th>
+            <th>Splunk Path</th>
+            <th>Why It Matters</th>
+            <th>Example Fields</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Audit and policy events</td>
+            <td>HTTP Event Collector</td>
+            <td>Splunk HEC supports sending application events over HTTP/HTTPS with token authentication.</td>
+            <td><code>event.type</code>, <code>severity</code>, <code>connector</code>, <code>policy.rule_id</code></td>
+          </tr>
+          <tr>
+            <td>Metrics, traces, logs</td>
+            <td>Splunk Distribution of the OpenTelemetry Collector</td>
+            <td>Collector path supports standard logs, metrics, and traces into Splunk Observability Cloud.</td>
+            <td><code>trace_id</code>, <code>span_id</code>, <code>service.name</code>, <code>deployment.environment</code></td>
+          </tr>
+          <tr>
+            <td>Runtime control events</td>
+            <td>HEC + OTel logs</td>
+            <td>Gives SOC and engineering a single view across prompt intent and OS behavior.</td>
+            <td><code>runtime.action</code>, <code>runtime.resource.path</code>, <code>runtime.destination.host</code></td>
+          </tr>
+          <tr>
+            <td>Credential gateway events</td>
+            <td>HEC + OTel spans</td>
+            <td>Shows when credentials were denied, injected, or required approval.</td>
+            <td><code>credential.id</code>, <code>credential.scope</code>, <code>duo.user_id</code>, <code>approval.status</code></td>
+          </tr>
+          <tr>
+            <td>Duo identity evidence</td>
+            <td>Duo Admin API ingest + joined lookup</td>
+            <td>Correlates runtime action to authenticated user, group, and MFA context.</td>
+            <td><code>duo.user_id</code>, <code>duo.groups</code>, <code>duo.auth.result</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout success">
+        <strong>Dashboard outcomes:</strong> runtime deny trends, top bypass-suspected agents, sensitive
+        file access attempts, non-allowlisted egress, credential injection by Duo group, approval latency,
+        and policy verdict distribution by connector and platform.
+      </div>
+    </section>
+
+    <section>
+      <h2>Platform Roadmap</h2>
+      <div class="timeline">
+        <div class="phase">
+          <b>Phase 0</b>
+          <span>Shared runtime schema, target registry, policy compiler, Splunk fields, Duo identity map.</span>
+        </div>
+        <div class="phase">
+          <b>Phase 1</b>
+          <span>macOS EndpointSecurity for exec and sensitive file events. Observe mode, then deterministic action mode.</span>
+        </div>
+        <div class="phase">
+          <b>Phase 2</b>
+          <span>macOS NetworkExtension for agent egress attribution, block/redirect, metadata endpoint protection.</span>
+        </div>
+        <div class="phase">
+          <b>Phase 3</b>
+          <span>Managed run with shims, broker tools, placeholder credentials, and credential gateway MVP.</span>
+        </div>
+        <div class="phase">
+          <b>Phase 4</b>
+          <span>Linux eBPF/OpenShell hardening and Windows WFP/minifilter implementation.</span>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Platform</th>
+            <th>Transparent Existing-Agent Control</th>
+            <th>Managed-Run Control</th>
+            <th>First Milestones</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>macOS</td>
+            <td>EndpointSecurity for file/exec, NetworkExtension for network, <code>pfctl</code> fallback</td>
+            <td><code>defenseclaw run</code>, shims, app shortcuts, env scrubbing, placeholder credentials</td>
+            <td>Observe exec/file, action mode, then network redirection</td>
+          </tr>
+          <tr>
+            <td>Linux</td>
+            <td>eBPF LSM/cgroup/tc, nftables/iptables, TPROXY where appropriate</td>
+            <td>namespaces, Landlock, seccomp, cgroups, network namespace, OpenShell path</td>
+            <td>Managed sandbox first, then transparent eBPF observe/action</td>
+          </tr>
+          <tr>
+            <td>Windows</td>
+            <td>Windows Filtering Platform for network, minifilter for filesystem</td>
+            <td>PowerShell/CMD shims, shortcuts, restricted token, Job Objects</td>
+            <td>WFP observe/action, then minifilter observe/action</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Enterprise Rollout</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Developer UX</h3>
+          <pre><code>defenseclaw enroll --all-agents --mode observe
+defenseclaw runtime status
+defenseclaw runtime mode action
+defenseclaw credentials enroll github-prod</code></pre>
+        </div>
+        <div class="card">
+          <h3>Policy Position</h3>
+          <p>
+            Existing agents continue to work during observe mode. Production credentials require
+            managed run or successful migration to placeholder credentials. Deterministic HIGH and
+            CRITICAL runtime events can move to action mode first.
+          </p>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Stage</th>
+            <th>Goal</th>
+            <th>Default Mode</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Pilot</td>
+            <td>Validate discovery, event volume, policy mapping, false positives, Splunk field quality.</td>
+            <td><span class="label blue">Observe</span></td>
+          </tr>
+          <tr>
+            <td>Fleet Observe</td>
+            <td>Deploy OS provider broadly and collect runtime evidence across agents and platforms.</td>
+            <td><span class="label blue">Observe</span></td>
+          </tr>
+          <tr>
+            <td>Deterministic Blocks</td>
+            <td>Block HIGH/CRITICAL sensitive file, suspicious exec, and egress rules.</td>
+            <td><span class="label amber">Action for deterministic rules</span></td>
+          </tr>
+          <tr>
+            <td>Managed Credential Access</td>
+            <td>Require managed run for production GitHub, Kubernetes, cloud, DB, and SSH credentials.</td>
+            <td><span class="label green">Action</span></td>
+          </tr>
+          <tr>
+            <td>Full Defense in Depth</td>
+            <td>Hooks, runtime controls, credential gateway, Duo identity, Splunk dashboards, and policy correlation active.</td>
+            <td><span class="label green">Action</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Capability Matrix</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>Existing Agents</th>
+            <th>Managed Run</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Agent discovery</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td>Hook intent inspection</td><td>Yes, when connector supports hooks</td><td>Yes</td></tr>
+          <tr><td>Local file read/write blocking</td><td>Yes, OS-dependent</td><td>Stronger and session-scoped</td></tr>
+          <tr><td>Process exec blocking</td><td>Yes, OS-dependent</td><td>Stronger and session-scoped</td></tr>
+          <tr><td>Child process tracking</td><td>Mostly</td><td>Strong</td></tr>
+          <tr><td>Network egress blocking</td><td>Yes</td><td>Stronger and session-scoped</td></tr>
+          <tr><td>True sandbox boundary</td><td>Limited</td><td>Yes</td></tr>
+          <tr><td>Placeholder credentials</td><td>Migration required</td><td>Yes</td></tr>
+          <tr><td>Real secret never reaches agent</td><td>Not guaranteed</td><td>Yes</td></tr>
+          <tr><td>Duo step-up before credential injection</td><td>Limited</td><td>Yes</td></tr>
+          <tr><td>Splunk-ready unified evidence</td><td>Yes</td><td>Yes</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Recommended Build Order</h2>
+      <ol>
+        <li>Shared runtime-control schema, target registry, normalized event model, and policy compiler.</li>
+        <li>Duo identity map design: user, group, device, auth logs, DefenseClaw device fingerprint.</li>
+        <li>Splunk field mapping and dashboards for runtime events, credential injection, and Duo correlation.</li>
+        <li>macOS EndpointSecurity observe mode for exec and sensitive file opens.</li>
+        <li>macOS action mode for deterministic HIGH/CRITICAL file and exec rules.</li>
+        <li>macOS NetworkExtension observe/action mode for agent egress.</li>
+        <li>Managed-run launcher, shims, shortcuts, and broker tools.</li>
+        <li>Credential gateway MVP for HTTPS, GitHub, and Kubernetes.</li>
+        <li>Linux managed-run hardening and eBPF transparent mode.</li>
+        <li>Windows WFP network controls and minifilter filesystem controls.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>References</h2>
+      <ul>
+        <li>Splunk HTTP Event Collector: <a href="https://help.splunk.com/en?resourceId=Splunk_Data_UsetheHTTPEventCollector">https://help.splunk.com/en?resourceId=Splunk_Data_UsetheHTTPEventCollector</a></li>
+        <li>Splunk Distribution of the OpenTelemetry Collector: <a href="https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector">https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector</a></li>
+        <li>Duo Admin API: <a href="https://duo.com/docs/adminapi">https://duo.com/docs/adminapi</a></li>
+        <li>Duo Single Sign-On: <a href="https://duo.com/docs/sso">https://duo.com/docs/sso</a></li>
+        <li>Duo OIDC Auth API / Universal Prompt: <a href="https://duo.com/docs/oauthapi">https://duo.com/docs/oauthapi</a></li>
+        <li>Apple EndpointSecurity: <a href="https://developer.apple.com/documentation/endpointsecurity">https://developer.apple.com/documentation/endpointsecurity</a></li>
+        <li>Apple NetworkExtension: <a href="https://developer.apple.com/documentation/networkextension">https://developer.apple.com/documentation/networkextension</a></li>
+        <li>Microsoft Windows Filtering Platform: <a href="https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page">https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page</a></li>
+        <li>Linux BPF LSM: <a href="https://docs.kernel.org/bpf/prog_lsm.html">https://docs.kernel.org/bpf/prog_lsm.html</a></li>
+        <li>Linux Landlock: <a href="https://docs.kernel.org/userspace-api/landlock.html">https://docs.kernel.org/userspace-api/landlock.html</a></li>
+      </ul>
+    </section>
+
+    <p class="footer">
+      Static HTML artifact generated for DefenseClaw product planning. The page is self-contained:
+      diagrams are inline SVG, styling is inline CSS, and it does not load external assets.
+    </p>
+  </main>
+</body>
+</html>

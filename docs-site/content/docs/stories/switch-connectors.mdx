@@ -1,14 +1,13 @@
 ---
-title: Switch connectors without losing audit history
-description: defenseclaw setup mode <connector> rewires the data path without touching the audit DB. Move from OpenClaw to Codex (or Claude Code, or Cursor) in one command and keep every audit row.
+title: Add a connector without losing audit history
+description: Use defenseclaw setup <connector> to add or reconfigure agent wiring while preserving audit history for every connector.
 keywords:
-  - DefenseClaw switch connector
-  - DefenseClaw setup mode
-  - DefenseClaw connector inheritance
+  - DefenseClaw connector setup
+  - DefenseClaw multi connector
   - DefenseClaw audit history preserved
 ---
 
-The audit DB is connector-agnostic. Every audit row records its own `connector` column, so switching connectors moves the data path without losing history. New events land under the new connector; old events stay attributable to the old one.
+The audit DB is connector-agnostic. Every audit row records its own `connector` column, so adding or replacing connector wiring does not erase history. New events land under the connector that produced them; old events stay attributable to the connector that produced them.
 
 <Steps>
 
@@ -22,26 +21,25 @@ defenseclaw alerts --limit 25
 tail -n 200 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
-`status` shows enforcement flags plus a per-connector block for every active connector — after a replace that's just the new one; on a multi-connector install it's the whole roster. `alerts` lists the most recent decisions as a table. The third command is a quick by-connector histogram of recent events from the gateway's JSONL fan-out — replace `tail -n 200` with `cat` for a full-DB view, or open `defenseclaw tui` for the interactive Audit panel.
+`status` shows enforcement flags plus a per-connector block for every active connector. `alerts` lists the most recent decisions as a table. The JSONL histogram gives you a quick by-connector view of recent gateway events.
 
 </Step>
 
 <Step>
 
-### Switch with smart inheritance
+### Add or reconfigure the connector
 
 ```bash
-defenseclaw setup mode codex
+defenseclaw setup codex
 ```
 
-The CLI runs the previous connector's `Teardown()` — restoring backed-up agent files — then the new connector's `Setup()`. Inheritance rules:
+If another connector is already wired, choose **Add** to keep both active. Choose **Replace** only when you want DefenseClaw to tear down the previous connector's agent-side files before wiring the new one.
 
-- `openclaw ↔ zeptoclaw`: full guardrail config inherits verbatim (both are proxy connectors).
-- `proxy → hooks`: switch to observability-only, force enforcement off, preserve the rest of `guardrail.*` on disk.
-- `hooks → proxy`: enable guardrail in observe mode so the proxy binds; never auto-enable enforcement.
-- `hooks ↔ hooks`: apply the destination's observability-only template.
+Use `--mode action` when this connector should block policy hits immediately:
 
-Full table on the [Switching connectors](/docs/setup/guardrail/switching-connectors) page.
+```bash
+defenseclaw setup codex --mode action
+```
 
 </Step>
 
@@ -55,53 +53,34 @@ defenseclaw alerts --limit 10
 tail -n 100 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
-`doctor` confirms the previous connector left no residual hook entries; `alerts` and the JSONL histogram show new events landing under the new connector.
+`doctor` confirms connector health. `alerts` and the JSONL histogram show new events landing under the expected connector.
 
 </Step>
 
 </Steps>
 
-## What stays, what moves
+## What stays, what changes
 
-| Stays put | Moves |
+| Stays put | Changes |
 | --- | --- |
-| Audit DB (`~/.defenseclaw/audit.db`) | Active connector wiring (`guardrail.connector`) — a replace swaps it; an add appends to the active roster instead |
+| Audit DB (`~/.defenseclaw/audit.db`) | Active connector roster |
 | Rule packs (`~/.defenseclaw/policies/`) | Hook scripts wired in agent config |
-| Sinks (OTLP / Splunk / webhooks) | `claw.mode` (drives source-of-truth files) |
-| `~/.defenseclaw/config.yaml` (selectively rewritten) | Backed-up agent files (restored to original) |
-
-<Flow
-  direction="TB"
-  compact
-  caption="Switching is a teardown + setup, scoped to the data path. The audit DB and policy directory are never touched."
->
-  <Node id="old" kind="connector">{`Old connector\ne.g. openclaw`}</Node>
-  <Node id="teardown" kind="connector">{`Teardown()\nrestore backups,\nremove entries`}</Node>
-  <Node id="new" kind="connector">{`New connector\ne.g. codex`}</Node>
-  <Node id="setup" kind="connector">{`Setup()\nwrite hooks,\nupdate config`}</Node>
-  <Node id="audit" kind="datastore">{`Audit DB\nuntouched`}</Node>
-  <Node id="policy" kind="policy">{`Rule packs\nuntouched`}</Node>
-  <Edge from="old" to="teardown" />
-  <Edge from="teardown" to="new" />
-  <Edge from="new" to="setup" />
-  <Edge from="audit" to="old" variant="dashed" label="shared" />
-  <Edge from="audit" to="new" variant="dashed" label="shared" />
-  <Edge from="policy" to="old" variant="dashed" label="shared" />
-  <Edge from="policy" to="new" variant="dashed" label="shared" />
-</Flow>
+| Sinks (OTLP / Splunk / webhooks) | `guardrail.connectors.<name>` policy blocks |
+| Historical audit attribution | Backed-up agent files for removed or replaced connectors |
 
 <Callout type="info">
-**Switch vs add.** `setup mode <connector>` *replaces* the active connector — only one stays wired. If you run multiple agents and want guardrail policy on each at the same time, use the **add** flow instead: one gateway keeps all connectors wired, each under its own `guardrail.connectors.<name>` policy, and `claw.mode` becomes `multi`. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+Use **Add** for multi-connector hosts. Use **Replace** only for a deliberate one-connector workstation. To retire a connector later, run `defenseclaw setup remove <connector>`.
 </Callout>
 
-## When to switch
+## When to change connector wiring
 
-- Trying a different agent. Operators switch connectors more often than they realise; the typical operator runs both Claude Code and Codex during a normal week.
-- Promoting an agent. You started with observability-only on Claude Code; now you want enforcement and want to use OpenClaw's plugin-mediated HITL instead. Switch.
-- Demoting an agent. You promoted Codex to enforcement; the rule pack is too aggressive; switch back to observability-only while you tune.
+- Trying a different agent. Add the second connector and compare behavior from `defenseclaw status` and `defenseclaw alerts`.
+- Promoting an agent. Re-run `defenseclaw setup <connector> --mode action` when a connector should start blocking.
+- Demoting an agent. Re-run `defenseclaw setup <connector> --mode observe` while you tune policy.
+- Retiring an agent. Run `defenseclaw setup remove <connector>` after you stop using it.
 
 ## Caveats
 
 <Callout>
-The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Run `defenseclaw migrations status` after a major version upgrade to see whether any schema migrations are pending; the CLI prompts you when this is needed and applies them automatically on the next command.
+The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Use [`defenseclaw upgrade`](/docs/get-started/upgrade), which applies release-required migrations before reporting success. Run `defenseclaw migrations status` afterward to inspect the durable cursor; pending entries retry on the next upgrade, not on unrelated CLI commands.
 </Callout>

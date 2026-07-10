@@ -23,7 +23,9 @@ for full details.
 ### Install DefenseClaw
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
+VERSION=0.8.3
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 defenseclaw init --enable-guardrail
 ```
 
@@ -101,7 +103,7 @@ diagnostics, metrics, traces, and saved searches.
 The local setup aligns DefenseClaw with these default local preset values.
 These values can vary if the preset or config is overridden:
 
-- HEC endpoint `http://127.0.0.1:8088/services/collector/event`
+- HEC endpoint `https://127.0.0.1:8088/services/collector/event`
 - index `defenseclaw_local`
 - source `defenseclaw`
 - sourcetype `defenseclaw:json`

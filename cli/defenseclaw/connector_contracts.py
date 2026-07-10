@@ -72,6 +72,8 @@ def normalize_connector(name: str | None) -> str:
         return "claudecode"
     if value in {"gemini", "gemini-cli", "gemini_cli"}:
         return "geminicli"
+    if value in {"open-hands", "open_hands"}:
+        return "openhands"
     return value
 
 

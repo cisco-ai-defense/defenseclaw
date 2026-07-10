@@ -17,6 +17,8 @@
 package gateway
 
 import (
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -29,6 +31,86 @@ type hookTokenUsage struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
+}
+
+type hookReportedCost struct {
+	USD        float64
+	Present    bool
+	Cumulative bool
+}
+
+// extractHookPayloadReportedCost returns only an explicit upstream-reported
+// USD amount. It deliberately does not apply model price tables: dashboards
+// must distinguish an absent cost from a real reported zero.
+func extractHookPayloadReportedCost(payload map[string]interface{}) hookReportedCost {
+	if len(payload) == 0 {
+		return hookReportedCost{}
+	}
+	candidates := []map[string]interface{}{payload}
+	for _, key := range []string{"usage", "Usage", "cost", "billing", "result", "response"} {
+		if nested := objectAt(payload, key); nested != nil {
+			candidates = append(candidates, nested)
+		}
+	}
+	for _, candidate := range candidates {
+		if value, ok := firstFloat64Present(candidate,
+			"total_cost_usd", "totalCostUsd", "totalCostUSD",
+			"session_cost_usd", "sessionCostUsd", "sessionCostUSD",
+			"usage.total_cost_usd",
+		); ok && value >= 0 && !math.IsInf(value, 0) && !math.IsNaN(value) {
+			return hookReportedCost{USD: value, Present: true, Cumulative: true}
+		}
+		if value, ok := firstFloat64Present(candidate,
+			"cost_usd", "costUsd", "costUSD",
+			"usage.cost_usd",
+		); ok && value >= 0 && !math.IsInf(value, 0) && !math.IsNaN(value) {
+			return hookReportedCost{USD: value, Present: true}
+		}
+	}
+	return hookReportedCost{}
+}
+
+func firstFloat64Present(payload map[string]interface{}, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		raw, ok := valueAtPath(payload, key)
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case float64:
+			return value, true
+		case float32:
+			return float64(value), true
+		case int:
+			return float64(value), true
+		case int64:
+			return float64(value), true
+		case string:
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			if err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func valueAtPath(payload map[string]interface{}, key string) (interface{}, bool) {
+	if raw, ok := payload[key]; ok {
+		return raw, true
+	}
+	var current interface{} = payload
+	for _, part := range strings.Split(key, ".") {
+		object, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 // extractHookPayloadTokenUsage walks an agent-hook payload looking

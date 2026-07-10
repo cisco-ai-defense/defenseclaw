@@ -12,9 +12,11 @@
 
 Stores small, non-sensitive operator preferences in
 ``<data_dir>/tui-state.json`` (mode 0600) so the TUI remembers the
-active panel, recently used commands, and per-panel "last seen"
-cursors across restarts. Tokens, secrets, and credentials NEVER live
-here — only opaque panel names, command aliases, and timestamps.
+recently used commands and per-panel "last seen" cursors across
+restarts. Tokens, secrets, and credentials NEVER live here — only
+opaque panel names, command aliases, and timestamps. The legacy
+``active_panel`` field is still loaded for compatibility, but plain
+TUI launches intentionally start on Overview.
 
 The serializer is tolerant: missing files yield default state and a
 corrupt payload is quarantined as ``tui-state.json.bak`` so the next
@@ -37,6 +39,8 @@ STATE_FILENAME = "tui-state.json"
 class TUIState:
     """Snapshot of the operator's TUI session preferences."""
 
+    # Retained for compatibility with existing state files and panel-visit
+    # bookkeeping. ``DefenseClawTUI`` does not use it as a launch preference.
     active_panel: str = "overview"
     palette_mru: tuple[str, ...] = ()
     panel_last_seen: dict[str, str] = field(default_factory=dict)

@@ -19,6 +19,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -105,7 +106,20 @@ type SplunkHECSinkConfig struct {
 	Index      string `mapstructure:"index"       yaml:"index,omitempty"`
 	Source     string `mapstructure:"source"      yaml:"source,omitempty"`
 	SourceType string `mapstructure:"sourcetype"  yaml:"sourcetype,omitempty"`
-	VerifyTLS  bool   `mapstructure:"verify_tls"  yaml:"verify_tls,omitempty"`
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
+	// transport defaulted to InsecureSkipVerify and operators had to
+	// set verify_tls=true to enable certificate validation. The field
+	// is retained for backward compatibility — if explicitly true it
+	// is honoured (no-op against the new secure default); explicit
+	// false is silently IGNORED. Operators who want the old insecure
+	// behaviour must set insecure_skip_verify=true.
+	VerifyTLS bool `mapstructure:"verify_tls"  yaml:"verify_tls,omitempty"`
+	// InsecureSkipVerify is the fix. When true, the sink does
+	// NOT validate the HEC server's certificate — required only for
+	// dev environments with self-signed HEC. Defaults to false (TLS
+	// verification enabled) so omitting the field never silently
+	// downgrades audit-token transport.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify" yaml:"insecure_skip_verify,omitempty"`
 
 	// SourceTypeOverrides lets operators map a canonical audit
 	// action onto a dedicated Splunk sourcetype, e.g.:
@@ -187,7 +201,16 @@ type HTTPJSONLSinkConfig struct {
 	Headers     map[string]string `mapstructure:"headers"      yaml:"headers,omitempty"`
 	BearerEnv   string            `mapstructure:"bearer_env"   yaml:"bearer_env,omitempty"`
 	BearerToken string            `mapstructure:"bearer_token" yaml:"bearer_token,omitempty"`
-	VerifyTLS   bool              `mapstructure:"verify_tls"   yaml:"verify_tls,omitempty"`
+	// VerifyTLS is the LEGACY opt-in-to-security flag (see
+	// SplunkHECSinkConfig.VerifyTLS for the history). Retained
+	// for backward compatibility; operators who want the old insecure
+	// behaviour must set insecure_skip_verify=true.
+	VerifyTLS bool `mapstructure:"verify_tls"   yaml:"verify_tls,omitempty"`
+	// InsecureSkipVerify is the fix. When true, the sink does
+	// NOT validate the HTTPS endpoint's certificate. Defaults to false
+	// so audit payloads (and any bearer token) cannot be silently
+	// captured by an on-path attacker.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify" yaml:"insecure_skip_verify,omitempty"`
 }
 
 // ResolvedBearer returns the env-resolved bearer token, falling back to
@@ -220,6 +243,155 @@ func (c *HTTPJSONLSinkConfig) Validate(sinkName string) error {
 			return fmt.Errorf("audit sink %q: http_jsonl.method must be POST/PUT/PATCH (got %q)",
 				sinkName, c.Method)
 		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Per-connector observability routing (D5b) — Go honor-half.
+//
+// This is the runtime counterpart of the Python config + resolver surface in
+// cli/defenseclaw/config.py (ObservabilityConfig / PerConnectorObservability /
+// effective_audit_sinks / effective_webhooks). The Python side persists and
+// round-trips the `observability.connectors[<name>]` block and resolves it for
+// Python consumers; honoring the routing at event-emit time is the Go change
+// implemented here and consumed by internal/audit/sinks (audit sinks) and
+// internal/gateway (webhooks).
+// ---------------------------------------------------------------------------
+
+// PerConnectorObservability is one connector's observability override. A
+// connector's events route to ITS configured sinks/webhooks, falling back to
+// the GLOBAL list (top-level audit_sinks: / webhooks:) when a dimension is
+// unset. Each dimension is independently tri-state, mirroring the Python
+// None / present-list / empty-list semantics with a Go pointer-to-slice:
+//
+//   - nil pointer    — key absent; INHERIT the global list. This is the
+//     default and the safety fallback: a connector with no
+//     per-connector config still emits to the global sinks
+//     (no silent drop).
+//   - present slice  — OVERRIDE: route this connector's events to exactly
+//     these entries. A non-nil pointer to an EMPTY slice
+//     ([] in YAML) suppresses the global list for that
+//     connector.
+//
+// AuditSinks reuses the typed AuditSink (the Go gateway owns the sink schema,
+// unlike the Python side which keeps raw mappings); Webhooks reuses
+// WebhookConfig, parity with the top-level webhooks: list.
+type PerConnectorObservability struct {
+	AuditSinks *[]AuditSink     `mapstructure:"audit_sinks" yaml:"audit_sinks,omitempty"`
+	Webhooks   *[]WebhookConfig `mapstructure:"webhooks"     yaml:"webhooks,omitempty"`
+}
+
+// ObservabilityConfig carries the per-connector observability routing map
+// (D5b). Connectors maps a connector name to its PerConnectorObservability
+// override. An empty/absent map preserves the legacy global-only behavior.
+// Resolution goes through EffectiveAuditSinks / EffectiveWebhooks (which take
+// the global list and fall back to it), never by reading the map directly —
+// mirroring AssetPolicyConfig and guardrail.connectors. Mirrors
+// ObservabilityConfig in cli/defenseclaw/config.py.
+type ObservabilityConfig struct {
+	Connectors map[string]PerConnectorObservability `mapstructure:"connectors" yaml:"connectors,omitempty"`
+}
+
+// connectorOverride returns the override block for connector if configured.
+// Mirrors GuardrailConfig.connectorOverride / AssetPolicyConfig.connectorOverride:
+// an empty connector / nil receiver / empty map yields (zero, false); lookup is
+// connector-name-insensitive (exact key first, then normalizeConnectorKey).
+func (o *ObservabilityConfig) connectorOverride(connector string) (PerConnectorObservability, bool) {
+	if o == nil || connector == "" || len(o.Connectors) == 0 {
+		return PerConnectorObservability{}, false
+	}
+	if pc, ok := o.Connectors[connector]; ok {
+		return pc, true
+	}
+	want := normalizeConnectorKey(connector)
+	if want == "" {
+		return PerConnectorObservability{}, false
+	}
+	for name, pc := range o.Connectors {
+		if normalizeConnectorKey(name) == want {
+			return pc, true
+		}
+	}
+	return PerConnectorObservability{}, false
+}
+
+// EffectiveAuditSinks resolves the audit sinks a connector's events route to:
+// the per-connector override (when the audit_sinks dimension is set, including
+// an explicit empty list = suppress) wins; otherwise inherit global. global is
+// the top-level cfg.AuditSinks. The returned slice is always a fresh copy so
+// callers cannot mutate config state. Mirrors
+// ObservabilityConfig.effective_audit_sinks in config.py.
+func (o *ObservabilityConfig) EffectiveAuditSinks(connector string, global []AuditSink) []AuditSink {
+	if pc, ok := o.connectorOverride(connector); ok && pc.AuditSinks != nil {
+		return append([]AuditSink(nil), (*pc.AuditSinks)...)
+	}
+	return append([]AuditSink(nil), global...)
+}
+
+// EffectiveWebhooks resolves the webhooks a connector's events route to: the
+// per-connector override (when the webhooks dimension is set, including an
+// explicit empty list = suppress) wins; otherwise inherit global. global is
+// the top-level cfg.Webhooks. Mirrors
+// ObservabilityConfig.effective_webhooks in config.py.
+func (o *ObservabilityConfig) EffectiveWebhooks(connector string, global []WebhookConfig) []WebhookConfig {
+	if pc, ok := o.connectorOverride(connector); ok && pc.Webhooks != nil {
+		return append([]WebhookConfig(nil), (*pc.Webhooks)...)
+	}
+	return append([]WebhookConfig(nil), global...)
+}
+
+// HasConnectorAuditSinksOverride reports whether connector has an explicit
+// per-connector audit_sinks dimension set (a present list, possibly empty).
+// A true result with zero effective sinks means "suppress global for this
+// connector"; the build/registration wiring uses this to distinguish
+// suppression from inheritance. Connector-name-insensitive.
+func (o *ObservabilityConfig) HasConnectorAuditSinksOverride(connector string) bool {
+	pc, ok := o.connectorOverride(connector)
+	return ok && pc.AuditSinks != nil
+}
+
+// HasConnectorWebhooksOverride is the webhooks counterpart of
+// HasConnectorAuditSinksOverride.
+func (o *ObservabilityConfig) HasConnectorWebhooksOverride(connector string) bool {
+	pc, ok := o.connectorOverride(connector)
+	return ok && pc.Webhooks != nil
+}
+
+// ConnectorNames returns the configured connector keys in deterministic
+// (sorted) order. Used by the build/registration wiring to fan out over
+// per-connector overrides without depending on Go map iteration order.
+func (o *ObservabilityConfig) ConnectorNames() []string {
+	if o == nil || len(o.Connectors) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(o.Connectors))
+	for name := range o.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Validate rejects empty / alias-duplicate connector names. Value-only check
+// mirroring AssetPolicyConfig.Validate / ObservabilityConfig.validate in
+// config.py — it never touches the connector registry. Returns the first
+// violation.
+func (o *ObservabilityConfig) Validate() error {
+	if o == nil || len(o.Connectors) == 0 {
+		return nil
+	}
+	seen := make(map[string]string, len(o.Connectors))
+	for _, name := range o.ConnectorNames() {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("observability.connectors: empty connector name is not allowed")
+		}
+		norm := normalizeConnectorKey(name)
+		if prev, ok := seen[norm]; ok {
+			return fmt.Errorf("observability.connectors: %q and %q refer to the same "+
+				"connector %q; keep only one", prev, name, norm)
+		}
+		seen[norm] = name
 	}
 	return nil
 }

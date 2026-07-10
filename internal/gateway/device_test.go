@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -119,6 +120,113 @@ func TestRepairPairing(t *testing.T) {
 	})
 }
 
+// TestRepairPairing_FailsClosedOnCorruptPairedJSON is the regression
+// for S3.HIGH_BUG ("RepairPairing can erase unrelated paired
+// devices"). Before the fix, json.Unmarshal errors on paired.json were
+// silently swallowed, the in-memory map was treated as empty, and the
+// subsequent rewrite ERASED every other paired device. The hardened
+// version refuses to overwrite, snapshots the corrupt bytes for
+// forensics, and returns an error to the caller.
+func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
+	device, err := LoadOrCreateIdentity(filepath.Join(t.TempDir(), "device.key"))
+	if err != nil {
+		t.Fatalf("create identity: %v", err)
+	}
+
+	home := t.TempDir()
+	devicesDir := filepath.Join(home, ".openclaw", "devices")
+	if err := os.MkdirAll(devicesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pairedPath := filepath.Join(devicesDir, "paired.json")
+	original := []byte(`{"paired-but-truncated`)
+	if err := os.WriteFile(pairedPath, original, 0o600); err != nil {
+		t.Fatalf("seed corrupt paired.json: %v", err)
+	}
+
+	if err := device.RepairPairing(home); err == nil {
+		t.Fatal("RepairPairing must fail closed on unparseable paired.json ()")
+	}
+
+	// The original bytes MUST remain intact -- the previous code path
+	// would have wiped the file. The byte-for-byte preservation is
+	// what protects existing pairings from being silently destroyed.
+	got, err := os.ReadFile(pairedPath)
+	if err != nil {
+		t.Fatalf("read paired.json: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("paired.json contents changed after fail-closed RepairPairing\noriginal: %s\ngot:      %s",
+			original, got)
+	}
+
+	// A snapshot of the corrupt bytes MUST exist beside the original
+	// so the operator can recover or post-mortem.
+	entries, err := os.ReadDir(devicesDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	foundBackup := false
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// paired.json.corrupt.<unix-nanos>
+		if strings.HasPrefix(e.Name(), "paired.json.corrupt.") {
+			foundBackup = true
+			b, err := os.ReadFile(filepath.Join(devicesDir, e.Name()))
+			if err != nil {
+				t.Fatalf("read backup: %v", err)
+			}
+			if string(b) != string(original) {
+				t.Fatalf("backup contents differ from original\nwant: %s\ngot:  %s", original, b)
+			}
+			info, err := os.Stat(filepath.Join(devicesDir, e.Name()))
+			if err != nil {
+				t.Fatalf("stat backup: %v", err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Errorf("backup perm = %v, want 0600", info.Mode().Perm())
+			}
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected a paired.json.corrupt.<ts> backup to be present (forensics)")
+	}
+}
+
+// TestRepairPairing_AtomicWriteAndPerms covers the second half of the
+// recommendation: writes go through a same-directory temp +
+// rename so a crash cannot leave a half-written file, and the final
+// file is 0600 (no longer world-readable 0644).
+func TestRepairPairing_AtomicWriteAndPerms(t *testing.T) {
+	device, err := LoadOrCreateIdentity(filepath.Join(t.TempDir(), "device.key"))
+	if err != nil {
+		t.Fatalf("create identity: %v", err)
+	}
+	home := t.TempDir()
+
+	if err := device.RepairPairing(home); err != nil {
+		t.Fatalf("repair pairing: %v", err)
+	}
+	pairedPath := filepath.Join(home, ".openclaw", "devices", "paired.json")
+	info, err := os.Stat(pairedPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("paired.json perm = %v, want 0600 (no longer world-readable)", info.Mode().Perm())
+	}
+
+	// No temp-file remnants beside the destination.
+	entries, _ := os.ReadDir(filepath.Dir(pairedPath))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".paired.json.tmp-") {
+			t.Errorf("leftover temp file %s -- atomic write did not clean up", e.Name())
+		}
+	}
+}
+
 func TestIsAuthError(t *testing.T) {
 	// The first cases below are the EXACT wire formats OpenClaw emits
 	// (see node_modules/openclaw/dist/connect-error-details-*.js Ee
@@ -139,14 +247,17 @@ func TestIsAuthError(t *testing.T) {
 		{fmt.Errorf("Pairing_Required"), true},
 		{fmt.Errorf("device not paired with gateway"), true},
 
-		// Real OpenClaw NOT_PAIRED messages — the four sub-reasons
-		// (not-paired, metadata-upgrade, role-upgrade, scope-upgrade)
-		// — must all trigger auto-repair. Anything less leaves the
-		// gateway flapping in RECONNECTING.
+		// Real OpenClaw NOT_PAIRED messages — only the transport
+		// sub-reasons (not-paired, metadata-upgrade) trigger
+		// auto-repair. explicitly require
+		// role-upgrade and scope-upgrade rejections to surface to the
+		// operator instead, because RepairPairing hard-codes
+		// operator.admin / operator.approvals into the pairing
+		// record and would otherwise self-elevate.
 		{fmt.Errorf("gateway: connect handshake: pairing required: device pairing required (NOT_PAIRED)"), true},
 		{fmt.Errorf("gateway: connect handshake: pairing required: device identity changed and must be re-approved (NOT_PAIRED)"), true},
-		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for a higher role than currently approved (NOT_PAIRED)"), true},
-		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for more scopes than currently approved (NOT_PAIRED)"), true},
+		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for a higher role than currently approved (NOT_PAIRED)"), false},
+		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for more scopes than currently approved (NOT_PAIRED)"), false},
 		{fmt.Errorf("websocket: close 1008 (policy violation): pairing required: device identity changed and must be re-approved (requestId: eabe39af-7a72-4331-8271-03e16e635db2)"), true},
 
 		{fmt.Errorf("connection refused"), false},

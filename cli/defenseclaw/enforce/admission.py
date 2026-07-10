@@ -64,13 +64,37 @@ def _default_admission_policy() -> AdmissionPolicyData:
             },
         },
         first_party_allow={
+            # F-0541: provenance markers must be specific to the first-party
+            # asset's own directory, not a broad parent like ``.defenseclaw``
+            # or ``.openclaw/extensions`` that any sibling plugin/skill could
+            # be dropped into. Each marker pins the asset's leaf component.
+            #
+            # F-0902: markers must also be home-anchored, not bare relative
+            # sequences ("extensions/defenseclaw") — a bare marker blesses any
+            # attacker path that merely contains the subsequence
+            # (``/tmp/attacker/extensions/defenseclaw``). ``_matches_provenance``
+            # anchors the match defensively, but these built-in defaults are
+            # kept home-anchored too so they mirror the bundled policy data
+            # (policies/{default,strict,permissive}.yaml + rego/data.json) and
+            # never rely solely on the matcher.
             ("plugin", "defenseclaw"): (
                 "first-party DefenseClaw plugin",
-                [".defenseclaw", "extensions/defenseclaw"],
+                [
+                    ".openclaw/extensions/defenseclaw",
+                    ".zeptoclaw/extensions/defenseclaw",
+                    ".claude/extensions/defenseclaw",
+                    ".codex/extensions/defenseclaw",
+                ],
             ),
             ("skill", "codeguard"): (
                 "first-party DefenseClaw skill",
-                [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"],
+                [
+                    ".openclaw/workspace/skills/codeguard",
+                    ".openclaw/skills/codeguard",
+                    ".zeptoclaw/skills/codeguard",
+                    ".claude/skills/codeguard",
+                    ".codex/skills/codeguard",
+                ],
             ),
         },
     )
@@ -94,6 +118,7 @@ def evaluate_admission(
     action_entry: Any | None = None,
     fallback_actions: Any | None = None,
     include_quarantine: bool = False,
+    allow_first_party: bool = True,
 ) -> AdmissionDecision:
     """Evaluate admission for a target using active policy data when available.
 
@@ -103,7 +128,16 @@ def evaluate_admission(
     still subject to the policy's ``allow_list_bypass_scan`` setting.
     """
     blocked_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the block list")
-    if pe.is_blocked(target_type, name):
+    # N2: honor a per-connector block at the admission gate. When a connector is
+    # in play, resolve most-specific-wins (connector-scoped entry, else global)
+    # via the *_for_connector engine method; the bare (global) path keeps the
+    # pre-N2 call so duck-typed callers/fakes without the connector dimension are
+    # unaffected (connector="" is equivalent to the global check anyway).
+    if (
+        pe.is_blocked_for_connector(target_type, name, connector)
+        if connector
+        else pe.is_blocked(target_type, name)
+    ):
         return AdmissionDecision("blocked", blocked_reason, source="manual-block")
 
     asset_decision = evaluate_asset_policy(
@@ -122,17 +156,60 @@ def evaluate_admission(
         return asset_decision
 
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
-    if pe.is_allowed(target_type, name):
+    if (
+        pe.is_allowed_for_connector(target_type, name, connector)
+        if connector
+        else pe.is_allowed(target_type, name)
+    ):
+        # an explicit operator allow that
+        # was registered with a source_path MUST NOT auto-allow a
+        # different on-disk asset just because it shares the
+        # registered name. Look up the stored entry and compare its
+        # source_path to the current source_path. If they differ
+        # we drop the allow and force a fresh scan/decision rather
+        # than honoring a name-only match. When the stored entry
+        # has no source_path (legacy allow) we keep current
+        # behavior to avoid breaking pre-fix entries; operators can
+        # re-allow with a path to opt into the strict mode.
+        #
+        # F-0401: when the allow IS path-pinned but the current request
+        # presents no source_path (empty/missing provenance, e.g. a
+        # non-local plugin/MCP pre-scan admission), we must NOT honor the
+        # pin as a match. An empty presented path cannot prove it is the
+        # pinned asset, so treat it as a mismatch and fail closed instead
+        # of falling through to an allow.
+        existing = _effective_action_entry(pe, target_type, name, connector)
+        existing_path = getattr(existing, "source_path", None) if existing else None
+        if existing_path and existing_path != source_path:
+            presented = source_path or "(no source path presented)"
+            return AdmissionDecision(
+                "rejected",
+                (
+                    f"allow entry for {target_type} '{name}' is pinned to "
+                    f"{existing_path!r}, but the presented asset is at "
+                    f"{presented!r} — failing closed"
+                ),
+                source="manual-allow-path-mismatch",
+            )
         return AdmissionDecision("allowed", allowed_reason, source="manual-allow")
 
-    if include_quarantine and pe.is_quarantined(target_type, name):
+    quarantined = (
+        pe.is_quarantined_for_connector(target_type, name, connector)
+        if connector
+        else pe.is_quarantined(target_type, name)
+    )
+    if include_quarantine and quarantined:
         reason = _action_reason(action_entry, default="quarantined")
         return AdmissionDecision("rejected", f"quarantined: {reason}", source="quarantine")
 
     policy = load_admission_policy(policy_dir)
 
+    # F-0742: callers evaluating untrusted-provenance inventory rows (e.g. a
+    # ``source: user`` AIBOM entry) pass ``allow_first_party=False`` so the
+    # first-party allow list cannot bless an operator/third-party asset that
+    # merely lands under a first-party provenance directory.
     fp_entry = policy.first_party_allow.get((target_type, name))
-    if fp_entry is not None and policy.allow_list_bypass_scan:
+    if allow_first_party and fp_entry is not None and policy.allow_list_bypass_scan:
         fp_reason, fp_constraints = fp_entry
         if _matches_provenance(fp_constraints, source_path):
             return AdmissionDecision("allowed", fp_reason, source="policy-allow")
@@ -180,9 +257,26 @@ def evaluate_asset_policy(
     if not getattr(asset_policy, "enabled", False):
         return AdmissionDecision("allowed", "asset policy disabled", source="asset-policy-disabled")
 
-    policy = getattr(asset_policy, target_type, None)
+    # Per-connector resolution (OTHER-7): prefer the AssetPolicyConfig
+    # resolvers so a connector with an override gets its own scalar settings
+    # (default / registry_required / registry_empty_action) and mode. Stay
+    # duck-typed — callers/tests that pass a bare object without the resolvers
+    # fall back to the global per-type policy and global mode, which is the
+    # legacy behavior and also exactly what the resolvers return when no
+    # per-connector override is configured.
+    type_resolver = getattr(asset_policy, "effective_asset_type_policy", None)
+    if callable(type_resolver):
+        policy = type_resolver(connector, target_type)
+    else:
+        policy = getattr(asset_policy, target_type, None)
     if policy is None:
         return AdmissionDecision("allowed", "asset policy unsupported target", source="asset-policy-unsupported")
+
+    mode_resolver = getattr(asset_policy, "effective_mode", None)
+    if callable(mode_resolver):
+        mode = mode_resolver(connector)
+    else:
+        mode = getattr(asset_policy, "mode", "observe")
 
     rule_args = args or []
     if rule := _find_asset_rule(
@@ -194,9 +288,10 @@ def evaluate_asset_policy(
         command,
         rule_args,
         transport,
+        connector_scope="scoped",
     ):
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
-        return _asset_policy_block_or_observe(asset_policy, reason, "asset-policy-deny")
+        return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
 
     if rule := _find_asset_rule(
         getattr(policy, "allowed", []),
@@ -207,11 +302,47 @@ def evaluate_asset_policy(
         command,
         rule_args,
         transport,
+        connector_scope="scoped",
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
+        return AdmissionDecision("allowed", reason, source="asset-policy-allow")
+
+    if rule := _find_asset_rule(
+        getattr(policy, "denied", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+        connector_scope="global",
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
+        return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
+
+    if rule := _find_asset_rule(
+        getattr(policy, "allowed", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+        connector_scope="global",
     ):
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
         return AdmissionDecision("allowed", reason, source="asset-policy-allow")
 
     registry = getattr(policy, "registry", [])
+    # F-1906: registry membership for MCP servers is the gate that lets a
+    # command actually run, so it must be matched strictly. The loose match
+    # (command BASENAME + argv PREFIX) let an attacker register a benign basename
+    # like ``npx`` and then run ``/tmp/evil/npx`` with extra trailing argv while
+    # still "matching" the registry rule. Compare the full command and require an
+    # exact argv match for the MCP registry. Denied/allowed rules keep the looser
+    # semantics so an over-broad *block* still fires.
     registered = _find_asset_rule(
         registry,
         name,
@@ -221,20 +352,39 @@ def evaluate_asset_policy(
         command,
         rule_args,
         transport,
+        strict=(target_type == "mcp"),
     ) is not None
     if registry and registered:
         return AdmissionDecision("allowed", f"{target_type} {name!r} is registered", source="asset-policy-registry")
 
     if getattr(policy, "registry_required", False):
-        return _asset_policy_block_or_observe(
-            asset_policy,
-            f"{target_type} {name!r} is not in the approved registry",
-            "asset-policy-registry-required",
-        )
+        # Split "registry configured but unmatched" from "registry empty",
+        # mirroring the Go gateway (internal/config/asset_policy.go
+        # EvaluateAssetPolicy): a *configured* (non-empty) registry that does
+        # not list this asset is always a hard "not approved" block.
+        if registry:
+            return _asset_policy_block_or_observe(
+                mode,
+                f"{target_type} {name!r} is not in the approved registry",
+                "asset-policy-registry-required",
+            )
+        # Registry required but empty → governed by registry_empty_action.
+        # Only "deny" blocks; "warn"/"allow" fall through to the default check
+        # below. The Go gateway now resolves "warn" the same way (warn → allow),
+        # so this matches the runtime (see _normalize_registry_empty_action).
+        if _normalize_registry_empty_action(
+            getattr(policy, "registry_empty_action", "deny")
+        ) == "deny":
+            return _asset_policy_block_or_observe(
+                mode,
+                f"{target_type} {name!r} is blocked because asset policy "
+                f"requires a registry but none is configured",
+                "asset-policy-registry-required-empty",
+            )
 
     if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
         return _asset_policy_block_or_observe(
-            asset_policy,
+            mode,
             f"{target_type} {name!r} is denied by default asset policy",
             "asset-policy-default-deny",
         )
@@ -246,10 +396,40 @@ def evaluate_asset_policy(
     )
 
 
-def _asset_policy_block_or_observe(asset_policy: Any, reason: str, source: str) -> AdmissionDecision:
-    if str(getattr(asset_policy, "mode", "observe")).strip().lower() == "action":
+def _asset_policy_block_or_observe(mode: Any, reason: str, source: str) -> AdmissionDecision:
+    """Block in action mode, observe (allow + ``-observe`` source) otherwise.
+
+    ``mode`` is the already-resolved effective mode for the connector (see
+    OTHER-7 per-connector resolution in :func:`evaluate_asset_policy`), not
+    the AssetPolicyConfig object — so a connector overriding ``mode: action``
+    blocks while one inheriting ``observe`` only flags would-block.
+    """
+    if str(mode).strip().lower() == "action":
         return AdmissionDecision("blocked", reason, source=source)
     return AdmissionDecision("allowed", reason, source=source + "-observe")
+
+
+def _normalize_registry_empty_action(value: Any) -> str:
+    """Canonicalize registry_empty_action for an empty-but-required registry.
+
+    Returns one of ``"deny"`` / ``"warn"`` / ``"allow"`` (the three values
+    documented on ``config.AssetTypePolicy.registry_empty_action``). Only
+    ``"deny"`` blocks; both ``"warn"`` and ``"allow"`` fall through to the
+    default check. ``"deny"``/``"block"``/``""`` and any unrecognised value
+    stay fail-closed as ``"deny"``.
+
+    Python↔Go parity: the Go gateway's ``normalizeRegistryEmptyAction``
+    (internal/config/asset_policy.go) now also treats ``"warn"`` as
+    fall-through (warn → allow), so both sides agree that ``"warn"`` is
+    "log-but-don't-block at the empty-registry gate". The earlier divergence
+    (Go collapsing ``"warn"`` into ``"deny"``) is closed.
+    """
+    v = str(value).strip().lower()
+    if v == "allow":
+        return "allow"
+    if v == "warn":
+        return "warn"
+    return "deny"
 
 
 def _find_asset_rule(
@@ -261,11 +441,42 @@ def _find_asset_rule(
     command: str,
     args: list[str],
     transport: str,
+    *,
+    strict: bool = False,
+    connector_scope: str | None = None,
 ) -> Any | None:
     for rule in rules:
-        if _asset_rule_matches(rule, name, connector, source_path, url, command, args, transport):
+        rule_connector = str(getattr(rule, "connector", "") or "").strip()
+        if connector_scope == "scoped":
+            if not rule_connector:
+                continue
+            if connector_paths.normalize(rule_connector) != connector_paths.normalize(connector):
+                continue
+        elif connector_scope == "global" and rule_connector:
+            continue
+        if _asset_rule_matches(
+            rule, name, connector, source_path, url, command, args, transport, strict=strict
+        ):
             return rule
     return None
+
+
+def _effective_action_entry(
+    pe: Any,
+    target_type: str,
+    name: str,
+    connector: str = "",
+) -> Any | None:
+    if not hasattr(pe, "get_action"):
+        return None
+    if connector:
+        try:
+            scoped = pe.get_action(target_type, name, connector)
+        except TypeError:
+            scoped = None
+        if scoped is not None and getattr(getattr(scoped, "actions", None), "install", ""):
+            return scoped
+    return pe.get_action(target_type, name)
 
 
 def _asset_rule_matches(
@@ -277,6 +488,8 @@ def _asset_rule_matches(
     command: str,
     args: list[str],
     transport: str,
+    *,
+    strict: bool = False,
 ) -> bool:
     constrained = False
     if getattr(rule, "name", ""):
@@ -298,16 +511,39 @@ def _asset_rule_matches(
             return False
     if getattr(rule, "command", ""):
         constrained = True
-        if os.path.basename(str(rule.command).strip()) != os.path.basename(command.strip()):
+        # F-1906: a basename-only compare lets ``/tmp/evil/npx`` satisfy a rule
+        # pinned to ``npx``. Under strict matching (MCP registry membership) the
+        # FULL command string must match so a substituted absolute path cannot
+        # impersonate a registered binary. Denied/allowed rules stay basename-
+        # based so an operator can broadly block by binary name.
+        if strict:
+            if str(rule.command).strip() != command.strip():
+                return False
+        elif os.path.basename(str(rule.command).strip()) != os.path.basename(command.strip()):
             return False
     prefix = getattr(rule, "args_prefix", []) or []
     if prefix:
         constrained = True
-        if len(args) < len(prefix):
+        # F-1906: an argv *prefix* match lets an attacker append trailing args
+        # (e.g. a second server spec or ``--allow-everything``) while still
+        # matching a registry rule. Under strict matching require an EXACT argv
+        # match — no extra trailing arguments — so the registered command line
+        # is the only one admitted.
+        if strict:
+            if len(args) != len(prefix):
+                return False
+        elif len(args) < len(prefix):
             return False
         for idx, want in enumerate(prefix):
             if str(want).strip() != str(args[idx]).strip():
                 return False
+    elif strict and args:
+        # A strict registry rule that pins a command but specifies no argv must
+        # only admit the bare command — reject any presented arguments rather
+        # than ignoring them (which would let trailing argv slip through).
+        if getattr(rule, "command", ""):
+            constrained = True
+            return False
     if getattr(rule, "transport", ""):
         constrained = True
         if str(rule.transport).strip().lower() != transport.strip().lower():
@@ -443,14 +679,74 @@ def _scan_summary(scan_result: Any) -> tuple[int, str]:
     return 0, "INFO"
 
 
+# F-0141: a first-party provenance marker is only trustworthy when it lives
+# under a DefenseClaw/agent-framework *home* the attacker cannot create siblings
+# in without already owning that home. These are the leaf directory names of the
+# per-connector homes (mirrors ``connector_paths.connector_home``). A marker run
+# must be anchored to one of these (either the marker begins with a home, or the
+# component immediately preceding the matched run is a home) so a user-writable
+# parent that merely *contains* the component subsequence — e.g.
+# ``/tmp/attacker/extensions/defenseclaw`` — does NOT bless the asset.
+_DEFENSECLAW_HOME_COMPONENTS = frozenset(
+    {
+        ".defenseclaw",
+        ".openclaw",
+        ".zeptoclaw",
+        ".claude",
+        ".codex",
+    }
+)
+
+
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:
-    """True if no constraints exist, or if source_path contains one of them."""
+    """True if no constraints exist, or if source_path is a path
+    *component* match against one of them that is anchored to a
+    DefenseClaw-owned home.
+
+    The first iteration of this matcher compared each constraint with
+    ``in normalised``, a substring test over the whole path string, which
+    accepted attacker paths whose components incidentally embedded the
+    constraint (``/tmp/user/.defenseclaw-evil/defenseclaw``). That was
+    tightened to a contiguous full-*component* match, but that alone still
+    accepted a user-writable parent that merely *contained* the component
+    subsequence: a bare marker like ``extensions/defenseclaw`` matched
+    ``/tmp/attacker/extensions/defenseclaw`` anywhere in the tree.
+
+    F-0141 anchors the match to a DefenseClaw-owned home: the matched run
+    must either start with a known home component (e.g.
+    ``.openclaw/extensions/defenseclaw``) or be immediately preceded in the
+    source path by one (so a marker leaf is only honored under a real home).
+    A location an unprivileged principal controls — which by definition does
+    not contain a DefenseClaw home as the anchoring parent — cannot match.
+    """
     if not constraints:
         return True
     if not source_path:
         return False
     normalised = source_path.replace("\\", "/").lower()
-    return any(c.lower() in normalised for c in constraints)
+    components = [c for c in normalised.split("/") if c]
+    for raw in constraints:
+        constraint = raw.replace("\\", "/").lower().strip("/")
+        if not constraint:
+            continue
+        constraint_parts = [p for p in constraint.split("/") if p]
+        if not constraint_parts:
+            continue
+        # Match constraint as a contiguous run of full path
+        # components in the source path.
+        clen = len(constraint_parts)
+        for i in range(len(components) - clen + 1):
+            if components[i : i + clen] != constraint_parts:
+                continue
+            # F-0141: the run must be anchored to a DefenseClaw-owned home —
+            # either the constraint itself begins with one, or the component
+            # directly above the matched run is one. Otherwise an attacker
+            # parent (``/tmp/attacker/extensions/defenseclaw``) would match.
+            if constraint_parts[0] in _DEFENSECLAW_HOME_COMPONENTS:
+                return True
+            if i > 0 and components[i - 1] in _DEFENSECLAW_HOME_COMPONENTS:
+                return True
+    return False
 
 
 def _action_reason(action_entry: Any | None, *, default: str) -> str:

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -97,21 +98,44 @@ func marshalScanResultV7(r *scanner.ScanResult, binaryVer string) ([]byte, error
 }
 
 func findingToV7(f *scanner.Finding, scannerName string) scanFindingV7 {
-	rid := scanner.EnsureRuleID(f, scannerName)
+	findingScanner := strings.TrimSpace(f.Scanner)
+	if findingScanner == "" {
+		findingScanner = scannerName
+	}
+	rid := scanner.EnsureRuleID(f, findingScanner)
 	ln := lineNumberFromLocation(f.Location)
 	var tags *[]string
 	if len(f.Tags) > 0 {
 		t := append([]string(nil), f.Tags...)
 		tags = &t
 	}
+	// H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
+	// findings"): findings produced by CodeGuard / plugin scanners can
+	// embed the raw matched source line in Description, the raw path in
+	// Location, and operator-supplied text in Remediation. The persistent
+	// audit path already runs each of these through redaction.ForSinkString
+	// (see audit/scan_persist.go:78-80), but the v7 wire output
+	// (`defenseclaw scan code --json`, gateway API scan endpoint)
+	// historically bypassed it and rendered raw text. Apply the same sink
+	// redaction here so secret-bearing matched lines never leak through
+	// stdout, file output, or the API response.
+	//
+	// Title is intentionally NOT redacted to stay symmetric with the
+	// audit DB path, which keeps Title as the operator-searchable
+	// human-readable summary. Scanner conventions render Title as a
+	// rule-name (e.g. "Hardcoded API key detected"), not the matched
+	// value. If a scanner does embed sensitive bytes in Title, fix the
+	// scanner — never widen this redaction to Title without also
+	// updating audit/scan_persist.go (otherwise the two sinks
+	// disagree on what's stored vs. what's emitted).
 	return scanFindingV7{
 		ID:          f.ID,
 		Severity:    string(f.Severity),
 		Title:       f.Title,
-		Description: strPtrOrNil(f.Description),
-		Location:    strPtrOrNil(f.Location),
-		Remediation: strPtrOrNil(f.Remediation),
-		Scanner:     scannerName,
+		Description: strPtrOrNil(redaction.ForSinkString(f.Description)),
+		Location:    strPtrOrNil(redaction.ForSinkString(f.Location)),
+		Remediation: strPtrOrNil(redaction.ForSinkString(f.Remediation)),
+		Scanner:     findingScanner,
 		Tags:        tags,
 		RuleID:      &rid,
 		LineNumber:  ln,

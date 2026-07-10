@@ -70,6 +70,8 @@ What agents are running, which models they call, and which scanners have evaluat
 
 Per-connector throughput, error rate, and policy hit ratios over time. Helps catch a connector that suddenly starts triggering rules.
 
+On multi-connector installs, this is the fastest dashboard for comparing hook volume, errors, and policy hits across the active roster.
+
 ![Splunk · Connector Activity](/images/splunk/connector-activity.png)
 
 #### Policy Decisions
@@ -80,7 +82,9 @@ Every guardrail verdict, broken down by rule, severity, and outcome. The "did th
 
 #### Findings and HITL
 
-Open scanner findings + the operator approval queue. The day-to-day operator surface.
+Open scanner findings plus HITL request/decision history. This is an
+observability view, not a resumable approval queue; live approval happens only
+on connector events with a native ask surface.
 
 ![Splunk · Findings and HITL](/images/splunk/findings-and-hitl.png)
 

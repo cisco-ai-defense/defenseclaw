@@ -1,23 +1,27 @@
 ---
 title: Quick setup aliases
-description: defenseclaw setup codex, setup claude-code, setup cursor, setup copilot, setup hermes, setup geminicli, setup windsurf, setup openclaw, setup zeptoclaw — one command per agent, no questions asked.
+description: defenseclaw setup codex, setup claude-code, setup cursor, setup copilot, setup openhands, setup antigravity, setup hermes, setup opencode, setup omnigent, setup geminicli, setup windsurf, setup openclaw, setup zeptoclaw — one command per agent, no questions asked.
 keywords:
   - defenseclaw setup codex
   - defenseclaw setup claude-code
   - defenseclaw setup cursor
   - defenseclaw setup copilot
+  - defenseclaw setup openhands
+  - defenseclaw setup antigravity
   - defenseclaw setup gemini cli
   - defenseclaw setup hermes
+  - defenseclaw setup opencode
+  - defenseclaw setup omnigent
   - defenseclaw setup windsurf
   - defenseclaw setup openclaw
   - defenseclaw setup zeptoclaw
 ---
 
-Each connector has a top-level alias that wraps `defenseclaw setup guardrail` with the right defaults. Use them for fast subsequent runs and CI scripts.
+Each connector has a top-level alias that wraps `defenseclaw setup guardrail --connector <name>` with the right defaults. Use them for fast subsequent runs and CI scripts.
 
-## Observability-only aliases (no enforcement)
+## Direct-to-upstream aliases (hook or policy enforcement)
 
-These connectors talk directly to their native upstream. DefenseClaw collects telemetry (hooks, native OTel, optional notify bridge) without sitting in the LLM data path.
+These connectors talk directly to their native upstream, so DefenseClaw never sits in the LLM data path. Observe mode records telemetry; action mode returns supported agent-native hook verdicts or, for OmniGent, native `ALLOW` / `ASK` / `DENY` policy decisions.
 
 <Cards>
   <Card title="Codex" href="/docs/connectors/codex" description="defenseclaw setup codex" />
@@ -26,7 +30,11 @@ These connectors talk directly to their native upstream. DefenseClaw collects te
   <Card title="Windsurf" href="/docs/connectors/windsurf" description="defenseclaw setup windsurf" />
   <Card title="Gemini CLI" href="/docs/connectors/geminicli" description="defenseclaw setup geminicli" />
   <Card title="GitHub Copilot CLI" href="/docs/connectors/copilot" description="defenseclaw setup copilot" />
+  <Card title="OpenHands" href="/docs/connectors/openhands" description="defenseclaw setup openhands" />
+  <Card title="Antigravity" href="/docs/connectors/antigravity" description="defenseclaw setup antigravity" />
   <Card title="Hermes" href="/docs/connectors/hermes" description="defenseclaw setup hermes" />
+  <Card title="OpenCode" href="/docs/connectors/opencode" description="defenseclaw setup opencode" />
+  <Card title="OmniGent" href="/docs/connectors/omnigent" description="defenseclaw setup omnigent — custom policy bridge with native ALLOW / ASK / DENY" />
 </Cards>
 
 ```bash
@@ -36,27 +44,27 @@ defenseclaw setup cursor --no-restart        # apply config without bouncing the
 ```
 
 <Callout>
-The observability-only aliases pin `claw.mode=<connector>` so the rest of the CLI/TUI (skill scanner, MCP scanner, plugin scanner, overview panels) reads from the matching connector's source-of-truth files (e.g., `~/.codex/`, `~/.claude/`) instead of OpenClaw's default layout.
+These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already active, choose **Add** to keep both connectors wired under `guardrail.connectors` and let `claw.mode` become `multi`.
 </Callout>
 
-### What an observability-only alias does
+### What a direct-to-upstream alias does
 
 <Steps>
 
 <Step>
-Pins `guardrail.connector` and `claw.mode` to the chosen connector so downstream commands read the right state directory.
+Selects the target connector exactly as if you had passed `defenseclaw setup guardrail --connector <name>`.
 </Step>
 
 <Step>
-Wires the hook scripts under `~/.defenseclaw/hooks/` and patches `~/.codex/config.toml` / `~/.claude/settings.json` with the hook references and native OTel env block. No proxy listener binds; the agent talks directly to its native upstream.
+Wires the connector's documented hook surface or OmniGent policy bridge and, where supported, native OTel exporter settings. No proxy listener binds; the agent talks directly to its native upstream.
 </Step>
 
 <Step>
-Wires the connector's hook scripts and (where supported) native OTel exporter against the running gateway.
+Uses observe mode by default. With `--mode action`, supported lifecycle callbacks return native block/approval decisions; OmniGent maps all six policy phases to `ALLOW`, `ASK`, or `DENY`.
 </Step>
 
 <Step>
-Persists `config.yaml` and writes the `picked_connector` hint so future `defenseclaw setup guardrail` runs default to the same connector.
+Persists `config.yaml`, updates the active connector roster, and writes the `picked_connector` hint for compatibility with flows that still need a default selection. On multi-connector hosts, use explicit `--connector <name>` whenever you mean to scope a later command to one connector.
 </Step>
 
 <Step>
@@ -78,6 +86,11 @@ Restarts the gateway (unless `--no-restart`).
       description: "Restart defenseclaw-gateway after applying changes.",
       default: "--restart",
     },
+    "--mode observe / action": {
+      type: "option",
+      description: "Choose record-only behavior or connector-native enforcement on supported callbacks.",
+      default: "observe",
+    },
     "--with-local-stack / --no-local-stack": {
       type: "flag",
       description: "Bring up the bundled Prom/Loki/Tempo/Grafana stack via `defenseclaw setup local-observability up` once config is saved.",
@@ -97,22 +110,22 @@ OpenClaw and ZeptoClaw run the full guardrail proxy regardless of mode — there
 
 ```bash
 defenseclaw setup openclaw --mode observe --restart
-defenseclaw setup openclaw --mode action --human-approval --rule-pack strict --restart
+defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-## Switch active connector
+## Add or reconfigure connectors
 
-Use `defenseclaw setup mode <connector>` to switch the active claw connector with smart guardrail inheritance — see [Switching connectors](/docs/setup/guardrail/switching-connectors).
+Use `defenseclaw setup <connector>` to add or reconfigure that connector. On hosts that already have another connector wired, the interactive flow asks whether to add the connector alongside the existing one or replace the old wiring. Use `defenseclaw setup remove <connector>` when you want to retire a connector.
 
 ## Why aliases at all?
 
-Operators who only want telemetry (no traffic interception, no enforcement) used to walk through the full `setup guardrail` wizard, answer "yes" to a single confirm, and trust that the wizard did the right thing under the hood. The aliases shortcut that:
+Operators previously walked through the full `setup guardrail` wizard just to configure one connector. The aliases expose the common observe/action path directly:
 
 ```bash
-defenseclaw setup codex          # observability-only for Codex
-defenseclaw setup claude-code    # observability-only for Claude Code
-defenseclaw setup cursor         # observability-only for Cursor
+defenseclaw setup codex                         # observe by default
+defenseclaw setup claude-code --mode action    # native lifecycle verdicts
+defenseclaw setup omnigent --mode action       # native ALLOW / ASK / DENY policy
 defenseclaw setup openclaw       # full guardrail for OpenClaw
 ```
 
-Both halves also flip `claw.mode` so the rest of the CLI/TUI reads from the matching connector's source-of-truth files. Without this flip, `defenseclaw skill scan --all` after `setup codex` would scan `~/.openclaw/skills` and miss every Codex skill — a foot-gun the aliases explicitly close.
+Both halves are really `--connector` shortcuts. That matters after setup too: `defenseclaw skill list --connector codex`, `defenseclaw mcp scan --connector cursor`, and `defenseclaw guardrail status --connector hermes` all use the same connector scope instead of relying on a single global "current connector" mental model.

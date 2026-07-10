@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -190,6 +191,18 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 	if lock.Connectors == nil {
 		lock.Connectors = map[string]HookContractLockEntry{}
 	}
+	if previous, ok := lock.Connectors[entry.Connector]; ok {
+		previousComparison := previous
+		entryComparison := entry
+		previousComparison.UpdatedAt = ""
+		entryComparison.UpdatedAt = ""
+		if reflect.DeepEqual(previousComparison, entryComparison) {
+			return nil
+		}
+	}
+	if entry.UpdatedAt == "" {
+		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	lock.Connectors[entry.Connector] = entry
 	data, err := json.MarshalIndent(lock, "", "  ")
@@ -257,7 +270,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookScriptPathsForConnector(opts, conn) {
+	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
 		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
 	}
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
@@ -306,13 +319,9 @@ func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
 		return true
 	}
-	if len(previous.HookScriptDigests) > 0 && len(current.HookScriptDigests) > 0 {
-		for name, digest := range previous.HookScriptDigests {
-			if current.HookScriptDigests[name] != "" && current.HookScriptDigests[name] != digest {
-				return true
-			}
-		}
-	}
+	// Hook script digests are intentionally not a boot/reconcile drift gate:
+	// changed script bytes are the thing setup/guardian repair is supposed to
+	// overwrite. Treat only agent/contract identity changes as contract drift.
 	return false
 }
 
@@ -321,7 +330,7 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 		return nil
 	}
 	out := map[string]string{}
-	for _, path := range hookScriptPathsForConnector(opts, conn) {
+	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -333,6 +342,13 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
+	if provider, ok := conn.(HookRuntimeArtifactProvider); ok {
+		return uniqueNonEmptyStrings(provider.HookRuntimeArtifacts(opts))
+	}
+	return hookScriptPathsForConnector(opts, conn)
 }
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {

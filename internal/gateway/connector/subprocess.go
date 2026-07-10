@@ -43,9 +43,13 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr  string
-	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode string // "open" (default, response-layer fails allow with a stderr warning) or "closed" (response-layer fails block); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	APIAddr       string
+	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
+	FailMode      string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	Managed       bool
+	TokenFile     string
+	ScopedToken   bool
+	ConnectorName string
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -58,37 +62,69 @@ type templateData struct {
 // open unless the operator opts into strict availability via
 // DEFENSECLAW_STRICT_AVAILABILITY=1.
 //
-// "open" is the default because a DefenseClaw hook that exits 2 on
-// every gateway hiccup bricks the user's agent for the duration of
-// any DefenseClaw outage, which is strictly worse UX than a brief
-// observability gap. Operators who run a strict policy posture can
-// flip this to "closed" via DEFENSECLAW_FAIL_MODE=closed at runtime
-// or — for connectors that route through
-// WriteHookScriptsForConnectorObjectWithOpts — by enabling per-
-// connector enforcement at setup time.
-const defaultHookFailMode = "open"
+// "closed" is the safer default: a response-layer failure (4xx,
+// malformed JSON, missing action) means the gateway answered but the
+// verdict is untrustworthy, so the hook BLOCKS the tool/prompt rather
+// than forwarding an uninspected action. Operators who would rather
+// accept an observability gap than a hard block during a DefenseClaw
+// outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
+// runtime, or through the per-connector setup flow (which also
+// persists to guardrail.hook_fail_mode in config.yaml).
+const defaultHookFailMode = "closed"
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
-// "closed" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "open" so a typo never accidentally puts
-// the agent into fail-closed mode.
+// "open" (case-sensitive — the env var contract is documented as
+// lowercase) collapses to "closed" so a typo never accidentally puts
+// the agent into fail-OPEN mode at the response-layer boundary
+// (CodeGuard rule codeguard-0-authorization-access-control: deny by
+// default).
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "closed" {
-		return "closed"
+	if strings.TrimSpace(mode) == "open" {
+		return "open"
 	}
-	return "open"
+	return "closed"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
 // into the given directory. Each shim calls /api/v1/inspect/tool before
 // delegating to the real binary.
+//
+// Avarice F-2029 / chain F-3397: the shim now authenticates each
+// inspection call using the gateway bearer token. The token is written
+// to ${shimDir}/.token (mode 0600) by WriteShimScriptsWithToken, the
+// same way the inspect-* hooks discover their token. WriteShimScripts
+// keeps the legacy no-token signature for backward compatibility but
+// internally always lays down a (possibly empty) token file so the
+// shim can find it; an empty token file produces shims that send no
+// Authorization header — matching the loopback-allow path used by
+// developer setups without a configured gateway token.
 func WriteShimScripts(shimDir, apiAddr string) error {
+	return WriteShimScriptsWithToken(shimDir, apiAddr, "")
+}
+
+// WriteShimScriptsWithToken generates the PATH shim scripts AND
+// persists a .token sidecar so each shim can authenticate inspection
+// calls. See F-2029 / F-3397 for the security rationale.
+func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
+	// F-2029 / F-3397: write the bearer token next to the shim
+	// scripts. The .token file is 0o600 so other workspace tooling
+	// can't slurp it; the shim sources the file at runtime via
+	// `. "${SHIM_DIR}/.token"`. An empty token still produces a
+	// well-formed file so the shim's source-or-fallback logic
+	// behaves deterministically across loopback-allow and
+	// authenticated deployments.
+	tokenPath := filepath.Join(shimDir, ".token")
+	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+	if err := atomicWriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+		return fmt.Errorf("write shim token file: %w", err)
+	}
+
+	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range shimBinaries {
 		content, err := shimFS.ReadFile("shims/" + name + ".sh")
@@ -115,6 +151,37 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 	}
 
 	return nil
+}
+
+func subprocessGeneratedFiles(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(opts.DataDir, "shims", ".token"),
+		filepath.Join(opts.DataDir, "policies", "defenseclaw-policy.yaml"),
+	}
+}
+
+func subprocessGeneratedExecutables(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	out := make([]string, 0, len(shimBinaries))
+	for _, name := range shimBinaries {
+		out = append(out, filepath.Join(opts.DataDir, "shims", name))
+	}
+	return out
+}
+
+func subprocessCreatedDirs(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(opts.DataDir, "shims"),
+		filepath.Join(opts.DataDir, "policies"),
+	}
 }
 
 // genericHookScripts are agent-agnostic inspection scripts generated for
@@ -256,10 +323,11 @@ func bytesIndex(hay []byte, needle string) int {
 // and leaving hook-failures.jsonl entries without the field —
 // even though the just-rendered hook scripts pass it.
 //
-// Equal versions still rewrite (idempotent overwrite, lets a same-
-// version bug-fix patch land); strictly-newer disk content is
-// preserved. Bumping the embedded `# defenseclaw-managed-hook vN`
-// marker is the explicit signal to roll forward.
+// Equal versions replace only changed bytes, so same-version bug-fix patches
+// still land without causing no-op guardian reconciles to retrigger fsnotify.
+// Strictly-newer disk content is preserved. Bumping the embedded
+// `# defenseclaw-managed-hook vN` marker is the explicit signal to roll
+// forward.
 func writeHookHelpers(hookDir string) error {
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -279,7 +347,7 @@ func writeHookHelpers(hookDir string) error {
 				continue
 			}
 		}
-		if err := os.WriteFile(helperPath, content, 0o600); err != nil {
+		if err := atomicWriteFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}
 	}
@@ -312,7 +380,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	// this file at runtime.
 	tokenPath := filepath.Join(hookDir, ".token")
 	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
-	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+	if err := atomicWriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
 		return fmt.Errorf("write hook token file: %w", err)
 	}
 
@@ -324,7 +392,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	// the .token file or the env var at runtime. FailMode defaults
 	// to "open" so a fresh setup never bricks the agent on a
 	// gateway outage; see defaultHookFailMode for rationale.
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode}
+	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range hookScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -338,7 +406,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 
 		hookPath := filepath.Join(hookDir, name)
-		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -369,21 +437,36 @@ func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) err
 }
 
 func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string, extras []string) error {
+	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode, extras, false, "", false)
+}
+
+func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
 
-	tokenPath := filepath.Join(hookDir, ".token")
-	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
-	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
-		return fmt.Errorf("write hook token file: %w", err)
+	tokenScope := ""
+	if scopedToken {
+		tokenScope = connectorName
+	}
+	tokenFile, err := writeHookTokenFiles(hookDir, tokenScope, token)
+	if err != nil {
+		return err
 	}
 
 	if err := writeHookHelpers(hookDir); err != nil {
 		return err
 	}
 
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode)}
+	data := templateData{
+		APIAddr:       apiAddr,
+		APIToken:      "",
+		FailMode:      normalizeHookFailMode(failMode),
+		Managed:       managed,
+		TokenFile:     tokenFile,
+		ScopedToken:   scopedToken,
+		ConnectorName: strings.ToLower(strings.TrimSpace(connectorName)),
+	}
 
 	scripts := hookScriptNamesFromExtras(extras)
 
@@ -397,7 +480,7 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 			return fmt.Errorf("render hook %s: %w", name, err)
 		}
 		hookPath := filepath.Join(hookDir, name)
-		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -405,6 +488,36 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		return err
 	}
 	return nil
+}
+
+func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
+	legacyPath := filepath.Join(hookDir, ".token")
+	if strings.TrimSpace(connectorName) == "" {
+		tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+		if err := atomicWriteFile(legacyPath, []byte(tokenContent), 0o600); err != nil {
+			return "", fmt.Errorf("write hook token file: %w", err)
+		}
+		return filepath.Base(legacyPath), nil
+	}
+	// Connector-scoped installs must not leave a legacy .token behind. Older
+	// releases put the master gateway bearer there, so retaining it on upgrade
+	// would preserve the exact cross-connector authority this migration removes.
+	// Setup rewrites every generated hook to the scoped basename before it
+	// returns, making removal safe for the managed artifacts in this directory.
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("remove legacy hook token file: %w", err)
+	}
+	scopedPath, err := HookTokenFilePath(hookDir, connectorName)
+	if err != nil {
+		return "", fmt.Errorf("resolve connector-scoped hook token file: %w", err)
+	}
+	if strings.ContainsAny(token, "\r\n") {
+		return "", fmt.Errorf("write connector-scoped hook token file: token contains a line break")
+	}
+	if err := atomicWriteFile(scopedPath, []byte(token+"\n"), 0o600); err != nil {
+		return "", fmt.Errorf("write connector-scoped hook token file: %w", err)
+	}
+	return filepath.Base(scopedPath), nil
 }
 
 // hookConfigSidecarName is the file the native Go hook entrypoint reads on
@@ -426,7 +539,7 @@ func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
 	body := fmt.Sprintf("DEFENSECLAW_GATEWAY_ADDR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
 		apiAddr, normalizeHookFailMode(failMode))
 	path := filepath.Join(hookDir, hookConfigSidecarName)
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	if err := atomicWriteFile(path, []byte(body), 0o600); err != nil {
 		return fmt.Errorf("write hook config sidecar: %w", err)
 	}
 	return nil
@@ -486,7 +599,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	return writeHookScriptsCommon(hookDir, apiAddr, token, extras)
+	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, defaultHookFailMode, extras, false, c.Name(), !IsProxyConnector(c.Name()))
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
@@ -504,7 +617,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("open").
+//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("closed").
 //  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
@@ -519,14 +632,48 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
+	failMode := resolveHookFailMode(opts, c)
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
 		if failMode == "closed" && !caps.SupportsFailClosed {
 			failMode = "open"
 		}
 	}
-	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
+	hookToken := opts.HookAPIToken
+	scopedToken := opts.HookAPITokenScoped
+	if strings.TrimSpace(hookToken) == "" {
+		hookToken = opts.APIToken
+		// Backward-compatible direct callers predate HookAPIToken. Preserve
+		// scoped sidecars for hook-native connectors, but never disguise a
+		// proxy connector's master token as connector-scoped.
+		scopedToken = !IsProxyConnector(c.Name())
+	}
+	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken)
+}
+
+// resolveHookFailMode picks the response-layer fail mode for a hook
+// render given the operator's setup opts and the connector identity.
+// The explicit string in opts.HookFailMode always wins; an empty
+// value falls back to the connector-default and is upgraded to
+// "closed" when the operator has set the matching enforcement flag
+// for codex / claudecode (avarice F-0681).
+func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		return normalizeHookFailMode(opts.HookFailMode)
+	}
+	if c != nil {
+		switch c.Name() {
+		case "codex":
+			if opts.CodexEnforcement {
+				return "closed"
+			}
+		case "claudecode":
+			if opts.ClaudeCodeEnforcement {
+				return "closed"
+			}
+		}
+	}
+	return defaultHookFailMode
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts
@@ -628,13 +775,17 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 			return fmt.Errorf("sandbox policy: %w", err)
 		}
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		// F-2029 / F-3397: persist the gateway bearer token alongside
+		// the shim scripts so every inspection call carries an
+		// Authorization header. Pre-fix the shim had no auth token
+		// available and silently downgraded a 401 to "allow".
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
 		}
 
 	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 

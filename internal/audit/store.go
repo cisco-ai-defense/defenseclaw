@@ -31,6 +31,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -172,6 +173,13 @@ type ActionEntry struct {
 	Actions    ActionState `json:"actions"`
 	Reason     string      `json:"reason"`
 	UpdatedAt  time.Time   `json:"updated_at"`
+	// Connector scopes the entry (SK-4). "" means the entry is global — it
+	// applies to every connector. A non-empty value (e.g. "hermes") scopes
+	// the action to one connector. The actions table is unique on
+	// (target_type, target_name, connector), so a target can carry one global
+	// entry plus one entry per connector. Mirrors ActionEntry.connector in
+	// cli/defenseclaw/models.py.
+	Connector string `json:"connector,omitempty"`
 }
 
 type Store struct {
@@ -469,6 +477,7 @@ var migrations = []migration{
 			);
 			CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
 			CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
+			CREATE INDEX IF NOT EXISTS idx_audit_severity_timestamp ON audit_events(severity, timestamp);
 			CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 			CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 			CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
@@ -1222,6 +1231,127 @@ var migrations = []migration{
 				return fmt.Errorf("create idx_audit_connector: %w", err)
 			}
 			return nil
+		},
+	},
+	{
+		// SK-4 foundation: per-connector scoping for the actions
+		// (enforcement) table. Adds an additive connector column and swaps
+		// the uniqueness index from (target_type, target_name) to
+		// (target_type, target_name, connector), so a target can carry one
+		// global entry (connector='') plus one entry per connector.
+		//
+		// Back-compat anchor: existing rows keep connector='' via the column
+		// DEFAULT, meaning global / applies to every connector — so every
+		// pre-existing block/allow stays in force after the upgrade. The
+		// ADD COLUMN is guarded by hasColumnDB and the index statements use
+		// IF EXISTS / IF NOT EXISTS, so re-running Init on an already-migrated
+		// DB is a no-op. Mirrors _ensure_connector_column in
+		// cli/defenseclaw/db.py. Like the multi-connector audit_events
+		// migration above, this does NOT bump version.SchemaVersion — these
+		// are additive schema changes, not a breaking envelope change.
+		description: "multi-connector: per-connector column on actions + 3-col unique index",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "actions")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			exists, err := hasColumnDB(ex, "actions", "connector")
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err := ex.Exec(
+					`ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''`,
+				); err != nil {
+					return fmt.Errorf("alter actions.connector: %w", err)
+				}
+			}
+			// Swap the legacy 2-column uniqueness index for the
+			// connector-aware one. DROP first so an upgraded DB cannot keep
+			// both (the old one would reject per-connector rows).
+			if _, err := ex.Exec(`DROP INDEX IF EXISTS idx_actions_type_name`); err != nil {
+				return fmt.Errorf("drop idx_actions_type_name: %w", err)
+			}
+			if _, err := ex.Exec(
+				`CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name_conn ` +
+					`ON actions(target_type, target_name, connector)`,
+			); err != nil {
+				return fmt.Errorf("create idx_actions_type_name_conn: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		description: "agent lifecycle: correlate network egress with connector, agent, execution, user, and tool",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "network_egress_events")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			for _, spec := range []struct {
+				column, stmt string
+			}{
+				{"connector", `ALTER TABLE network_egress_events ADD COLUMN connector TEXT`},
+				{"agent_id", `ALTER TABLE network_egress_events ADD COLUMN agent_id TEXT`},
+				{"agent_lifecycle_id", `ALTER TABLE network_egress_events ADD COLUMN agent_lifecycle_id TEXT`},
+				{"agent_execution_id", `ALTER TABLE network_egress_events ADD COLUMN agent_execution_id TEXT`},
+				{"user_id", `ALTER TABLE network_egress_events ADD COLUMN user_id TEXT`},
+				{"tool_id", `ALTER TABLE network_egress_events ADD COLUMN tool_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, "network_egress_events", spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter network_egress_events.%s: %w", spec.column, err)
+					}
+				}
+			}
+			for _, stmt := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_egress_agent ON network_egress_events(agent_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_egress_lifecycle ON network_egress_events(agent_lifecycle_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_egress_user ON network_egress_events(user_id)`,
+			} {
+				if _, err := ex.Exec(stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
+	{
+		description: "agent360: correlate network egress with root agent, parent agent, and root session",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "network_egress_events")
+			if err != nil || !present {
+				return err
+			}
+			for _, spec := range []struct {
+				column, stmt string
+			}{
+				{"root_agent_id", `ALTER TABLE network_egress_events ADD COLUMN root_agent_id TEXT`},
+				{"parent_agent_id", `ALTER TABLE network_egress_events ADD COLUMN parent_agent_id TEXT`},
+				{"root_session_id", `ALTER TABLE network_egress_events ADD COLUMN root_session_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, "network_egress_events", spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter network_egress_events.%s: %w", spec.column, err)
+					}
+				}
+			}
+			_, err = ex.Exec(`CREATE INDEX IF NOT EXISTS idx_egress_root_agent ON network_egress_events(root_agent_id)`)
+			return err
 		},
 	},
 }
@@ -2136,8 +2266,15 @@ type rowScanner interface {
 
 // --- Actions ---
 
-// SetAction upserts the full action state for a target.
+// SetAction upserts the full action state for a target's global
+// (connector="") entry.
 func (s *Store) SetAction(targetType, targetName, sourcePath string, state ActionState, reason string) error {
+	return s.SetActionForConnector(targetType, targetName, "", sourcePath, state, reason)
+}
+
+// SetActionForConnector upserts the full action state for a target scoped to
+// connector (connector="" = global). See ActionEntry.Connector (SK-4).
+func (s *Store) SetActionForConnector(targetType, targetName, connector, sourcePath string, state ActionState, reason string) error {
 	actionsJSON, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("audit: marshal actions: %w", err)
@@ -2145,14 +2282,14 @@ func (s *Store) SetAction(targetType, targetName, sourcePath string, state Actio
 	id := uuid.New().String()
 	now := time.Now().UTC()
 	_, err = s.execDB(context.Background(), "audit",
-		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(target_type, target_name) DO UPDATE SET
+		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
 		   actions_json = excluded.actions_json,
 		   reason = excluded.reason,
 		   updated_at = excluded.updated_at,
 		   source_path = COALESCE(excluded.source_path, source_path)`,
-		id, targetType, targetName, nullStr(sourcePath), string(actionsJSON), reason, now,
+		id, targetType, targetName, nullStr(sourcePath), string(actionsJSON), reason, now, connector,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: set action: %w", err)
@@ -2160,8 +2297,15 @@ func (s *Store) SetAction(targetType, targetName, sourcePath string, state Actio
 	return nil
 }
 
-// SetActionField updates a single action dimension without touching others.
+// SetActionField updates a single action dimension on a target's global
+// (connector="") entry without touching others.
 func (s *Store) SetActionField(targetType, targetName, field, value, reason string) error {
+	return s.SetActionFieldForConnector(targetType, targetName, "", field, value, reason)
+}
+
+// SetActionFieldForConnector updates a single action dimension scoped to
+// connector (connector="" = global). See ActionEntry.Connector (SK-4).
+func (s *Store) SetActionFieldForConnector(targetType, targetName, connector, field, value, reason string) error {
 	if err := validateActionFieldAndValue(field, value); err != nil {
 		return err
 	}
@@ -2178,24 +2322,31 @@ func (s *Store) SetActionField(targetType, targetName, field, value, reason stri
 		initJSON = fmt.Sprintf(`{"runtime":"%s"}`, value)
 	}
 	query :=
-		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-		 VALUES (?, ?, ?, NULL, ?, ?, ?)
-		 ON CONFLICT(target_type, target_name) DO UPDATE SET
+		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+		 ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
 		   actions_json = json_set(actions_json, ?, ?),
 		   reason = excluded.reason,
 		   updated_at = excluded.updated_at`
-	_, err := s.execDB(context.Background(), "audit", query, id, targetType, targetName, initJSON, reason, now, path, value)
+	_, err := s.execDB(context.Background(), "audit", query, id, targetType, targetName, initJSON, reason, now, connector, path, value)
 	if err != nil {
 		return fmt.Errorf("audit: set action field %s: %w", field, err)
 	}
 	return nil
 }
 
-// SetSourcePath updates just the source_path for an existing action row.
+// SetSourcePath updates just the source_path for a target's global
+// (connector="") action row.
 func (s *Store) SetSourcePath(targetType, targetName, path string) error {
+	return s.SetSourcePathForConnector(targetType, targetName, "", path)
+}
+
+// SetSourcePathForConnector updates source_path for the row scoped to
+// connector (connector="" = global). See ActionEntry.Connector (SK-4).
+func (s *Store) SetSourcePathForConnector(targetType, targetName, connector, path string) error {
 	_, err := s.execDB(context.Background(), "audit",
-		`UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ?`,
-		path, targetType, targetName,
+		`UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ? AND connector = ?`,
+		path, targetType, targetName, connector,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: set source path: %w", err)
@@ -2203,34 +2354,47 @@ func (s *Store) SetSourcePath(targetType, targetName, path string) error {
 	return nil
 }
 
-// ClearActionField removes a single dimension from the actions JSON.
-// Deletes the row if all dimensions are empty afterward.
+// ClearActionField removes a single dimension from the global (connector="")
+// actions JSON. Deletes the row if all dimensions are empty afterward.
 func (s *Store) ClearActionField(targetType, targetName, field string) error {
+	return s.ClearActionFieldForConnector(targetType, targetName, "", field)
+}
+
+// ClearActionFieldForConnector removes a single dimension from the actions
+// JSON of the row scoped to connector (connector="" = global). Deletes the row
+// if all dimensions are empty afterward. See ActionEntry.Connector (SK-4).
+func (s *Store) ClearActionFieldForConnector(targetType, targetName, connector, field string) error {
 	if err := validateActionFieldAndValue(field, ""); err != nil {
 		return err
 	}
 	path := "$." + field
 	_, err := s.execDB(context.Background(), "audit",
 		`UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
-		 WHERE target_type = ? AND target_name = ?`,
-		path, time.Now().UTC(), targetType, targetName,
+		 WHERE target_type = ? AND target_name = ? AND connector = ?`,
+		path, time.Now().UTC(), targetType, targetName, connector,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: clear action field %s: %w", field, err)
 	}
 	// Clean up rows with no active actions
 	_, _ = s.execDB(context.Background(), "audit",
-		`DELETE FROM actions WHERE target_type = ? AND target_name = ? AND actions_json IN ('{}', 'null', '')`,
-		targetType, targetName,
+		`DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ? AND actions_json IN ('{}', 'null', '')`,
+		targetType, targetName, connector,
 	)
 	return nil
 }
 
-// RemoveAction deletes the entire action row for a target.
+// RemoveAction deletes the global (connector="") action row for a target.
 func (s *Store) RemoveAction(targetType, targetName string) error {
+	return s.RemoveActionForConnector(targetType, targetName, "")
+}
+
+// RemoveActionForConnector deletes the action row scoped to connector
+// (connector="" = global). See ActionEntry.Connector (SK-4).
+func (s *Store) RemoveActionForConnector(targetType, targetName, connector string) error {
 	_, err := s.execDB(context.Background(), "audit",
-		`DELETE FROM actions WHERE target_type = ? AND target_name = ?`,
-		targetType, targetName,
+		`DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?`,
+		targetType, targetName, connector,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: remove action: %w", err)
@@ -2238,16 +2402,25 @@ func (s *Store) RemoveAction(targetType, targetName string) error {
 	return nil
 }
 
-// GetAction returns the full action entry for a target, or nil if none exists.
+// GetAction returns the global (connector="") action entry for a target, or
+// nil if none exists.
 func (s *Store) GetAction(targetType, targetName string) (*ActionEntry, error) {
+	return s.GetActionForConnector(targetType, targetName, "")
+}
+
+// GetActionForConnector returns the action entry scoped to connector
+// (connector="" = global), or nil if none exists. This is an exact-match
+// lookup: callers wanting most-specific-wins resolution (connector then global
+// fallback) compose two lookups. See ActionEntry.Connector (SK-4).
+func (s *Store) GetActionForConnector(targetType, targetName, connector string) (*ActionEntry, error) {
 	var e ActionEntry
 	var sourcePath, reason, actionsJSON sql.NullString
 	err := s.scanRow(context.Background(), "get_action",
 		s.db.QueryRowContext(context.Background(),
-			`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
-		 FROM actions WHERE target_type = ? AND target_name = ?`,
-			targetType, targetName,
-		), &e.ID, &e.TargetType, &e.TargetName, &sourcePath, &actionsJSON, &reason, &e.UpdatedAt)
+			`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+		 FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?`,
+			targetType, targetName, connector,
+		), &e.ID, &e.TargetType, &e.TargetName, &sourcePath, &actionsJSON, &reason, &e.UpdatedAt, &e.Connector)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -2262,58 +2435,80 @@ func (s *Store) GetAction(targetType, targetName string) (*ActionEntry, error) {
 	return &e, nil
 }
 
-// HasAction checks if a target has a specific field set to a specific value.
+// HasAction checks if a target's global (connector="") entry has a specific
+// field set to a specific value.
 func (s *Store) HasAction(targetType, targetName, field, value string) (bool, error) {
+	return s.HasActionForConnector(targetType, targetName, "", field, value)
+}
+
+// HasActionForConnector checks if the entry scoped to connector (connector=""
+// = global) has a specific field set to a specific value. Exact-match: callers
+// wanting most-specific-wins resolution compose connector + global lookups.
+// See ActionEntry.Connector (SK-4).
+func (s *Store) HasActionForConnector(targetType, targetName, connector, field, value string) (bool, error) {
 	if err := validateActionFieldAndValue(field, value); err != nil {
 		return false, err
 	}
 	var count int
 	query := fmt.Sprintf(
-		`SELECT COUNT(*) FROM actions WHERE target_type = ? AND target_name = ? AND json_extract(actions_json, '$.%s') = ?`,
+		`SELECT COUNT(*) FROM actions WHERE target_type = ? AND target_name = ? AND connector = ? AND json_extract(actions_json, '$.%s') = ?`,
 		field)
 	err := s.scanRow(context.Background(), "has_action",
-		s.db.QueryRowContext(context.Background(), query, targetType, targetName, value), &count)
+		s.db.QueryRowContext(context.Background(), query, targetType, targetName, connector, value), &count)
 	if err != nil {
 		return false, fmt.Errorf("audit: has action: %w", err)
 	}
 	return count > 0, nil
 }
 
-// ListByAction returns all entries where a given field has a given value.
+// ListByAction returns all entries (across all connectors) where a given field
+// has a given value. Each entry carries its own Connector.
 func (s *Store) ListByAction(field, value string) ([]ActionEntry, error) {
 	if err := validateActionFieldAndValue(field, value); err != nil {
 		return nil, err
 	}
 	query := fmt.Sprintf(
-		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE json_extract(actions_json, '$.%s') = ?
 		 ORDER BY updated_at DESC`, field)
 	return s.queryActions(query, value)
 }
 
-// ListByActionAndType filters by both action field/value and target_type.
+// ListByActionAndType filters by both action field/value and target_type,
+// across all connectors. Each entry carries its own Connector.
 func (s *Store) ListByActionAndType(field, value, targetType string) ([]ActionEntry, error) {
 	if err := validateActionFieldAndValue(field, value); err != nil {
 		return nil, err
 	}
 	query := fmt.Sprintf(
-		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE json_extract(actions_json, '$.%s') = ? AND target_type = ?
 		 ORDER BY updated_at DESC`, field)
 	return s.queryActions(query, value, targetType)
 }
 
-// ListActionsByType returns all action entries for a given target type.
+// ListActionsByType returns all action entries for a given target type, across
+// all connectors. Each entry carries its own Connector (SK-4).
 func (s *Store) ListActionsByType(targetType string) ([]ActionEntry, error) {
 	return s.queryActions(
-		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE target_type = ? ORDER BY updated_at DESC`, targetType)
 }
 
-// ListAllActions returns every action entry.
+// ListActionsByTypeForConnector returns action entries for a target type
+// scoped to exactly one connector (connector="" = global only). See
+// ActionEntry.Connector (SK-4).
+func (s *Store) ListActionsByTypeForConnector(targetType, connector string) ([]ActionEntry, error) {
+	return s.queryActions(
+		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+		 FROM actions WHERE target_type = ? AND connector = ? ORDER BY updated_at DESC`, targetType, connector)
+}
+
+// ListAllActions returns every action entry, across all connectors. Each entry
+// carries its own Connector.
 func (s *Store) ListAllActions() ([]ActionEntry, error) {
 	return s.queryActions(
-		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions ORDER BY updated_at DESC`)
 }
 
@@ -2328,7 +2523,7 @@ func (s *Store) queryActions(query string, args ...any) ([]ActionEntry, error) {
 	for rows.Next() {
 		var e ActionEntry
 		var sourcePath, reason, actionsJSON sql.NullString
-		if err := rows.Scan(&e.ID, &e.TargetType, &e.TargetName, &sourcePath, &actionsJSON, &reason, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.TargetType, &e.TargetName, &sourcePath, &actionsJSON, &reason, &e.UpdatedAt, &e.Connector); err != nil {
 			return nil, fmt.Errorf("audit: scan action row: %w", err)
 		}
 		e.SourcePath = sourcePath.String
@@ -2678,11 +2873,14 @@ func (s *Store) GetCounts() (Counts, error) {
 // NetworkEgressFilter parameterises QueryNetworkEgressEvents.
 // Zero values mean "no filter". Limit defaults to 100 when zero.
 type NetworkEgressFilter struct {
-	Hostname  string    // exact match; empty = all hosts
-	SessionID string    // exact match; empty = all sessions
-	Since     time.Time // only events at or after this time; zero = all time
-	Blocked   *bool     // nil = all; &true = blocked only; &false = allowed only
-	Limit     int       // defaults to 100
+	Hostname    string    // exact match; empty = all hosts
+	SessionID   string    // exact match; empty = all sessions
+	AgentID     string    // exact match; empty = all agents
+	RootAgentID string    // exact match; empty = all agent trees
+	UserID      string    // exact match; empty = all users
+	Since       time.Time // only events at or after this time; zero = all time
+	Blocked     *bool     // nil = all; &true = blocked only; &false = allowed only
+	Limit       int       // defaults to 100
 }
 
 // QueryNetworkEgressEvents returns egress events matching the filter, newest first.
@@ -2692,7 +2890,8 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 		limit = 100
 	}
 
-	query := `SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
+	query := `SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
+	                 agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 	                 policy_outcome, decision_code, blocked, severity, details
 	          FROM network_egress_events WHERE 1=1`
 	var args []any
@@ -2704,6 +2903,18 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 	if f.SessionID != "" {
 		query += " AND session_id = ?"
 		args = append(args, f.SessionID)
+	}
+	if f.AgentID != "" {
+		query += " AND agent_id = ?"
+		args = append(args, f.AgentID)
+	}
+	if f.RootAgentID != "" {
+		query += " AND root_agent_id = ?"
+		args = append(args, f.RootAgentID)
+	}
+	if f.UserID != "" {
+		query += " AND user_id = ?"
+		args = append(args, f.UserID)
 	}
 	if !f.Since.IsZero() {
 		query += " AND julianday(timestamp) >= julianday(?)"
@@ -2729,15 +2940,26 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 	var events []NetworkEgressRow
 	for rows.Next() {
 		var e NetworkEgressRow
-		var sessionID, url, httpMethod, protocol, decisionCode, details sql.NullString
+		var sessionID, connector, agentID, rootAgentID, parentAgentID, rootSessionID, lifecycleID, executionID, userID, toolID sql.NullString
+		var url, httpMethod, protocol, decisionCode, details sql.NullString
 		var blocked int
 		if err := rows.Scan(
-			&e.ID, &e.Timestamp, &sessionID, &e.Hostname, &url, &httpMethod, &protocol,
+			&e.ID, &e.Timestamp, &sessionID, &connector, &agentID, &rootAgentID, &parentAgentID, &rootSessionID, &lifecycleID,
+			&executionID, &userID, &toolID, &e.Hostname, &url, &httpMethod, &protocol,
 			&e.PolicyOutcome, &decisionCode, &blocked, &e.Severity, &details,
 		); err != nil {
 			return nil, fmt.Errorf("audit: scan egress row: %w", err)
 		}
 		e.SessionID = sessionID.String
+		e.Connector = connector.String
+		e.AgentID = agentID.String
+		e.RootAgentID = rootAgentID.String
+		e.ParentAgentID = parentAgentID.String
+		e.RootSessionID = rootSessionID.String
+		e.AgentLifecycleID = lifecycleID.String
+		e.AgentExecutionID = executionID.String
+		e.UserID = userID.String
+		e.ToolID = toolID.String
 		e.URL = url.String
 		e.HTTPMethod = httpMethod.String
 		e.Protocol = protocol.String
@@ -2793,22 +3015,41 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 
 // NetworkEgressRow is the persisted shape of a network_egress_events row.
 type NetworkEgressRow struct {
-	ID            string    `json:"id"`
-	Timestamp     time.Time `json:"timestamp"`
-	SessionID     string    `json:"session_id,omitempty"`
-	Hostname      string    `json:"hostname"`
-	URL           string    `json:"url,omitempty"`
-	HTTPMethod    string    `json:"http_method,omitempty"`
-	Protocol      string    `json:"protocol,omitempty"`
-	PolicyOutcome string    `json:"policy_outcome"`
-	DecisionCode  string    `json:"decision_code,omitempty"`
-	Blocked       bool      `json:"blocked"`
-	Severity      string    `json:"severity"`
-	Details       string    `json:"details,omitempty"`
+	ID               string    `json:"id"`
+	Timestamp        time.Time `json:"timestamp"`
+	SessionID        string    `json:"session_id,omitempty"`
+	Connector        string    `json:"connector,omitempty"`
+	AgentID          string    `json:"agent_id,omitempty"`
+	RootAgentID      string    `json:"root_agent_id,omitempty"`
+	ParentAgentID    string    `json:"parent_agent_id,omitempty"`
+	RootSessionID    string    `json:"root_session_id,omitempty"`
+	AgentLifecycleID string    `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID string    `json:"agent_execution_id,omitempty"`
+	UserID           string    `json:"user_id,omitempty"`
+	ToolID           string    `json:"tool_id,omitempty"`
+	Hostname         string    `json:"hostname"`
+	URL              string    `json:"url,omitempty"`
+	HTTPMethod       string    `json:"http_method,omitempty"`
+	Protocol         string    `json:"protocol,omitempty"`
+	PolicyOutcome    string    `json:"policy_outcome"`
+	DecisionCode     string    `json:"decision_code,omitempty"`
+	Blocked          bool      `json:"blocked"`
+	Severity         string    `json:"severity"`
+	Details          string    `json:"details,omitempty"`
 }
 
 // InsertNetworkEgressEvent persists one outbound network call as a structured row.
 func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
+	rawURL := e.URL
+	if strings.TrimSpace(rawURL) != "" {
+		e.URL = netguard.ScrubURLString(rawURL)
+		if len(e.URL) > 512 {
+			e.URL = truncateUTF8(e.URL, 512)
+		}
+		if e.Details != "" && e.URL != rawURL {
+			e.Details = strings.ReplaceAll(e.Details, rawURL, e.URL)
+		}
+	}
 	if e.ID == "" {
 		e.ID = uuid.New().String()
 	}
@@ -2825,10 +3066,13 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 	}
 	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO network_egress_events
-		 (id, timestamp, session_id, hostname, url, http_method, protocol, policy_outcome, decision_code, blocked, severity, details)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id, agent_execution_id, user_id, tool_id,
+		  hostname, url, http_method, protocol, policy_outcome, decision_code, blocked, severity, details)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts,
-		nullStr(e.SessionID), e.Hostname, nullStr(e.URL), nullStr(e.HTTPMethod), nullStr(e.Protocol),
+		nullStr(e.SessionID), nullStr(e.Connector), nullStr(e.AgentID), nullStr(e.RootAgentID), nullStr(e.ParentAgentID), nullStr(e.RootSessionID), nullStr(e.AgentLifecycleID),
+		nullStr(e.AgentExecutionID), nullStr(e.UserID), nullStr(e.ToolID),
+		e.Hostname, nullStr(e.URL), nullStr(e.HTTPMethod), nullStr(e.Protocol),
 		e.PolicyOutcome, nullStr(e.DecisionCode), blocked, e.Severity, nullStr(e.Details),
 	)
 	if err != nil {
@@ -2902,14 +3146,16 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 	)
 	if hostname == "" {
 		rows, err = s.queryDB(context.Background(), "audit",
-			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
+			`SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
+			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events
 			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, limit,
 		)
 	} else {
 		rows, err = s.queryDB(context.Background(), "audit",
-			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
+			`SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
+			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events WHERE hostname = ?
 			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, hostname, limit,
@@ -2923,15 +3169,26 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 	var events []NetworkEgressRow
 	for rows.Next() {
 		var e NetworkEgressRow
-		var sessionID, url, httpMethod, protocol, decisionCode, details sql.NullString
+		var sessionID, connector, agentID, rootAgentID, parentAgentID, rootSessionID, lifecycleID, executionID, userID, toolID sql.NullString
+		var url, httpMethod, protocol, decisionCode, details sql.NullString
 		var blocked int
 		if err := rows.Scan(
-			&e.ID, &e.Timestamp, &sessionID, &e.Hostname, &url, &httpMethod, &protocol,
+			&e.ID, &e.Timestamp, &sessionID, &connector, &agentID, &rootAgentID, &parentAgentID, &rootSessionID, &lifecycleID,
+			&executionID, &userID, &toolID, &e.Hostname, &url, &httpMethod, &protocol,
 			&e.PolicyOutcome, &decisionCode, &blocked, &e.Severity, &details,
 		); err != nil {
 			return nil, fmt.Errorf("audit: scan egress row: %w", err)
 		}
 		e.SessionID = sessionID.String
+		e.Connector = connector.String
+		e.AgentID = agentID.String
+		e.RootAgentID = rootAgentID.String
+		e.ParentAgentID = parentAgentID.String
+		e.RootSessionID = rootSessionID.String
+		e.AgentLifecycleID = lifecycleID.String
+		e.AgentExecutionID = executionID.String
+		e.UserID = userID.String
+		e.ToolID = toolID.String
 		e.URL = url.String
 		e.HTTPMethod = httpMethod.String
 		e.Protocol = protocol.String

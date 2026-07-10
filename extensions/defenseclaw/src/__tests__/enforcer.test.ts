@@ -387,14 +387,92 @@ describe("PolicyEnforcer", () => {
       expect(result.reason).toContain("daemon policy");
     });
 
-    it("returns 'allowed' for locally allowed plugin (skip scan)", async () => {
+    it("returns 'allowed' for locally allowed plugin only when provenance matches (skip scan)", async () => {
       const enforcer = makeEnforcer();
-      await enforcer.allow("plugin", "trusted", "reviewed");
+      // Provenance bound to the canonical path of the plugin dir.
+      await enforcer.allow("plugin", "trusted", "reviewed", tempDir);
 
       const result = await enforcer.evaluatePlugin(tempDir, "trusted");
 
       expect(result.verdict).toBe("allowed");
       expect(result.reason.toLowerCase()).toContain("allow");
+      expect(mockRunPluginScan).not.toHaveBeenCalled();
+    });
+
+    it("name-only allow does NOT short-circuit scan (provenance gate)", async () => {
+      // Regression for finding "name-only allow-list bypasses
+      // scan for unrelated plugins": an attacker can no longer reuse
+      // the name of a previously-allowed benign target to bypass the
+      // scanner via the *local* cache. The local allow entry is
+      // preserved (so the operator's intent is recorded) but admission
+      // still requires a fresh scan because the entry has no bound
+      // provenance. The daemon-side OPA policy enforces the same
+      // property -- this test isolates the local code path by clearing
+      // the synced allow-list after recording the operator intent so
+      // the OPA evaluator does not auto-allow the same name.
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [
+          {
+            id: "plugin-1",
+            severity: "HIGH",
+            title: "Dangerous permission",
+            description: "Plugin requests broad filesystem access",
+            location: "package.json",
+            remediation: "Request specific paths",
+            scanner: "plugin-scanner",
+            tags: ["permissions"],
+          },
+        ],
+      });
+
+      const enforcer = makeEnforcer();
+      // Name-only allow (no provenance) -- e.g. operator typed
+      // `/allow plugin trusted reviewed` without a path.
+      await enforcer.allow("plugin", "trusted", "reviewed");
+      expect(enforcer.isAllowedLocally("plugin", "trusted")).toBe(true);
+
+      // Simulate the daemon enforcing provenance-keyed allows -- it
+      // would not auto-allow a different artifact reusing the same
+      // name. Clearing `allowedList` ensures the OPA mock returns the
+      // findings-driven verdict, so this assertion targets the local
+      // gate exclusively.
+      allowedList = [];
+
+      const result = await enforcer.evaluatePlugin(tempDir, "trusted");
+
+      expect(mockRunPluginScan).toHaveBeenCalledTimes(1);
+      expect(result.verdict).toBe("rejected");
+      expect(result.reason).toContain("HIGH");
+    });
+
+    it("provenance mismatch does NOT short-circuit scan", async () => {
+      // Allow was bound to a different path than the one being
+      // evaluated -- e.g. an attacker dropped a same-named plugin in
+      // a different directory. As above, clear the synced daemon-side
+      // entry so this assertion targets the local provenance gate.
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [],
+      });
+
+      const enforcer = makeEnforcer();
+      await enforcer.allow(
+        "plugin",
+        "trusted",
+        "reviewed",
+        join(tempDir, "..", "other-path"),
+      );
+      allowedList = [];
+
+      const result = await enforcer.evaluatePlugin(tempDir, "trusted");
+
+      expect(mockRunPluginScan).toHaveBeenCalledTimes(1);
+      expect(result.verdict).toBe("clean");
     });
 
     it("scans and returns 'clean' for safe plugin", async () => {
@@ -610,7 +688,7 @@ describe("PolicyEnforcer", () => {
       expect(result.verdict).toBe("blocked");
     });
 
-    it("allow list skips scanning", async () => {
+    it("provenance-bound allow list skips scanning", async () => {
       await writeFile(
         join(tempDir, "package.json"),
         JSON.stringify({
@@ -620,13 +698,22 @@ describe("PolicyEnforcer", () => {
       );
 
       const enforcer = makeEnforcer();
-      await enforcer.allow("plugin", "allowed-but-dangerous", "trust override");
+      // Bind the allow to the canonical path of the artifact so it
+      // overrides scanning -- mirrors the secure usage pattern from
+      // first-party tooling.
+      await enforcer.allow(
+        "plugin",
+        "allowed-but-dangerous",
+        "trust override",
+        tempDir,
+      );
 
       const result = await enforcer.evaluatePlugin(
         tempDir,
         "allowed-but-dangerous",
       );
       expect(result.verdict).toBe("allowed");
+      expect(mockRunPluginScan).not.toHaveBeenCalled();
     });
   });
 

@@ -28,7 +28,7 @@
       <title>Active Connectors</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" AND ("$connector$"="*" OR connector="$connector$") | stats dc(connector) as active_connectors</query>
+          <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" AND ($connector|s$="*" OR connector=$connector|s$) | stats dc(connector) as active_connectors</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -39,7 +39,7 @@
       <title>Connector Events</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where "$connector$"="*" OR connector="$connector$" | stats count as connector_events</query>
+          <query>`defenseclaw_demo_connector_events` | where $connector|s$="*" OR connector=$connector|s$ | stats count as connector_events</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -50,7 +50,7 @@
       <title>Blocks</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where ("$connector$"="*" OR connector="$connector$") AND (decision="block" OR like(action, "%block%")) | stats count as blocks</query>
+          <query>`defenseclaw_demo_connector_events` | where ($connector|s$="*" OR connector=$connector|s$) AND (decision="block" OR like(action, "%block%")) | stats count as blocks</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -61,7 +61,7 @@
       <title>Confirms</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where ("$connector$"="*" OR connector="$connector$") AND (decision="confirm" OR like(action, "%confirm%") OR like(action, "%approval%")) | stats count as confirms</query>
+          <query>`defenseclaw_demo_connector_events` | where ($connector|s$="*" OR connector=$connector|s$) AND (decision="confirm" OR like(action, "%confirm%") OR like(action, "%approval%")) | stats count as confirms</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -74,7 +74,7 @@
       <title>Activity By Connector</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where "$connector$"="*" OR connector="$connector$" | timechart span=15m count by connector limit=10 useother=t</query>
+          <query>`defenseclaw_demo_connector_events` | where $connector|s$="*" OR connector=$connector|s$ | timechart span=15m count by connector limit=10 useother=t</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -86,7 +86,7 @@
       <title>Verdict Mix</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where "$connector$"="*" OR connector="$connector$" | stats count by connector decision | sort - count | head 20</query>
+          <query>`defenseclaw_demo_connector_events` | where $connector|s$="*" OR connector=$connector|s$ | stats count by connector decision | sort - count | head 20</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -100,7 +100,7 @@
       <title>Per Connector Summary</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" AND ("$connector$"="*" OR connector="$connector$") | stats count as events dc(run_id) as runs dc(session_id) as sessions values(event_name) as event_names values(decision) as decisions values(severity) as severities by connector | sort - events | head 20</query>
+          <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" AND ($connector|s$="*" OR connector=$connector|s$) | stats count as events dc(run_id) as runs dc(session_id) as sessions values(event_name) as event_names values(decision) as decisions values(severity) as severities by connector | sort - events | head 20</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -112,7 +112,7 @@
       <title>Top Tools And Targets</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where "$connector$"="*" OR connector="$connector$" | stats count as events values(connector) as connectors values(decision) as decisions by target | sort - events | head 20</query>
+          <query>`defenseclaw_demo_connector_events` | where $connector|s$="*" OR connector=$connector|s$ | stats count as events values(connector) as connectors values(decision) as decisions by target | sort - events | head 20</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -126,7 +126,7 @@
       <title>Recent Connector Events</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_connector_events` | where "$connector$"="*" OR connector="$connector$" | table timestamp connector event_name decision severity run_id session_id target message | sort - timestamp | head 50</query>
+          <query>`defenseclaw_demo_connector_events` | where $connector|s$="*" OR connector=$connector|s$ | table timestamp connector event_name decision severity run_id session_id target message | sort - timestamp | head 50</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>

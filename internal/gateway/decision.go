@@ -121,7 +121,22 @@ func guardrailRuntimeActionForConnector(cfg *config.Config, connector, severity 
 	if cfg == nil {
 		return guardrailRuntimeActionForGuardrailConnector(nil, connector, severity, confirmable)
 	}
-	return guardrailRuntimeActionForGuardrailConnector(&cfg.Guardrail, connector, severity, confirmable)
+	rank := guardrailSeverityRank(severity)
+	if rank <= severityNone {
+		return guardrailActionAllow
+	}
+
+	blockThreshold, alertThreshold := guardrailThresholdsForConfigConnector(cfg, connector)
+	if rank >= blockThreshold {
+		return guardrailActionBlock
+	}
+	if hiltEnabledForConfig(cfg, connector) && confirmable && rank >= hiltMinRankForConfig(cfg, connector) {
+		return guardrailActionConfirm
+	}
+	if rank >= alertThreshold {
+		return guardrailActionAlert
+	}
+	return guardrailActionAllow
 }
 
 func guardrailRuntimeActionForGuardrailConnector(gc *config.GuardrailConfig, connector, severity string, confirmable bool) string {
@@ -158,6 +173,17 @@ func guardrailThresholdsForConnector(gc *config.GuardrailConfig, connector strin
 	}
 }
 
+func guardrailThresholdsForConfigConnector(cfg *config.Config, connector string) (blockThreshold int, alertThreshold int) {
+	switch guardrailProfileForConfigConnector(cfg, connector) {
+	case "strict":
+		return severityMedium, severityLow
+	case "permissive":
+		return severityCritical, severityHigh
+	default:
+		return severityCritical, severityMedium
+	}
+}
+
 func guardrailProfile(gc *config.GuardrailConfig) string {
 	return guardrailProfileForConnector(gc, "")
 }
@@ -170,6 +196,18 @@ func guardrailProfileForConnector(gc *config.GuardrailConfig, connector string) 
 		return "default"
 	}
 	dir := strings.ToLower(strings.TrimSpace(gc.EffectiveRulePackDir(connector)))
+	return guardrailProfileForDir(dir)
+}
+
+func guardrailProfileForConfigConnector(cfg *config.Config, connector string) string {
+	if cfg == nil {
+		return "default"
+	}
+	dir := strings.ToLower(strings.TrimSpace(cfg.EffectiveRulePackDirForConnector(connector)))
+	return guardrailProfileForDir(dir)
+}
+
+func guardrailProfileForDir(dir string) string {
 	if dir == "" {
 		return "default"
 	}
@@ -194,6 +232,10 @@ func hiltEnabled(gc *config.GuardrailConfig, connector string) bool {
 	return gc != nil && gc.EffectiveHILT(connector).Enabled
 }
 
+func hiltEnabledForConfig(cfg *config.Config, connector string) bool {
+	return cfg != nil && cfg.EffectiveHILTForConnector(connector).Enabled
+}
+
 // hiltMinRank returns the minimum severity rank that triggers a HILT confirm
 // for the request's connector, resolved via EffectiveHILT (per-connector
 // override → global). Defaults to HIGH when unset.
@@ -202,6 +244,17 @@ func hiltMinRank(gc *config.GuardrailConfig, connector string) int {
 		return severityHigh
 	}
 	rank := guardrailSeverityRank(gc.EffectiveHILT(connector).MinSeverity)
+	if rank <= severityNone {
+		return severityHigh
+	}
+	return rank
+}
+
+func hiltMinRankForConfig(cfg *config.Config, connector string) int {
+	if cfg == nil {
+		return severityHigh
+	}
+	rank := guardrailSeverityRank(cfg.EffectiveHILTForConnector(connector).MinSeverity)
 	if rank <= severityNone {
 		return severityHigh
 	}

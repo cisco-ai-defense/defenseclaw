@@ -9,6 +9,11 @@ on:
   # change reaches a main-targeting PR.
   pull_request:
 
+# Top-level permissions are intentionally read-only. Per-job
+# permissions overrides (none required at the moment) must remain
+# minimum-privilege; opening up `contents: write`, `id-token: write`,
+# or `packages: write` here would let a future build step that
+# accidentally executed PR-supplied code escalate into the repo.
 permissions:
   contents: read
 
@@ -21,7 +26,13 @@ jobs:
     name: Version Sync Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # CI action / tool version pinning: drop the GitHub
+          # credential after fetch so downstream `make` steps cannot
+          # push or fetch on our behalf if a transient compromise
+          # injects shell.
+          persist-credentials: false
       # Catches drift between the four in-repo version sources (Makefile,
       # pyproject.toml, cli/__init__.py, package.json) before it can ship
       # in a release. The release workflow restamps from the git tag, but
@@ -43,11 +54,13 @@ jobs:
     name: Go Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
@@ -59,18 +72,20 @@ jobs:
     name: Go Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
       - run: make go-test-cov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage
           path: coverage.out
@@ -83,18 +98,20 @@ jobs:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
       - run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
           path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -103,40 +120,129 @@ jobs:
     name: Python Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
       - run: make py-lint
       - run: make cli-test-cov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: python-coverage
           path: coverage-py.xml
+
+  python-wheel-install:
+    name: Python Wheel Install (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: make dist-cli
+      - shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          whl="$(find dist -maxdepth 1 -name 'defenseclaw-*.whl' -print -quit)"
+          test -n "$whl"
+          uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
+          uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
+          "$tmp/venv/bin/defenseclaw" --help >/dev/null
+
+  upgrade-smoke:
+    name: Upgrade Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # Exercises real historical `defenseclaw upgrade` commands against a
+      # localhost-served candidate release before a tag exists. The seeded
+      # baselines keep the test stable even when an old release's dependency
+      # pins become unsatisfiable in today's resolver.
+      - run: make upgrade-smoke-matrix ARGS="--baseline-mode seed"
 
   connector-matrix:
     name: Connector Matrix
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make plugin
       - run: make dev-pycli
       - run: make connector-matrix-test
+
+  enterprise-hook-hardening:
+    name: Enterprise Hook Hardening (${{ matrix.os }}, ${{ matrix.connector }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        connector: [codex, claudecode]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build enterprise gateway CLI
+        shell: bash
+        run: go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
+      - name: Test root boundary and connector repair
+        shell: bash
+        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" "${{ matrix.connector }}"
+
+  macos-enterprise-packaging:
+    name: macOS Enterprise Packaging
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build enterprise gateway CLI
+        shell: bash
+        run: go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
+      - name: Test managed package ownership enforcement
+        shell: bash
+        env:
+          MACOS_ENTERPRISE_PACKAGING_SMOKE: "1"
+        run: ./scripts/test-macos-enterprise-packaging.sh "$RUNNER_TEMP/defenseclaw-gateway"
 
   python-audit:
     name: Python Dependency Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
       - run: uv pip install pip pip-audit
       # TODO: Remove --ignore-vuln CVE-2026-4539 once pygments >= 2.19.3 is released
@@ -162,14 +268,19 @@ jobs:
       #   - CVE-2026-28684 (python-dotenv arbitrary file read)
       # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265) and pyjwt>=2.13.0
       # (PYSEC-2026-175/177/178/179) are likewise pinned in pyproject.toml.
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
+      # Use OSV for the vulnerability database so an outage in PyPI's
+      # package-metadata JSON API does not turn the audit red before
+      # pip-audit can evaluate the installed environment.
+      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
 
   ts-build-test:
     name: TypeScript Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
@@ -184,8 +295,10 @@ jobs:
       run:
         working-directory: extensions/defenseclaw
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
@@ -197,26 +310,34 @@ jobs:
     name: Rego Policy Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: open-policy-agent/setup-opa@v2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          version: latest
+          persist-credentials: false
+      - uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
+        with:
+          # CI action / tool version pinning: a `version: latest`
+          # value let a malicious OPA release run inside CI and tamper
+          # with policy test results. Pin to a known-good release and
+          # refresh through reviewed dependency updates (Dependabot).
+          version: 0.70.0
       - run: make rego-test
 
   schema-parity:
     name: Schema & Parity Checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make plugin
       - run: make dev-pycli
       - run: make check
@@ -225,16 +346,18 @@ jobs:
     name: make test (unified)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make plugin
       # dev-pycli installs the [dev] group (pytest, jsonschema, ruff)
       # which `make test → cli-test` indirectly needs at import time:
@@ -288,7 +411,9 @@ jobs:
       # Execute the per-OS connector capability model and hook-wiring tests.
       - name: Go test - connector capability + hook wiring
         run: go test ./internal/gateway/connector/ -run "ProxyConnector|IsProxyConnector|ConnectorSupportedOnOS|RegistryNamesFilter|HookInvocationCommand|ShellWordPassesNativeCommandThrough|BuildCodexHooksTableHashesTheCommand|IsOwnedHookRecognizesNativeCommand"
-      # Execute the native `defenseclaw hook` entrypoint + sidecar resolution.
+      - name: Go test - hook token trust
+        run: go test ./internal/gateway/connector/ -run "HookAPIToken|LoadHookAPITokens" -count=1
+      # Execute the native `defenseclaw-gateway hook` entrypoint + sidecar resolution.
       - name: Go test - hook entrypoint
         run: go test ./internal/cli/ -run "BuildHookOptions|ReadHookSidecar|HookCommandRegistered"
       - name: Sync Python env

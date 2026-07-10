@@ -6,14 +6,42 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// redactedScanResultJSON serializes a copy of “result“ whose finding
+// description / location / remediation fields have been passed through
+// redaction.ForSinkString. ("Raw scan JSON stores
+// unredacted secret-bearing findings"): callers persist this JSON into
+// scan_results.raw_json, which is read back through GetScanRawJSON and
+// LatestScansByScanner -- both surfaces had previously leaked the raw
+// matched source line.
+func redactedScanResultJSON(r *ScanResult) ([]byte, error) {
+	if r == nil {
+		return []byte(`{}`), nil
+	}
+	clone := *r
+	if len(r.Findings) > 0 {
+		safe := make([]Finding, len(r.Findings))
+		for i, f := range r.Findings {
+			cf := f
+			cf.Description = redaction.ForSinkString(cf.Description)
+			cf.Location = redaction.ForSinkString(cf.Location)
+			cf.Remediation = redaction.ForSinkString(cf.Remediation)
+			safe[i] = cf
+		}
+		clone.Findings = safe
+	}
+	return json.MarshalIndent(clone, "", "  ")
+}
 
 // ScanPersistence persists scan summary + per-finding rows. Implemented by
 // *audit.Store (see audit/scan_persist.go).
@@ -57,6 +85,20 @@ var findingEnricher func(*Finding) []string
 // only when Finding.DataAxis is empty, so scanner-specific code that
 // already sets axes (e.g. clawshield tagging by content hash) wins.
 func SetFindingEnricher(f func(*Finding) []string) { findingEnricher = f }
+
+// capabilityEnricher maps a finding's rule_id to its
+// tool_capability_class (read_fs / write_fs / exec_shell /
+// network_fetch / send_message). Nil until the guardrail wiring layer
+// installs guardrail.CapabilityForRuleID — see cli/correlator_wire.go.
+// Returning "" means "no capability", leaving the field untouched.
+var capabilityEnricher func(*Finding) string
+
+// SetCapabilityEnricher installs the capability-labeling hook that
+// runs on every finding emitted through EmitScanResult. Like the axis
+// enricher it only runs when Finding.ToolCapabilityClass is empty, so
+// surfaces that already classified the capability from a real tool
+// name (e.g. proxy tool-call inspection via ClassifyToolName) win.
+func SetCapabilityEnricher(f func(*Finding) string) { capabilityEnricher = f }
 
 // ScanSummaryParams is the v7 scan_results row payload.
 type ScanSummaryParams struct {
@@ -141,6 +183,16 @@ func EmitScanResult(
 				result.Findings[i].DataAxis = axes
 			}
 		}
+		// Auto-populate ToolCapabilityClass the same way: derive it
+		// from the rule_id for content-matched findings that didn't
+		// already get a class from a real tool name upstream. Without
+		// this the DESTRUCTIVE-FLOW correlator pattern (which keys on
+		// exec_shell) can never fire on regex/plugin detections.
+		if result.Findings[i].ToolCapabilityClass == "" && capabilityEnricher != nil {
+			if cap := capabilityEnricher(&result.Findings[i]); cap != "" {
+				result.Findings[i].ToolCapabilityClass = cap
+			}
+		}
 	}
 
 	targetType := result.EffectiveTargetType()
@@ -177,7 +229,19 @@ func EmitScanResult(
 	}
 
 	if pers != nil {
-		raw, jerr := result.JSON()
+		// ("Raw scan JSON stores unredacted
+		// secret-bearing findings"): the per-finding rows pass
+		// description / location / remediation through
+		// redaction.ForSinkString, but the legacy emitter
+		// serialised the same Finding values via result.JSON() and
+		// stored them in scan_results.raw_json without redaction.
+		// CodeGuard finding descriptions contain the raw matched
+		// source line, so a hardcoded secret matched by CG-CRED-001
+		// would persist verbatim in the SQLite audit DB and be
+		// fetchable via GetScanRawJSON. Redact a copy of the
+		// findings before serialising so raw_json reflects the
+		// same sanitised view as the per-finding rows.
+		raw, jerr := redactedScanResultJSON(result)
 		if jerr != nil {
 			raw = []byte(`{}`)
 		}

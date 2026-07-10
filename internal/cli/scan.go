@@ -39,8 +39,9 @@ var scanCmd = &cobra.Command{
 
 var scanCodeCmd = &cobra.Command{
 	Use:   "code <path>",
-	Short: "Scan source code with CodeGuard",
-	Long: `Scan a file or directory for security issues using the CodeGuard static scanner.
+	Short: "Scan source code with CodeGuard and ClawShield",
+	Long: `Scan a file or directory for security issues using the CodeGuard static scanner
+and ClawShield code scanners.
 
 Checks for hardcoded secrets, unsafe exec calls, SQL injection, weak crypto,
 path traversal, and more across Python, JS/TS, Go, Java, Ruby, PHP, Shell,
@@ -75,11 +76,10 @@ func runScanCode(_ *cobra.Command, args []string) error {
 	if cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
 
-	result, err := cg.Scan(context.Background(), target)
+	result, err := scanner.ScanCode(context.Background(), target, rulesDir)
 	if err != nil {
-		return fmt.Errorf("codeguard scan failed: %w", err)
+		return fmt.Errorf("code scan failed: %w", err)
 	}
 
 	if auditLog != nil {
@@ -105,14 +105,14 @@ func runScanCode(_ *cobra.Command, args []string) error {
 
 func printCodeScanResults(result *scanner.ScanResult) {
 	if len(result.Findings) == 0 {
-		fmt.Printf("CodeGuard scan: %s\n", result.Target)
+		fmt.Printf("Code scan: %s\n", result.Target)
 		fmt.Println("  No findings — clean")
 		fmt.Printf("  Duration: %s\n", result.Duration)
 		printHint("Run full audit:  defenseclaw doctor")
 		return
 	}
 
-	fmt.Printf("CodeGuard scan: %s — %d finding(s)\n", result.Target, len(result.Findings))
+	fmt.Printf("Code scan: %s — %d finding(s)\n", result.Target, len(result.Findings))
 	fmt.Println()
 
 	for _, f := range result.Findings {

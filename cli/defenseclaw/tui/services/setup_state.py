@@ -46,6 +46,14 @@ class SetupCommandIntent:
     category: str = "setup"
     origin: str = "setup"
     follow_up: tuple[SetupCommandIntent, ...] = ()
+    # Secret payload fed to the child over stdin instead of argv so it
+    # never shows up in process listings (e.g. ``keys set`` reads a hidden
+    # prompt). ``None`` means "no stdin payload".
+    secret_stdin: str | None = None
+    # Secret-bearing environment variables injected into the child process
+    # environment rather than passed as ``--env KEY=secret`` on the command
+    # line. Empty mapping means "no overrides".
+    env_overrides: tuple[tuple[str, str], ...] = ()
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -222,9 +230,17 @@ def build_readiness_checks(
 
     checks: list[ReadinessCheck] = []
 
-    connector = str(_get_path(cfg, "claw.mode", "") or "").strip()
-    if connector:
-        checks.append(ReadinessCheck("Active Connector", f"{connector} configured", "pass"))
+    # B1: route readiness through the full active connector SET, not the
+    # singular ``claw.mode``. A multi-connector install (e.g. hermes + codex
+    # via ``guardrail.connectors``) previously showed only the primary
+    # connector here — or, after the last connector was removed, a phantom
+    # "openclaw". ``active_connectors()`` is R1-clean (empty when nothing is
+    # configured) so this both surfaces every active connector and stops
+    # fabricating one when the install is genuinely empty.
+    connectors = _active_connector_names(cfg)
+    if connectors:
+        for connector in connectors:
+            checks.append(ReadinessCheck(f"Active Connector: {connector}", "configured", "pass"))
     else:
         checks.append(
             ReadinessCheck(
@@ -599,13 +615,173 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
     if key.startswith(("skill_actions.", "mcp_actions.", "plugin_actions.")):
         _apply_action_matrix_field(cfg, key, value)
         return
+    if key.startswith("asset_policy.connectors."):
+        _apply_per_connector_asset_policy_field(cfg, key, value)
+        return
     if key.startswith("asset_policy."):
         _apply_typed_field(cfg, key, value)
         return
     if key.startswith("connector_hooks."):
         _apply_connector_hook_field(cfg, key, value)
         return
+    if key.startswith("guardrail.connectors."):
+        _apply_per_connector_guardrail_field(cfg, key, value)
+        return
+    if key.startswith("guardrail.judge.hook_connectors."):
+        _apply_judge_hook_connector_toggle(cfg, key, value)
+        return
     _apply_typed_field(cfg, key, value)
+
+
+# B4/E4c/E4d: the config editor exposes every per-connector guardrail override.
+# Top-level ``PerConnectorGuardrailConfig`` fields editable via the 4-part
+# ``guardrail.connectors.<c>.<field>`` key; the nested HILT block is edited via
+# the 5-part ``guardrail.connectors.<c>.hilt.<field>`` key. ``rule_pack_dir`` /
+# ``block_message`` are free-text strings; ``mode`` is an enum string;
+# ``hook_fail_mode`` normalizes to open/closed; ``enabled`` is a bool. The
+# per-connector judge state is NOT here — it is membership in the
+# ``guardrail.judge.hook_connectors`` list (see _apply_judge_hook_connector_toggle).
+_PER_CONNECTOR_GUARDRAIL_STR_FIELDS = frozenset({"mode", "rule_pack_dir", "block_message"})
+_PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS = frozenset({"enabled"})
+_PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS = frozenset({"hook_fail_mode"})
+_PER_CONNECTOR_GUARDRAIL_FIELDS = (
+    _PER_CONNECTOR_GUARDRAIL_STR_FIELDS
+    | _PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS
+    | _PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS
+)
+_PER_CONNECTOR_HILT_FIELDS = frozenset({"enabled", "min_severity"})
+
+
+def _coerce_per_connector_value(field_name: str, value: str) -> Any:
+    """Coerce a TUI string value to the type ``PerConnectorGuardrailConfig`` expects.
+
+    Bool fields (``enabled``) parse ``"true"``/``"false"``; ``hook_fail_mode``
+    normalizes to the ``open``/``closed`` enum (mirroring cmd_setup's
+    ``_apply_hook_connector_setup`` and the global guardrail apply path);
+    everything else is a free-text / enum string written verbatim.
+    """
+
+    if field_name in _PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS:
+        return value.strip().lower() == "true"
+    if field_name in _PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS:
+        return "closed" if value.strip().lower() == "closed" else "open"
+    return value
+
+
+def _apply_per_connector_guardrail_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Write one ``guardrail.connectors.<c>.<field>`` override (B4/E4c/E4d).
+
+    The naive ``set_config_value`` traversal would replace a typed
+    :class:`PerConnectorGuardrailConfig` entry with a plain ``dict`` (or create
+    one for a missing connector), which breaks the ``effective_*`` resolvers the
+    boot loop reads. So construct/locate the typed entry and ``setattr`` the
+    field (type-coerced), preserving any sibling overrides. The nested HILT block
+    (``guardrail.connectors.<c>.hilt.<field>``, 5 parts) is materialized on first
+    write so a present block explicitly overrides the global one (see
+    ``GuardrailConfig.effective_hilt``). Dict-backed configs (test fixtures)
+    round-trip fine through the nested-dict fallback.
+    """
+
+    parts = key.split(".")
+    # guardrail.connectors.<c>.<field>        -> 4 parts (top-level override)
+    # guardrail.connectors.<c>.hilt.<field>   -> 5 parts (nested HILT block)
+    if len(parts) not in (4, 5) or parts[1] != "connectors":
+        return
+    connector = parts[2].strip()
+    if not connector:
+        return
+    field_name = parts[3]
+    is_hilt = len(parts) == 5
+    if is_hilt:
+        if field_name != "hilt" or parts[4] not in _PER_CONNECTOR_HILT_FIELDS:
+            return
+    elif field_name not in _PER_CONNECTOR_GUARDRAIL_FIELDS:
+        return
+    guardrail = getattr(cfg, "guardrail", None)
+    connectors = getattr(guardrail, "connectors", None) if guardrail is not None else None
+    if guardrail is None or isinstance(guardrail, Mapping) or not isinstance(connectors, dict):
+        # Dict-backed config (or an unexpected shape): nested-dict creation
+        # round-trips cleanly and never strips a typed sibling.
+        leaf = parts[4] if is_hilt else field_name
+        set_config_value(cfg, key, _coerce_per_connector_value(leaf, value))
+        return
+    try:
+        from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - degrade to the dict fallback.
+        set_config_value(cfg, key, value)
+        return
+    entry = connectors.get(connector)
+    if not isinstance(entry, PerConnectorGuardrailConfig):
+        replacement = PerConnectorGuardrailConfig()
+        if isinstance(entry, Mapping):
+            for sib_key, sib_val in entry.items():
+                if hasattr(replacement, sib_key):
+                    setattr(replacement, sib_key, sib_val)
+        connectors[connector] = replacement
+        entry = replacement
+    if is_hilt:
+        # A present hilt block (even partial) explicitly overrides the global
+        # one — materialize it on first touch, then set just the named leaf.
+        block = entry.hilt if isinstance(entry.hilt, HILTConfig) else HILTConfig()
+        entry.hilt = block
+        sub_field = parts[4]
+        if sub_field == "enabled":
+            block.enabled = value.strip().lower() == "true"
+        else:  # min_severity
+            block.min_severity = value.strip().upper()
+        return
+    setattr(entry, field_name, _coerce_per_connector_value(field_name, value))
+
+
+def _apply_judge_hook_connector_toggle(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Add/remove one connector from ``guardrail.judge.hook_connectors`` (B4 judge half).
+
+    The per-connector hook-lane judge state is NOT a
+    :class:`PerConnectorGuardrailConfig` field — it is membership in the
+    ``guardrail.judge.hook_connectors`` gate list. The synthetic
+    ``guardrail.judge.hook_connectors.<c>`` key from the editor toggles that
+    membership *surgically* (mirrors the CLI ``--judge-hook-connectors`` opt-in /
+    opt-out): a ``true`` write adds the connector, a ``false`` write removes it.
+    The rest of the judge block is never touched. The ``"*"`` every-connector
+    sentinel is honored like the CLI's ``_apply_judge_enablement`` opt-out: a
+    ``true`` write is a no-op (already covered) and a ``false`` write leaves
+    ``"*"`` intact rather than expanding-then-subtracting (the ambiguous case the
+    CLI deliberately refuses, J6).
+    """
+
+    parts = key.split(".")
+    if len(parts) != 4 or parts[:3] != ["guardrail", "judge", "hook_connectors"]:
+        return
+    connector = parts[3].strip()
+    if not connector:
+        return
+    enable = value.strip().lower() == "true"
+    name = connector.lower()
+
+    gate_raw = _get_path(cfg, "guardrail.judge.hook_connectors", None)
+    gate = [str(entry) for entry in gate_raw] if isinstance(gate_raw, (list, tuple)) else []
+    is_all = any((entry or "").strip() == "*" for entry in gate)
+    contains = any((entry or "").strip().lower() == name for entry in gate)
+
+    if enable:
+        if is_all or contains:
+            return  # already covered — nothing to change.
+        new_gate = [*gate, connector]
+    else:
+        if is_all or not contains:
+            # "*" covers everything (leave it intact, J6); or the connector
+            # was never listed — either way there is nothing to remove.
+            return
+        new_gate = [entry for entry in gate if (entry or "").strip().lower() != name]
+
+    # Write the list back, preserving a typed JudgeConfig (never a dict that
+    # would shadow the dataclass) — set_config_value handles the dict fixture.
+    guardrail = getattr(cfg, "guardrail", None)
+    judge = getattr(guardrail, "judge", None) if guardrail is not None else None
+    if judge is not None and not isinstance(judge, Mapping):
+        judge.hook_connectors = new_gate
+    else:
+        set_config_value(cfg, "guardrail.judge.hook_connectors", new_gate)
 
 
 def split_csv(value: str) -> list[str]:
@@ -647,6 +823,37 @@ def _doctor_missing_credentials(doctor: object | Mapping[str, Any] | None) -> tu
     return tuple(str(item) for item in raw if str(item).strip())
 
 
+def _active_connector_names(cfg: object | Mapping[str, Any] | None) -> list[str]:
+    """Resolve the active connector set for the readiness panel (B1).
+
+    Prefers the live ``Config.active_connectors()`` (multi-connector aware and
+    R1-clean: empty when nothing is configured, never a phantom "openclaw").
+    Falls back to reading the config shape directly when given a plain mapping
+    (the test fixtures pass dicts): the ``guardrail.connectors`` map keys, then
+    the singular ``guardrail.connector`` / ``claw.mode`` markers. An empty
+    result means "no connector configured" and drives the fail row.
+    """
+    method = getattr(cfg, "active_connectors", None)
+    if callable(method):
+        try:
+            names = method()
+        except Exception:  # noqa: BLE001 — never let a config quirk blank readiness.
+            names = None
+        if isinstance(names, (list, tuple)):
+            return [str(name).strip() for name in names if str(name).strip()]
+
+    connectors_map = _get_path(cfg, "guardrail.connectors", None)
+    if isinstance(connectors_map, Mapping):
+        keys = [str(key).strip() for key in connectors_map if str(key).strip()]
+        if keys:
+            return sorted(set(keys))
+    singular = (
+        str(_get_path(cfg, "guardrail.connector", "") or "").strip()
+        or str(_get_path(cfg, "claw.mode", "") or "").strip()
+    )
+    return [singular] if singular else []
+
+
 def _registry_required_but_empty(cfg: object | Mapping[str, Any] | None) -> bool:
     for key in ("asset_policy.skill", "asset_policy.mcp", "asset_policy.plugin"):
         if bool(_get_path(cfg, f"{key}.registry_required", False)) and not _get_path(cfg, f"{key}.registry", ()):
@@ -685,7 +892,7 @@ def _looks_like_url_field(key: str) -> bool:
 
 
 def _is_otlp_endpoint_field(key: str) -> bool:
-    return key in {"otel.endpoint", "otel.traces.endpoint", "otel.logs.endpoint", "otel.metrics.endpoint"}
+    return False
 
 
 def _validate_host_port(value: str) -> bool:
@@ -771,6 +978,90 @@ def _apply_action_matrix_field(cfg: object | dict[str, Any], key: str, value: st
     set_config_value(cfg, key, value)
 
 
+def _coerce_per_connector_asset_policy_value(field_name: str, value: str) -> Any:
+    raw = value.strip()
+    if field_name == "registry_required":
+        lowered = raw.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        return None
+    return raw.lower()
+
+
+def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Write one ``asset_policy.connectors.<c>`` scalar override.
+
+    The generic config writer would materialize missing typed entries as
+    ``SimpleNamespace`` objects, which breaks ``AssetPolicyConfig.effective_*``
+    resolution. Mirror the guardrail override writer: preserve typed map
+    entries, materialize optional per-type blocks only when touched, and use
+    ``None`` for blank per-connector ``registry_required`` so it inherits the
+    global setting.
+    """
+
+    parts = key.split(".")
+    # asset_policy.connectors.<connector>.mode
+    # asset_policy.connectors.<connector>.<asset>.{default,registry_required,registry_empty_action}
+    if len(parts) not in (4, 5) or parts[1] != "connectors":
+        return
+    connector = parts[2].strip()
+    if not connector:
+        return
+    is_mode = len(parts) == 4
+    if is_mode:
+        if parts[3] != "mode":
+            return
+        asset_type = ""
+        field_name = "mode"
+    else:
+        asset_type = parts[3]
+        field_name = parts[4]
+        if asset_type not in {"skill", "mcp", "plugin"} or field_name not in {
+            "default",
+            "registry_required",
+            "registry_empty_action",
+        }:
+            return
+
+    asset_policy = getattr(cfg, "asset_policy", None)
+    connectors = getattr(asset_policy, "connectors", None) if asset_policy is not None else None
+    if asset_policy is None or isinstance(asset_policy, Mapping) or not isinstance(connectors, dict):
+        set_config_value(cfg, key, _coerce_per_connector_asset_policy_value(field_name, value))
+        return
+
+    try:
+        from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - degrade to the dict fallback.
+        set_config_value(cfg, key, _coerce_per_connector_asset_policy_value(field_name, value))
+        return
+
+    entry = connectors.get(connector)
+    if not isinstance(entry, PerConnectorAssetPolicy):
+        replacement = PerConnectorAssetPolicy()
+        if isinstance(entry, Mapping):
+            for sib_key, sib_val in entry.items():
+                if hasattr(replacement, sib_key):
+                    setattr(replacement, sib_key, sib_val)
+        connectors[connector] = replacement
+        entry = replacement
+    if is_mode:
+        entry.mode = _coerce_per_connector_asset_policy_value(field_name, value)
+        return
+
+    block = getattr(entry, asset_type, None)
+    if not isinstance(block, PerConnectorAssetTypePolicy):
+        replacement_block = PerConnectorAssetTypePolicy()
+        if isinstance(block, Mapping):
+            for sib_key, sib_val in block.items():
+                if hasattr(replacement_block, sib_key):
+                    setattr(replacement_block, sib_key, sib_val)
+        setattr(entry, asset_type, replacement_block)
+        block = replacement_block
+    setattr(block, field_name, _coerce_per_connector_asset_policy_value(field_name, value))
+
+
 _BOOL_FIELD_KEYS = frozenset(
     {
         "privacy.disable_redaction",
@@ -823,11 +1114,7 @@ _BOOL_FIELD_KEYS = frozenset(
         "gateway.watcher.mcp.take_action",
         "gateway.watchdog.enabled",
         "otel.enabled",
-        "otel.tls.insecure",
-        "otel.traces.enabled",
-        "otel.logs.enabled",
         "otel.logs.emit_individual_findings",
-        "otel.metrics.enabled",
         "watch.auto_block",
         "watch.allow_list_bypass_scan",
         "watch.rescan_enabled",
@@ -900,6 +1187,6 @@ _CSV_FIELD_KEYS = frozenset(
     }
 )
 
-_KV_CSV_FIELD_KEYS = frozenset({"otel.headers", "otel.resource.attributes"})
+_KV_CSV_FIELD_KEYS = frozenset({"otel.resource.attributes"})
 
 _TRISTATE_FIELD_KEYS = frozenset({"openshell.auto_pair", "openshell.host_networking"})

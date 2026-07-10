@@ -1,0 +1,46 @@
+[Unit]
+Description=DefenseClaw per-user hook guardian watch service
+Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment
+After=defenseclaw-gateway.service
+Wants=defenseclaw-gateway.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
+Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m
+Restart=always
+RestartSec=10s
+UMask=0077
+NoNewPrivileges=false
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
+ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

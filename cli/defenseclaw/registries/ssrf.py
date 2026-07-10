@@ -27,10 +27,31 @@ mocked in tests by passing a custom ``resolver`` callback.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
+import os
 import socket
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
 from urllib.parse import urlparse
+
+# RFC 6598 carrier-grade NAT range. Python's ``ipaddress.is_private``
+# does NOT include this block — it predates RFC 6598 — so we have to
+# match it explicitly to stay in lockstep with the Go-side gateway
+# guard (``internal/gateway/provider.go`` ``isUnsafeIP``). Operators
+# running over Tailscale or other CGNAT-routed overlays opt in via
+# ``DEFENSECLAW_ALLOW_CGNAT=1``, the same env var the Go side honours.
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _cgnat_allowed() -> bool:
+    """Return True when the operator has opted into dialing CGNAT.
+
+    Read at call time (not at import) so tests can toggle the env var
+    with :func:`unittest.mock.patch.dict` and so a long-running process
+    picks up a config change without restart.
+    """
+    return os.environ.get("DEFENSECLAW_ALLOW_CGNAT") == "1"
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 """Schemes accepted for HTTP-style fetches.
@@ -86,10 +107,10 @@ def guard_url(
 
     * scheme outside :data:`ALLOWED_SCHEMES`
     * empty / non-DNS-resolvable host
-    * resolved IP in the loopback / link-local / multicast / unspecified
-      range (always blocked)
-    * resolved IP in RFC1918 / ULA / shared-CGNAT / RFC6598 ranges
-      when *allow_private* is False (the default).
+    * resolved IP in multicast / unspecified / reserved ranges
+    * resolved IP in loopback / link-local / RFC1918 / ULA /
+      shared-CGNAT / RFC6598 ranges when *allow_private* is False
+      (the default).
 
     The default fail-closed posture matches the project guidance for
     operator-provided URLs (codeguard-0-api-web-services).
@@ -129,8 +150,8 @@ def resolve_and_pin(
     if not host:
         raise SSRFError("URL is missing a host component")
 
-    if host in {"localhost", "ip6-localhost"}:
-        raise SSRFError("refusing to fetch from localhost")
+    if host in {"localhost", "ip6-localhost"} and not allow_private:
+        raise SSRFError("refusing to fetch from localhost (use --allow-private to opt in)")
 
     resolve = resolver or _default_resolver
     addrs = resolve(host)
@@ -143,20 +164,37 @@ def resolve_and_pin(
             ip = ipaddress.ip_address(addr)
         except ValueError:
             continue
-        if (
-            ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_unspecified
-            or ip.is_reserved
-        ):
+        privateish = ip.is_loopback or ip.is_link_local or ip.is_private
+        if ip.is_multicast or ip.is_unspecified or (ip.is_reserved and not privateish):
             raise SSRFError(
                 f"host {host!r} resolves to disallowed address {addr}"
+            )
+        if not allow_private and (ip.is_loopback or ip.is_link_local):
+            raise SSRFError(
+                f"host {host!r} resolves to disallowed address {addr} "
+                "(use --allow-private to opt in)"
             )
         if not allow_private and ip.is_private:
             raise SSRFError(
                 f"host {host!r} resolves to private address {addr} "
                 "(use --allow-private to opt in)"
+            )
+        # CGNAT (RFC 6598, 100.64.0.0/10) is not covered by
+        # ipaddress.is_private but the Go-side dial guard refuses it,
+        # so a CGNAT URL accepted here would still fail at dispatch
+        # time. Refuse here too to keep config-time validation in
+        # lockstep with runtime, unless the operator has explicitly
+        # opted into a CGNAT overlay with DEFENSECLAW_ALLOW_CGNAT=1.
+        if (
+            not allow_private
+            and not _cgnat_allowed()
+            and ip.version == 4
+            and ip in _CGNAT_NETWORK
+        ):
+            raise SSRFError(
+                f"host {host!r} resolves to RFC 6598 CGNAT address {addr} "
+                "(set DEFENSECLAW_ALLOW_CGNAT=1 to opt in, "
+                "or use --allow-private)"
             )
         if safe_ip is None:
             safe_ip = addr
@@ -166,6 +204,71 @@ def resolve_and_pin(
         raise SSRFError(f"could not pin a usable IP for host {host!r}")
     port = parsed.port or (443 if scheme == "https" else 80)
     return safe_ip, host, port
+
+
+# ---------------------------------------------------------------------------
+# DNS-rebind defense at the resolver chokepoint
+# ---------------------------------------------------------------------------
+#
+# ``resolve_and_pin`` validates the hostname once. A client library then
+# resolves the SAME hostname AGAIN when it opens the socket — a low-TTL
+# rebind can answer "safe" the first time and "unsafe" the second,
+# defeating the guard. The adapters' ``_PinnedConnect`` closes this for
+# ``urllib3``-based clients, but the MCP scanner SDK connects with async
+# ``httpx``/``anyio`` (``sse_client`` / ``streamablehttp_client``), which
+# never touches urllib3. Both stacks ultimately resolve through
+# :func:`socket.getaddrinfo`, so pinning there covers every client.
+
+_GETADDRINFO_PIN_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def pinned_getaddrinfo(host: str, port: int, ip: str) -> Iterator[None]:
+    """Pin :func:`socket.getaddrinfo` to *ip* for the (*host*, *port*) pair.
+
+    While the block is active, a lookup for the vetted ``host:port`` is
+    answered with the pre-validated ``ip`` (so no second, rebindable DNS
+    query happens at connect time). A lookup for the same host on a
+    *different* port is also re-pointed at the vetted IP (clients may dial
+    a derived port). A lookup for any *other* host raises :class:`SSRFError`
+    so a library cannot side-channel a request to an unvetted destination
+    during the pinned operation.
+
+    Held under a process-wide lock for the duration of the block because it
+    monkeypatches a module global; concurrent pinned fetches serialise on
+    connect, matching the adapter ``_PinnedConnect`` contract.
+    """
+    target_host = (host or "").strip().lower()
+    family_ip = ipaddress.ip_address(ip)
+    with _GETADDRINFO_PIN_LOCK:
+        original = socket.getaddrinfo
+
+        def _pinned(node, service, *args, **kwargs):  # type: ignore[no-untyped-def]
+            asked = (str(node).strip().lower() if node is not None else "")
+            if asked == target_host:
+                # Resolve to the vetted IP literal. Preserve the requested
+                # service/port so a derived port still connects correctly;
+                # the Host header / TLS SNI continue to carry the hostname
+                # because those travel independently of the dial address.
+                fam = socket.AF_INET6 if family_ip.version == 6 else socket.AF_INET
+                return original(ip, service, fam, *args[1:], **kwargs)
+            # An IP literal that equals our pin is fine (some clients
+            # pre-resolve and re-call getaddrinfo with the IP).
+            try:
+                if ipaddress.ip_address(asked) == family_ip:
+                    return original(ip, service, *args, **kwargs)
+            except ValueError:
+                pass
+            raise SSRFError(
+                f"unexpected DNS resolution for {asked!r} during pinned "
+                f"fetch of {target_host!r} (possible DNS rebinding)"
+            )
+
+        socket.getaddrinfo = _pinned  # type: ignore[assignment]
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = original  # type: ignore[assignment]
 
 
 def guard_git_url(

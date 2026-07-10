@@ -26,6 +26,10 @@ from defenseclaw.tui.command_line import ParsedCommand, infer_command_risk
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 SECRET_FLAG_FRAGMENTS = ("key", "token", "secret", "password", "credential")
+# ``--env KEY=VALUE`` pairs routinely carry API tokens; the flag name
+# itself contains no secret fragment, so it needs dedicated handling that
+# redacts the value while keeping the key visible for context.
+ENV_FLAGS = ("--env", "-e")
 
 
 @dataclass(frozen=True)
@@ -81,20 +85,30 @@ def mask_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
 
     masked: list[str] = []
     mask_next = False
+    mask_next_env = False
     for arg in argv:
         if mask_next:
             masked.append("<redacted>")
             mask_next = False
             continue
+        if mask_next_env:
+            masked.append(_redact_env_pair(arg))
+            mask_next_env = False
+            continue
 
-        if arg.startswith("--") and "=" in arg:
-            flag, _value = arg.split("=", 1)
+        if arg.startswith("-") and "=" in arg:
+            flag, value = arg.split("=", 1)
+            if _flag_is_env(flag):
+                masked.append(f"{flag}={_redact_env_pair(value)}")
+                continue
             if _flag_is_secret(flag):
                 masked.append(f"{flag}=<redacted>")
                 continue
 
         masked.append(arg)
-        if arg.startswith("--") and _flag_is_secret(arg):
+        if _flag_is_env(arg):
+            mask_next_env = True
+        elif arg.startswith("--") and _flag_is_secret(arg):
             mask_next = True
     return tuple(masked)
 
@@ -102,6 +116,19 @@ def mask_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
 def _flag_is_secret(flag: str) -> bool:
     normalized = flag.lower().replace("-", "_")
     return any(fragment in normalized for fragment in SECRET_FLAG_FRAGMENTS) or normalized == "__value"
+
+
+def _flag_is_env(flag: str) -> bool:
+    return flag in ENV_FLAGS
+
+
+def _redact_env_pair(pair: str) -> str:
+    """Redact the value of a ``KEY=VALUE`` env assignment, keeping the key."""
+
+    if "=" in pair:
+        key, _value = pair.split("=", 1)
+        return f"{key}=<redacted>"
+    return "<redacted>"
 
 
 def _risk_summary(risk: str, category: str) -> str:
@@ -208,7 +235,11 @@ class CommandPreviewScreen(ModalScreen[bool]):
                 yield Button("Run", id="preview-run", variant="success")
 
     def on_mount(self) -> None:
-        self.query_one("#preview-run", Button).focus()
+        # For destructive / secret-bearing commands, focus Cancel so a
+        # reflexive Enter cancels instead of running the command. Benign
+        # commands keep Run focused for fast confirmation.
+        target = "#preview-cancel" if self.preview.risk in {"destructive", "secret"} else "#preview-run"
+        self.query_one(target, Button).focus()
 
     def action_cancel(self) -> None:
         self.dismiss(False)

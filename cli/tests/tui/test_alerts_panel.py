@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from defenseclaw.tui.panels import alerts as alerts_module
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertFinding, AlertsPanelModel, humanize_alert_details
 from defenseclaw.tui.services.gateway_events import count_recent_silent_bypass, load_gateway_egress
 
@@ -60,6 +61,35 @@ def test_alerts_filter_selection_and_counts() -> None:
     assert action.filter_change.new == "CRITICAL"
 
 
+def test_alerts_set_events_owns_the_input_list() -> None:
+    events = [AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one")]
+    model = AlertsPanelModel()
+
+    model.set_events(events)
+    events.clear()
+    model.refresh()
+
+    assert [event.id for event in model.audit_events] == ["a1"]
+    assert [row.event.id for row in model.filtered] == ["a1"]
+
+
+def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
+            AlertEvent(id="a2", severity="MEDIUM", action="proxy", target="gateway"),
+            AlertEvent(id="a3", severity="INFO", action="connector-hook", target="preToolUse"),
+        ]
+    )
+
+    assert [row.event.id for row in model.filtered] == ["a1"]
+    assert "No actionable" not in model.empty_state()
+
+    assert model.handle_key("1").handled is True
+    assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3"}
+
+
 def test_alerts_slash_search_and_exact_severity_filter() -> None:
     model = AlertsPanelModel()
     model.set_events(
@@ -91,6 +121,7 @@ def test_alerts_connector_column_and_shared_filter() -> None:
     """8.13: CONNECTOR column + shared connector filter on the Alerts panel."""
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events(
         [
             AlertEvent(id="a1", severity="HIGH", action="connector-hook",
@@ -115,6 +146,40 @@ def test_alerts_connector_column_and_shared_filter() -> None:
     assert [row.event.id for row in model.filtered] == ["a1"]
     model.set_connector_filter("")
     assert {row.event.id for row in model.filtered} == {"a1", "a2"}
+
+
+def test_alerts_connector_hook_uses_detail_severity_for_observe_findings() -> None:
+    """Observe-mode hook findings store INFO rows but carry policy severity in details."""
+
+    now = datetime(2026, 6, 24, 17, 46, tzinfo=timezone.utc)
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(
+                id="plain",
+                timestamp=now,
+                severity="INFO",
+                action="connector-hook",
+                target="PostToolUse",
+                details="connector=codex action=allow raw_action=allow severity=NONE mode=observe",
+            ),
+            AlertEvent(
+                id="finding",
+                timestamp=now + timedelta(seconds=1),
+                severity="INFO",
+                action="connector-hook",
+                target="PostToolUse",
+                details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe",
+            ),
+        ]
+    )
+
+    assert [row.event.id for row in model.filtered] == ["finding"]
+    assert model.severity_counts()["HIGH"] == 1
+    assert model.data_table_row_models()[0].cells[1] == "HIGH"
+
+    model.set_severity_filter_exact("HIGH")
+    assert [row.event.id for row in model.filtered] == ["finding"]
 
 
 def test_alerts_connector_token_filters_by_connector() -> None:
@@ -162,6 +227,7 @@ def test_alerts_refresh_ingests_scan_finding_from_gateway_jsonl(tmp_path) -> Non
         encoding="utf-8",
     )
     model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
     model.refresh_gateway_scans()
     model.expanded.add("sid1")
     model.apply_filter()
@@ -170,6 +236,53 @@ def test_alerts_refresh_ingests_scan_finding_from_gateway_jsonl(tmp_path) -> Non
     finding = next(row for row in model.filtered if row.kind == "scan_finding")
     assert "R9" in finding.event.details
     assert "line=3" in finding.event.details
+
+
+def test_alerts_refresh_clears_gateway_rows_when_data_dir_is_removed(tmp_path) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
+            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
+            '"verdict":"warn","severity_max":"HIGH"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
+    model.set_events([AlertEvent(id="audit-1", severity="HIGH", action="proxy", target="gateway")])
+    model.refresh()
+    assert model.scan_blocks
+
+    model.set_data_dir(None)
+    model.refresh()
+
+    assert model.scan_blocks == []
+    assert model.egress_events == []
+    assert model.filtered
+    assert all(row.kind == "audit" for row in model.filtered)
+
+
+def test_alerts_refresh_keeps_gateway_rows_after_transient_read_failure(tmp_path, monkeypatch) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
+            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
+    model.refresh_gateway_scans()
+    previous = tuple(model.scan_blocks)
+
+    def fail_load(*_args, **_kwargs):
+        raise OSError("transient gateway read")
+
+    monkeypatch.setattr(alerts_module, "load_gateway_scan_blocks", fail_load)
+    model.refresh_gateway_scans()
+
+    assert tuple(model.scan_blocks) == previous
+    assert any(row.kind == "scan" for row in model.filtered)
 
 
 def test_alerts_refresh_ingests_gateway_egress_and_filters_warning_as_medium(tmp_path) -> None:
@@ -191,6 +304,7 @@ def test_alerts_refresh_ingests_gateway_egress_and_filters_warning_as_medium(tmp
         encoding="utf-8",
     )
     model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
     model.refresh_gateway_scans()
 
     egress_rows = [row for row in model.filtered if row.kind == "egress"]
@@ -327,6 +441,7 @@ def test_alerts_table_metadata_marks_scan_rows_non_selectable(tmp_path) -> None:
         encoding="utf-8",
     )
     model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
     model.set_events([AlertEvent(id="a1", severity="LOW", action="proxy", target="gateway")])
     model.refresh_gateway_scans()
 
@@ -367,6 +482,7 @@ def test_alerts_connector_hook_row_surfaces_connector_and_decision() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event, plain_event])
 
     rows = {row.alert_id: row for row in model.data_table_row_models()}
@@ -397,6 +513,7 @@ def test_alerts_connector_hook_detail_pairs_expand_kv_into_rows() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event])
     model.toggle_expand_or_detail()
 
@@ -434,6 +551,7 @@ def test_alerts_connector_hook_blocked_keeps_severity_and_block_flag() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event])
     model.toggle_expand_or_detail()
 
@@ -461,6 +579,7 @@ def test_alerts_connector_hook_copy_text_uses_structured_rows() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event])
     model.toggle_expand_or_detail()
 

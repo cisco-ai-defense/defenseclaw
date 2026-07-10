@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type Environment string
@@ -30,6 +32,7 @@ const (
 	EnvDGXSpark Environment = "dgx-spark"
 	EnvMacOS    Environment = "macos"
 	EnvLinux    Environment = "linux"
+	EnvWindows  Environment = "windows"
 )
 
 type DeploymentMode string
@@ -77,12 +80,18 @@ func DefaultDataPath() string {
 }
 
 func ConfigPath() string {
+	if v := os.Getenv(managed.ConfigPathEnv); v != "" {
+		return v
+	}
 	return filepath.Join(DefaultDataPath(), DefaultConfigName)
 }
 
 func DetectEnvironment() Environment {
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return EnvMacOS
+	case "windows":
+		return EnvWindows
 	}
 
 	if _, err := os.Stat("/etc/dgx-release"); err == nil {
@@ -139,7 +148,7 @@ func DefaultConfig() *Config {
 			},
 			MCPScanner: MCPScannerConfig{
 				Binary:    "mcp-scanner",
-				Analyzers: "yara",
+				Analyzers: "auto",
 			},
 			PluginScanner: "defenseclaw",
 			CodeGuard:     filepath.Join(dataDir, "codeguard-rules"),
@@ -158,24 +167,27 @@ func DefaultConfig() *Config {
 			RescanContentGated:  true,
 		},
 		AIDiscovery: AIDiscoveryConfig{
-			Enabled:                  true,
-			Mode:                     "enhanced",
-			ScanIntervalMin:          5,
-			ProcessIntervalSec:       60,
-			ScanRoots:                []string{"~"},
-			SignaturePacks:           []string{},
-			AllowWorkspaceSignatures: false,
-			DisabledSignatureIDs:     []string{},
-			IncludeShellHistory:      true,
-			IncludePackageManifests:  true,
-			IncludeEnvVarNames:       true,
-			IncludeNetworkDomains:    true,
-			MaxFilesPerScan:          1000,
-			MaxFileBytes:             512 * 1024,
-			EmitOTel:                 true,
-			StoreRawLocalPaths:       false,
-			ConfidencePolicyPath:     filepath.Join(dataDir, "confidence.yaml"),
+			Enabled:                   true,
+			Mode:                      "enhanced",
+			ScanIntervalMin:           5,
+			ProcessIntervalSec:        60,
+			ScanRoots:                 []string{"~"},
+			SignaturePacks:            []string{},
+			AllowWorkspaceSignatures:  false,
+			DisabledSignatureIDs:      []string{},
+			IncludeShellHistory:       true,
+			IncludePackageManifests:   true,
+			IncludeEnvVarNames:        true,
+			IncludeNetworkDomains:     true,
+			MaxFilesPerScan:           1000,
+			MaxFileBytes:              512 * 1024,
+			EmitOTel:                  true,
+			StoreRawLocalPaths:        false,
+			ConfidencePolicyPath:      filepath.Join(dataDir, "confidence.yaml"),
+			RequireTrustedBinaryPaths: false,
+			TrustedBinaryPrefixes:     []string{},
 		},
+		ApplicationProtection: DefaultApplicationProtectionConfig(),
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),
 			RulesFile:  filepath.Join(dataDir, "firewall.pf.conf"),
@@ -217,6 +229,9 @@ func DefaultConfig() *Config {
 			MaxReconnectMs:  15000,
 			ApprovalTimeout: 30,
 			APIPort:         18970,
+			ConfigReload: GatewayConfigReloadConfig{
+				Mode: "hot",
+			},
 			Watcher: GatewayWatcherConfig{
 				Enabled: true,
 				Skill: GatewayWatcherSkillConfig{

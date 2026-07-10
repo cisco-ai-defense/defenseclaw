@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_factory import build_analyzers
 from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts
 from defenseclaw.scanner.plugin_scanner.helpers import (
+    audit_skipped_dirs_for_native,
     build_result,
     deduplicate_findings,
     make_finding,
@@ -116,9 +118,15 @@ def scan_plugin(
         manifest = PluginManifest(name="unknown", source="none")
 
     # --- Build analyzer pipeline (respecting policy toggles + LLM config) ---
+    disabled_analyzers = disabled_analyzer_names(policy)
+    # Honour an explicit request to disable meta analysis (CLI --no-meta
+    # threaded through PluginScanOptions). Previously the flag was accepted
+    # by the wrapper but never reached the pipeline (F-0302).
+    if options and options.disable_meta and "meta" not in disabled_analyzers:
+        disabled_analyzers = [*disabled_analyzers, "meta"]
     analyzers = build_analyzers(
         profile=profile,
-        disabled_analyzers=disabled_analyzer_names(policy),
+        disabled_analyzers=disabled_analyzers,
         llm=policy.llm.to_dict() if policy.llm else None,
     )
 
@@ -137,7 +145,20 @@ def scan_plugin(
     # --- Run analyzers sequentially ---
     all_findings: list[Finding] = []
     if manifest_missing_finding is not None:
+        manifest_missing_finding.id = f"plugin-{ctx.finding_counter[0]}"
+        ctx.finding_counter[0] += 1
         all_findings.append(manifest_missing_finding)
+
+    # F-1907: surface native/binary payloads hidden under normally-skipped
+    # dirs (node_modules/.git/etc.). The directory-structure analyzer skips
+    # those trees, so this audit is the only thing that catches a native
+    # addon stashed there to dodge both source and binary scanning. Run it
+    # before the analyzer loop so the meta analyzer can fold the signal into
+    # its cross-reference chains.
+    for f in audit_skipped_dirs_for_native(target):
+        f.id = f"plugin-{ctx.finding_counter[0]}"
+        ctx.finding_counter[0] += 1
+        all_findings.append(f)
 
     for analyzer in analyzers:
         # Feed accumulated findings to meta analyzer
@@ -146,11 +167,15 @@ def scan_plugin(
 
         findings = analyzer.analyze(ctx)
 
-        # Assign stable IDs
+        # Assign globally-unique IDs. Each analyzer's ``make_finding``
+        # helper numbers findings from ``plugin-1`` against its own local
+        # list, so without renumbering here multiple analyzers collide on
+        # the same ``plugin-N`` id (F-0364). Renumber every finding from
+        # the shared monotonic counter so ids are unique across the merged
+        # result set.
         for f in findings:
-            if f.id.startswith("plugin-0") or not f.id.startswith("plugin-"):
-                f.id = f"plugin-{ctx.finding_counter[0]}"
-                ctx.finding_counter[0] += 1
+            f.id = f"plugin-{ctx.finding_counter[0]}"
+            ctx.finding_counter[0] += 1
 
         all_findings.extend(findings)
 
@@ -213,16 +238,176 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
+    """Read and JSON-parse a manifest candidate without following symlinks.
+
+    A third-party plugin can ship a manifest-named path (``package.json``,
+    ``.codex-plugin/plugin.json`` …) that is actually a symlink to an
+    arbitrary host file. A plain ``open()`` follows it and copies outside
+    file contents into manifest metadata (and downstream finding
+    evidence) — arbitrary file read (F-0361). We:
+
+      * require the realpath of the candidate to stay inside the plugin
+        root (blocks ``..``/symlink escapes via intermediate components);
+      * reject a symlinked final component outright (``lstat``);
+      * open with ``O_NOFOLLOW`` so a final-component symlink that races
+        in between the checks and the open also fails.
+
+    Returns the parsed dict, or ``None`` if the candidate is missing,
+    unsafe, unreadable, or not a JSON object.
+    """
+    try:
+        real = os.path.realpath(candidate)
+    except OSError:
+        return None
+    if real != scan_root and not real.startswith(scan_root + os.sep):
+        return None
+    try:
+        st = os.lstat(candidate)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        # Symlinks (S_ISLNK), directories, fifos, devices, etc. are not
+        # acceptable manifests.
+        return None
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(candidate, flags)
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode):
+            return None
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            fd = -1  # ownership transferred to the file object
+            raw_text = fh.read()
+    except OSError:
+        return None
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    try:
+        data = json.loads(raw_text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _manifest_permissions(raw: dict) -> list[str]:
+    """Union of declared permissions from a single manifest dict.
+
+    Includes both the top-level ``permissions`` list and a nested
+    ``defenseclaw.permissions`` list so the strictest declared set is
+    considered (F-0241) and when merging across manifests. Order is
+    first-seen; duplicates are dropped so the returned list is stable and
+    free of redundant entries for downstream consumers.
+    """
+    perms: list[str] = []
+    seen: set[str] = set()
+
+    def _add(values: object) -> None:
+        if not isinstance(values, list):
+            return
+        for p in values:
+            if isinstance(p, str) and p not in seen:
+                seen.add(p)
+                perms.append(p)
+
+    _add(raw.get("permissions"))
+    dc = raw.get("defenseclaw")
+    if isinstance(dc, dict):
+        _add(dc.get("permissions"))
+    return perms
+
+
+def _manifest_entrypoints(raw: dict) -> list[str]:
+    """Declared runtime entrypoints from a single manifest dict.
+
+    Covers npm ``main`` and ``bin`` (string or name->path map) plus
+    connector-manifest ``entrypoint``/``entry`` fields. These are the
+    files that actually execute, so they must be force-scanned even when
+    extensionless or under a normally-skipped directory.
+    """
+    eps: list[str] = []
+    main = raw.get("main")
+    if isinstance(main, str) and main.strip():
+        eps.append(main)
+    bin_field = raw.get("bin")
+    if isinstance(bin_field, str) and bin_field.strip():
+        eps.append(bin_field)
+    elif isinstance(bin_field, dict):
+        for value in bin_field.values():
+            if isinstance(value, str) and value.strip():
+                eps.append(value)
+    for key in ("entrypoint", "entry"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            eps.append(value)
+    return eps
+
+
 def _load_manifest(directory: str) -> PluginManifest | None:
+    scan_root = os.path.realpath(directory)
+
+    parsed: list[tuple[dict, str]] = []
     for rel_path, source_label in _MANIFEST_CANDIDATES:
         candidate = os.path.join(directory, rel_path)
-        try:
-            with open(candidate, encoding="utf-8") as fh:
-                raw = json.loads(fh.read())
-            return _normalize_manifest(raw, source_label)
-        except (OSError, json.JSONDecodeError):
+        raw = _safe_read_manifest(candidate, scan_root)
+        if raw is None:
             continue
-    return None
+        parsed.append((raw, source_label))
+
+    if not parsed:
+        return None
+
+    primary_raw, primary_label = parsed[0]
+    manifest = _normalize_manifest(primary_raw, primary_label)
+
+    # When multiple candidate manifests are present, the primary (per
+    # _MANIFEST_CANDIDATES ordering, normally package.json) still defines
+    # identity/metadata, but a benign primary must NOT shadow the
+    # security-relevant declarations of a connector-specific manifest
+    # (F-0362). Union the declared permissions, tools, and entrypoints
+    # across ALL present manifests so the stricter set is always checked.
+    if len(parsed) > 1:
+        _merge_declared_capabilities(manifest, parsed)
+
+    return manifest
+
+
+def _merge_declared_capabilities(
+    manifest: PluginManifest,
+    parsed: list[tuple[dict, str]],
+) -> None:
+    merged_perms: list[str] = []
+    seen_perms: set[str] = set()
+    merged_tools: list[dict] = []
+    merged_entrypoints: list[str] = []
+    seen_entrypoints: set[str] = set()
+
+    for raw, _label in parsed:
+        for perm in _manifest_permissions(raw):
+            if perm not in seen_perms:
+                seen_perms.add(perm)
+                merged_perms.append(perm)
+        tools = raw.get("tools")
+        if isinstance(tools, list):
+            merged_tools.extend(t for t in tools if isinstance(t, dict))
+        for ep in _manifest_entrypoints(raw):
+            if ep not in seen_entrypoints:
+                seen_entrypoints.add(ep)
+                merged_entrypoints.append(ep)
+
+    if merged_perms:
+        manifest.permissions = merged_perms
+    if merged_tools:
+        manifest.tools = merged_tools
+    if merged_entrypoints:
+        manifest.entrypoints = merged_entrypoints
 
 
 def _normalize_manifest(
@@ -238,12 +423,17 @@ def _normalize_manifest(
         source=filename,
     )
 
-    if isinstance(raw.get("permissions"), list):
-        manifest.permissions = raw["permissions"]
-
-    defenseclaw = raw.get("defenseclaw")
-    if isinstance(defenseclaw, dict) and isinstance(defenseclaw.get("permissions"), list):
-        manifest.permissions = defenseclaw["permissions"]
+    # F-0241: UNION the top-level ``permissions`` list with any nested
+    # ``defenseclaw.permissions`` list rather than letting the nested block
+    # REPLACE the top-level one. A malicious manifest could otherwise hide a
+    # dangerous top-level permission (e.g. ``fs:*``) behind an empty/benign
+    # nested ``defenseclaw.permissions`` and dodge the permission checks.
+    # ``_manifest_permissions`` already unions both sources and de-dups while
+    # preserving first-seen ordering, which is what downstream consumers
+    # (check_permissions, _merge_declared_capabilities) expect.
+    merged_perms = _manifest_permissions(raw)
+    if merged_perms:
+        manifest.permissions = merged_perms
 
     if isinstance(raw.get("tools"), list):
         manifest.tools = raw["tools"]
@@ -261,5 +451,9 @@ def _normalize_manifest(
 
     if isinstance(raw.get("scripts"), dict):
         manifest.scripts = raw["scripts"]
+
+    entrypoints = _manifest_entrypoints(raw)
+    if entrypoints:
+        manifest.entrypoints = entrypoints
 
     return manifest

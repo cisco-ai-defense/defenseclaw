@@ -73,3 +73,54 @@ func watchdogTerminate(proc *os.Process) error {
 func watchdogKill(proc *os.Process) error {
 	return proc.Kill()
 }
+
+// watchdogLockOffsetHigh places the advisory lock on a single sentinel byte
+// far beyond any PID-file content, so writeWatchdogPIDInfo's truncate-then-
+// write of the JSON payload (which lives at offset 0) never overlaps — and
+// therefore never conflicts with — the locked region.
+const watchdogLockOffsetHigh = 0x4000_0000
+
+// acquireWatchdogPIDFile opens (creating if missing) the PID file, takes an
+// exclusive non-blocking lock on a sentinel byte via LockFileEx, and writes
+// the JSON fingerprint. The returned file MUST stay open for the watchdog's
+// whole lifetime; closing it releases the lock. Returns an error when
+// another process already holds the lock (DeepSec S3.HIGH_BUG).
+func acquireWatchdogPIDFile(path string, info watchdogPIDInfo) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	ol := &windows.Overlapped{OffsetHigh: watchdogLockOffsetHigh}
+	if err := windows.LockFileEx(windows.Handle(f.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, ol); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := writeWatchdogPIDInfo(f, info); err != nil {
+		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// watchdogIsLocked reports whether the PID-file lock is currently held by
+// another process (the live watchdog). It releases any lock it acquires
+// before returning so the real watchdog child can take it.
+func watchdogIsLocked(path string) (bool, watchdogPIDInfo) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return false, watchdogPIDInfo{}
+	}
+	defer f.Close()
+	ol := &windows.Overlapped{OffsetHigh: watchdogLockOffsetHigh}
+	if err := windows.LockFileEx(windows.Handle(f.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, ol); err != nil {
+		info, _ := readWatchdogPIDInfo(path)
+		return true, info
+	}
+	_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
+	return false, watchdogPIDInfo{}
+}

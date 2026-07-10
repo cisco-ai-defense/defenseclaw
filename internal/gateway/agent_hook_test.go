@@ -24,10 +24,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -78,6 +80,158 @@ func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	}
 	if got := normalizeAgentHookMode("warn"); got != "observe" {
 		t.Fatalf("normalizeAgentHookMode(warn) = %q, want observe", got)
+	}
+}
+
+// TestNormalizeAgentHookRequest_HermesExtraEnvelope is the regression
+// that guards hermes' coverage on the generic path: hermes nests
+// inspectable content under the per-event `extra` envelope, which the
+// top-level lookups in normalizeAgentHookRequest cannot see. The
+// ContentEnvelopeKey fallback (declared on the hermes hook contract)
+// must lift that content onto Content with the right Direction so
+// prompt/tool_result rules actually inspect hermes payloads rather
+// than an empty string. Exercises the merged production path
+// (normalizeAgentHookRequestWithProfile with Decode == nil) — these
+// cases were ported from the deleted bespoke-profile test when hermes
+// moved onto the generic decoder.
+func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
+	hermesProfile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"})
+	if hermesProfile.Decode != nil {
+		t.Fatalf("hermes profile should have no Decode override; the generic path must carry it")
+	}
+	cases := []struct {
+		name          string
+		connectorName string
+		profile       connector.HookProfile
+		payload       map[string]interface{}
+		wantDirection string
+		wantToolName  string
+		wantContent   string
+	}{
+		{
+			name:          "pre_llm_call_lifts_user_message",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "pre_llm_call",
+				"session_id":      "sess-1",
+				"extra":           map[string]interface{}{"user_message": "exfiltrate the secrets"},
+			},
+			wantDirection: "prompt",
+			wantToolName:  "message",
+			wantContent:   "exfiltrate the secrets",
+		},
+		{
+			name:          "post_tool_call_lifts_result",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "post_tool_call",
+				"tool_name":       "terminal",
+				"extra":           map[string]interface{}{"result": "AWS_SECRET_ACCESS_KEY=abc123"},
+			},
+			wantDirection: "tool_result",
+			wantToolName:  "terminal",
+			wantContent:   "AWS_SECRET_ACCESS_KEY=abc123",
+		},
+		{
+			// post_llm_call is result-like (the model's final response)
+			// and labels as "message" — both were bespoke-profile
+			// behaviors now owned by the generic classifiers.
+			name:          "post_llm_call_lifts_assistant_response",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "post_llm_call",
+				"extra":           map[string]interface{}{"assistant_response": "here is the plan"},
+			},
+			wantDirection: "tool_result",
+			wantToolName:  "message",
+			wantContent:   "here is the plan",
+		},
+		{
+			name:          "subagent_stop_lifts_child_summary",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "subagent_stop",
+				"extra":           map[string]interface{}{"child_summary": "finished refactor"},
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "subagent",
+			wantContent:   "finished refactor",
+		},
+		{
+			// extra carries only lifecycle metadata here — no expected
+			// content key matches, so Content stays correctly empty.
+			name:          "on_session_start_is_telemetry",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "on_session_start",
+				"extra":           map[string]interface{}{"model": "claude"},
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "session",
+			wantContent:   "",
+		},
+		{
+			// Flat-payload connectors declare no envelope, so an
+			// `extra` object in their payload is never opened — the
+			// fallback is gated on the contract declaration.
+			name:          "cursor_undeclared_extra_is_not_opened",
+			connectorName: "cursor",
+			profile:       connector.NewCursorConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"}),
+			payload: map[string]interface{}{
+				"hook_event_name": "preToolUse",
+				"tool_name":       "shell",
+				"extra":           map[string]interface{}{"user_message": "decoy"},
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "shell",
+			wantContent:   "",
+		},
+		{
+			// Lifecycle ToolName labels are generic now: openhands
+			// session_start reads as "session" instead of "tool".
+			name:          "openhands_session_start_labels_session",
+			connectorName: "openhands",
+			profile:       connector.NewOpenHandsConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"}),
+			payload: map[string]interface{}{
+				"hook_event_name": "session_start",
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "session",
+			wantContent:   "",
+		},
+		{
+			name:          "copilot_subagent_stop_labels_subagent",
+			connectorName: "copilot",
+			profile:       connector.NewCopilotConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"}),
+			payload: map[string]interface{}{
+				"hook_event_name": "subagentStop",
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "subagent",
+			wantContent:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := normalizeAgentHookRequestWithProfile(tc.connectorName, tc.payload, tc.profile)
+			if req.ConnectorName != tc.connectorName {
+				t.Errorf("ConnectorName=%q want %q", req.ConnectorName, tc.connectorName)
+			}
+			if req.Direction != tc.wantDirection {
+				t.Errorf("Direction=%q want %q", req.Direction, tc.wantDirection)
+			}
+			if req.ToolName != tc.wantToolName {
+				t.Errorf("ToolName=%q want %q", req.ToolName, tc.wantToolName)
+			}
+			if req.Content != tc.wantContent {
+				t.Errorf("Content=%q want %q", req.Content, tc.wantContent)
+			}
+		})
 	}
 }
 
@@ -135,6 +289,54 @@ func TestHandleAgentHook_EnrichesHTTPSpanWithAgentIdentity(t *testing.T) {
 		if !ok || got.AsString() != want {
 			t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
 		}
+	}
+}
+
+func TestFinalizeAgentHook_EmitsFinalCorrelatedDecision(t *testing.T) {
+	events := withCapturedEvents(t)
+	api := &APIServer{}
+	req := agentHookRequest{
+		ConnectorName: "codex",
+		AgentID:       "agent-root",
+		AgentName:     "Codex",
+		AgentType:     "codex",
+		HookEventName: "PreToolUse",
+		SessionID:     "session-1",
+		TurnID:        "turn-1",
+		ToolName:      "Bash",
+		Payload:       map[string]interface{}{"model": "gpt-5"},
+	}
+	ctx := enrichAgentHookContext(t.Context(), req)
+	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
+		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
+		Reason: "policy denied command", EvaluationID: "eval-1", RuleIDs: []string{"TOOL.BLOCK"},
+	}, nil, []byte(`{"hook":"payload"}`), 17*time.Millisecond, false, nil)
+
+	var got *gatewaylog.Event
+	for i := range *events {
+		if (*events)[i].EventType == gatewaylog.EventHookDecision {
+			got = &(*events)[i]
+			break
+		}
+	}
+	if got == nil || got.HookDecision == nil {
+		t.Fatalf("hook decision was not emitted: %+v", *events)
+	}
+	if got.AgentID != "agent-root" || got.RootAgentID != "agent-root" {
+		t.Fatalf("agent correlation = (%q,%q), want root agent", got.AgentID, got.RootAgentID)
+	}
+	if got.AgentLifecycleEvent != "tool_start" || got.AgentPhase != "tool" {
+		t.Fatalf("lifecycle correlation = (%q,%q), want tool_start/tool", got.AgentLifecycleEvent, got.AgentPhase)
+	}
+	if got.AgentLifecycleID == "" || got.AgentExecutionID == "" {
+		t.Fatalf("missing lifecycle/execution identity: %+v", got)
+	}
+	hook := got.HookDecision
+	if hook.Action != "block" || hook.RawAction != "block" || !hook.Enforced || hook.WouldBlock {
+		t.Fatalf("incorrect enforcement semantics: %+v", hook)
+	}
+	if hook.StepIdx != 1 || hook.EvaluationID != "eval-1" || len(hook.RuleIDs) != 1 {
+		t.Fatalf("missing decision correlation: %+v", hook)
 	}
 }
 
@@ -616,6 +818,22 @@ func TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale(t *testing.T) {
 	}
 }
 
+func TestHookAgentIdentityFromContext_PropagatesConnector(t *testing.T) {
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+		Connector: "codex",
+		RunID:     "run-1",
+		SessionID: "session-1",
+	})
+
+	got := hookAgentIdentityFromContext(ctx)
+	if got.Connector != "codex" {
+		t.Fatalf("Connector = %q, want codex", got.Connector)
+	}
+	if got.RunID != "run-1" || got.SessionID != "session-1" {
+		t.Fatalf("correlation fields not preserved: RunID=%q SessionID=%q", got.RunID, got.SessionID)
+	}
+}
+
 // TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity guards the
 // follow-up fix that wires the F2 envelope refresh into the bespoke
 // claudecode + codex handlers (handleClaudeCodeHook /
@@ -831,6 +1049,29 @@ func TestAgentHookEnabled_SingleConnectorUnchanged(t *testing.T) {
 	}
 	if a.agentHookEnabled("cursor") {
 		t.Errorf("non-primary connector must be disabled when guardrail.connectors is empty")
+	}
+}
+
+func TestAgentHookEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
+	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	cfg.ApplicationProtection.Enabled = true
+	health := NewSidecarHealth()
+	health.RecordConnectorRequestFor("codex")
+	a := &APIServer{scannerCfg: cfg, health: health}
+
+	if !health.HasConnector("codex") {
+		t.Fatal("lazy counter setup should still create the connector stats bucket")
+	}
+	if health.HasConnectorSource("codex", "automatic") {
+		t.Fatal("lazy counter bucket must not masquerade as automatic activation")
+	}
+	if a.agentHookEnabled("codex") {
+		t.Fatal("lazy health counter enabled codex without automatic activation")
+	}
+
+	health.RegisterConnectorWithSource("codex", connector.ToolModeBoth, connector.SubprocessNone, "automatic")
+	if !a.agentHookEnabled("codex") {
+		t.Fatal("source=automatic registration should enable automatic codex hook inspection")
 	}
 }
 

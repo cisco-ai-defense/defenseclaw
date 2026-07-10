@@ -325,6 +325,37 @@ def _load_plugin_llm_config() -> dict[str, Any]:
         return {}
 
 
+def _request_redirects_routing(request: dict, defaults: dict) -> bool:
+    """Return True when the request routes to a different endpoint than the
+    resolved default.
+
+    "Routing" is the combination of ``api_base`` (explicit endpoint URL)
+    and the ``provider`` / ``model`` pair (which selects the provider's
+    default endpoint). The model comparison mirrors :func:`call_llm`'s
+    ``provider/model`` stitching so a request that re-states the default
+    routing in a different shape (``provider`` + bare ``model``) is not
+    treated as a redirect.
+    """
+    req_api_base = request.get("api_base")
+    if req_api_base and req_api_base != defaults.get("api_base"):
+        return True
+
+    default_model = defaults.get("model") or ""
+    req_model = (request.get("model") or "").strip()
+    req_provider = (request.get("provider") or "").strip()
+    if req_model:
+        effective = req_model
+        if req_provider and "/" not in req_model:
+            effective = f"{req_provider}/{req_model}"
+        if effective != default_model:
+            return True
+    elif req_provider:
+        default_provider = default_model.split("/", 1)[0] if "/" in default_model else ""
+        if req_provider != default_provider:
+            return True
+    return False
+
+
 def _merge_defaults(request: dict, defaults: dict) -> dict:
     """Layer defaults under explicit request fields.
 
@@ -347,6 +378,23 @@ def _merge_defaults(request: dict, defaults: dict) -> dict:
         value = request.get(req_name)
         if value:
             merged[litellm_name] = value
+
+    # F-0061: do not reuse the operator's resolved default api_key with a
+    # caller-chosen endpoint. When the request redirects routing
+    # (api_base / provider / model) away from the resolved default but does
+    # not supply its own api_key, drop the default key so the trusted
+    # credential is never sent to an endpoint the caller selected. Normal
+    # routing (unchanged) and caller-supplied keys are preserved.
+    if (
+        defaults.get("api_key")
+        and not request.get("api_key")
+        and _request_redirects_routing(request, defaults)
+    ):
+        merged.pop("api_key", None)
+        _debug(
+            "dropped resolved default api_key: request redirects routing to a "
+            "caller-chosen endpoint without supplying its own key"
+        )
     return merged
 
 

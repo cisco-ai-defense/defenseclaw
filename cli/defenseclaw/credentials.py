@@ -123,8 +123,30 @@ class CredentialSpec:
 # would add capability but the operator can run without it".
 
 
-def _openclaw_gateway_token(_cfg: Config) -> Requirement:
-    # The gateway always needs an auth token to talk to OpenClaw.
+def _connector_name(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "")
+
+
+def _openclaw_gateway_token(cfg: Config) -> Requirement:
+    guardrail = getattr(cfg, "guardrail", None)
+    connectors = getattr(guardrail, "connectors", {}) if guardrail is not None else {}
+    if isinstance(connectors, dict) and connectors:
+        return (
+            Requirement.REQUIRED
+            if any(_connector_name(name) == "openclaw" for name in connectors)
+            else Requirement.NOT_USED
+        )
+
+    guardrail_connector = getattr(guardrail, "connector", "") if guardrail is not None else ""
+    if str(guardrail_connector or "").strip():
+        return Requirement.REQUIRED if _connector_name(guardrail_connector) == "openclaw" else Requirement.NOT_USED
+
+    claw = getattr(cfg, "claw", None)
+    claw_mode = getattr(claw, "mode", "")
+    if str(claw_mode or "").strip():
+        return Requirement.REQUIRED if _connector_name(claw_mode) == "openclaw" else Requirement.NOT_USED
+
+    # Old configs defaulted to OpenClaw when no connector was specified.
     # We auto-detect it from ~/.openclaw/openclaw.json when available,
     # but it is still required — "REQUIRED but auto-detected" is shown
     # in the keys list UX as a friendly hint.
@@ -152,7 +174,7 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
 
     gc = getattr(cfg, "guardrail", None)
     if gc is not None and getattr(gc, "enabled", False):
-        if needs_key("guardrail"):
+        if _guardrail_proxy_uses_llm(cfg) and needs_key("guardrail"):
             return True
         judge = getattr(gc, "judge", None)
         if judge is not None and getattr(judge, "enabled", False) and needs_key("guardrail.judge"):
@@ -171,6 +193,44 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
                 if needs_key("scanners.mcp"):
                     return True
     return False
+
+
+_HOOK_POLICY_ONLY_CONNECTORS = frozenset(
+    {
+        "codex",
+        "claudecode",
+        "hermes",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+        "omnigent",
+    }
+)
+
+
+def _guardrail_proxy_uses_llm(cfg: Config) -> bool:
+    """Whether any enabled connector sends LLM traffic through the proxy."""
+    gc = getattr(cfg, "guardrail", None)
+    connectors = getattr(gc, "connectors", {}) if gc is not None else {}
+    if isinstance(connectors, dict) and connectors:
+        active: list[str] = []
+        for name, override in connectors.items():
+            if getattr(override, "enabled", None) is False:
+                continue
+            active.append(_connector_name(name))
+        if active:
+            return any(name not in _HOOK_POLICY_ONLY_CONNECTORS for name in active)
+
+    connector = _connector_name(getattr(gc, "connector", "") if gc is not None else "")
+    if not connector:
+        claw = getattr(cfg, "claw", None)
+        connector = _connector_name(getattr(claw, "mode", ""))
+    # An unconfigured legacy install historically defaults to OpenClaw.
+    return not connector or connector not in _HOOK_POLICY_ONLY_CONNECTORS
 
 
 def _defenseclaw_llm_key(cfg: Config) -> Requirement:
@@ -235,6 +295,32 @@ def _splunk_token(cfg: Config) -> Requirement:
     if sp is None or not getattr(sp, "enabled", False):
         return Requirement.NOT_USED
     return Requirement.REQUIRED
+
+
+def _galileo_key(cfg: Config) -> Requirement:
+    otel = getattr(cfg, "otel", None)
+    if not getattr(otel, "enabled", False):
+        return Requirement.NOT_USED
+    for destination in getattr(otel, "destinations", ()) or ():
+        if (
+            getattr(destination, "preset", "") == "galileo"
+            and getattr(destination, "enabled", False)
+        ):
+            return Requirement.REQUIRED
+    return Requirement.NOT_USED
+
+
+def _galileo_endpoint(cfg: Config) -> str:
+    otel = getattr(cfg, "otel", None)
+    if not getattr(otel, "enabled", False):
+        return ""
+    for destination in getattr(otel, "destinations", ()) or ():
+        if (
+            getattr(destination, "preset", "") == "galileo"
+            and getattr(destination, "enabled", False)
+        ):
+            return str(getattr(destination, "endpoint", "") or "")
+    return ""
 
 
 def _inspect_llm_key(cfg: Config) -> Requirement:
@@ -370,6 +456,13 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         description="Splunk HEC token for audit forwarding",
         required=_splunk_token,
         effective_env_name=_splunk_env,
+    ),
+    CredentialSpec(
+        env_name="GALILEO_API_KEY",
+        feature="observability.galileo",
+        description="Galileo API key for OTLP trace export",
+        required=_galileo_key,
+        bound_endpoint=_galileo_endpoint,
     ),
     CredentialSpec(
         env_name="DEFENSECLAW_SKILL_SCANNER_LLM_KEY",

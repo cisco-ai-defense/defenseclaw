@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cisco.secureclient.defenseclaw.hook-guardian</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway</string>
+    <string>enterprise</string>
+    <string>hooks</string>
+    <string>reconcile</string>
+    <string>--manifest</string>
+    <string>/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/cisco/secureclient/defenseclaw</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DEFENSECLAW_HOME</key>
+    <string>/opt/cisco/secureclient/defenseclaw</string>
+    <key>DEFENSECLAW_CONFIG</key>
+    <string>/opt/cisco/secureclient/defenseclaw/etc/config.yaml</string>
+    <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
+    <string>managed_enterprise</string>
+    <key>DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR</key>
+    <string>/opt/cisco/secureclient/defenseclaw/hook-guardian-state</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/hook-guardian.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/hook-guardian.err.log</string>
+</dict>
+</plist>

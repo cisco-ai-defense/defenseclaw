@@ -12,10 +12,9 @@
 """Regression tests for the ``setup codex`` / ``setup claude-code`` aliases.
 
 These aliases configure DefenseClaw for hook-only operation against a
-single connector (Codex / Claude Code) and flip ``claw.mode`` so the
-rest of the CLI/TUI surfaces the matching connector's source-of-truth
-files (``~/.codex`` / ``~/.claude``) instead of the OpenClaw default
-layout.
+connector set (Codex / Claude Code) so the rest of the CLI/TUI surfaces
+the matching connector's source-of-truth files (``~/.codex`` /
+``~/.claude``).
 
 The tests pin two architectural invariants:
 
@@ -48,6 +47,18 @@ from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup import setup as setup_group
 
 from tests.helpers import cleanup_app, make_app_context
+
+HOOK_ALIAS_CONNECTORS = (
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "openhands",
+    "antigravity",
+    "opencode",
+    "omnigent",
+)
 
 
 def _invoke(args: list[str], app):
@@ -129,7 +140,13 @@ class TestSetupCodexAlias(unittest.TestCase):
         self.assertTrue(gc.enabled)
         self.assertEqual(gc.mode, "observe")
         self.assertEqual(gc.scanner_mode, "local")
-        self.assertEqual(gc.detection_strategy, "regex_only")
+        # SU-02/ND-1: hook setup no longer clobbers detection_strategy down to
+        # regex_only — it preserves the documented dataclass default
+        # (regex_judge), so a later `guardrail judge add` survives a setup
+        # re-run. The per-direction completion strategy is still seeded
+        # (regex_only) only when unset.
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_only")
         self.assertFalse(gc.judge.enabled)
 
     def test_writes_picked_connector_hint(self):
@@ -255,7 +272,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_new_aliases_pin_observability_connector(self):
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -284,6 +301,15 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(self.app.cfg.guardrail.mode, "observe")
                 self.assertEqual(self.app.cfg.guardrail.scanner_mode, "local")
                 self.assertFalse(self.app.cfg.guardrail.judge.enabled)
+                self.assertIn(f"Connector {connector!r} configured", result.output)
+                self.assertNotIn("claw.mode=", result.output)
+                self.assertNotIn("claw.mode:", result.output)
+                self.assertIn(f"{connector} mode=observe", result.output)
+                self.assertIn(f"defenseclaw setup {connector} --mode action", result.output)
+                self.assertNotIn("Active connector set", result.output)
+                self.assertNotIn("guardrail.mode=observe", result.output)
+                self.assertNotIn("guardrail.mode:", result.output)
+                self.assertNotIn("set guardrail.mode=action", result.output)
                 restart_mock.assert_not_called()
 
                 hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
@@ -291,7 +317,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     self.assertEqual(fh.read().strip(), connector)
 
     def test_new_aliases_support_hook_action_mode(self):
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -318,13 +344,50 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(self.app.cfg.claw.workspace_dir, "")
                 self.assertTrue(self.app.cfg.guardrail.enabled)
                 self.assertEqual(self.app.cfg.guardrail.mode, "action")
-                self.assertIn("guardrail.mode=action", result.output)
+                self.assertIn(f"{connector} mode=action", result.output)
+                self.assertNotIn("guardrail.mode=action", result.output)
+                self.assertNotIn("guardrail.mode:", result.output)
+                self.assertIn(f"defenseclaw setup {connector} --mode observe", result.output)
+                self.assertNotIn("set guardrail.mode=observe", result.output)
                 version_mock.assert_called_with(
                     connector,
                     mode="action",
                     data_dir=self.app.cfg.data_dir,
+                    _allow_prompt=False,
                 )
                 restart_mock.assert_not_called()
+
+    def test_yes_no_restart_setup_does_not_reference_missing_interactive_flag(self):
+        for connector in ["hermes", "codex", "opencode"]:
+            with (
+                self.subTest(connector=connector),
+                patch(
+                    "defenseclaw.commands.cmd_setup._restart_services",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    return_value=True,
+                ) as version_mock,
+            ):
+                self.app.cfg.claw.mode = "openclaw"
+                self.app.cfg.guardrail.connector = "openclaw"
+                self.app.cfg.guardrail.connectors = {}
+                result = _invoke([connector, "--yes", "--no-restart"], self.app)
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(self.app.cfg.guardrail.connector, connector)
+                self.assertNotIn("NameError", result.output)
+                version_mock.assert_called_with(
+                    connector,
+                    mode="observe",
+                    data_dir=self.app.cfg.data_dir,
+                    _allow_prompt=False,
+                )
 
     def test_alias_workspace_option_pins_workspace(self):
         workspace = os.path.join(self.tmp_dir, "repo")
@@ -368,13 +431,36 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
     def test_setup_help_lists_new_alias_commands(self):
         result = _invoke(["--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             self.assertIn(connector, result.output)
+        self.assertIn("codex, claudecode", result.output)
+        self.assertIn("hermes, antigravity", result.output)
+        self.assertIn("OpenClaw/ZeptoClaw use the proxy path", result.output)
+        self.assertNotIn("antigravity, openclaw", result.output)
+        self.assertNotIn("openclaw) tracked under guardrail.connectors", result.output)
+
+    def test_hook_help_uses_connector_set_wording(self):
+        for connector in ("codex", "claude-code", *HOOK_ALIAS_CONNECTORS):
+            with self.subTest(connector=connector):
+                result = _invoke([connector, "--help"], self.app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertIn("hook connector set", result.output)
+                self.assertNotIn("Pins the active connector", result.output)
+                self.assertNotIn("Pins claw.mode", result.output)
+                self.assertNotIn("OpenClaw default layout", result.output)
+
+    def test_omnigent_help_describes_policy_api_not_pretool_hooks(self):
+        result = _invoke(["omnigent", "--help"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("custom policy API", result.output)
+        self.assertIn("approval verdict", result.output)
+        self.assertNotIn("PreToolUse deny", result.output)
+        self.assertNotIn("pre-tool hook", result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
         result = _invoke(["guardrail", "--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             self.assertIn(connector, result.output)
         self.assertNotIn("openclaw, claudecode, codex, zeptoclaw", result.output)
 
@@ -663,6 +749,173 @@ class TestConnectorRulePackFlag(unittest.TestCase):
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.rule_pack_dir, "")
         self.assertEqual(gc.connectors, {})
+
+    # ------------------------------------------------------------------
+    # R1 — free-text --rule-pack-dir (CLI parity with the TUI's free-text
+    # field). The directory follows the SAME global-vs-per-connector
+    # scoping as the preset --rule-pack.
+    # ------------------------------------------------------------------
+
+    def test_rule_pack_dir_sets_global_on_sole_connector(self):
+        # Codex is the only (hook) connector -> replace -> the free-text
+        # dir lands on the GLOBAL rule_pack_dir, anchored absolute.
+        custom = os.path.join(self.tmp_dir, "my-pack")
+        os.makedirs(custom, exist_ok=True)
+        result = self._run(
+            "codex", "--yes", "--no-restart", "--rule-pack-dir", custom
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.rule_pack_dir, os.path.abspath(custom))
+        self.assertEqual(gc.connectors, {})
+
+    def test_rule_pack_dir_per_connector_override(self):
+        # codex (sole -> global preset), then claude-code with a free-text
+        # dir (now a peer -> per-connector override). codex inherits the
+        # global strict pack; claudecode runs the custom dir.
+        custom = os.path.join(self.tmp_dir, "cc-pack")
+        os.makedirs(custom, exist_ok=True)
+        r1 = self._run("codex", "--yes", "--no-restart", "--rule-pack", "strict")
+        self.assertEqual(r1.exit_code, 0, msg=r1.output)
+        r2 = self._run(
+            "claude-code", "--yes", "--no-restart", "--rule-pack-dir", custom
+        )
+        self.assertEqual(r2.exit_code, 0, msg=r2.output)
+
+        gc = self.app.cfg.guardrail
+        self.assertEqual(set(gc.connectors), {"codex", "claudecode"})
+        # codex has no override -> inherits the global strict pack.
+        self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
+        # claudecode carries its own free-text dir override (absolute).
+        self.assertEqual(
+            gc.connectors["claudecode"].rule_pack_dir, os.path.abspath(custom)
+        )
+        # The resolver the gateway uses at boot reflects both.
+        self.assertTrue(
+            gc.effective_rule_pack_dir("codex").endswith(
+                os.path.join("guardrail", "strict")
+            )
+        )
+        self.assertEqual(
+            gc.effective_rule_pack_dir("claudecode"), os.path.abspath(custom)
+        )
+
+    def test_rule_pack_dir_missing_is_rejected(self):
+        custom = os.path.join(self.tmp_dir, "missing-pack")
+        result = self._run(
+            "codex", "--yes", "--no-restart", "--rule-pack-dir", custom
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--rule-pack-dir", result.output)
+        self.assertIn("does not exist", result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(gc.connectors, {})
+
+    def test_rule_pack_and_rule_pack_dir_are_mutually_exclusive(self):
+        # Naming a pack two ways in one invocation is the one-input-two-
+        # meanings ambiguity R3 removes — reject it loudly, write nothing.
+        result = self._run(
+            "codex",
+            "--yes",
+            "--no-restart",
+            "--rule-pack",
+            "strict",
+            "--rule-pack-dir",
+            os.path.join(self.tmp_dir, "x"),
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("mutually exclusive", result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(gc.connectors, {})
+
+    def test_rule_pack_dir_empty_string_clears_global(self):
+        # Seed a global pack, then `--rule-pack-dir ""` explicitly clears
+        # the override back to the inherited/built-in default.
+        r1 = self._run("codex", "--yes", "--no-restart", "--rule-pack", "strict")
+        self.assertEqual(r1.exit_code, 0, msg=r1.output)
+        self.assertTrue(self.app.cfg.guardrail.rule_pack_dir)
+        r2 = self._run("codex", "--yes", "--no-restart", "--rule-pack-dir", "")
+        self.assertEqual(r2.exit_code, 0, msg=r2.output)
+        self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
+
+
+class TestGuardrailRulePackScoping(unittest.TestCase):
+    """R3 — ``setup guardrail --connector X --rule-pack`` scopes per-connector.
+
+    The hook aliases (``setup codex`` etc.) already write a per-connector
+    override when the connector is a multi-install peer. R3 makes the proxy/
+    global ``setup guardrail`` command agree: a named connector that owns an
+    override block gets the pack written there, not silently onto the global
+    field. Tested at the shared ``_apply_guardrail_extra_options`` helper so
+    the scoping rule is pinned independent of the heavy command machinery.
+    """
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _apply(self, **kwargs):
+        from defenseclaw.commands.cmd_setup import _apply_guardrail_extra_options
+
+        _apply_guardrail_extra_options(
+            self.app,
+            self.app.cfg.guardrail,
+            human_approval=None,
+            hilt_min_severity=None,
+            disable_redaction=None,
+            **kwargs,
+        )
+
+    def test_named_peer_with_block_scopes_per_connector(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        # Simulate a multi-install where hermes owns an override block.
+        gc.connectors = {"hermes": PerConnectorGuardrailConfig()}
+        self._apply(rule_pack="strict", connector="hermes")
+        # Pack went to the per-connector block, NOT the global field (R3).
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertTrue(
+            gc.connectors["hermes"].rule_pack_dir.endswith(
+                os.path.join("guardrail", "strict")
+            )
+        )
+
+    def test_named_connector_without_block_falls_back_to_global(self):
+        gc = self.app.cfg.guardrail
+        # No per-connector block (single-connector / proxy shape) -> global,
+        # matching the pre-R3 behavior so single installs are unchanged.
+        self._apply(rule_pack="permissive", connector="openclaw")
+        self.assertEqual(gc.connectors, {})
+        self.assertTrue(
+            gc.rule_pack_dir.endswith(os.path.join("guardrail", "permissive"))
+        )
+
+    def test_rule_pack_dir_scopes_like_preset(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        gc.connectors = {"hermes": PerConnectorGuardrailConfig()}
+        custom = os.path.join(self.tmp_dir, "hermes-pack")
+        os.makedirs(custom, exist_ok=True)
+        self._apply(rule_pack=None, rule_pack_dir=custom, connector="hermes")
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(
+            gc.connectors["hermes"].rule_pack_dir, os.path.abspath(custom)
+        )
+
+    def test_no_connector_keeps_global_scope(self):
+        # Callers that don't pass a connector (e.g. the TUI wizard) keep the
+        # historical global write — the new param is opt-in.
+        gc = self.app.cfg.guardrail
+        self._apply(rule_pack="default")
+        self.assertTrue(
+            gc.rule_pack_dir.endswith(os.path.join("guardrail", "default"))
+        )
 
 
 if __name__ == "__main__":

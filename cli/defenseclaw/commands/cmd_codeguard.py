@@ -95,17 +95,24 @@ def install_cmd(app: AppContext, connector_flag: str, target: str, replace: bool
 
 
 @codeguard.command("install-skill")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Connector to install into (default: every active connector).",
+)
 @pass_ctx
-def install_skill_cmd(app: AppContext) -> None:
+def install_skill_cmd(app: AppContext, connector_flag: str) -> None:
     """Backward-compatible alias for ``codeguard install --target skill``.
 
-    Like ``codeguard install``, installs into every active connector.
+    Like ``codeguard install --target skill``, installs into every active
+    connector by default; ``--connector <name>`` scopes to one peer.
     """
     from defenseclaw.codeguard_skill import install_codeguard_skill
     from defenseclaw.commands import resolve_list_connectors
 
     failures: list[str] = []
-    for connector in resolve_list_connectors(app, ""):
+    for connector in resolve_list_connectors(app, connector_flag):
         status = install_codeguard_skill(app.cfg, connector=connector)
         click.echo(f"CodeGuard skill [{connector}]: {status}")
         if _is_codeguard_install_error(status):

@@ -576,6 +576,7 @@ func hookAgentIdentityFromContext(ctx context.Context) scanner.AgentIdentity {
 		RequestID:         env.RequestID,
 		SessionID:         env.SessionID,
 		TraceID:           env.TraceID,
+		Connector:         env.Connector,
 	}
 }
 
@@ -601,12 +602,13 @@ func ruleFindingsToInspect(in []RuleFinding) []scanner.InspectFinding {
 	out := make([]scanner.InspectFinding, 0, len(in))
 	for _, f := range in {
 		out = append(out, scanner.InspectFinding{
-			RuleID:     f.RuleID,
-			Title:      f.Title,
-			Severity:   scanner.Severity(f.Severity),
-			Confidence: f.Confidence,
-			Evidence:   f.Evidence,
-			Tags:       f.Tags,
+			RuleID:              f.RuleID,
+			Title:               f.Title,
+			Severity:            scanner.Severity(f.Severity),
+			Confidence:          f.Confidence,
+			Evidence:            f.Evidence,
+			Tags:                f.Tags,
+			ToolCapabilityClass: f.ToolCapabilityClass,
 		})
 	}
 	return out

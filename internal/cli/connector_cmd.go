@@ -183,6 +183,36 @@ func resolveConnectorDataDir() string {
 	return ""
 }
 
+// newConnectorRegistryWithPlugins mirrors the sidecar startup path
+// (NewGuardrailProxy / APIServer.Run) by registering both the
+// built-in connectors AND any plugin connectors discovered under the
+// configured plugin directory. ("Connector lifecycle
+// commands cannot operate on plugin connectors"): without this, a
+// plugin connector named in active_connector.json or via --connector
+// is reported as unknown by `connector teardown` and `connector
+// verify`, leaving plugin-owned hooks and config patches behind on
+// uninstall.
+//
+// Plugin discovery failures are logged and tolerated: built-in
+// connectors should still resolve so an unrelated plugin error never
+// blocks `teardown openclaw` etc.
+func newConnectorRegistryWithPlugins() *connector.Registry {
+	reg := connector.NewDefaultRegistry()
+	if cfg == nil {
+		return reg
+	}
+	pluginDir := strings.TrimSpace(cfg.PluginDir)
+	if pluginDir == "" {
+		return reg
+	}
+	if err := reg.DiscoverPlugins(pluginDir); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"connector cli: plugin discovery in %q failed: %v\n",
+			pluginDir, err)
+	}
+	return reg
+}
+
 // resolveConnectorOpts builds the SetupOpts used by Teardown/VerifyClean.
 // APIToken / ProxyAddr / APIAddr are filled in best-effort from cfg —
 // teardown does not need them, but VerifyClean for some connectors checks
@@ -215,7 +245,7 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	}
 	name := resolveActiveConnectorName(dataDir)
 
-	reg := connector.NewDefaultRegistry()
+	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
 	if !ok {
 		return fmt.Errorf("connector teardown: unknown connector %q (known: %s)",
@@ -259,7 +289,7 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	}
 	name := resolveActiveConnectorName(dataDir)
 
-	reg := connector.NewDefaultRegistry()
+	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
 	if !ok {
 		// Map "unknown connector" to exit code 2 (config error), distinct

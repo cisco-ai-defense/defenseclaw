@@ -19,7 +19,7 @@ DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It s
 <Cards>
   <Card title="Observe" description="Log everything, block nothing. Use this for the first week." />
   <Card title="Action" description="Block on HIGH and CRITICAL. CRITICAL always wins." />
-  <Card title="HITL" description="Pause risky actions for a human. Native ask on Claude Code, Cursor, Copilot CLI, OpenClaw; downgraded confirm elsewhere." />
+  <Card title="HITL" description="Pause eligible actions on native-ask events. Other connector events preserve the confirm intent in audit and apply an immediate fallback." />
 </Cards>
 
 ## Why a separate sidecar?

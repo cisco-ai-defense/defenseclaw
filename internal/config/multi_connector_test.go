@@ -24,7 +24,8 @@ import (
 
 // TestActiveConnectors_Precedence pins the multi-connector resolution
 // order: a non-empty guardrail.connectors map wins (keys sorted), else
-// the singular guardrail.connector, else claw.mode, else "openclaw".
+// the singular guardrail.connector, else claw.mode, else an empty roster
+// for a zero-config install.
 func TestActiveConnectors_Precedence(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -52,8 +53,8 @@ func TestActiveConnectors_Precedence(t *testing.T) {
 			want:     []string{"zeptoclaw"},
 		},
 		{
-			name: "default_openclaw",
-			want: []string{"openclaw"},
+			name: "zero_config_empty_roster",
+			want: nil,
 		},
 		{
 			name:       "whitespace_keys_dropped_then_fallback",
@@ -62,9 +63,20 @@ func TestActiveConnectors_Precedence(t *testing.T) {
 			want:       []string{"codex"},
 		},
 		{
-			name:       "trims_map_keys",
-			connectors: map[string]PerConnectorGuardrailConfig{"  codex  ": {}},
-			want:       []string{"codex"},
+			name: "normalizes_map_keys",
+			connectors: map[string]PerConnectorGuardrailConfig{
+				"  Codex  ":  {},
+				"open-hands": {},
+			},
+			want: []string{"codex", "openhands"},
+		},
+		{
+			name: "dedupes_normalized_aliases",
+			connectors: map[string]PerConnectorGuardrailConfig{
+				"openhands":  {},
+				"open_hands": {},
+			},
+			want: []string{"openhands"},
 		},
 	}
 	for _, tt := range tests {
@@ -104,8 +116,8 @@ func TestActiveConnector_UnchangedByMap(t *testing.T) {
 
 func TestActiveConnectors_NilSafe(t *testing.T) {
 	var cfg *Config
-	if got := cfg.activeConnectors(); !reflect.DeepEqual(got, []string{"openclaw"}) {
-		t.Errorf("nil cfg activeConnectors() = %v, want [openclaw]", got)
+	if got := cfg.activeConnectors(); !reflect.DeepEqual(got, []string(nil)) {
+		t.Errorf("nil cfg activeConnectors() = %v, want nil", got)
 	}
 }
 
@@ -185,8 +197,11 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	if got := g.EffectiveMode(""); got != "observe" {
 		t.Errorf("EffectiveMode empty = %q, want observe", got)
 	}
-	if got := g.EffectiveHookFailModeFor(""); got != "open" {
-		t.Errorf("EffectiveHookFailModeFor empty = %q, want open", got)
+	// An unset hook fail mode now resolves to "closed" (fail-safe / deny
+	// by default): a blank or misconfigured value blocks the tool call
+	// rather than silently allowing it through the response-layer gate.
+	if got := g.EffectiveHookFailModeFor(""); got != "closed" {
+		t.Errorf("EffectiveHookFailModeFor empty = %q, want closed", got)
 	}
 	if got := g.EffectiveBlockMessage(""); got != "" {
 		t.Errorf("EffectiveBlockMessage empty = %q, want empty", got)

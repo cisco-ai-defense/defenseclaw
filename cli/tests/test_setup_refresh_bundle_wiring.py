@@ -28,10 +28,14 @@ tests don't need a real Docker daemon or filesystem-resident bundle.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import stat
 import tempfile
 import unittest
+import uuid
+from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
@@ -46,6 +50,32 @@ def _make_app() -> tuple[AppContext, str]:
     app = AppContext()
     app.cfg = cfg
     return app, tmp_dir
+
+
+def _bridge_env_file(data_dir: str) -> str:
+    return os.path.join(data_dir, "splunk-bridge", "env", ".env")
+
+
+def _read_dotenv(path: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            entries[key] = value
+    return entries
+
+
+def _bridge_up_args(mock_run: MagicMock) -> list[str]:
+    """Return the Splunk bridge `up` argv from mocked subprocess calls."""
+
+    for call in mock_run.call_args_list:
+        args = call.args[0]
+        if len(args) >= 2 and args[1] == "up":
+            return args
+    raise AssertionError("Splunk bridge up command was not invoked")
 
 
 class TestSetupSplunkRefreshWiring(unittest.TestCase):
@@ -107,7 +137,20 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_refresh.assert_called_once_with(self.tmp_dir)
+        env_file = _bridge_env_file(self.tmp_dir)
+        mock_refresh.assert_called_once_with(self.tmp_dir, env_file=env_file)
+        self.assertEqual(
+            _bridge_up_args(mock_run),
+            ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
+        )
+
+        self.assertEqual(stat.S_IMODE(os.stat(env_file).st_mode), 0o600)
+        entries = _read_dotenv(env_file)
+        self.assertEqual(entries["SPLUNK_HEC_TOKEN"], entries["DEFENSECLAW_HEC_TOKEN"])
+        uuid.UUID(entries["SPLUNK_HEC_TOKEN"])
+        self.assertEqual(entries["DEFENSECLAW_INTEGRATION_ENABLED"], "true")
+        self.assertTrue(entries["SPLUNK_PASSWORD"].startswith("DefenseClawLocal-"))
+        self.assertTrue(entries["SPLUNK_PASSWORD"].endswith("!"))
 
     @patch(
         "defenseclaw.commands.cmd_setup._refresh_and_maybe_restart_splunk_bridge",
@@ -157,6 +200,11 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_not_called()
+        env_file = _bridge_env_file(self.tmp_dir)
+        self.assertEqual(
+            _bridge_up_args(mock_run),
+            ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
+        )
 
 
 class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
@@ -195,14 +243,15 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         )
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        result = _refresh_and_maybe_restart_splunk_bridge("/data")
+        env_file = "/data/splunk-bridge/env/.env"
+        result = _refresh_and_maybe_restart_splunk_bridge("/data", env_file=env_file)
 
         self.assertTrue(result.was_running)
         self.assertTrue(result.stopped)
         # The down call must precede the refresh call. Pull the
         # subprocess args to confirm we asked the bridge for `down`.
         self.assertTrue(any(
-            call.args[0] == ["/fake/bin/splunk-claw-bridge", "down"]
+            call.args[0] == ["/fake/bin/splunk-claw-bridge", "down", "--env-file", env_file]
             for call in mock_run.call_args_list
         ))
         mock_refresh.assert_called_once_with("/data")
@@ -305,9 +354,9 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_called_once()
-        # The wiring should pass refresh_config=False unless the user
-        # opts in.
-        self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
+        # The standard setup path should bring host-mounted dashboards,
+        # rules, and collector config up to the latest bundled version.
+        self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
 
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability"
@@ -409,6 +458,99 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_called_once()
         self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
+
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        "._refresh_and_maybe_restart_local_observability",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._run_bridge_up",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._resolve_bridge",
+        return_value="/fake/bin/openclaw-observability-bridge",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        "._apply_local_otlp_audit_sink",
+    )
+    def test_up_no_refresh_config_preserves_local_config(
+        self,
+        _audit: MagicMock,
+        _otlp: MagicMock,
+        _resolve: MagicMock,
+        mock_run_up: MagicMock,
+        _preflight: MagicMock,
+        mock_refresh: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            local_observability,
+        )
+
+        mock_run_up.return_value = {
+            "otlp_endpoint": "127.0.0.1:4317",
+            "otlp_protocol": "grpc",
+        }
+
+        result = self.runner.invoke(
+            local_observability,
+            ["up", "--no-wait", "--no-refresh-config"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_refresh.assert_called_once()
+        self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
+
+
+class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
+    """Direct coverage for local-observability refresh messaging."""
+
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        ".refresh_local_observability_stack",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        ".is_compose_project_running",
+        return_value=False,
+    )
+    def test_preserved_config_hint_is_printed(
+        self,
+        _running: MagicMock,
+        mock_refresh: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            _refresh_and_maybe_restart_local_observability,
+        )
+
+        mock_refresh.return_value = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest="/dest",
+            bundle_source="/src",
+            refreshed=False,
+            preserved_paths=["grafana", "prometheus"],
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _refresh_and_maybe_restart_local_observability(
+                "/data",
+                refresh_config=False,
+            )
+
+        self.assertIn("Preserved local observability config", output.getvalue())
+        self.assertIn("--refresh-config", output.getvalue())
+        self.assertIn("--no-refresh-config", output.getvalue())
 
 
 if __name__ == "__main__":

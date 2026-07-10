@@ -12,6 +12,7 @@ package sinks
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -229,6 +230,67 @@ func TestHTTPJSONLSink_RequeuesOnFailure(t *testing.T) {
 	}
 }
 
+// S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+// deliveries"): with BatchSize=1 (the default for the generic webhook
+// sink), Forward used to call s.send synchronously and return the error
+// without queuing, so a transient collector outage permanently dropped
+// the event. The fix routes BatchSize<=1 through the bounded retry
+// queue. This test verifies the documented contract from the report:
+// "BatchSize=1 fails once, then succeeds on a later Flush."
+func TestHTTPJSONLSink_BatchSize1_FailsThenRedeliversOnFlush(t *testing.T) {
+	srv, records, mu, code := httpEchoServer(t, http.StatusInternalServerError)
+
+	sink, err := NewHTTPJSONLSink(HTTPJSONLConfig{
+		Name:           "siem",
+		URL:            srv.URL,
+		BatchSize:      1,
+		FlushIntervalS: 60, // disable background ticker for deterministic test
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPJSONLSink err=%v", err)
+	}
+	defer sink.Close()
+
+	// First Forward fails — collector returns 500. The previous
+	// implementation returned and the event was lost. The fixed
+	// implementation must keep it in s.batch for retry.
+	if err := sink.Forward(context.Background(),
+		Event{ID: "audit-1", Action: "scan", Severity: "HIGH"}); err == nil {
+		t.Fatal("expected Forward err on 500")
+	}
+
+	sink.mu.Lock()
+	queued := len(sink.batch)
+	sink.mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("after failed Forward, batch must contain 1 event for retry; got %d", queued)
+	}
+
+	// Collector recovers; next Flush MUST redeliver the event we thought
+	// we'd dropped.
+	atomic.StoreInt32(code, http.StatusOK)
+	if err := sink.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush err=%v after recovery", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// At least 2 requests: the failed one and the recovered one.
+	if len(*records) < 2 {
+		t.Fatalf("records=%d want >=2 (1 failure + 1 recovery)", len(*records))
+	}
+	final := (*records)[len(*records)-1]
+	if !strings.Contains(string(final.body), `"id":"audit-1"`) {
+		t.Fatalf("recovered request missing audit-1 — event was dropped: %s", final.body)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.batch) != 0 {
+		t.Fatalf("batch should be empty after successful redelivery; got %d", len(sink.batch))
+	}
+}
+
 func TestHTTPJSONLSink_FilterGatesDelivery(t *testing.T) {
 	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
 	sink, err := NewHTTPJSONLSink(HTTPJSONLConfig{
@@ -311,6 +373,71 @@ func TestMaxHTTPJSONLQueue_HasFloor(t *testing.T) {
 	}
 	if got := maxHTTPJSONLQueue(500); got != 50_000 {
 		t.Fatalf("scaled cap wrong for BatchSize=500: got %d want 50000", got)
+	}
+}
+
+// TestHTTPJSONLSink_TLSSecureByDefault pins the fix: a sink
+// built with the zero-value config (no VerifyTLS, no
+// InsecureSkipVerify) MUST construct an http.Client that verifies TLS
+// certificates. Pre-fix the same shape silently downgraded
+// verification and any bearer token would have been observable to a
+// MITM peer. The legacy “verify_tls“ field is now ignored when set
+// to false; operators that want the old insecure mode must use the
+// new explicit “insecure_skip_verify“ opt-out.
+func TestHTTPJSONLSink_TLSSecureByDefault(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      HTTPJSONLConfig
+		wantSkip bool
+	}{
+		{
+			name:     "zero-value defaults to verify",
+			cfg:      HTTPJSONLConfig{URL: "https://siem.example/ingest"},
+			wantSkip: false,
+		},
+		{
+			name: "legacy verify_tls=true is honoured (no-op vs new default)",
+			cfg: HTTPJSONLConfig{
+				URL: "https://siem.example/ingest", VerifyTLS: true,
+			},
+			wantSkip: false,
+		},
+		{
+			name: "legacy verify_tls=false is IGNORED (new default wins)",
+			cfg: HTTPJSONLConfig{
+				URL: "https://siem.example/ingest", VerifyTLS: false,
+			},
+			wantSkip: false,
+		},
+		{
+			name: "explicit insecure_skip_verify=true honoured (dev opt-out)",
+			cfg: HTTPJSONLConfig{
+				URL: "https://siem.example/ingest", InsecureSkipVerify: true,
+			},
+			wantSkip: true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			sink, err := NewHTTPJSONLSink(tt.cfg)
+			if err != nil {
+				t.Fatalf("NewHTTPJSONLSink err=%v", err)
+			}
+			defer sink.Close()
+			tr, ok := sink.client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("unexpected transport type %T", sink.client.Transport)
+			}
+			if tr.TLSClientConfig == nil {
+				t.Fatal("TLSClientConfig must be set")
+			}
+			if got := tr.TLSClientConfig.InsecureSkipVerify; got != tt.wantSkip {
+				t.Fatalf("InsecureSkipVerify=%v want %v", got, tt.wantSkip)
+			}
+			if tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+				t.Fatalf("MinVersion=%d must be >=TLS1.2", tr.TLSClientConfig.MinVersion)
+			}
+		})
 	}
 }
 

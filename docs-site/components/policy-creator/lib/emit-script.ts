@@ -16,15 +16,20 @@ const HEADER = `#!/usr/bin/env bash
 # Inspect every heredoc below before running. Re-run is idempotent.
 set -euo pipefail
 
-POLICIES_ROOT="\${HOME}/.defenseclaw/policies"
+DC_ROOT="\${DEFENSECLAW_HOME:-\${HOME}/.defenseclaw}"
+POLICIES_ROOT="\${DC_ROOT}/policies"
 mkdir -p "\${POLICIES_ROOT}"
 `;
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 const FOOTER = (name: string) => `
 # Activate the new policy.
-defenseclaw policy activate "${name}"
+defenseclaw policy activate ${shellQuote(name)}
 echo
-echo "Activated policy: ${name}"
+printf 'Activated policy: %s\\n' ${shellQuote(name)}
 `;
 
 // Strip the leading "~/.defenseclaw/policies/" path prefix that emit()

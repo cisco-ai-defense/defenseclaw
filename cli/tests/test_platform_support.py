@@ -59,6 +59,8 @@ HOOK_CONNECTORS = {
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
+    "omnigent",
 }
 
 

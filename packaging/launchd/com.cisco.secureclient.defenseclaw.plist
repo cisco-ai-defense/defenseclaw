@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cisco.secureclient.defenseclaw</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway</string>
+  </array>
+  <!--
+    UserName / GroupName intentionally omitted. launchd runs the
+    daemon as root (uid 0) by default, which is required so the
+    managed cloud auth provider can read and re-perm its per-machine
+    credential store on disk.
+
+    Install layout:
+      /opt/cisco/secureclient/defenseclaw/bin/     — binaries
+      /opt/cisco/secureclient/defenseclaw/etc/     — config
+      /opt/cisco/secureclient/defenseclaw/runtime/ — mutable state
+      /Library/Logs/Cisco/SecureClient/DefenseClaw/ — logs
+  -->
+  <key>WorkingDirectory</key>
+  <string>/opt/cisco/secureclient/defenseclaw</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DEFENSECLAW_HOME</key>
+    <string>/opt/cisco/secureclient/defenseclaw</string>
+    <key>DEFENSECLAW_CONFIG</key>
+    <string>/opt/cisco/secureclient/defenseclaw/etc/config.yaml</string>
+    <key>DEFENSECLAW_DEPLOYMENT_MODE</key>
+    <string>managed_enterprise</string>
+    <key>DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR</key>
+    <string>/opt/cisco/secureclient/defenseclaw/hook-guardian-state</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/gateway.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/gateway.err.log</string>
+</dict>
+</plist>

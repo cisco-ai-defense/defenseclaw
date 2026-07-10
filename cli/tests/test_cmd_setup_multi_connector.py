@@ -168,6 +168,17 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connectors, {})
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
 
+    def test_no_restart_suppresses_parent_auto_restart_for_hook_alias(self):
+        self._seed_map("antigravity", "codex", "hermes", "opencode")
+        with (
+            _setup_patches(),
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True),
+            patch("defenseclaw.commands.cmd_setup._restart_defense_gateway") as bounce,
+        ):
+            result = _invoke(["hermes", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        bounce.assert_not_called()
+
 
 class TestWriteConnectorIdentityUnit(unittest.TestCase):
     """Direct unit tests for the write-mode writer (no Click layer)."""
@@ -244,13 +255,18 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertIn("claudecode", out)
         self.assertIn("codex", out)
         self.assertIn("connectors:", out)
+        self.assertIn("codex mode:", out)
+        self.assertNotIn("guardrail.mode:", out)
         # ...and no '(primary: ...)' callout leaks the back-compat pointer.
         self.assertNotIn("primary:", out)
 
-    def test_single_connector_summary_unchanged(self):
-        self._seed_map("cursor")  # single → claw.mode row, not a roster
+    def test_single_connector_summary_uses_connector_mode_label(self):
+        self._seed_map("cursor")
         out = self._capture_summary("cursor")
-        self.assertIn("claw.mode:", out)
+        self.assertIn("active connector:", out)
+        self.assertIn("cursor mode:", out)
+        self.assertNotIn("claw.mode:", out)
+        self.assertNotIn("guardrail.mode:", out)
         self.assertNotIn("connectors:", out)
         self.assertNotIn("primary:", out)
 
@@ -374,6 +390,14 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
 
+    def test_remove_connector_alias(self):
+        self._seed_map("claudecode", "codex")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "claude-code", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertNotIn("claudecode", self.app.cfg.guardrail.connectors)
+
     # D3=A: --restart bounces the gateway so boot-time set-diff teardown runs.
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")
@@ -401,6 +425,74 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Aborted", result.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
+
+
+class TestPerConnectorModeAndPreserve(unittest.TestCase):
+    """SU-01 (per-connector mode write) + SU-02/ND-1 (preserve judge/strategy,
+    keep the documented detection_strategy default) for the hook setup path."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        # Start from a clean, unconfigured guardrail block.
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.guardrail.connectors = {}
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _setup(self, *args):
+        with _setup_patches():
+            return _invoke([*args, "--yes", "--no-restart"], self.app)
+
+    # --- SU-01: per-connector mode ------------------------------------
+    def test_toggling_one_connector_mode_lands_per_connector(self):
+        # Configure two hook connectors (codex seeded into the map), then flip
+        # codex to action. The action mode must land on codex's OWN override
+        # block, not the shared global field, and the peer must be untouched.
+        self.assertEqual(self._setup("codex", "--mode", "observe").exit_code, 0)
+        self.assertEqual(self._setup("hermes", "--mode", "observe").exit_code, 0)
+        r = self._setup("codex", "--mode", "action")
+        self.assertEqual(r.exit_code, 0, msg=r.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.connectors["codex"].mode, "action")  # written per-connector
+        self.assertEqual(gc.mode, "observe")  # global field NOT flipped to action
+        self.assertEqual(gc.effective_mode("codex"), "action")
+        self.assertEqual(gc.effective_mode("hermes"), "observe")
+
+    def test_pdf_repro_peer_mode_not_flipped(self):
+        # PDF repro: `setup hermes --mode action` then `setup codex` (default
+        # observe). The bug wrote the global mode, so configuring codex flipped
+        # hermes back to observe. hermes must remain action.
+        self.assertEqual(self._setup("hermes", "--mode", "action").exit_code, 0)
+        self.assertEqual(self._setup("codex").exit_code, 0)  # default observe, ADD
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.effective_mode("hermes"), "action")
+        self.assertEqual(gc.effective_mode("codex"), "observe")
+
+    # --- SU-02: preserve operator's judge + strategy ------------------
+    def test_rerun_preserves_enabled_judge_and_strategy(self):
+        gc = self.app.cfg.guardrail
+        gc.connector = "hermes"
+        gc.connectors = {}
+        gc.detection_strategy = "judge_first"
+        gc.detection_strategy_completion = "regex_judge"
+        gc.judge.enabled = True
+        r = self._setup("hermes")
+        self.assertEqual(r.exit_code, 0, msg=r.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.detection_strategy, "judge_first")  # not re-pinned
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")  # preserved
+        self.assertTrue(gc.judge.enabled)  # not silently disabled
+
+    def test_fresh_setup_keeps_documented_regex_judge_default(self):
+        # ND-1: a fresh hook setup no longer clobbers the documented
+        # detection_strategy default (regex_judge) down to regex_only, and does
+        # not force-toggle the judge.
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
+        r = self._setup("hermes")
+        self.assertEqual(r.exit_code, 0, msg=r.output)
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertFalse(self.app.cfg.guardrail.judge.enabled)
 
 
 if __name__ == "__main__":

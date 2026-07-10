@@ -16,6 +16,11 @@ patterns:
       injection exfil path.
     window_events: 30
     severity_on_match: CRITICAL
+    # Order-aware: untrusted ingress must precede sensitive access,
+    # which must precede external egress. This is the true exfil
+    # direction and rejects benign windows where egress happened
+    # before any untrusted content entered the session.
+    ordered: true
     all_of:
       - axis: ingress_untrusted
       - axis: sensitive_access

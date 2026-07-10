@@ -62,7 +62,7 @@ class CheckConnectorResidueTests(unittest.TestCase):
         check = r.checks[0]
         self.assertEqual(check["status"], "warn")
         self.assertIn("codex", check["detail"])
-        self.assertIn("doctor --fix", check["detail"])
+        self.assertIn("defenseclaw-gateway connector teardown --connector <name>", check["detail"])
 
     def test_warns_when_managed_codex_backup_present_with_openclaw_active(self):
         with tempfile.TemporaryDirectory() as data_dir:
@@ -250,6 +250,64 @@ class FixConnectorResidueTests(unittest.TestCase):
                 tag, detail = _fix_connector_residue(cfg, assume_yes=False)
         self.assertEqual(tag, "skip")
         self.assertIn("declined", detail)
+        run_mock.assert_not_called()
+
+
+class MultiConnectorResidueTests(unittest.TestCase):
+    """D7: residue is decided against the FULL ``active_connectors()`` set, not
+    just the singular primary, so a multi-connector install never flags (or
+    tears down) a live connector as residue.
+    """
+
+    def _cfg_multi(self, data_dir: str, actives: list[str]) -> SimpleNamespace:
+        return SimpleNamespace(
+            data_dir=data_dir,
+            claw=SimpleNamespace(config_file=""),
+            active_connectors=lambda: list(actives),
+        )
+
+    def test_active_codex_not_flagged_on_hermes_primary(self):
+        """hermes(primary)+codex: codex_backup.json is a LIVE connector's
+        backup, never residue — the bug was that all-but-primary looked stale."""
+        with tempfile.TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "codex_backup.json"), "w") as fh:
+                fh.write("{}")
+            r = _DoctorResult()
+            _check_connector_residue(
+                self._cfg_multi(data_dir, ["hermes", "codex"]), "hermes", r,
+            )
+        self.assertEqual(r.warned, 0, msg=r.checks)
+        self.assertEqual(r.passed, 1)
+
+    def test_genuinely_inactive_connector_still_flagged(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            for f in ("codex_backup.json", "claudecode_backup.json"):
+                with open(os.path.join(data_dir, f), "w") as fh:
+                    fh.write("{}")
+            r = _DoctorResult()
+            # active={hermes,codex}; claudecode is genuinely inactive residue.
+            _check_connector_residue(
+                self._cfg_multi(data_dir, ["hermes", "codex"]), "hermes", r,
+            )
+        self.assertEqual(r.warned, 1)
+        detail = r.checks[0]["detail"]
+        self.assertIn("claudecode", detail)
+        # codex is active — it must not appear as a residue group.
+        self.assertNotIn("codex:", detail)
+
+    def test_fixer_skips_active_connector(self):
+        """The teardown helper must also exclude the full active set so it can
+        never shell ``connector teardown`` against a live connector."""
+        with tempfile.TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "codex_backup.json"), "w") as fh:
+                fh.write("{}")
+            cfg = self._cfg_multi(data_dir, ["hermes", "codex"])
+            cfg.active_connector = lambda: "hermes"
+            cfg.guardrail = SimpleNamespace(connector="hermes")
+            with patch("subprocess.run") as run_mock:
+                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
+        self.assertEqual(tag, "skip")
+        self.assertIn("no inactive-connector residue", detail)
         run_mock.assert_not_called()
 
 

@@ -9,13 +9,18 @@ keywords:
 
 The Hermes connector wires DefenseClaw into the Hermes agent runtime via `~/.hermes/config.yaml` hooks and discovery surfaces for MCP servers, skills, and plugins.
 
+<Video
+  src="hermes"
+  caption="Three commands against one Hermes Agent session in observe mode, every event reporting into the DefenseClaw gateway: (1) `echo hello` flows through as action=allow / severity=NONE; (2) `chmod 777 /tmp/dc_test` matches CMD-CHMOD-WORLD HIGH — DefenseClaw's finding is injected into the agent's context via Hermes' pre_llm_call hook, so the agent itself explains inline why world-writable + world-executable perms are risky; (3) `cat /etc/shadow` raises a CRITICAL sensitive-file read. Observe mode logs without blocking, so each pre_tool_call / post_tool_call / llm_prompt / session event streams live into the Splunk Connector Activity dashboard filtered to connector=hermes on the right."
+/>
+
 ## Setup
 
 ```bash
 defenseclaw setup hermes
 ```
 
-Pins `claw.mode=hermes`, wires hooks against `~/.hermes/config.yaml`, and discovers existing MCP servers, skills, and plugins. **There is no proxy-enforcement path** for Hermes — blocking happens hook-side via the documented pre-tool-call hook. Hermes has no native human-approval surface, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI.
+`setup hermes` is shorthand for `setup guardrail --connector hermes`: it adds or reconfigures Hermes, wires hooks against `~/.hermes/config.yaml`, and discovers existing MCP servers, skills, and plugins. **There is no proxy-enforcement path** for Hermes — blocking happens hook-side via the documented pre-tool-call hook. Hermes has no native human-approval surface, so confirm verdicts use an immediate system-message fallback with `raw_action` preserved for audit.
 
 #### What `setup hermes` actually does
 
@@ -27,7 +32,7 @@ The wrapper accepts exactly three flags. The underlying guardrail config falls b
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
 
-Pinned by the alias regardless of flags: `claw.mode=hermes`, `guardrail.connector=hermes`, `guardrail.mode=observe`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. To tune any of those after install, use [`defenseclaw setup guardrail --connector hermes`](/docs/setup/guardrail) — see the variations below.
+The alias defaults Hermes to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Hermes after install, keep using [`defenseclaw setup guardrail --connector hermes`](/docs/setup/guardrail) — see the variations below.
 
 #### Common variations — pick the recipe that fits your phase
 
@@ -56,7 +61,7 @@ Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo
 <Tab value="Add scanning rigor">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup hermes                                  # base alias first
 defenseclaw setup guardrail \
@@ -69,7 +74,7 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The alias keeps the connector pinned; the follow-up `setup guardrail` swaps in the strict rule pack, runs both local + [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
+The alias selects Hermes; the follow-up `setup guardrail --connector hermes` swaps in the strict rule pack, runs both local + [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
 
 </Tab>
 
@@ -85,7 +90,7 @@ connector_hooks:
     fail_mode: open       # open | closed
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Hermes' pre-tool-call hook blocks on findings; HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI since Hermes has no native ask surface — make sure operators are reachable there.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Hermes' pre-tool-call hook blocks when policy returns `block`. A `confirm` result falls back to a system message because Hermes has no native ask surface; the TUI can review the audit event but cannot resume the call.
 
 </Tab>
 
@@ -94,8 +99,8 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, He
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Hermes downgrades to confirm verdicts in the TUI / audit log since it has no native ask." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector hermes` after the alias has pinned things." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Hermes has no native ask; confirm uses a system-message fallback preserved in audit." />
+  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector hermes` when tuning Hermes." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
 </Cards>
@@ -122,7 +127,7 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <HookEventsList connector="hermes" />
 
 <Callout>
-Hermes can block supported hook events but has no native human-approval surface; HITL approvals fall back to confirm verdicts in the DefenseClaw TUI / audit log.
+Hermes can block supported hook events but has no native human-approval surface. Confirm verdicts use a system-message fallback with `raw_action` preserved; audit and the TUI are review-only.
 </Callout>
 
 ## Disable

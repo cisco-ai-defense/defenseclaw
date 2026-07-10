@@ -51,3 +51,41 @@ func watchdogTerminate(proc *os.Process) error {
 func watchdogKill(proc *os.Process) error {
 	return proc.Signal(syscall.SIGKILL)
 }
+
+// acquireWatchdogPIDFile opens (creating if missing) the PID file with
+// 0600 perms, takes an exclusive non-blocking flock, and writes the JSON
+// fingerprint. The returned file MUST stay open for the watchdog's whole
+// lifetime; closing it releases the kernel flock. Returns an error when
+// another process already holds the lock (DeepSec S3.HIGH_BUG).
+func acquireWatchdogPIDFile(path string, info watchdogPIDInfo) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := writeWatchdogPIDInfo(f, info); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// watchdogIsLocked reports whether the PID-file flock is currently held by
+// another process (the live watchdog). It always releases any lock it
+// acquires before returning so the real watchdog child can take it.
+func watchdogIsLocked(path string) (bool, watchdogPIDInfo) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return false, watchdogPIDInfo{}
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		info, _ := readWatchdogPIDInfo(path)
+		return true, info
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false, watchdogPIDInfo{}
+}

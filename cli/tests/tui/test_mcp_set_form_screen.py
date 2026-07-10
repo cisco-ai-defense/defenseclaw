@@ -52,18 +52,24 @@ def test_mcp_set_form_field_order_matches_go_oracle() -> None:
 
 
 def test_mcp_set_form_builds_cli_argv_shape() -> None:
+    # F-1821: Command and URL are mutually exclusive. A local command and a
+    # remote URL are scanned differently by the CLI (scanner uses
+    # ``is_local = command and not url``), so a mixed entry would scan the URL
+    # while installing/running the command. Build a single-flag (local) entry.
     result = MCPSetFormValues(
         name="context7",
         command="uvx",
         args="context7-mcp",
-        url="https://example.com/mcp",
-        transport="sse",
+        transport="stdio",
         env="API_KEY=xxx, REGION=us-east-1",
         skip_scan="y",
     ).build_result()
 
     assert result.binary == "defenseclaw"
     assert result.display_name == "mcp set context7"
+    # F-0803: env pairs must NOT be placed in argv (they leak secrets in
+    # process listings). They travel via ``result.env`` and are injected
+    # into the child process environment by the executor.
     assert result.argv == (
         "mcp",
         "set",
@@ -72,16 +78,78 @@ def test_mcp_set_form_builds_cli_argv_shape() -> None:
         "uvx",
         "--args",
         "context7-mcp",
-        "--url",
-        "https://example.com/mcp",
         "--transport",
-        "sse",
-        "--env",
-        "API_KEY=xxx",
-        "--env",
-        "REGION=us-east-1",
+        "stdio",
         "--skip-scan",
     )
+    # The mixed entry never produces both flags.
+    assert not ("--command" in result.argv and "--url" in result.argv)
+    assert "--env" not in result.argv
+    assert all("API_KEY=xxx" not in arg for arg in result.argv)
+    assert result.env == (("API_KEY", "xxx"), ("REGION", "us-east-1"))
+
+def test_mcp_set_form_rejects_mixed_command_and_url() -> None:
+    # F-1821: A mixed command+url entry is scanned remotely (URL) but the local
+    # command is what gets installed/run, so reject it instead of silently
+    # building a both-flags argv.
+    with pytest.raises(MCPSetValidationError, match="exactly one of Command or URL"):
+        MCPSetFormValues(
+            name="context7",
+            command="uvx",
+            args="context7-mcp",
+            url="https://example.com/mcp",
+        ).build_result()
+
+
+def test_mcp_set_form_threads_connector_into_argv() -> None:
+    # B10: an MCP added from a filtered connector view must write to that
+    # connector's config via ``--connector``, not the default/primary one.
+    result = MCPSetFormValues(
+        name="context7",
+        command="uvx",
+        connector="hermes",
+    ).build_result()
+    assert result.argv == (
+        "mcp",
+        "set",
+        "context7",
+        "--command",
+        "uvx",
+        "--connector",
+        "hermes",
+    )
+
+
+def test_mcp_set_form_omits_connector_when_unfocused() -> None:
+    # Empty connector (single-connector install / merged "All" view) keeps the
+    # legacy argv shape so the active connector is targeted exactly as before.
+    result = MCPSetFormValues(name="context7", command="uvx").build_result()
+    assert "--connector" not in result.argv
+
+
+@pytest.mark.asyncio
+async def test_mcp_set_form_screen_carries_connector() -> None:
+    app = MCPSetHarness(initial_name="context7")
+    app._connector = "codex"
+
+    async with app.run_test(size=(120, 44)) as pilot:
+        screen = app.screen
+        assert isinstance(screen, MCPSetFormScreen)
+        screen.connector = "codex"
+        screen.query_one("#mcp-command", Input).value = "uvx"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert app.result is not None
+        assert app.result.argv == (
+            "mcp",
+            "set",
+            "context7",
+            "--command",
+            "uvx",
+            "--connector",
+            "codex",
+        )
 
 
 def test_mcp_set_form_validates_required_fields_and_env_pairs() -> None:
@@ -107,11 +175,12 @@ def test_mcp_set_form_skip_scan_truthy_and_text_editing() -> None:
 
 
 def _fill_screen(screen: MCPSetFormScreen) -> None:
+    # F-1821: Command and URL are mutually exclusive; fill a local-command
+    # entry (no URL) so build_result succeeds.
     screen.query_one("#mcp-name", Input).value = "context7"
     screen.query_one("#mcp-command", Input).value = "uvx"
     screen.query_one("#mcp-args", Input).value = "context7-mcp"
-    screen.query_one("#mcp-url", Input).value = "https://example.com/mcp"
-    screen.query_one("#mcp-transport", Input).value = "sse"
+    screen.query_one("#mcp-transport", Input).value = "stdio"
     screen.query_one("#mcp-env", Input).value = "API_KEY=xxx, REGION=us-east-1"
     screen.query_one("#mcp-skip-scan", Checkbox).value = True
 
@@ -145,6 +214,35 @@ async def test_mcp_set_form_ctrl_s_returns_cli_result() -> None:
 
         assert app.result is not None
         assert app.result.argv == ("mcp", "set", "context7", "--command", "uvx")
+
+
+@pytest.mark.asyncio
+async def test_mcp_set_form_enter_in_field_submits() -> None:
+    app = MCPSetHarness(initial_name="context7")
+
+    async with app.run_test(size=(120, 44)) as pilot:
+        screen = app.screen
+        assert isinstance(screen, MCPSetFormScreen)
+        screen.query_one("#mcp-command", Input).value = "uvx"
+        # on_mount focuses #mcp-name; Enter in a field submits via Input.Submitted.
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result is not None
+        assert app.result.argv == ("mcp", "set", "context7", "--command", "uvx")
+
+
+@pytest.mark.asyncio
+async def test_mcp_set_form_enter_with_invalid_input_keeps_modal_open() -> None:
+    app = MCPSetHarness()  # empty name -> invalid
+
+    async with app.run_test(size=(120, 44)) as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result is None
+        assert isinstance(app.screen, MCPSetFormScreen)
+        assert "name is required" in app.screen.query_one("#mcp-set-status", Static).content
 
 
 @pytest.mark.asyncio

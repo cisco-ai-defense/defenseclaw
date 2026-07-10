@@ -51,9 +51,15 @@ func (t InstallType) String() string { return string(t) }
 
 // InstallEvent is emitted when the watcher detects a new skill or MCP server.
 type InstallEvent struct {
-	Type      InstallType
-	Name      string
-	Path      string
+	Type InstallType
+	Name string
+	Path string
+	// Connector is the owning connector for this install, used to scope
+	// per-connector enforcement on the admit path (most-specific-wins:
+	// connector-scoped state, then the bare global state). Empty ⇒ resolve the
+	// connector from the watcher config (watcherConnectorName) — preserves the
+	// pre-existing global behavior for events that do not tag a connector.
+	Connector string
 	Timestamp time.Time
 }
 
@@ -293,8 +299,21 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 		Type:      installType,
 		Name:      filepath.Base(path),
 		Path:      path,
+		Connector: watcherConnectorName(w.cfg),
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+// eventConnector resolves the connector that owns an install event: the
+// connector tagged on the event when present, otherwise the watcher's own
+// connector (watcherConnectorName). This keeps the admit path correct for
+// events that do not carry a Connector (e.g. the rescan enumerator), which
+// previously always resolved via watcherConnectorName.
+func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
+	if c := strings.TrimSpace(evt.Connector); c != "" {
+		return c
+	}
+	return watcherConnectorName(w.cfg)
 }
 
 // runAdmission applies the full admission gate: block → allow → scan.
@@ -320,6 +339,35 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	_ = w.logger.LogAction(string(audit.ActionInstallDetected), evt.Path,
 		fmt.Sprintf("type=%s name=%s", targetType, evt.Name))
 
+	// Avarice F-2867: an explicit operator allow that recorded a
+	// source_path MUST NOT auto-allow a different on-disk asset
+	// just because it presents the same target name. We consult
+	// the stored entry first; if its source_path differs from
+	// evt.Path we drop the allow and force a fresh scan/decision.
+	if existing, _ := pe.GetAction(targetType, evt.Name); existing != nil {
+		if existing.Actions.Install == "allow" && existing.SourcePath != "" && existing.SourcePath != evt.Path {
+			_ = w.logger.LogAction("install-allow-path-mismatch", evt.Path,
+				fmt.Sprintf("type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
+					targetType, evt.Name, existing.SourcePath, evt.Path))
+			if w.otel != nil {
+				w.otel.EmitPolicyDecision("admission", "allow-path-mismatch", evt.Name, targetType,
+					"allow entry pinned to different source_path; failing closed (F-2867)",
+					map[string]string{
+						"allowed_path":   existing.SourcePath,
+						"presented_path": evt.Path,
+					})
+			}
+			w.enforceBlock(ctx, evt)
+			w.recordAdmission(ctx, "blocked", targetType)
+			res = AdmissionResult{
+				Event:   evt,
+				Verdict: VerdictBlocked,
+				Reason:  "allow entry pinned to different source_path; failing closed (F-2867)",
+			}
+			return res
+		}
+	}
+
 	// Build block/allow lists from the SQLite store for the OPA input.
 	blockList := w.buildListEntries(pe, "block")
 	allowList := w.buildListEntries(pe, "allow")
@@ -328,7 +376,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	assetDecision := w.cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           evt.Name,
-		Connector:      watcherConnectorName(w.cfg),
+		Connector:      w.eventConnector(evt),
 		SourcePath:     evt.Path,
 		RuntimeSurface: "watcher",
 	})
@@ -457,8 +505,23 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if w.otel != nil {
 			w.otel.RecordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
 		}
+		// Avarice F-3187: a scanner error must NOT leave the
+		// freshly-detected install in place. The legacy code
+		// recorded `scan-error` and returned without quarantine,
+		// blocking, or disabling the artifact, so a malicious
+		// skill/plugin that crashed its scanner stayed installed.
+		// Treat scanner failures as fail-closed: enforce a block
+		// (which quarantines + disables per fallback policy) before
+		// surfacing the verdict to the sidecar.
+		w.enforceBlock(ctx, evt)
+		_ = w.logger.LogAction("install-blocked", evt.Path,
+			fmt.Sprintf("type=%s reason=scanner-error scanner=%s (F-3187)",
+				targetType, s.Name()))
 		w.recordAdmission(ctx, "scan-error", targetType)
-		res = AdmissionResult{Event: evt, Verdict: VerdictScanError, Reason: err.Error()}
+		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked,
+			Reason:        fmt.Sprintf("scanner failure (fail-closed): %v", err),
+			InstallAction: "block",
+		}
 		return res
 	}
 

@@ -18,11 +18,13 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 
 from defenseclaw.config import LLMConfig
 from defenseclaw.models import Finding, ScanResult
+from defenseclaw.scanner._llm_env import litellm_model
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import (
     PluginScanOptions,
@@ -89,7 +91,7 @@ class PluginScannerWrapper:
         *,
         policy: str = "",
         profile: str = "",
-        use_llm: bool = False,
+        use_llm: bool | None = None,
         llm_model: str = "",
         llm_api_key: str = "",
         llm_provider: str = "",
@@ -107,6 +109,9 @@ class PluginScannerWrapper:
             options.policy = "permissive"
         if profile:
             options.profile = profile
+        # Thread the --no-meta request through so the MetaAnalyzer is
+        # actually skipped by the scanner pipeline (F-0302).
+        options.disable_meta = disable_meta
 
         # Build the LLM override:
         #   1. Start from the resolved unified LLM config (top-level
@@ -115,8 +120,6 @@ class PluginScannerWrapper:
         #      highest-precedence source because the operator is
         #      pointing a specific flag at this one run.
         override = _llm_to_override(self._llm) or {}
-        if use_llm:
-            override["enabled"] = True
         if llm_model:
             override["model"] = llm_model
         if llm_api_key:
@@ -125,6 +128,34 @@ class PluginScannerWrapper:
             override["provider"] = llm_provider
         if llm_consensus_runs > 0:
             override["consensus_runs"] = llm_consensus_runs
+
+        # P-F: the LLM lane is default-ON whenever a model is configured.
+        #   use_llm is None  → auto: enable iff a model resolves.
+        #   use_llm is True  → force on; loud-degrade to static (YARA/heuristic)
+        #                      with a stderr warning if no model resolves, so a
+        #                      requested-but-unavailable LLM is never a silent
+        #                      clean pass.
+        #   use_llm is False → force off (local analyzers only; --no-llm).
+        # The plugin_scanner orchestrator additionally surfaces a runtime LLM
+        # failure (backend unreachable) as an LLM-SCAN-ERROR finding rather than
+        # swallowing it — see tests/test_plugin_llm_degrade.py.
+        model_configured = bool(override.get("model")) or bool(
+            self._llm and litellm_model(self._llm)
+        )
+        if use_llm is None:
+            if model_configured:
+                override["enabled"] = True
+        elif use_llm:
+            if model_configured:
+                override["enabled"] = True
+            else:
+                print(
+                    "warning: --use-llm requested but no model is configured for "
+                    "scanners.plugin — running static (YARA/heuristic) analysis "
+                    "only. Set llm.model or scanners.plugin.llm to enable the "
+                    "semantic LLM lane.",
+                    file=sys.stderr,
+                )
         if override:
             options.llm_override = override
 

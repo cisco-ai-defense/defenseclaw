@@ -59,6 +59,13 @@ class EntryVerdict:
     command: str = ""
     args: list[str] = field(default_factory=list)
     url: str = ""
+    # F-0346 / F-0807: the connector scope and the archive content
+    # digest are part of an entry's executable shape. Caching them lets
+    # _entry_payload_changed() invalidate a prior trust decision when the
+    # publisher narrows/broadens the connector or swaps the archive
+    # behind an unchanged source_url.
+    connector: str = ""
+    sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         out = {
@@ -70,7 +77,7 @@ class EntryVerdict:
         }
         for key in (
             "severity", "scan_id", "target", "error", "last_scanned_at",
-            "source_url", "transport", "command", "url",
+            "source_url", "transport", "command", "url", "connector", "sha256",
         ):
             value = getattr(self, key)
             if value:
@@ -181,6 +188,8 @@ def load_index(data_dir: str, source_id: str) -> SourceIndex:
             command=str(raw.get("command", "")),
             args=[str(a) for a in (raw.get("args") or [])],
             url=str(raw.get("url", "")),
+            connector=str(raw.get("connector", "")),
+            sha256=str(raw.get("sha256", "")),
         ))
     idx = SourceIndex(
         source_id=str(data.get("source_id", source_id)),
@@ -268,22 +277,64 @@ def merge_manifest_into_index(
         prior = keep.get(key)
         fresh = _verdict_from_entry(entry)
         if prior is not None:
-            # Preserve operator overrides + last successful scan.
-            fresh.approved = prior.approved
-            fresh.rejected = prior.rejected
-            if prior.status in {"clean", "warning", "blocked"}:
-                fresh.status = prior.status
-                fresh.severity = prior.severity
-                fresh.findings = prior.findings
-                fresh.scan_id = prior.scan_id
-                fresh.target = prior.target
-                fresh.last_scanned_at = prior.last_scanned_at
+            # the legacy code matched prior verdicts
+            # by (type, name) only and copied approved/rejected flags
+            # plus prior clean/warning/blocked scan state onto the new
+            # entry. A registry publisher could keep the same name but
+            # change source_url / command / args / url / transport and
+            # inherit a prior trust decision — promotion would then
+            # write the NEW command into asset_policy.mcp.registry.
+            # We drop prior trust state when the executable shape of
+            # the entry has changed.
+            payload_changed = _entry_payload_changed(prior, entry)
+            if not payload_changed:
+                # Preserve operator overrides + last successful scan.
+                fresh.approved = prior.approved
+                fresh.rejected = prior.rejected
+                if prior.status in {"clean", "warning", "blocked"}:
+                    fresh.status = prior.status
+                    fresh.severity = prior.severity
+                    fresh.findings = prior.findings
+                    fresh.scan_id = prior.scan_id
+                    fresh.target = prior.target
+                    fresh.last_scanned_at = prior.last_scanned_at
+            # else: leave fresh as a pending placeholder — payload
+            # diverged, so the operator must re-approve / re-scan.
         new_verdicts.append(fresh)
     idx.verdicts = new_verdicts
     idx.publisher = manifest.publisher
     idx.schema_version = manifest.schema_version
     idx.recount()
     return idx
+
+
+def _entry_payload_changed(prior: EntryVerdict, entry: ManifestEntry) -> bool:
+    """Return True if the executable shape of `entry` differs from
+    `prior` enough that a previous trust decision should not carry
+    over (). We compare every field that affects what
+    the runtime ends up executing/connecting to.
+    """
+    if prior.source_url != entry.source_url:
+        return True
+    if prior.transport != entry.transport:
+        return True
+    if prior.command != entry.command:
+        return True
+    if list(prior.args) != list(entry.args):
+        return True
+    if prior.url != entry.url:
+        return True
+    # F-0346: a connector change re-scopes which assistant the entry can
+    # touch (e.g. codex -> "" broadens it to every connector), so a prior
+    # approval must not carry over.
+    if prior.connector != entry.connector:
+        return True
+    # F-0807: bind the trust decision to the archive contents. A swapped
+    # sha256 behind an unchanged source_url means different bytes get
+    # promoted, so treat a checksum change as a payload change.
+    if prior.sha256 != entry.sha256:
+        return True
+    return False
 
 
 def _verdict_from_entry(entry: ManifestEntry) -> EntryVerdict:
@@ -296,6 +347,8 @@ def _verdict_from_entry(entry: ManifestEntry) -> EntryVerdict:
         command=entry.command,
         args=list(entry.args),
         url=entry.url,
+        connector=entry.connector,
+        sha256=entry.sha256,
     )
 
 

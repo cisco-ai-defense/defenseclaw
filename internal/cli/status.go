@@ -16,7 +16,10 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -133,8 +136,46 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	printConnectors(&snap)
+	if isLocalStatusTarget(bind) {
+		printHookGuardianStatus()
+	}
 
 	return nil
+}
+
+func isLocalStatusTarget(host string) bool {
+	host = strings.TrimSpace(host)
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if hostname, err := os.Hostname(); err == nil && strings.EqualFold(host, hostname) {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return true
+	}
+	for _, addr := range addrs {
+		switch local := addr.(type) {
+		case *net.IPNet:
+			if local.IP.Equal(ip) {
+				return true
+			}
+		case *net.IPAddr:
+			if local.IP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // printConnectors renders the active-connector roster. The HealthSnapshot
@@ -211,6 +252,114 @@ func printConnectorBody(c *gateway.ConnectorHealth) {
 		subBlk)
 }
 
+type hookGuardianStatus struct {
+	Configured   bool                       `json:"-"`
+	StateFile    string                     `json:"state_file,omitempty"`
+	OK           bool                       `json:"ok"`
+	UpdatedAt    string                     `json:"updated_at,omitempty"`
+	Manifest     string                     `json:"manifest,omitempty"`
+	TargetCount  int                        `json:"target_count,omitempty"`
+	SuccessCount int                        `json:"success_count,omitempty"`
+	FailureCount int                        `json:"failure_count,omitempty"`
+	Results      []hookGuardianStatusResult `json:"results,omitempty"`
+}
+
+type hookGuardianStatusResult struct {
+	User      string `json:"user,omitempty"`
+	UserHome  string `json:"user_home,omitempty"`
+	Connector string `json:"connector,omitempty"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+func loadHookGuardianStatus() hookGuardianStatus {
+	state := hookGuardianStatus{}
+	if cfg == nil || strings.TrimSpace(cfg.DataDir) == "" {
+		state.StateFile = "hook_guardian_state.json"
+		return state
+	}
+	state.StateFile = filepath.Join(cfg.DataDir, "hook_guardian_state.json")
+	data, err := os.ReadFile(state.StateFile)
+	if err != nil {
+		return state
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return hookGuardianStatus{StateFile: state.StateFile}
+	}
+	state.Configured = true
+	if state.TargetCount == 0 {
+		state.TargetCount = len(state.Results)
+	}
+	if state.SuccessCount == 0 {
+		for _, row := range state.Results {
+			if row.OK {
+				state.SuccessCount++
+			}
+		}
+	}
+	if state.FailureCount == 0 && state.TargetCount >= state.SuccessCount {
+		state.FailureCount = state.TargetCount - state.SuccessCount
+	}
+	return state
+}
+
+func printHookGuardianStatus() {
+	state := loadHookGuardianStatus()
+	managed := cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.DeploymentMode), "managed_enterprise")
+	if !managed && !state.Configured {
+		return
+	}
+
+	if !state.Configured {
+		printGatewayKV("Hook guardian", Style("not reconciled", "fg=yellow"))
+		fmt.Printf("                %s\n\n", Dim("(no hook_guardian_state.json yet)"))
+		return
+	}
+
+	statusText := Style("healthy", "fg=green")
+	if !state.OK {
+		statusText = Style("attention", "fg=yellow")
+	}
+	statusText += Dim(fmt.Sprintf(" (%d/%d targets ok)", state.SuccessCount, state.TargetCount))
+	if state.FailureCount > 0 {
+		statusText += Dim(fmt.Sprintf(", %d failed", state.FailureCount))
+	}
+	printGatewayKV("Hook guardian", statusText)
+
+	var details []string
+	if state.UpdatedAt != "" {
+		details = append(details, "last run: "+state.UpdatedAt)
+	}
+	if state.Manifest != "" {
+		details = append(details, "manifest: "+state.Manifest)
+	}
+	if len(details) > 0 {
+		fmt.Printf("                %s\n", Dim(strings.Join(details, "  ")))
+	}
+	for i, row := range state.Results {
+		if i >= 8 {
+			break
+		}
+		conn := strings.TrimSpace(row.Connector)
+		label := fmt.Sprintf("%s (%s)", friendlyConnectorName(conn), conn)
+		if user := strings.TrimSpace(row.User); user != "" {
+			label += " for " + user
+		} else if home := strings.TrimSpace(row.UserHome); home != "" {
+			label += " for " + home
+		}
+		if row.OK {
+			fmt.Printf("                  %s — ok\n", label)
+		} else {
+			errText := row.Error
+			if errText == "" {
+				errText = "failed"
+			}
+			fmt.Printf("                  %s — %s\n", label, Style(errText, "fg=yellow"))
+		}
+	}
+	fmt.Println()
+}
+
 // friendlyConnectorName renders a human-friendly connector label for the
 // CLI text output. The table is kept in sync with the Python CLI's
 // _FRIENDLY_CONNECTOR_NAMES (cli/defenseclaw/commands/cmd_status.py) so the
@@ -242,6 +391,8 @@ func friendlyConnectorName(name string) string {
 		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
+	case "omnigent":
+		return "OmniGent"
 	default:
 		s := strings.TrimSpace(name)
 		if s == "" {
@@ -259,10 +410,14 @@ func defaultStr(s, fallback string) string {
 }
 
 type connectorModeSummary struct {
-	Connector      string   `json:"connector"`
-	Mode           string   `json:"mode"`
-	Telemetry      []string `json:"telemetry"`
-	ProxyIntercept bool     `json:"proxy_intercept"`
+	Connector          string   `json:"connector"`
+	Mode               string   `json:"mode"`
+	PolicyMode         string   `json:"policy_mode"`
+	EnforcementSurface string   `json:"enforcement_surface"`
+	Telemetry          []string `json:"telemetry"`
+	ProxyIntercept     bool     `json:"proxy_intercept"`
+	GuardrailMode      string   `json:"guardrail_mode"`
+	HookEnforcement    bool     `json:"hook_enforcement"`
 }
 
 // fetchConnectorModes returns one mode summary per active connector. It
@@ -272,7 +427,28 @@ type connectorModeSummary struct {
 // N-connector install both yield a non-empty slice rendered the same way.
 func fetchConnectorModes(client *http.Client, bind string, port int) []connectorModeSummary {
 	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
-	resp, err := client.Get(addr)
+	req, err := http.NewRequest(http.MethodGet, addr, nil)
+	if err != nil {
+		return nil
+	}
+	// ("Connector mode status fetch omits required
+	// API token"): /status sits behind tokenAuth, which only
+	// exempts GET /health. The previous client.Get call sent no
+	// auth headers and silently swallowed the resulting 401, so
+	// the CLI status command always omitted the connector_mode
+	// section against a normally-configured sidecar. Attach the
+	// resolved gateway token (under both the bearer and the
+	// X-DefenseClaw-Token aliases for compatibility); when the
+	// token cannot be resolved, fall back to the previous
+	// best-effort behaviour rather than error out -- the rest of
+	// `defenseclaw status` is still useful without this section.
+	if cfg != nil {
+		if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-DefenseClaw-Token", token)
+		}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil
 	}
@@ -318,11 +494,38 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 		connectorName = fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
 	}
 	fmt.Printf("    %s%s\n", modeLabel, connectorName)
-	modeLine := Style(fmt.Sprintf("%-18s", "Mode:"), "fg=bright_black", "bold")
-	fmt.Printf("    %s%s\n", modeLine, m.Mode)
+	dataPath := m.Mode
+	if m.Mode == "observability" {
+		dataPath = "direct-to-upstream"
+	} else if m.Mode == "guardrail" {
+		dataPath = "DefenseClaw proxy"
+	}
+	dataPathLine := Style(fmt.Sprintf("%-18s", "Data path:"), "fg=bright_black", "bold")
+	fmt.Printf("    %s%s\n", dataPathLine, dataPath)
+	if m.PolicyMode != "" {
+		policyLine := Style(fmt.Sprintf("%-18s", "Policy mode:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", policyLine, m.PolicyMode)
+	}
+	if m.EnforcementSurface != "" {
+		surface := strings.ReplaceAll(m.EnforcementSurface, "_", " ")
+		surfaceLine := Style(fmt.Sprintf("%-18s", "Enforcement:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", surfaceLine, surface)
+	}
 	if len(m.Telemetry) > 0 {
 		telLabel := Style(fmt.Sprintf("%-18s", "Telemetry:"), "fg=bright_black", "bold")
 		fmt.Printf("    %s%s\n", telLabel, strings.Join(m.Telemetry, ", "))
+	}
+	if m.GuardrailMode != "" {
+		modeLabel := Style(fmt.Sprintf("%-18s", "Guardrail mode:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", modeLabel, m.GuardrailMode)
+	}
+	if !m.ProxyIntercept {
+		hookLabel := Style(fmt.Sprintf("%-18s", "Hook enforcement:"), "fg=bright_black", "bold")
+		hookState := "no"
+		if m.HookEnforcement {
+			hookState = "yes (action-mode hooks can block)"
+		}
+		fmt.Printf("    %s%s\n", hookLabel, hookState)
 	}
 	intercept := "no (traffic flows directly to upstream)"
 	if m.ProxyIntercept {

@@ -1,0 +1,11 @@
+{
+  "id": "malicious-plugin",
+  "name": "Malicious Plugin Fixture",
+  "version": "1.0.0",
+  "description": "Valid OpenClaw plugin fixture with intentionally malicious content for DefenseClaw E2E tests.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

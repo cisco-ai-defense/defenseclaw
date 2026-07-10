@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -73,6 +74,23 @@ func TestEvaluateCodexHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 	}
 	if resp.Severity != "CRITICAL" {
 		t.Errorf("Severity = %q, want CRITICAL", resp.Severity)
+	}
+}
+
+func TestCodexEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
+	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	cfg.ApplicationProtection.Enabled = true
+	health := NewSidecarHealth()
+	health.RecordConnectorRequestFor("codex")
+	api := &APIServer{scannerCfg: cfg, health: health}
+
+	if api.codexEnabled() {
+		t.Fatal("lazy health counter enabled codex without automatic activation")
+	}
+
+	health.RegisterConnectorWithSource("codex", connector.ToolModeBoth, connector.SubprocessNone, "automatic")
+	if !api.codexEnabled() {
+		t.Fatal("source=automatic registration should enable codex inspection")
 	}
 }
 
@@ -476,6 +494,13 @@ func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
 	}
 }
 
+// TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock pins the
+// fix: when AssetPolicy is in action mode and MCP.Default is
+// "deny", an unknown terminal MCP command MUST block even when the
+// secondary `runtime_detection.unknown_terminal_mcp` knob is left at
+// its observe default. Operators that explicitly opt into
+// MCP.Default=deny should not have to discover and override the
+// secondary knob to get default-deny semantics.
 func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
@@ -495,11 +520,9 @@ func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) 
 	}
 	resp := api.evaluateCodexHook(context.Background(), req)
 
-	if resp.Action != "allow" || resp.RawAction != "block" {
-		t.Fatalf("action=%q raw=%q, want allow/block", resp.Action, resp.RawAction)
-	}
-	if !resp.WouldBlock {
-		t.Fatal("unknown terminal MCP should default to would_block")
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block — MCP.Default=deny in action mode must not be silently downgraded by unknown_terminal_mcp=observe",
+			resp.Action, resp.RawAction)
 	}
 }
 

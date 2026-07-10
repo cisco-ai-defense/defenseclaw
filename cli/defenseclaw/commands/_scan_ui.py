@@ -42,7 +42,7 @@ Public surface:
   categories.
 * :func:`render_per_target_status` — prints a single result line.
 * :func:`render_summary` — prints the final tally (clean / blocked /
-  errored / total).
+  findings / errored / total).
 * :func:`render_json_payload` — emits a stable JSON shape; locked
   by snapshot tests in S6.6.
 
@@ -111,6 +111,8 @@ _DEFAULT_CATEGORIES: dict[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 
 VERDICT_CLEAN = "clean"
+VERDICT_WARN = "warn"
+VERDICT_INFO = "info"
 VERDICT_BLOCKED = "blocked"
 VERDICT_QUARANTINED = "quarantined"
 VERDICT_ERROR = "error"
@@ -118,6 +120,8 @@ VERDICT_SKIPPED = "skipped"
 
 _VERDICT_GLYPH: dict[str, str] = {
     VERDICT_CLEAN: "ok",
+    VERDICT_WARN: "WARN",
+    VERDICT_INFO: "INFO",
     VERDICT_BLOCKED: "BLOCKED",
     VERDICT_QUARANTINED: "QUARANTINED",
     VERDICT_ERROR: "ERROR",
@@ -279,6 +283,7 @@ def render_summary(
     blocked: int,
     errored: int,
     total: int,
+    findings: int = 0,
     duration_ms: int | None = None,
 ) -> None:
     """Print the final tally line.
@@ -294,6 +299,8 @@ def render_summary(
         f"clean={clean}",
         f"blocked={blocked}",
     ]
+    if findings:
+        parts.append(f"findings={findings}")
     if errored:
         parts.append(f"errored={errored}")
     if duration_ms is not None and duration_ms >= 0:

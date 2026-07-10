@@ -26,7 +26,7 @@ from defenseclaw.tui.theme import DEFAULT_TOKENS
 MCP_FIELD_ORDER: tuple[str, ...] = ("name", "command", "args", "url", "transport", "env", "skip_scan")
 MCP_FIELD_LABELS: tuple[str, ...] = (
     "Name (required)",
-    "Command (e.g. npx, uvx) - at least one of Command/URL",
+    "Command (e.g. npx, uvx) - exactly one of Command/URL",
     "Args (JSON array or comma-separated)",
     "URL (for SSE/HTTP transport)",
     "Transport (stdio, sse; blank = auto)",
@@ -46,6 +46,10 @@ class MCPSetResult:
     binary: str
     argv: tuple[str, ...]
     display_name: str
+    # Environment variables (``KEY=VAL`` from the Env field) are routed to
+    # the child process environment instead of ``--env KEY=secret`` argv so
+    # secrets never appear in process listings. See F-0803.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,13 @@ class MCPSetFormValues:
     transport: str = ""
     env: str = ""
     skip_scan: bool | str = False
+    # B10: the connector this MCP is being added to. Threaded from the
+    # focused connector in the catalog (the filtered connector, or the
+    # selected row's owner when editing). Empty = no ``--connector`` flag,
+    # so a single-connector install writes to the active connector exactly
+    # as before; a filtered multi-connector view writes to that peer's MCP
+    # config instead of silently defaulting to the primary connector.
+    connector: str = ""
 
     def build_result(self) -> MCPSetResult:
         """Validate and render the form values into `defenseclaw mcp set` argv."""
@@ -71,6 +82,13 @@ class MCPSetFormValues:
         url = self.url.strip()
         if not command and not url:
             raise MCPSetValidationError("one of Command or URL is required")
+        # F-1821: Command and URL are mutually exclusive. A local command and a
+        # remote URL are scanned differently by the CLI, so a mixed entry would
+        # scan one and install/run the other. Build only single-flag argv.
+        if command and url:
+            raise MCPSetValidationError(
+                "provide exactly one of Command or URL, not both"
+            )
 
         argv: list[str] = ["mcp", "set", name]
         if command:
@@ -81,14 +99,26 @@ class MCPSetFormValues:
             argv.extend(("--url", url))
         if transport := self.transport.strip():
             argv.extend(("--transport", transport))
+        # Env pairs carry secrets (API keys, tokens). Keep them OUT of argv
+        # and hand them to the executor as process-environment overrides so
+        # they are not visible in `ps`/process listings. See F-0803.
+        env: list[tuple[str, str]] = []
         for pair in parse_env_pairs(self.env):
-            argv.extend(("--env", pair))
+            key, value = pair.split("=", 1)
+            env.append((key, value))
         if skip_scan_truthy(self.skip_scan):
             argv.append("--skip-scan")
+        # B10: scope the write to the focused connector so an MCP added from
+        # a filtered connector view lands in that connector's config, not the
+        # default/primary one. ``mcp set`` accepts ``--connector`` (see
+        # cmd_mcp.set_server); mirror catalog_state._connector_focus_args.
+        if connector := self.connector.strip():
+            argv.extend(("--connector", connector))
         return MCPSetResult(
             binary="defenseclaw",
             argv=tuple(argv),
             display_name=f"mcp set {name}",
+            env=tuple(env),
         )
 
 
@@ -144,9 +174,13 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
         Binding("ctrl+s", "submit", "Submit", show=False),
     ]
 
-    def __init__(self, initial_name: str = "") -> None:
+    def __init__(self, initial_name: str = "", connector: str = "") -> None:
         super().__init__()
         self.initial_name = initial_name
+        # B10: the connector the add/update targets. Carried into the pure
+        # form values so ``build_result`` can emit ``--connector`` and the
+        # write lands on the focused connector instead of the primary.
+        self.connector = connector
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-set-dialog"):
@@ -184,6 +218,7 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
             transport=self.query_one("#mcp-transport", Input).value,
             env=self.query_one("#mcp-env", Input).value,
             skip_scan=self.query_one("#mcp-skip-scan", Checkbox).value,
+            connector=self.connector,
         )
 
     def action_cancel(self) -> None:
@@ -196,6 +231,13 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
             self.query_one("#mcp-set-status", Static).update(str(exc))
             return
         self.dismiss(result)
+
+    @on(Input.Submitted)
+    def _on_input_submitted(self, event: Input.Submitted) -> None:
+        # Pressing Enter in any field submits the form (matching the Go form
+        # and operator expectation), not just the button or the hidden ctrl+s.
+        event.stop()
+        self.action_submit()
 
     def on_click(self, event: events.Click) -> None:
         if event.widget is self:

@@ -140,7 +140,12 @@ def _dashboard_options(func):
     func = click.option(
         "--o11y-api-token",
         default=None,
-        help="Splunk O11y API access token. Required unless provided explicitly.",
+        envvar="SFX_AUTH_TOKEN",
+        help=(
+            "Splunk O11y API access token. Prefer the SFX_AUTH_TOKEN "
+            "environment variable so the secret never appears in shell "
+            "history or process listings."
+        ),
     )(func)
     func = click.option(
         "--api-url",
@@ -941,13 +946,44 @@ def _resolve_o11y_api_token(o11y_api_token: str | None) -> str:
     if o11y_api_token:
         return o11y_api_token
     raise click.ClickException(
-        "Splunk O11y token not found. Pass --o11y-api-token."
+        "Splunk O11y token not found. Set the SFX_AUTH_TOKEN environment "
+        "variable (preferred) or pass --o11y-api-token."
     )
+
+
+def _validate_api_url(api_url: str) -> str:
+    """Validate an explicitly-supplied O11y API URL before attaching the token.
+
+    ``_api_url_from_ingest_endpoint`` only ever derives ``https://api.<realm>.
+    signalfx.com`` (or ``…observability.splunkcloud.com``) hosts, but an
+    explicit ``--api-url`` / ``SFX_API_URL`` previously bypassed that
+    allowlist, so the ``X-SF-TOKEN`` could be sent to an arbitrary host.
+    Require the same https + Splunk O11y host shape so the token only ever
+    reaches a legitimate Splunk O11y API endpoint (F-0187). Returns the
+    normalised ``https://<host>`` form (path/query/port stripped) so no
+    extra routing can be smuggled in.
+    """
+    parsed = urlsplit(api_url.strip())
+    host = (parsed.hostname or "").lower()
+    host_ok = bool(
+        re.fullmatch(
+            r"api\.[a-z0-9-]+\.(signalfx\.com|observability\.splunkcloud\.com)",
+            host,
+        )
+    )
+    if parsed.scheme != "https" or not host_ok or parsed.port not in (None, 443):
+        raise click.ClickException(
+            f"Refusing to send the Splunk O11y API token to {api_url!r}: "
+            "--api-url / SFX_API_URL must be an https URL to a Splunk O11y API "
+            "host (api.<realm>.signalfx.com or "
+            "api.<realm>.observability.splunkcloud.com).",
+        )
+    return f"https://{host}"
 
 
 def _resolve_api_url(api_url: str | None, app: AppContext | None) -> str:
     if api_url:
-        return api_url
+        return _validate_api_url(api_url)
     for endpoint in _configured_otel_endpoints(app):
         derived = _api_url_from_ingest_endpoint(endpoint)
         if derived:

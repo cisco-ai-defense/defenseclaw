@@ -151,6 +151,15 @@ const (
 	// can join input and output without scraping free-form details.
 	EventToolInvocation EventType = "tool_invocation"
 
+	// EventHookDecision records the connector-facing outcome of one hook
+	// evaluation. It is distinct from EventVerdict: Verdict describes what a
+	// guardrail stage concluded, while HookDecision records what DefenseClaw
+	// actually returned to the agent after enforcement-mode and connector
+	// capability mapping. This lets operators distinguish an enforced block
+	// from an observe-mode would-block and then follow the next lifecycle,
+	// model, or tool event in the same agent execution.
+	EventHookDecision EventType = "hook_decision"
+
 	// EventAIDiscovery records sanitized continuous AI usage discovery
 	// deltas. It is metadata-only: no raw paths, commands, prompt text,
 	// file contents, or secret values.
@@ -294,17 +303,35 @@ type Event struct {
 	//     sidecar's lifetime; changes on every restart. Primarily
 	//     useful for operators debugging which sidecar emitted a
 	//     specific event.
-	AgentID           string `json:"agent_id,omitempty"`
-	AgentName         string `json:"agent_name,omitempty"`
-	AgentType         string `json:"agent_type,omitempty"`
-	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
-	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
-	UserID            string `json:"user_id,omitempty"`
-	UserName          string `json:"user_name,omitempty"`
-	PolicyID          string `json:"policy_id,omitempty"`
-	DestinationApp    string `json:"destination_app,omitempty"`
-	ToolName          string `json:"tool_name,omitempty"`
-	ToolID            string `json:"tool_id,omitempty"`
+	AgentID              string   `json:"agent_id,omitempty"`
+	AgentName            string   `json:"agent_name,omitempty"`
+	AgentType            string   `json:"agent_type,omitempty"`
+	RootAgentID          string   `json:"root_agent_id,omitempty"`
+	ParentAgentID        string   `json:"parent_agent_id,omitempty"`
+	RootSessionID        string   `json:"root_session_id,omitempty"`
+	ParentSessionID      string   `json:"parent_session_id,omitempty"`
+	AgentLifecycleID     string   `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID     string   `json:"agent_execution_id,omitempty"`
+	AgentLifecycleEvent  string   `json:"agent_lifecycle_event,omitempty"`
+	AgentLifecycleState  string   `json:"agent_lifecycle_state,omitempty"`
+	AgentPhase           string   `json:"agent_phase,omitempty"`
+	AgentPreviousPhase   string   `json:"agent_previous_phase,omitempty"`
+	AgentPhaseCode       *int     `json:"agent_phase_code,omitempty"`
+	AgentSequence        int64    `json:"agent_sequence,omitempty"`
+	AgentOperationID     string   `json:"agent_operation_id,omitempty"`
+	AgentDepth           *int     `json:"agent_depth,omitempty"`
+	AgentReportedCostUSD *float64 `json:"agent_reported_cost_usd,omitempty"`
+	AgentReportedCost    *bool    `json:"agent_reported_cost_present,omitempty"`
+	SessionSource        string   `json:"session_source,omitempty"`
+	SessionResumed       *bool    `json:"session_resumed,omitempty"`
+	AgentInstanceID      string   `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID    string   `json:"sidecar_instance_id,omitempty"`
+	UserID               string   `json:"user_id,omitempty"`
+	UserName             string   `json:"user_name,omitempty"`
+	PolicyID             string   `json:"policy_id,omitempty"`
+	DestinationApp       string   `json:"destination_app,omitempty"`
+	ToolName             string   `json:"tool_name,omitempty"`
+	ToolID               string   `json:"tool_id,omitempty"`
 
 	// Connector is the hook/proxy connector that produced this event
 	// (codex, claudecode, antigravity, openclaw, …). Optional —
@@ -365,19 +392,20 @@ type Event struct {
 	PayloadHMAC string `json:"payload_hmac,omitempty"`
 
 	// Type-specific payloads — exactly one is populated.
-	Verdict     *VerdictPayload     `json:"verdict,omitempty"`
-	Judge       *JudgePayload       `json:"judge,omitempty"`
-	Lifecycle   *LifecyclePayload   `json:"lifecycle,omitempty"`
-	Error       *ErrorPayload       `json:"error,omitempty"`
-	Diagnostic  *DiagnosticPayload  `json:"diagnostic,omitempty"`
-	Scan        *ScanPayload        `json:"scan,omitempty"`
-	ScanFinding *ScanFindingPayload `json:"scan_finding,omitempty"`
-	Activity    *ActivityPayload    `json:"activity,omitempty"`
-	Egress      *EgressPayload      `json:"egress,omitempty"`
-	LLMPrompt   *LLMPromptPayload   `json:"llm_prompt,omitempty"`
-	LLMResponse *LLMResponsePayload `json:"llm_response,omitempty"`
-	Tool        *ToolPayload        `json:"tool_invocation,omitempty"`
-	AIDiscovery *AIDiscoveryPayload `json:"ai_discovery,omitempty"`
+	Verdict      *VerdictPayload      `json:"verdict,omitempty"`
+	Judge        *JudgePayload        `json:"judge,omitempty"`
+	Lifecycle    *LifecyclePayload    `json:"lifecycle,omitempty"`
+	Error        *ErrorPayload        `json:"error,omitempty"`
+	Diagnostic   *DiagnosticPayload   `json:"diagnostic,omitempty"`
+	Scan         *ScanPayload         `json:"scan,omitempty"`
+	ScanFinding  *ScanFindingPayload  `json:"scan_finding,omitempty"`
+	Activity     *ActivityPayload     `json:"activity,omitempty"`
+	Egress       *EgressPayload       `json:"egress,omitempty"`
+	LLMPrompt    *LLMPromptPayload    `json:"llm_prompt,omitempty"`
+	LLMResponse  *LLMResponsePayload  `json:"llm_response,omitempty"`
+	Tool         *ToolPayload         `json:"tool_invocation,omitempty"`
+	HookDecision *HookDecisionPayload `json:"hook_decision,omitempty"`
+	AIDiscovery  *AIDiscoveryPayload  `json:"ai_discovery,omitempty"`
 }
 
 // StampPayloadHMAC fills the PayloadHMAC field with HMAC-SHA256 over
@@ -414,6 +442,8 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.LLMResponse)
 	case e.Tool != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.Tool)
+	case e.HookDecision != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.HookDecision)
 	case e.AIDiscovery != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.AIDiscovery)
 	}
@@ -479,6 +509,30 @@ type VerdictPayload struct {
 	RuleIDs []string `json:"rule_ids,omitempty"`
 }
 
+// HookDecisionPayload is the agent-facing decision after the hook runtime
+// applies connector capability and enforcement-mode mapping. Action is what
+// the connector received; RawAction is the guardrail's original result. The
+// two differ for observe-mode would-blocks and non-enforceable hook surfaces.
+// EvaluationID and RuleIDs link this decision to the matching verdict and
+// per-rule scan-finding events without embedding content in the dashboard
+// correlation path.
+type HookDecisionPayload struct {
+	Connector    string   `json:"connector"`
+	Event        string   `json:"event"`
+	Result       string   `json:"result"`
+	Action       string   `json:"action"`
+	RawAction    string   `json:"raw_action"`
+	Severity     Severity `json:"severity"`
+	Mode         string   `json:"mode"`
+	WouldBlock   bool     `json:"would_block"`
+	Enforced     bool     `json:"enforced"`
+	StepIdx      int      `json:"step_idx,omitempty"`
+	LatencyMs    int64    `json:"latency_ms,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
+	EvaluationID string   `json:"evaluation_id,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
+}
+
 // Finding matches the shape guardrail scanners emit. Keep the field
 // set minimal — additional context belongs in the stage-specific
 // JudgePayload or VerdictPayload, not here.
@@ -512,6 +566,17 @@ type JudgePayload struct {
 	Findings    []Finding `json:"findings,omitempty"`
 	RawResponse string    `json:"raw_response,omitempty"`
 	ParseError  string    `json:"parse_error,omitempty"`
+	// InputHash is the SHA-256 of the inspected judge *input*
+	// (the prompt/request bytes the judge was asked to evaluate),
+	// hex-encoded with the "sha256:" prefix when populated.
+	// ("Judge input_hash is computed from the
+	// response body") closure: the persistor previously hashed
+	// RawResponse and stored the resulting digest as InputHash,
+	// breaking dedup/pivot semantics. Callers that have the
+	// inspected bytes available should populate this; the audit
+	// store leaves InputHash empty when this is not provided
+	// rather than hashing the response body.
+	InputHash string `json:"input_hash,omitempty"`
 }
 
 // LifecyclePayload covers sidecar start/stop and config-reload
@@ -719,7 +784,7 @@ type ToolPayload struct {
 //     populated -- they carry no raw paths or unhashed values, only
 //     sha256:* digests and category/vendor/product strings drawn from
 //     the operator-curated catalog.
-//   - The "extended" set (Component, Runtime, Detector, IdentityScore,
+//   - The "extended" set (Component, Model, Runtime, Detector, IdentityScore,
 //     PresenceScore, IdentityFactors, PresenceFactors, Evidence,
 //     RawPaths) is populated *only* when the gateway sees
 //     `privacy.disable_redaction = true`. RawPath inside each
@@ -749,6 +814,7 @@ type AIDiscoveryPayload struct {
 	// payload must check the same flag.
 	Detector        string                `json:"detector,omitempty"`
 	Component       *AIDiscoveryComponent `json:"component,omitempty"`
+	Model           *AIDiscoveryModel     `json:"model,omitempty"`
 	Runtime         *AIDiscoveryRuntime   `json:"runtime,omitempty"`
 	LastActiveAt    string                `json:"last_active_at,omitempty"`
 	IdentityScore   float64               `json:"identity_score,omitempty"`
@@ -769,6 +835,22 @@ type AIDiscoveryComponent struct {
 	Name      string `json:"name,omitempty"`
 	Version   string `json:"version,omitempty"`
 	Framework string `json:"framework,omitempty"`
+}
+
+// AIDiscoveryModel mirrors inventory.LocalModelInfo. It is part of the
+// privacy-gated extended payload because model IDs can contain user-chosen or
+// private repository names. Local `/api/v1/ai-usage` responses still carry the
+// model block regardless of outbound sink redaction.
+type AIDiscoveryModel struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Format    string `json:"format,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Recipe    string `json:"recipe,omitempty"`
+	Modality  string `json:"modality,omitempty"`
+	Device    string `json:"device,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Pinned    bool   `json:"pinned,omitempty"`
 }
 
 // AIDiscoveryRuntime mirrors inventory.ProcessRuntime.

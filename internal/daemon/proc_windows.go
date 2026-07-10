@@ -21,6 +21,7 @@ package daemon
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -81,6 +82,28 @@ func processExists(pid int) bool {
 		return true
 	}
 	return code == stillActive
+}
+
+// processStartIdentity returns an opaque string that uniquely identifies a
+// process for its lifetime, used by verifyProcess() to detect a stale
+// gateway.pid that now points at an unrelated process which reused the PID.
+//
+// On Windows the process creation time (GetProcessTimes) is fixed for the
+// life of the process and differs after PID reuse, so the raw FILETIME is a
+// stable opaque identity. Mirrors the Unix contract: returns ("", err) when
+// the process can't be queried (dead PID or access denied), and callers
+// treat a captured-vs-live mismatch as "not the same process".
+func processStartIdentity(pid int) (string, error) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(h)
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &creation, &exit, &kernel, &user); err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(creation.Nanoseconds(), 10), nil
 }
 
 // killStaleProcesses is a no-op on Windows. pgrep is not available and

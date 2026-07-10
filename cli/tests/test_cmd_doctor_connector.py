@@ -42,7 +42,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -51,9 +51,16 @@ from defenseclaw.commands.cmd_doctor import (
     _check_connector_hooks,
     _check_connector_inventory,
     _check_hook_contract_lock,
+    _check_hook_health,
+    _check_omnigent_policy_health,
+    _check_plugin_registry_required,
     _check_scan_coverage,
+    _connector_enabled,
+    _doctor_active_connectors,
     _doctor_label_suffix,
     _DoctorResult,
+    _fix_plugin_registry_required,
+    _plugin_registry_required_offenders,
 )
 
 
@@ -372,15 +379,25 @@ class TestCheckScanCoverage(unittest.TestCase):
 
 class TestConnectorInventoryRulePack(unittest.TestCase):
     """The inventory block surfaces each connector's effective rule pack,
-    warning when a configured directory is missing on disk."""
+    warning when the resolved directory is missing/empty on disk.
 
-    def _cfg(self, *, rule_pack_dir=""):
+    D9: when no explicit ``rule_pack_dir`` is set, the gateway resolves the
+    built-in default to ``<data_dir>/policies/guardrail/default`` and loads
+    packs from there — doctor must validate THAT path, not emit a benign skip.
+    """
+
+    def _cfg(self, *, rule_pack_dir="", data_dir="/tmp/dc-doctor-test-datadir"):
         cfg = MagicMock()
         cfg.skill_dirs.return_value = []
         cfg.plugin_dirs.return_value = []
         cfg.mcp_servers.return_value = []
+        cfg.data_dir = data_dir
         cfg.guardrail.effective_mode.return_value = "observe"
         cfg.guardrail.effective_rule_pack_dir.return_value = rule_pack_dir
+        # Keep the N3 Detection row deterministic (real strings, not mocks).
+        cfg.guardrail.detection_strategy = "regex_judge"
+        cfg.guardrail.judge.enabled = False
+        cfg.guardrail.judge.hook_connectors = []
         return cfg
 
     def test_rule_pack_dir_missing_warns(self):
@@ -396,11 +413,557 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         rp = next(c for c in r.checks if c["label"] == "Rule pack")
         self.assertEqual(rp["status"], "pass")
 
-    def test_rule_pack_dir_empty_skips(self):
+    def test_rule_pack_dir_empty_validates_resolved_default_missing(self):
+        # D9: empty rule_pack_dir → resolve <data_dir>/policies/guardrail/default;
+        # when it's absent, WARN (enforcement would run with no rule packs)
+        # rather than the old benign skip.
+        with tempfile.TemporaryDirectory() as data_dir:
+            r = _DoctorResult()
+            _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
+            rp = next(c for c in r.checks if c["label"] == "Rule pack")
+            self.assertEqual(rp["status"], "warn")
+            self.assertIn("built-in default", rp["detail"])
+            self.assertIn(
+                os.path.join(data_dir, "policies", "guardrail", "default"),
+                rp["detail"],
+            )
+
+    def test_rule_pack_dir_empty_validates_resolved_default_empty(self):
+        # D9: the default dir exists but is empty → still a degradation (zero
+        # rule packs loaded), so WARN.
+        with tempfile.TemporaryDirectory() as data_dir:
+            os.makedirs(os.path.join(data_dir, "policies", "guardrail", "default"))
+            r = _DoctorResult()
+            _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
+            rp = next(c for c in r.checks if c["label"] == "Rule pack")
+            self.assertEqual(rp["status"], "warn")
+            self.assertIn("empty", rp["detail"])
+
+    def test_rule_pack_dir_empty_validates_resolved_default_present(self):
+        # D9: the resolved default dir exists and is seeded → PASS.
+        with tempfile.TemporaryDirectory() as data_dir:
+            default_dir = os.path.join(data_dir, "policies", "guardrail", "default")
+            os.makedirs(default_dir)
+            with open(os.path.join(default_dir, "injection.yaml"), "w") as fh:
+                fh.write("rules: []\n")
+            r = _DoctorResult()
+            _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
+            rp = next(c for c in r.checks if c["label"] == "Rule pack")
+            self.assertEqual(rp["status"], "pass")
+            self.assertIn("built-in default", rp["detail"])
+
+
+class TestDoctorActiveConnectors(unittest.TestCase):
+    """``_doctor_active_connectors`` is the phantom-openclaw gate (D3): it must
+    honor ``active_connectors()``'s empty signal instead of flooring to the
+    singular ``openclaw`` path default the way doctor's old inventory/Services
+    loops did.
+    """
+
+    def test_uses_active_connectors_when_present(self) -> None:
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = ["Hermes", "codex"]
+        self.assertEqual(_doctor_active_connectors(cfg), ["hermes", "codex"])
+
+    def test_empty_active_connectors_returns_empty_not_phantom(self) -> None:
+        """The D3 core: a configured-then-removed install reports ``[]`` and
+        doctor must NOT fabricate ``["openclaw"]``."""
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = []
+        self.assertEqual(_doctor_active_connectors(cfg), [])
+
+    def test_dedupes_and_lowercases_in_order(self) -> None:
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = ["Codex", "codex", "Hermes"]
+        self.assertEqual(_doctor_active_connectors(cfg), ["codex", "hermes"])
+
+    def test_falls_back_to_primary_for_legacy_config(self) -> None:
+        """A config predating ``active_connectors()`` falls back to the
+        singular primary so legacy single-connector installs are unaffected."""
+        cfg = MagicMock(spec=["guardrail"])  # no active_connectors/active_connector
+        cfg.guardrail = MagicMock()
+        cfg.guardrail.connector = "codex"
+        self.assertEqual(_doctor_active_connectors(cfg), ["codex"])
+
+    def test_swallows_active_connectors_exception(self) -> None:
+        cfg = MagicMock()
+        cfg.active_connectors.side_effect = RuntimeError("boom")
+        cfg.active_connector.return_value = "openclaw"
+        self.assertEqual(_doctor_active_connectors(cfg), ["openclaw"])
+
+
+class TestCheckHookHealth(unittest.TestCase):
+    """D4: generic hook-health rows for connectors that previously had no
+    Services check (hermes/cursor/windsurf/geminicli/opencode). The check
+    prefers the gateway's recorded ``hook_contract_lock.json`` paths and is
+    format-agnostic (YAML for hermes, flat ``.js`` for opencode).
+    """
+
+    def _cfg(self, data_dir: str, connector: str, paths: list[str]) -> MagicMock:
+        cfg = MagicMock()
+        cfg.data_dir = data_dir
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"connectors": {connector: {"locations": {"hook_config_paths": paths}}}},
+                fh,
+            )
+        return cfg
+
+    def test_lock_path_with_marker_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "config.yaml")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
+            r = _DoctorResult()
+            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertEqual(r.checks[-1]["label"], "Hermes hooks")
+        self.assertIn(hook, r.checks[-1]["detail"])
+
+    def test_lock_path_without_marker_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "config.yaml")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("hooks: []\n")
+            r = _DoctorResult()
+            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("does not reference", r.checks[-1]["detail"])
+
+    def test_missing_hook_file_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            r = _DoctorResult()
+            _check_hook_health(
+                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]), "hermes", r,
+            )
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("not found", r.checks[-1]["detail"])
+
+    def test_opencode_flat_js_plugin_passes(self) -> None:
+        """opencode's hook is a flat ``.js`` file (not JSON) keyed on the
+        bare ``defenseclaw`` marker — the format-agnostic check must accept it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "defenseclaw.js")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("export const plugin = () => fetch('http://127.0.0.1:4000');  // defenseclaw bridge\n")
+            r = _DoctorResult()
+            _check_hook_health(self._cfg(tmp, "opencode", [hook]), "opencode", r)
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
+
+    def test_unknown_connector_is_noop(self) -> None:
         r = _DoctorResult()
-        _check_connector_inventory(self._cfg(rule_pack_dir=""), "codex", r)
-        rp = next(c for c in r.checks if c["label"] == "Rule pack")
-        self.assertEqual(rp["status"], "skip")
+        _check_hook_health(MagicMock(), "totallymadeupclaw", r)
+        self.assertEqual(r.checks, [])
+
+    def test_omnigent_requires_config_module_and_import_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("def defenseclaw_policy(event): return {'result': 'ALLOW'}\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(tmp + "\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            _check_omnigent_policy_health(cfg, r)
+        self.assertEqual(r.checks[-1]["status"], "pass")
+
+    def test_omnigent_missing_import_shim_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            _check_omnigent_policy_health(cfg, r)
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn(".pth", r.checks[-1]["detail"])
+
+    def test_omnigent_missing_policy_entry_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(tmp + "\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
+                r = _DoctorResult()
+                _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("policy registration", r.checks[-1]["detail"])
+
+    def test_omnigent_uses_managed_backups_when_lock_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_home = os.path.join(tmp, "omnigent-config")
+            os.makedirs(config_home)
+            config = os.path.join(config_home, "config.yaml")
+            module_dir = os.path.join(tmp, "hooks")
+            os.makedirs(module_dir)
+            module = os.path.join(module_dir, "defenseclaw_omnigent_policy.py")
+            site_packages = os.path.join(tmp, "site-packages")
+            os.makedirs(site_packages)
+            pth = os.path.join(site_packages, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(module_dir + "\n")
+            backup_dir = os.path.join(tmp, "connector_backups", "omnigent")
+            os.makedirs(backup_dir)
+            for logical, path in (("module", module), ("pth", pth)):
+                with open(os.path.join(backup_dir, f"{logical}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(
+                        {"connector": "omnigent", "logical_name": logical, "path": path},
+                        fh,
+                    )
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
+                r = _DoctorResult()
+                _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+
+    def test_omnigent_malformed_utf8_metadata_fails_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "config.yaml"), "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "wb") as fh:
+                fh.write(b"\xff\xfe\x00")
+            backup_dir = os.path.join(tmp, "connector_backups", "omnigent")
+            os.makedirs(backup_dir)
+            with open(os.path.join(backup_dir, "module.json"), "wb") as fh:
+                fh.write(b"\xff\xfe\x00")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
+                r = _DoctorResult()
+                _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("policy module and .pth", r.checks[-1]["detail"])
+
+    def test_omnigent_malformed_utf8_import_shim_fails_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            with open(pth, "wb") as fh:
+                fh.write(b"\xff\xfe\x00")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn(".pth import shim", r.checks[-1]["detail"])
+
+    def test_dispatch_routes_omnigent_policy_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
+                r = _DoctorResult()
+                _check_connector_hooks(cfg, "omnigent", r)
+
+        self.assertTrue(r.checks)
+        self.assertEqual(r.checks[-1]["label"], "OmniGent policy")
+
+    def test_dispatch_routes_all_five_connectors(self) -> None:
+        """``_check_connector_hooks`` must dispatch each generic connector
+        unhandled connectors to the generic hook-health row."""
+        for connector, label in (
+            ("hermes", "Hermes hooks"),
+            ("cursor", "Cursor hooks"),
+            ("windsurf", "Windsurf hooks"),
+            ("geminicli", "Gemini CLI hooks"),
+            ("opencode", "OpenCode hooks"),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = self._cfg(tmp, connector, [os.path.join(tmp, "missing")])
+                r = _DoctorResult()
+                _check_connector_hooks(cfg, connector, r)
+            self.assertTrue(r.checks, msg=connector)
+            self.assertEqual(r.checks[-1]["label"], label, msg=connector)
+
+
+class TestConnectorEnabled(unittest.TestCase):
+    """N1 — doctor must not render an operator-disabled connector as active.
+
+    ``active_connectors()`` returns every key in ``guardrail.connectors``
+    regardless of its ``enabled`` flag, so doctor's inventory/Services loops
+    gate on :func:`_connector_enabled` (which mirrors ``cmd_status._is_enabled``
+    over ``GuardrailConfig.effective_enabled``).
+    """
+
+    def _cfg_with(self, connectors):
+        from defenseclaw import config
+
+        cfg = config.default_config()
+        cfg.guardrail.connectors = connectors
+        return cfg
+
+    def test_explicit_disabled_returns_false(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        cfg = self._cfg_with(
+            {
+                "codex": PerConnectorGuardrailConfig(enabled=False),
+                "hermes": PerConnectorGuardrailConfig(enabled=True),
+                "cursor": PerConnectorGuardrailConfig(),  # unset → inherit → True
+            }
+        )
+        self.assertFalse(_connector_enabled(cfg, "codex"))
+        self.assertTrue(_connector_enabled(cfg, "hermes"))
+        self.assertTrue(_connector_enabled(cfg, "cursor"))
+
+    def test_premise_active_connectors_still_lists_disabled(self):
+        # The bug N1 fixes: active_connectors() does NOT drop a disabled
+        # connector, so doctor would otherwise inventory it as active.
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        cfg = self._cfg_with(
+            {
+                "codex": PerConnectorGuardrailConfig(enabled=False),
+                "hermes": PerConnectorGuardrailConfig(enabled=True),
+            }
+        )
+        self.assertIn("codex", cfg.active_connectors())
+        self.assertIn("codex", _doctor_active_connectors(cfg))
+
+    def test_missing_guardrail_defaults_true(self):
+        cfg = MagicMock()
+        cfg.guardrail = None
+        self.assertTrue(_connector_enabled(cfg, "codex"))
+
+
+class TestDetectionStrategyRow(unittest.TestCase):
+    """N3 — read-only per-connector detection-strategy / judge-gating row."""
+
+    def _cfg(self, *, strategy="regex_judge", judge_enabled=False, hook_connectors=None):
+        cfg = MagicMock()
+        cfg.skill_dirs.return_value = []
+        cfg.plugin_dirs.return_value = []
+        cfg.mcp_servers.return_value = []
+        cfg.data_dir = ""  # keep the rule-pack row a benign skip
+        cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        cfg.guardrail.detection_strategy = strategy
+        cfg.guardrail.judge.enabled = judge_enabled
+        cfg.guardrail.judge.hook_connectors = hook_connectors or []
+        return cfg
+
+    def _detection_row(self, cfg, connector):
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, connector, r)
+        return next(c for c in r.checks if c["label"] == "Detection")
+
+    def test_strategy_surfaced(self):
+        row = self._detection_row(self._cfg(strategy="judge_first"), "codex")
+        self.assertIn("strategy=judge_first", row["detail"])
+
+    def test_judge_disabled_noted(self):
+        row = self._detection_row(self._cfg(judge_enabled=False), "codex")
+        self.assertIn("judge disabled", row["detail"])
+
+    def test_hook_connector_not_gated(self):
+        # judge enabled but this hook connector is NOT in hook_connectors →
+        # surfaces root #4: the judge won't actually fire for it.
+        row = self._detection_row(
+            self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex"
+        )
+        self.assertIn("NOT gated", row["detail"])
+
+    def test_hook_connector_gated_explicit(self):
+        row = self._detection_row(
+            self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex"
+        )
+        self.assertIn("judge active (hook lane)", row["detail"])
+
+    def test_hook_connector_gated_wildcard(self):
+        row = self._detection_row(
+            self._cfg(judge_enabled=True, hook_connectors=["*"]), "codex"
+        )
+        self.assertIn("judge active (hook lane)", row["detail"])
+
+    def test_proxy_connector_uses_proxy_lane(self):
+        # openclaw is a proxy connector: the judge runs in the proxy lane
+        # whenever it's enabled, regardless of hook_connectors.
+        row = self._detection_row(
+            self._cfg(judge_enabled=True, hook_connectors=[]), "openclaw"
+        )
+        self.assertIn("judge active (proxy lane)", row["detail"])
+
+
+class TestPluginRegistryRequiredCheck(unittest.TestCase):
+    """OTHER-5 (doctor half) — surface + clear a dead-end
+    ``asset_policy.plugin.registry_required=true``."""
+
+    def _cfg(self, *, enabled=True, global_required=False, connector_required=None):
+        from defenseclaw import config
+        from defenseclaw.config import (
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+
+        cfg = config.default_config()
+        cfg.asset_policy.enabled = enabled
+        cfg.asset_policy.plugin.registry_required = global_required
+        if connector_required is not None:
+            cfg.asset_policy.connectors = {
+                "codex": PerConnectorAssetPolicy(
+                    plugin=PerConnectorAssetTypePolicy(registry_required=connector_required)
+                )
+            }
+        return cfg
+
+    def test_clean_config_passes(self):
+        r = _DoctorResult()
+        _check_plugin_registry_required(self._cfg(global_required=False), r)
+        row = next(c for c in r.checks if c["label"] == "Plugin registry policy")
+        self.assertEqual(row["status"], "pass")
+
+    def test_global_required_warns(self):
+        r = _DoctorResult()
+        _check_plugin_registry_required(self._cfg(enabled=True, global_required=True), r)
+        row = next(c for c in r.checks if c["label"] == "Plugin registry policy")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("global", row["detail"])
+        self.assertIn("blocks ALL plugins", row["detail"])
+
+    def test_per_connector_required_warns(self):
+        r = _DoctorResult()
+        _check_plugin_registry_required(
+            self._cfg(global_required=False, connector_required=True), r
+        )
+        row = next(c for c in r.checks if c["label"] == "Plugin registry policy")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("connector:codex", row["detail"])
+
+    def test_disabled_enforcement_softer_wording(self):
+        r = _DoctorResult()
+        _check_plugin_registry_required(self._cfg(enabled=False, global_required=True), r)
+        row = next(c for c in r.checks if c["label"] == "Plugin registry policy")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("once asset-policy enforcement is enabled", row["detail"])
+
+    def test_offenders_lists_global_and_connector(self):
+        cfg = self._cfg(global_required=True, connector_required=True)
+        offenders = _plugin_registry_required_offenders(cfg)
+        self.assertIn("global", offenders)
+        self.assertIn("connector:codex", offenders)
+
+    def test_per_connector_none_is_not_an_offender(self):
+        # None = inherit; only an explicit True is a dead-end offender.
+        cfg = self._cfg(global_required=False, connector_required=None)
+        self.assertEqual(_plugin_registry_required_offenders(cfg), [])
+
+
+class TestPluginRegistryRequiredFixer(unittest.TestCase):
+    """OTHER-5 — ``doctor --fix`` clears the dead-end flag."""
+
+    def _cfg(self, *, global_required=False, connector_required=None):
+        from defenseclaw import config
+        from defenseclaw.config import (
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+
+        cfg = config.default_config()
+        cfg.asset_policy.enabled = True
+        cfg.asset_policy.plugin.registry_required = global_required
+        if connector_required is not None:
+            cfg.asset_policy.connectors = {
+                "codex": PerConnectorAssetPolicy(
+                    plugin=PerConnectorAssetTypePolicy(registry_required=connector_required)
+                )
+            }
+        cfg.save = MagicMock()
+        return cfg
+
+    def test_nothing_set_skips(self):
+        cfg = self._cfg(global_required=False)
+        tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
+        self.assertEqual(tag, "skip")
+        cfg.save.assert_not_called()
+
+    def test_clears_global(self):
+        cfg = self._cfg(global_required=True)
+        tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
+        self.assertEqual(tag, "pass")
+        self.assertFalse(cfg.asset_policy.plugin.registry_required)
+        cfg.save.assert_called_once()
+        self.assertIn("global", detail)
+
+    def test_clears_per_connector_to_none(self):
+        cfg = self._cfg(global_required=False, connector_required=True)
+        tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
+        self.assertEqual(tag, "pass")
+        # Tri-state field reset to None (inherit), not False.
+        self.assertIsNone(cfg.asset_policy.connectors["codex"].plugin.registry_required)
+        cfg.save.assert_called_once()
+
+    def test_declined_does_not_save(self):
+        cfg = self._cfg(global_required=True)
+        with patch("defenseclaw.commands.cmd_doctor.click.confirm", return_value=False):
+            tag, _ = _fix_plugin_registry_required(cfg, assume_yes=False)
+        self.assertEqual(tag, "skip")
+        cfg.save.assert_not_called()
+        # Flag is untouched on decline.
+        self.assertTrue(cfg.asset_policy.plugin.registry_required)
 
 
 if __name__ == "__main__":

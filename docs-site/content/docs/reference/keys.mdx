@@ -9,6 +9,7 @@ keywords:
   - CISCO_AI_DEFENSE_API_KEY
   - VIRUSTOTAL_API_KEY
   - SPLUNK_ACCESS_TOKEN
+  - GALILEO_API_KEY
   - DefenseClaw credentials registry
   - dotenv
 ---
@@ -21,7 +22,12 @@ DefenseClaw stores secrets in a single dotenv file and reads them through one re
 ~/.defenseclaw/.env       # 0o600 file. Never commit. Never log.
 ```
 
-Created on demand by `defenseclaw keys set <ENV>`. Atomic tmp+rename writes; values are read **lazily** by the gateway and CLI on every operation, so rotating a secret is a single `defenseclaw keys set` (or a `vim` followed by save) — no service restart.
+Created on demand by `defenseclaw keys set <ENV>` using an atomic tmp+rename
+write. New CLI processes read the updated value immediately. Long-running
+gateway components may hold the credential they resolved at startup or during
+configuration reload, so restart the gateway after rotating a key unless the
+specific setup command documents hot reload. Run `defenseclaw doctor` to verify
+the new credential.
 
 The CLI also supports overriding any value at runtime by `export`-ing it in your shell. That's the highest-priority source.
 
@@ -81,6 +87,7 @@ Every credential the gateway and CLI know about is registered in `cli/defensecla
 | `CISCO_AI_DEFENSE_API_KEY` | `guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner. |
 | `VIRUSTOTAL_API_KEY` | `skill-scanner.virustotal` | `scanners.skill_scanner.use_virustotal=true`. | Required when the skill scanner is wired up to ask VirusTotal. |
 | `SPLUNK_ACCESS_TOKEN` | `observability.splunk` | A Splunk audit sink is enabled. | The HEC token. |
+| `GALILEO_API_KEY` | `observability.galileo` | An enabled OTLP destination named `galileo` is configured. | Required for Galileo Cloud and authenticated self-hosted trace export. Use `setup observability list` for the destination inventory. |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | `skill-scanner.llm` | The skill scanner uses LLM and has a custom `llm.api_key_env` override. | Only tracked when there's a custom override; otherwise falls through to `DEFENSECLAW_LLM_KEY`. |
 
 The names you see in `keys list` are the **effective** ones. If you set `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY`, the table shows `MY_JUDGE_KEY` — not the canonical `JUDGE_API_KEY` — because that's the env var the running gateway will actually read.
@@ -100,6 +107,7 @@ DefenseClaw routes every LLM call through Bifrost (Go gateway) or LiteLLM (Pytho
   ● CISCO_AI_DEFENSE_API_KEY    guardrail.remote        REQUIRED     env     ✓ set
   · VIRUSTOTAL_API_KEY          skill-scanner.virustotal NOT_USED    unset   n/a
   · SPLUNK_ACCESS_TOKEN         observability.splunk    NOT_USED     unset   n/a
+  ● GALILEO_API_KEY              observability.galileo   REQUIRED     dotenv  ✓ set
   · DEFENSECLAW_SKILL_SCANNER_LLM_KEY skill-scanner.llm NOT_USED     unset   n/a
 
   Legend: ● required   ○ optional   · not used by current config

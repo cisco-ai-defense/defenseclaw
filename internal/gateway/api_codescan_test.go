@@ -61,6 +61,40 @@ func TestHandleCodeScan_ValidPath(t *testing.T) {
 	}
 }
 
+func TestHandleCodeScan_IncludesClawShieldMalware(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "payload.sh")
+	payload := "#!/bin/sh\nexec 3<>/dev/" + "tcp/127.0.0.1/4444\n"
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	api := testAPIServerWithConfig(t, "action")
+	body, _ := json.Marshal(map[string]string{"path": path})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/scan/code", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleCodeScan(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+
+	var result scanner.ScanResult
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Scanner != "codeguard" {
+		t.Errorf("scanner = %q, want codeguard", result.Scanner)
+	}
+	for i := range result.Findings {
+		if result.Findings[i].ID == "CS-MAL-RS-DEVTCP" && result.Findings[i].Scanner == "clawshield-malware" {
+			return
+		}
+	}
+	t.Fatalf("expected ClawShield malware finding in API response, got %+v", result.Findings)
+}
+
 func TestHandleCodeScan_MissingPath(t *testing.T) {
 	api := testAPIServerWithConfig(t, "action")
 	body := `{"path": ""}`

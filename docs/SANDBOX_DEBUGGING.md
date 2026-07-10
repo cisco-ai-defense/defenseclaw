@@ -109,7 +109,7 @@ cat /home/sandbox/.openclaw/openclaw.json | jq .plugins
 | Symptom | Fix |
 |---|---|
 | Watcher shows `error` | ACL issue. Run `sudo scripts/fix-sandbox-acls.sh`. |
-| Skill blocked | Check block list: `defenseclaw block list`. Remove if false positive: `defenseclaw block remove <key>`. |
+| Skill blocked | Check installed skills with `defenseclaw skill list`. Remove a false-positive policy entry with `defenseclaw skill unblock <name>`. |
 | Plugin not in list | Not registered in `openclaw.json`. Re-run `defenseclaw sandbox setup`. |
 
 ## Guardrail Proxy Issues

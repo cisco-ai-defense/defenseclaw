@@ -49,12 +49,12 @@ from defenseclaw.commands.cmd_setup_local_observability import (
 # Real ``docker ps --format {{.Ports}}`` capture from a healthy stack.
 # Mixes single-port mappings (Grafana / Loki / Prometheus / Tempo
 # main port) with ranged mappings (otel-collector publishes
-# ``4317-4318`` and ``8888-8889`` as ranges) plus a tempo-secondary
+# ``4317-4318`` as a range) plus a tempo-secondary
 # row that uses a comma-separated mapping list.
 _HEALTHY_PORTS_BLOB = (
     "127.0.0.1:3000->3000/tcp\n"
     "127.0.0.1:4317-4318->4317-4318/tcp, "
-    "127.0.0.1:8888-8889->8888-8889/tcp, "
+    "127.0.0.1:8888->8888/tcp, "
     "127.0.0.1:13133->13133/tcp, "
     "55678-55679/tcp\n"
     "127.0.0.1:3100->3100/tcp\n"
@@ -73,13 +73,16 @@ class TestPortsContains(unittest.TestCase):
 
     def test_ranged_ports_match(self):
         # 4317 and 4318 come from "127.0.0.1:4317-4318->4317-4318/tcp".
-        # The boundary numbers AND a value strictly inside the range
-        # (8888, 8889) must all match.
-        for port in (4317, 4318, 8888, 8889):
+        # Both boundary numbers of the OTLP receiver range must match.
+        for port in (4317, 4318):
             self.assertTrue(
                 _ports_contains(_HEALTHY_PORTS_BLOB, port),
                 msg=f"ranged-port {port} should be detected",
             )
+
+    def test_collector_self_metrics_port_matches(self):
+        self.assertTrue(_ports_contains(_HEALTHY_PORTS_BLOB, 8888))
+        self.assertFalse(_ports_contains(_HEALTHY_PORTS_BLOB, 8889))
 
     def test_unrelated_port_does_not_match(self):
         for port in (22, 80, 443, 9999, 65535):

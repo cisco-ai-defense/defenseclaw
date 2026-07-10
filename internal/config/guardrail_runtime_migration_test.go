@@ -1,0 +1,239 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestLoadFromFileWithRuntimeMigration_MigratesAndDeletesGuardrailRuntime(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	runtimePath := filepath.Join(dir, GuardrailRuntimeFileName)
+	original := `config_version: 6
+data_dir: ` + dir + `
+# guardrail settings
+guardrail:
+  # mode stays commented
+  mode: observe
+  scanner_mode: local
+  hilt:
+    enabled: false
+    min_severity: HIGH
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	runtime := `{
+		"mode": "action",
+		"scanner_mode": "both",
+		"block_message": "Custom block",
+		"connector": "codex",
+		"hilt_enabled": true,
+		"hilt_min_severity": "medium"
+	}`
+	if err := os.WriteFile(runtimePath, []byte(runtime), 0o600); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+
+	cfg, err := LoadFromFileWithRuntimeMigration(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFileWithRuntimeMigration: %v", err)
+	}
+	if cfg.Guardrail.Mode != "action" {
+		t.Fatalf("mode = %q, want action", cfg.Guardrail.Mode)
+	}
+	if cfg.Guardrail.ScannerMode != "both" {
+		t.Fatalf("scanner_mode = %q, want both", cfg.Guardrail.ScannerMode)
+	}
+	if cfg.Guardrail.BlockMessage != "Custom block" {
+		t.Fatalf("block_message = %q, want Custom block", cfg.Guardrail.BlockMessage)
+	}
+	if cfg.Guardrail.Connector != "codex" {
+		t.Fatalf("connector = %q, want codex", cfg.Guardrail.Connector)
+	}
+	if !cfg.Guardrail.HILT.Enabled || cfg.Guardrail.HILT.MinSeverity != "MEDIUM" {
+		t.Fatalf("hilt = %#v, want enabled MEDIUM", cfg.Guardrail.HILT)
+	}
+	if _, err := os.Stat(runtimePath); !os.IsNotExist(err) {
+		t.Fatalf("runtime file still exists or stat failed: %v", err)
+	}
+	patched, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	if !strings.Contains(string(patched), "# mode stays commented") {
+		t.Fatalf("patched config did not preserve comments:\n%s", string(patched))
+	}
+}
+
+func TestGuardrailRuntimeMigrationDisabledForManagedEnterprise(t *testing.T) {
+	if guardrailRuntimeMigrationAllowed(true, string(DeploymentModeManagedEnterprise)) {
+		t.Fatal("managed_enterprise must not consume service-owned legacy runtime state")
+	}
+	if guardrailRuntimeMigrationAllowed(false, string(DeploymentModeUnmanagedBYOD)) {
+		t.Fatal("migration ran when the caller did not request it")
+	}
+	if !guardrailRuntimeMigrationAllowed(true, string(DeploymentModeUnmanagedBYOD)) {
+		t.Fatal("unmanaged one-time compatibility migration was unexpectedly disabled")
+	}
+}
+
+func TestLoadFromFileWithRuntimeMigration_InvalidGuardrailRuntimeIsNonFatalAndPreserved(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	runtimePath := filepath.Join(dir, GuardrailRuntimeFileName)
+	original := "config_version: 6\ndata_dir: " + dir + "\nguardrail:\n  mode: observe\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte(`{"mode":"invalid"}`), 0o600); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+
+	cfg, err := LoadFromFileWithRuntimeMigration(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFileWithRuntimeMigration returned a fatal error for invalid legacy runtime: %v", err)
+	}
+	if cfg.Guardrail.Mode != "observe" {
+		t.Fatalf("mode = %q, want validated config.yaml value observe", cfg.Guardrail.Mode)
+	}
+	if _, err := os.Stat(runtimePath); err != nil {
+		t.Fatalf("runtime file should remain after failed migration: %v", err)
+	}
+	current, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(current) != original {
+		t.Fatalf("config changed after failed migration:\n%s", string(current))
+	}
+}
+
+func TestLoadFromFileWithRuntimeMigration_MissingPrimaryConfigIsNonFatalAndPreservesRuntime(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	runtimePath := filepath.Join(dir, GuardrailRuntimeFileName)
+	if err := os.WriteFile(runtimePath, []byte(`{"mode":"action"}`), 0o600); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+
+	if _, err := LoadFromFileWithRuntimeMigration(configPath); err != nil {
+		t.Fatalf("LoadFromFileWithRuntimeMigration returned fatal migration error without primary config: %v", err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("primary config should remain absent: %v", err)
+	}
+	if _, err := os.Stat(runtimePath); err != nil {
+		t.Fatalf("runtime file should remain after failed migration: %v", err)
+	}
+}
+
+func TestLoadFromFileWithRuntimeMigration_UnreadableRuntimeIsNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	runtimePath := filepath.Join(dir, GuardrailRuntimeFileName)
+	if err := os.WriteFile(configPath, []byte("config_version: 6\ndata_dir: "+dir+"\nguardrail:\n  mode: observe\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.Mkdir(runtimePath, 0o700); err != nil {
+		t.Fatalf("create unreadable runtime placeholder: %v", err)
+	}
+
+	cfg, err := LoadFromFileWithRuntimeMigration(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFileWithRuntimeMigration returned fatal runtime read error: %v", err)
+	}
+	if cfg.Guardrail.Mode != "observe" {
+		t.Fatalf("mode = %q, want observe", cfg.Guardrail.Mode)
+	}
+}
+
+func TestLoadFromFileWithRuntimeMigration_UnknownOnlyRuntimeIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	runtimePath := filepath.Join(dir, GuardrailRuntimeFileName)
+	original := "config_version: 6\ndata_dir: " + dir + "\nguardrail:\n  mode: observe\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte(`{"removed_field":"value"}`), 0o600); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+
+	if _, err := LoadFromFileWithRuntimeMigration(configPath); err != nil {
+		t.Fatalf("LoadFromFileWithRuntimeMigration returned fatal unknown-value error: %v", err)
+	}
+	if _, err := os.Stat(runtimePath); err != nil {
+		t.Fatalf("unknown-only runtime should remain for repair: %v", err)
+	}
+	current, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(current) != original {
+		t.Fatalf("config changed after unknown-only runtime:\n%s", string(current))
+	}
+}
+
+func TestRestoreConfigAfterFailedMigrationPreservesConfigMode(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	original := "config_version: 6\ndata_dir: " + dir + "\nguardrail:\n  mode: observe\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("patched"), 0o600); err != nil {
+		t.Fatalf("write patched config: %v", err)
+	}
+	if err := restoreConfigAfterFailedMigration(configPath, []byte(original), 0o640, true); err != nil {
+		t.Fatalf("restoreConfigAfterFailedMigration: %v", err)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Fatalf("config mode = %o, want 640", got)
+	}
+}
+
+func TestLoadFromFile_IgnoresGuardrailRuntime(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	runtimePath := filepath.Join(dir, GuardrailRuntimeFileName)
+	if err := os.WriteFile(configPath, []byte("config_version: 6\ndata_dir: "+dir+"\nguardrail:\n  mode: observe\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(runtimePath, []byte(`{"mode":"action"}`), 0o600); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.Guardrail.Mode != "observe" {
+		t.Fatalf("mode = %q, want observe from config.yaml", cfg.Guardrail.Mode)
+	}
+	if _, err := os.Stat(runtimePath); err != nil {
+		t.Fatalf("runtime file should be ignored and left in place: %v", err)
+	}
+}

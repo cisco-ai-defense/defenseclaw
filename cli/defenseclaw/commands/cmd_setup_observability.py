@@ -30,10 +30,11 @@ disable <name>        Flip ``enabled: false``
 remove <name>         Delete an audit_sinks entry
 test <name>           Probe the configured endpoint and report status
 migrate-splunk        Move legacy ``splunk:`` block to ``audit_sinks[]``
+migrate-otel          Convert flat ``otel:`` transport into a named route
 
-All destructive subcommands write atomically (``config.yaml.tmp`` ->
-``rename``) so a crash mid-write cannot leave the gateway with an
-unparseable config.
+All destructive subcommands write through the shared secure atomic
+config writer so a crash mid-write cannot leave the gateway with an
+unparseable config and managed-mode writes remain administrator-gated.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
+from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability import (
     PRESETS,
@@ -59,10 +61,28 @@ from defenseclaw.observability import (
     WriteResult,
     apply_preset,
     list_destinations,
+    migrate_flat_otel,
     preset_choices,
     remove_destination,
     resolve_preset,
     set_destination_enabled,
+)
+from defenseclaw.observability.display import redact_endpoint_for_display
+from defenseclaw.observability.writer import _NAME_RE as _SINK_NAME_RE
+
+# Per-connector (D5b) sink writes reuse the writer's preset-resolution,
+# sink-entry builder, and secret writer so the per-connector path never
+# drifts from the global ``apply_preset`` path. They are imported (not
+# re-implemented) because the writer module is outside this lane's edit
+# surface; the per-connector routing target is the only difference.
+from defenseclaw.observability.writer import (
+    _apply_secret,
+    _build_sink_entry,
+    _destination_name,
+    _resolve_inputs,
+    _resolve_target,
+    _sink_endpoint,
+    _sink_preset_id,
 )
 
 # All prompt keys across all presets. Exposed as Click options so the
@@ -70,7 +90,7 @@ from defenseclaw.observability import (
 # keys per preset.
 _ALL_PROMPT_FLAGS = (
     "realm", "site", "region", "dataset",
-    "endpoint", "protocol",
+    "endpoint", "protocol", "project", "logstream",
     "host", "port", "index", "source", "sourcetype",
     "url", "method", "url_path", "verify_tls",
 )
@@ -109,9 +129,16 @@ def observability() -> None:
 @click.option("--signals", default=None,
               help="Comma-separated OTel signals to enable (traces,metrics,logs)")
 @click.option("--token", "token_value", default=None,
+              envvar="DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN",
+              show_envvar=True,
               help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env")
 @click.option("--enabled/--disabled", "enabled", default=True,
               help="Mark destination enabled (default) or disabled")
+@click.option("--connector", default=None,
+              help="Scope this sink to a connector (omit = global). A connector's "
+                   "events route to its per-connector audit_sinks when set, "
+                   "falling back to the global audit_sinks otherwise. Applies to "
+                   "audit_sinks only (OTel destinations are process-wide).")
 @click.option("--dry-run", is_flag=True, help="Preview YAML/dotenv changes without writing")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts; use flags only")
 # Prompt flags — shared across all presets; writer resolves per-preset.
@@ -121,6 +148,8 @@ def observability() -> None:
 @click.option("--dataset", default=None)
 @click.option("--endpoint", default=None)
 @click.option("--protocol", type=click.Choice(["grpc", "http"]), default=None)
+@click.option("--project", default=None, help="Vendor project name or ID")
+@click.option("--logstream", default=None, help="Vendor Log stream name or ID")
 @click.option("--host", default=None)
 @click.option("--port", default=None)
 @click.option("--index", default=None)
@@ -139,10 +168,11 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     signals: str | None,
     token_value: str | None,
     enabled: bool,
+    connector: str | None,
     dry_run: bool,
     non_interactive: bool,
     realm, site, region, dataset,
-    endpoint, protocol,
+    endpoint, protocol, project, logstream,
     host, port, index, source, sourcetype,
     url, method, url_path, verify_tls,
 ) -> None:
@@ -159,10 +189,14 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
       defenseclaw setup observability add splunk-enterprise
     """
     preset = resolve_preset(preset_id.lower())
+    token_source = click.get_current_context().get_parameter_source("token_value")
+    if token_source == click.core.ParameterSource.ENVIRONMENT:
+        click.echo("Using token from DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN.")
 
     raw_inputs: dict[str, str | None] = {
         "realm": realm, "site": site, "region": region, "dataset": dataset,
         "endpoint": endpoint, "protocol": protocol,
+        "project": project, "logstream": logstream,
         "host": host, "port": port, "index": index, "source": source,
         "sourcetype": sourcetype,
         "url": url, "method": method, "url_path": url_path,
@@ -187,23 +221,37 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             raise SystemExit(2)
         signal_tuple = parsed  # type: ignore[assignment]
 
+    connector_name = (connector or "").strip()
     try:
-        result = apply_preset(
-            preset.id,
-            inputs,
-            app.cfg.data_dir,
-            name=name,
-            enabled=enabled,
-            signals=signal_tuple,
-            secret_value=token_value,
-            target_override=target,
-            dry_run=dry_run,
-        )
+        if connector_name:
+            result = _apply_sink_to_connector(
+                preset,
+                inputs,
+                app.cfg.data_dir,
+                connector_name,
+                name=name,
+                enabled=enabled,
+                secret_value=token_value,
+                target_override=target,
+                dry_run=dry_run,
+            )
+        else:
+            result = apply_preset(
+                preset.id,
+                inputs,
+                app.cfg.data_dir,
+                name=name,
+                enabled=enabled,
+                signals=signal_tuple,
+                secret_value=token_value,
+                target_override=target,
+                dry_run=dry_run,
+            )
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
 
-    _print_write_result(result, dry_run=dry_run)
+    _print_write_result(result, action="add", dry_run=dry_run, connector=connector_name)
     print_redaction_status_hint(app.cfg)
     click.echo()
 
@@ -211,7 +259,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         app.logger.log_action(
             ACTION_SETUP_OBSERVABILITY,
             "config",
-            f"action=add preset={preset.id} name={result.name} target={result.target}",
+            f"action=add preset={preset.id} name={result.name} target={result.target}"
+            + (f" connector={connector_name}" if connector_name else ""),
         )
 
 
@@ -222,9 +271,38 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
 @observability.command("list")
 @click.option("--json", "emit_json", is_flag=True, help="Emit machine-readable JSON")
+@click.option("--connector", default=None,
+              help="List a connector's per-connector audit_sinks (omit = global). "
+                   "When the connector has no per-connector sinks it inherits the "
+                   "global audit_sinks.")
 @pass_ctx
-def list_cmd(app: AppContext, emit_json: bool) -> None:
+def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
     """List configured observability destinations."""
+    connector_name = (connector or "").strip()
+    if connector_name:
+        dests = _connector_destinations(app.cfg.data_dir, connector_name)
+        if dests is None:
+            if emit_json:
+                click.echo("[]")
+                return
+            ux.subhead(
+                f"No per-connector audit_sinks for {connector_name!r} — "
+                "inherits the global audit_sinks."
+            )
+            return
+        if emit_json:
+            click.echo(_json.dumps([_dest_to_dict(d) for d in dests], indent=2))
+            return
+        if not dests:
+            ux.subhead(f"Connector {connector_name!r} has an explicit empty sink set.")
+            return
+        click.echo()
+        ux.section(f"Observability destinations — connector {connector_name}")
+        _print_destination_header()
+        for d in dests:
+            _print_destination_row(d)
+        click.echo()
+        return
     dests = list_destinations(app.cfg.data_dir)
     if emit_json:
         click.echo(_json.dumps([_dest_to_dict(d) for d in dests], indent=2))
@@ -235,16 +313,9 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         return
     click.echo()
     ux.section("Observability destinations")
-    click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<18} ENDPOINT")
-    click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 18} {'-' * 40}")
+    _print_destination_header()
     for d in dests:
-        endpoint = d.endpoint or "(none)"
-        if len(endpoint) > 60:
-            endpoint = endpoint[:57] + "..."
-        click.echo(
-            f"  {ux.bold(f'{d.name:<40}')} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
-            f"{(d.preset_id or '-'):<18} {endpoint}",
-        )
+        _print_destination_row(d)
     click.echo()
 
 
@@ -255,28 +326,38 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
 
 @observability.command("enable")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector sink")
 @pass_ctx
-def enable_cmd(app: AppContext, name: str) -> None:
+def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Enable a destination (``name=otel`` targets the gateway exporter)."""
+    connector_name = (connector or "").strip()
     try:
-        result = set_destination_enabled(name, True, app.cfg.data_dir)
+        if connector_name:
+            result = _set_connector_sink_enabled(app.cfg.data_dir, connector_name, name, True)
+        else:
+            result = set_destination_enabled(name, True, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False)
+    _print_write_result(result, action="enable", dry_run=False, connector=connector_name)
 
 
 @observability.command("disable")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector sink")
 @pass_ctx
-def disable_cmd(app: AppContext, name: str) -> None:
+def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Disable a destination."""
+    connector_name = (connector or "").strip()
     try:
-        result = set_destination_enabled(name, False, app.cfg.data_dir)
+        if connector_name:
+            result = _set_connector_sink_enabled(app.cfg.data_dir, connector_name, name, False)
+        else:
+            result = set_destination_enabled(name, False, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False)
+    _print_write_result(result, action="disable", dry_run=False, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -286,19 +367,25 @@ def disable_cmd(app: AppContext, name: str) -> None:
 
 @observability.command("remove")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector sink")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @pass_ctx
-def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
+def remove_cmd(app: AppContext, name: str, connector: str | None, yes: bool) -> None:
     """Delete a destination (``name=otel`` disables but preserves the block)."""
-    if not yes and not click.confirm(f"  Remove destination {name!r}?", default=False):
+    connector_name = (connector or "").strip()
+    label = f"{name!r}" + (f" (connector {connector_name})" if connector_name else "")
+    if not yes and not click.confirm(f"  Remove destination {label}?", default=False):
         click.echo("  Aborted.")
         return
     try:
-        result = remove_destination(name, app.cfg.data_dir)
+        if connector_name:
+            result = _remove_connector_sink(app.cfg.data_dir, connector_name, name)
+        else:
+            result = remove_destination(name, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False)
+    _print_write_result(result, action="remove", dry_run=False, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -329,12 +416,16 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
 
     click.echo()
     label = "Splunk Enterprise (HEC)" if d.preset_id == "splunk-enterprise" else d.kind
+    display_endpoint = redact_endpoint_for_display(
+        d.endpoint or "(no endpoint)",
+        hide_path=d.target != "otel",
+    )
     click.echo(
         f"  {ux.bold('Testing')} {ux.bold(name)} "
-        f"{ux.dim('[' + label + ']')}: {d.endpoint or '(no endpoint)'}"
+        f"{ux.dim('[' + label + ']')}: {display_endpoint}"
     )
     if d.target == "otel":
-        _test_otel(app.cfg.data_dir, timeout=timeout)
+        _test_otel(app.cfg.data_dir, name, timeout=timeout)
     elif d.kind == "splunk_hec":
         _test_splunk_hec(app.cfg.data_dir, name, timeout=timeout)
     elif d.kind == "otlp_logs":
@@ -344,6 +435,28 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
     else:
         click.echo(f"  Unknown kind {d.kind!r} — cannot test.")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# migrate-splunk
+# ---------------------------------------------------------------------------
+
+
+@observability.command("migrate-otel")
+@click.option("--apply", "do_apply", is_flag=True, help="Write the migration (default: preview)")
+@pass_ctx
+def migrate_otel_cmd(app: AppContext, do_apply: bool) -> None:
+    """Convert a flat OTel exporter into ``otel.destinations[]``.
+
+    This is the only supported transition from pre-fan-out configuration.
+    It is idempotent and saves a backup before writing.
+    """
+
+    result = migrate_flat_otel(app.cfg.data_dir, dry_run=not do_apply)
+    if not result.yaml_changes:
+        click.echo("  No flat OTel exporter found — nothing to migrate.")
+        return
+    _print_write_result(result, action="migrate", dry_run=not do_apply)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +476,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     """
     import yaml
 
-    cfg_path = os.path.join(app.cfg.data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(app.cfg.data_dir))
     try:
         with open(cfg_path) as f:
             raw: dict[str, Any] = yaml.safe_load(f) or {}
@@ -385,18 +498,33 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
             host = parsed.hostname
 
     name = f"splunk-hec-{_slug(host)}"
+    # a legacy ``splunk:`` block whose ``verify_tls`` field is
+    # absent or false used to silently downgrade certificate validation
+    # under the new ``audit_sinks`` shape. Migrate to the explicit
+    # ``insecure_skip_verify`` opt-out so the migrated sink is now
+    # secure by default. We only carry the insecure mode forward when
+    # the operator EXPLICITLY set ``verify_tls=false``; absence implies
+    # the new secure default.
+    legacy_verify_present = "verify_tls" in legacy
+    legacy_verify_explicit_false = legacy_verify_present and not bool(legacy.get("verify_tls"))
+    new_block: dict[str, Any] = {
+        "endpoint": endpoint,
+        "token_env": str(legacy.get("hec_token_env", "") or "DEFENSECLAW_SPLUNK_HEC_TOKEN"),
+        "index": str(legacy.get("index", "") or "defenseclaw"),
+        "source": str(legacy.get("source", "") or "defenseclaw"),
+        "sourcetype": str(legacy.get("sourcetype", "") or "_json"),
+    }
+    if legacy_verify_explicit_false:
+        new_block["insecure_skip_verify"] = True
+        click.echo(
+            "  ⚠ migrated legacy verify_tls=false → insecure_skip_verify=true; "
+            "remove this opt-out for production",
+        )
     new_entry: dict[str, Any] = {
         "name": name,
         "kind": "splunk_hec",
         "enabled": bool(legacy.get("enabled", False)),
-        "splunk_hec": {
-            "endpoint": endpoint,
-            "token_env": str(legacy.get("hec_token_env", "") or "DEFENSECLAW_SPLUNK_HEC_TOKEN"),
-            "index": str(legacy.get("index", "") or "defenseclaw"),
-            "source": str(legacy.get("source", "") or "defenseclaw"),
-            "sourcetype": str(legacy.get("sourcetype", "") or "_json"),
-            "verify_tls": bool(legacy.get("verify_tls", False)),
-        },
+        "splunk_hec": new_block,
     }
 
     sinks = raw.get("audit_sinks")
@@ -411,7 +539,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
             click.echo(f"  audit_sinks already contains {s.get('name')!r} with same endpoint; skipping")
             if do_apply:
                 raw.pop("splunk", None)
-                _write_atomically(cfg_path, raw)
+                write_config_yaml_secure(cfg_path, raw)
                 click.echo("  Removed legacy splunk: block.")
             return
 
@@ -429,7 +557,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     sinks.append(new_entry)
     raw["audit_sinks"] = sinks
     raw.pop("splunk", None)
-    _write_atomically(cfg_path, raw)
+    write_config_yaml_secure(cfg_path, raw)
     click.echo(f"  Migrated splunk: block to audit_sinks[{name}].")
     if app.logger:
         app.logger.log_action(
@@ -507,7 +635,7 @@ def _mask(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _test_otel(data_dir: str, *, timeout: float) -> None:
+def _test_otel(data_dir: str, name: str, *, timeout: float) -> None:
     """Dial the configured OTel signal endpoints over TCP.
 
     A full OTLP probe would require an SDK + collector context — TCP
@@ -515,23 +643,39 @@ def _test_otel(data_dir: str, *, timeout: float) -> None:
     """
     import yaml
 
-    cfg_path = os.path.join(data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(data_dir))
     try:
         with open(cfg_path) as f:
             raw: dict[str, Any] = yaml.safe_load(f) or {}
     except OSError as exc:
         click.echo(f"  ✗ cannot read config.yaml: {exc}")
         return
-    otel = raw.get("otel") or {}
-    if not otel.get("enabled"):
-        click.echo("  ⚠ otel.enabled=false — exporter will not run until enabled")
+    otel_root = raw.get("otel") or {}
+    using_named_destinations = isinstance(otel_root.get("destinations"), list)
+    if using_named_destinations:
+        otel = next(
+            (
+                item for item in otel_root["destinations"]
+                if isinstance(item, dict) and item.get("name") == name
+            ),
+            {},
+        )
+    else:
+        otel = otel_root
+    if not otel_root.get("enabled") or not otel.get("enabled"):
+        click.echo("  ⚠ destination enabled=false — exporter will not run until enabled")
     for sig in ("traces", "metrics", "logs"):
         block = otel.get(sig) or {}
-        if not block.get("enabled"):
+        signal_enabled = bool(block.get("enabled"))
+        if not using_named_destinations and "enabled" not in block:
+            signal_enabled = bool(block.get("endpoint") or otel.get("endpoint"))
+        if not signal_enabled:
             click.echo(f"    {sig:<8} disabled")
             continue
         endpoint = str(block.get("endpoint", "") or "")
         protocol = str(block.get("protocol") or otel.get("protocol") or "grpc")
+        if not endpoint:
+            endpoint = str(otel.get("endpoint", "") or "")
         ok, msg = _tcp_probe(endpoint, protocol, timeout=timeout)
         click.echo(f"    {sig:<8} {'✓' if ok else '✗'} {msg}")
 
@@ -541,10 +685,32 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
     click.echo(f"  {'✓' if ok else '✗'} {message}")
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse 3xx redirects on the token-bearing HEC probe.
+
+    ``urllib.request.urlopen`` follows redirects by default and replays
+    request headers — including ``Authorization: Splunk <token>`` — to the
+    redirect target. A malicious/misconfigured HEC endpoint could 302 the
+    probe to an attacker host and harvest the token. Raising on any 30x
+    keeps the credential pinned to the validated origin (F-0184).
+    """
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirects disabled (token would be forwarded)",
+            headers, fp,
+        )
+
+    http_error_302 = http_error_301
+    http_error_303 = http_error_301
+    http_error_307 = http_error_301
+    http_error_308 = http_error_301
+
+
 def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tuple[bool, str]:
     import yaml
 
-    cfg_path = os.path.join(data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with open(cfg_path) as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     sink = next(
@@ -562,7 +728,14 @@ def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tupl
         token = _peek_dotenv(data_dir, token_env)
     if not token:
         return False, f"token not set (env={token_env})"
-    verify_tls = bool(hec.get("verify_tls", False))
+    # TLS verification is ON by default. ``insecure_skip_verify``
+    # is the explicit opt-out for dev environments with self-signed
+    # HEC. The legacy ``verify_tls`` flag is honoured only when
+    # explicitly true (no-op against the new secure default); explicit
+    # false is silently IGNORED so probing this sink can never silently
+    # leak the HEC token to a MITM peer.
+    insecure_skip_verify = bool(hec.get("insecure_skip_verify", False))
+    verify_tls = not insecure_skip_verify
     body = _json.dumps({
         "event": "defenseclaw observability test",
         "sourcetype": hec.get("sourcetype", "_json"),
@@ -585,8 +758,14 @@ def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tupl
     if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+    # Use a dedicated opener that refuses redirects so the ``Authorization:
+    # Splunk <token>`` header is never replayed to a redirect target (F-0184).
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx),
+        _NoRedirectHandler(),
+    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310
             return True, f"HEC responded {resp.status} {resp.reason}"
     except urllib.error.HTTPError as exc:
         hint = "check token/index permissions" if exc.code in (401, 403) else ""
@@ -598,7 +777,7 @@ def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tupl
 def _test_otlp_logs(data_dir: str, name: str, *, timeout: float) -> None:
     import yaml
 
-    cfg_path = os.path.join(data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with open(cfg_path) as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     sink = next(
@@ -619,7 +798,7 @@ def _test_otlp_logs(data_dir: str, name: str, *, timeout: float) -> None:
 def _test_http_jsonl(data_dir: str, name: str, *, timeout: float) -> None:
     import yaml
 
-    cfg_path = os.path.join(data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with open(cfg_path) as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     sink = next(
@@ -649,11 +828,15 @@ def _test_http_jsonl(data_dir: str, name: str, *, timeout: float) -> None:
             click.echo(f"  ⚠ bearer env {bearer_env!r} not set — sending unauthenticated probe")
     body = (_json.dumps({"probe": "defenseclaw.observability.test"}) + "\n").encode()
     req = urllib.request.Request(url, data=body, method=method, headers=headers)  # noqa: S310
-    verify_tls = bool(block.get("verify_tls", True))
+    # parity: TLS verification is ON by default for the HTTP
+    # JSONL probe; only ``insecure_skip_verify=true`` disables it.
+    insecure_skip_verify = bool(block.get("insecure_skip_verify", False))
+    verify_tls = not insecure_skip_verify
     ctx = ssl.create_default_context()
     if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        click.echo("  ⚠ TLS certificate verification DISABLED (insecure_skip_verify=true)")
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
             click.echo(f"  ✓ webhook responded {resp.status} {resp.reason}")
@@ -699,12 +882,27 @@ def _tcp_probe(endpoint: str, protocol: str, *, timeout: float) -> tuple[bool, s
 # ---------------------------------------------------------------------------
 
 
-def _print_write_result(result: WriteResult, *, dry_run: bool) -> None:
+def _print_write_result(
+    result: WriteResult,
+    *,
+    action: str,
+    dry_run: bool,
+    connector: str = "",
+) -> None:
     click.echo()
     mode_tag = f"{ux.dim('[dry-run]')} " if dry_run else ""
+    scope = f" {ux.dim('@' + connector)}" if connector else ""
+    display_action = action.upper()
+    if action == "add":
+        updating = any(
+            "overwriting existing" in warning or "already existed" in warning
+            for warning in result.warnings
+        )
+        display_action = "UPDATE" if updating else "ADD"
     click.echo(
-        f"  {mode_tag}{ux.bold(result.target)}:{ux.bold(result.name)} "
-        f"(preset={result.preset_id})"
+        f"  {mode_tag}{ux.bold(display_action)} "
+        f"{ux.bold(result.target)}:{ux.bold(result.name)} "
+        f"(preset={result.preset_id}){scope}"
     )
     line_indent = "      " if dry_run else "    "
     for line in result.yaml_changes:
@@ -716,6 +914,38 @@ def _print_write_result(result: WriteResult, *, dry_run: bool) -> None:
     if not dry_run:
         ux.subhead("Next: defenseclaw-gateway restart (to reload config)")
     click.echo()
+
+
+def _destination_signals(d: Destination) -> str:
+    if d.target != "otel":
+        return "audit-events"
+    enabled = [name for name in ("traces", "metrics", "logs") if d.signals.get(name)]
+    return ",".join(enabled) or "none"
+
+
+def _print_destination_header() -> None:
+    click.echo(
+        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<8} "
+        f"{'SIGNALS':<22} {'PRESET':<18} ENDPOINT"
+    )
+    click.echo(
+        f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 8} "
+        f"{'-' * 22} {'-' * 18} {'-' * 36}"
+    )
+
+
+def _print_destination_row(d: Destination) -> None:
+    endpoint = redact_endpoint_for_display(
+        d.endpoint or "(none)",
+        hide_path=d.target != "otel",
+    )
+    if len(endpoint) > 54:
+        endpoint = endpoint[:51] + "..."
+    click.echo(
+        f"  {ux.bold(f'{d.name:<28}')} {d.target:<12} {d.kind:<10} "
+        f"{('yes' if d.enabled else 'no'):<8} {_destination_signals(d):<22} "
+        f"{(d.preset_id or '-'):<18} {endpoint}"
+    )
 
 
 def _dest_to_dict(d: Destination) -> dict[str, Any]:
@@ -730,6 +960,251 @@ def _dest_to_dict(d: Destination) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Per-connector audit_sinks (D5b)
+#
+# These write a SURGICAL slice of ``config.yaml`` —
+# ``observability.connectors[<name>].audit_sinks`` — under the shared config
+# lock, mirroring the sibling ``defenseclaw.observability.writer`` (which
+# writes the top-level ``audit_sinks:`` list). They deliberately do NOT route
+# through ``Config.save()``: that would re-serialize the whole (possibly
+# stale) dataclass and could clobber a concurrently-written global block. The
+# ``observability.connectors`` schema is round-tripped by
+# ``config.ObservabilityConfig`` so any *fully-loaded* ``cfg.save()`` (a setup
+# wizard, the TUI) preserves these entries.
+#
+# Preset resolution, the sink-entry builder, and the secret writer are reused
+# from the writer module so the per-connector path never drifts from the
+# global ``apply_preset`` path — only the routing target differs.
+# ---------------------------------------------------------------------------
+
+
+def _obs_load_raw(path: str) -> dict[str, Any]:
+    import yaml
+
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping at top level")
+    return data
+
+
+def _connector_audit_sinks_list(
+    raw: dict[str, Any], connector: str, *, create: bool,
+) -> list[Any] | None:
+    """Return ``observability.connectors[connector].audit_sinks``.
+
+    ``create=True`` materialises the nested path; ``create=False`` returns
+    ``None`` for a missing path ("inherit the global audit_sinks").
+    """
+    obs = raw.get("observability")
+    if not isinstance(obs, dict):
+        if not create:
+            return None
+        obs = {}
+        raw["observability"] = obs
+    conns = obs.get("connectors")
+    if not isinstance(conns, dict):
+        if not create:
+            return None
+        conns = {}
+        obs["connectors"] = conns
+    entry = conns.get(connector)
+    if not isinstance(entry, dict):
+        if not create:
+            return None
+        entry = {}
+        conns[connector] = entry
+    sinks = entry.get("audit_sinks")
+    if not isinstance(sinks, list):
+        if not create:
+            return None
+        sinks = []
+        entry["audit_sinks"] = sinks
+    return sinks
+
+
+def _prune_observability(raw: dict[str, Any], connector: str) -> None:
+    """Drop now-empty per-connector dimensions / connector / block."""
+    obs = raw.get("observability")
+    if not isinstance(obs, dict):
+        return
+    conns = obs.get("connectors")
+    if not isinstance(conns, dict):
+        return
+    entry = conns.get(connector)
+    if isinstance(entry, dict):
+        if entry.get("audit_sinks") == []:
+            entry.pop("audit_sinks", None)
+        if entry.get("webhooks") == []:
+            entry.pop("webhooks", None)
+        if not entry:
+            conns.pop(connector, None)
+    if not conns:
+        obs.pop("connectors", None)
+    if not obs:
+        raw.pop("observability", None)
+
+
+def _apply_sink_to_connector(
+    preset,
+    inputs: dict[str, str],
+    data_dir: str,
+    connector: str,
+    *,
+    name: str | None,
+    enabled: bool,
+    secret_value: str | None,
+    target_override: str | None,
+    dry_run: bool,
+) -> WriteResult:
+    """Write an audit-sink preset under observability.connectors[connector]."""
+    effective_target = _resolve_target(preset, target_override)
+    if effective_target != "audit_sinks":
+        raise ValueError(
+            "--connector applies to audit_sinks only; the OTel gateway exporter "
+            f"(preset {preset.id!r}) is a single global block. Re-run without "
+            "--connector, or use a sink preset / --target audit_sinks."
+        )
+    resolved_inputs = _resolve_inputs(preset, inputs)
+    dest_name = _destination_name(preset, name, resolved_inputs)
+    if not _SINK_NAME_RE.match(dest_name):
+        raise ValueError(
+            f"destination name {dest_name!r} must match {_SINK_NAME_RE.pattern}"
+        )
+    entry = _build_sink_entry(preset, resolved_inputs, name=dest_name, enabled=enabled)
+
+    warnings: list[str] = []
+    # Secrets land in ~/.defenseclaw/.env (shared per token_env across
+    # connectors, exactly like the global path) — reused verbatim.
+    dotenv_changes = _apply_secret(data_dir, preset, secret_value, dry_run=dry_run)
+
+    if not dry_run:
+        cfg_path = str(config_path_for_data_dir(data_dir))
+        with locked_config_yaml(cfg_path):
+            raw = _obs_load_raw(cfg_path)
+            sinks = _connector_audit_sinks_list(raw, connector, create=True)
+            idx = next(
+                (i for i, s in enumerate(sinks)
+                 if isinstance(s, dict) and s.get("name") == dest_name),
+                -1,
+            )
+            if idx >= 0:
+                warnings.append(
+                    f"observability.connectors[{connector}].audit_sinks[{dest_name}] "
+                    "already existed — fields overwritten (other keys preserved)",
+                )
+                merged = dict(sinks[idx]) if isinstance(sinks[idx], dict) else {}
+                merged.update(entry)
+                sinks[idx] = merged
+            else:
+                sinks.append(entry)
+            write_config_yaml_secure(cfg_path, raw)
+
+    return WriteResult(
+        name=dest_name,
+        target="audit_sinks",
+        preset_id=preset.id,
+        yaml_changes=[
+            f"observability.connectors[{connector}].audit_sinks[{dest_name}] "
+            f"kind={entry.get('kind')} enabled={entry.get('enabled')}",
+        ],
+        dotenv_changes=dotenv_changes,
+        warnings=warnings,
+        dry_run=dry_run,
+    )
+
+
+def _connector_destinations(data_dir: str, connector: str) -> list[Destination] | None:
+    """Return a connector's per-connector audit sinks, or None if unset."""
+    raw = _obs_load_raw(str(config_path_for_data_dir(data_dir)))
+    sinks = _connector_audit_sinks_list(raw, connector, create=False)
+    if sinks is None:
+        return None
+    out: list[Destination] = []
+    for sink in sinks:
+        if not isinstance(sink, dict):
+            continue
+        kind = str(sink.get("kind", "") or "")
+        name = str(sink.get("name", "") or "")
+        if not name or not kind:
+            continue
+        out.append(
+            Destination(
+                name=name,
+                target="audit_sinks",
+                kind=kind,
+                enabled=bool(sink.get("enabled", False)),
+                preset_id=_sink_preset_id(sink),
+                endpoint=_sink_endpoint(sink),
+                signals={},
+            ),
+        )
+    return out
+
+
+def _set_connector_sink_enabled(
+    data_dir: str, connector: str, name: str, enabled: bool,
+) -> WriteResult:
+    cfg_path = str(config_path_for_data_dir(data_dir))
+    with locked_config_yaml(cfg_path):
+        raw = _obs_load_raw(cfg_path)
+        sinks = _connector_audit_sinks_list(raw, connector, create=False)
+        idx = next(
+            (i for i, s in enumerate(sinks or [])
+             if isinstance(s, dict) and s.get("name") == name),
+            -1,
+        )
+        if idx < 0:
+            raise ValueError(
+                f"no per-connector audit sink named {name!r} for connector {connector!r}"
+            )
+        sinks[idx]["enabled"] = bool(enabled)
+        write_config_yaml_secure(cfg_path, raw)
+    return WriteResult(
+        name=name,
+        target="audit_sinks",
+        preset_id="",
+        yaml_changes=[
+            f"observability.connectors[{connector}].audit_sinks[{name}].enabled = {bool(enabled)}",
+        ],
+        dotenv_changes=[],
+        warnings=[],
+        dry_run=False,
+    )
+
+
+def _remove_connector_sink(data_dir: str, connector: str, name: str) -> WriteResult:
+    cfg_path = str(config_path_for_data_dir(data_dir))
+    with locked_config_yaml(cfg_path):
+        raw = _obs_load_raw(cfg_path)
+        sinks = _connector_audit_sinks_list(raw, connector, create=False)
+        if sinks is None:
+            raise ValueError(
+                f"no per-connector audit sinks for connector {connector!r}"
+            )
+        new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
+        if len(new) == len(sinks):
+            raise ValueError(
+                f"no per-connector audit sink named {name!r} for connector {connector!r}"
+            )
+        sinks[:] = new
+        _prune_observability(raw, connector)
+        write_config_yaml_secure(cfg_path, raw)
+    return WriteResult(
+        name=name,
+        target="audit_sinks",
+        preset_id="",
+        yaml_changes=[f"observability.connectors[{connector}].audit_sinks[{name}] removed"],
+        dotenv_changes=[],
+        warnings=[],
+        dry_run=False,
+    )
+
+
 def _slug(value: str) -> str:
     import re
     out = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
@@ -737,13 +1212,14 @@ def _slug(value: str) -> str:
 
 
 def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
-    import yaml
+    """Compatibility wrapper around the authoritative secure config writer.
 
-    tmp = cfg_path + ".tmp"
-    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-    with open(tmp, "w") as f:
-        yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
-    os.replace(tmp, cfg_path)
+    Older callers and the F-0186 regression test import this private helper.
+    Keeping the shim avoids splitting atomic-write behavior while ensuring all
+    writes use the managed-mode authorization and mode-preservation checks in
+    :func:`write_config_yaml_secure`.
+    """
+    write_config_yaml_secure(cfg_path, raw)
 
 
 # ---------------------------------------------------------------------------

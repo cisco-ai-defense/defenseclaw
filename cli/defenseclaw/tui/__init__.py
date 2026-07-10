@@ -27,11 +27,54 @@ from defenseclaw.tui.panels.first_run import decide_first_run_prompt, first_run_
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, ThemeTokens
 
 
+def _harden_textual_stdin_decoder() -> None:
+    """Make Textual's stdin decoder tolerate non-UTF-8 input bytes.
+
+    Textual's Linux/macOS driver decodes raw stdin with a *strict*
+    UTF-8 incremental decoder (``getincrementaldecoder("utf-8")()`` in
+    ``textual/drivers/linux_driver.py``). A single stray byte that is
+    not valid UTF-8 — a bracketed-paste of binary, a mouse report when
+    the terminal isn't in UTF-8 mode, or a key on a non-UTF-8 locale —
+    makes ``decode`` raise ``UnicodeDecodeError`` inside the input
+    thread, which Textual turns into a full-screen ``panic`` traceback
+    and tears the TUI down.
+
+    We swap the decoder factory that module references for one that
+    decodes UTF-8 with ``errors="replace"`` (the offending byte becomes
+    U+FFFD instead of crashing). Best-effort: if Textual's internals
+    move, the import/attribute access fails and we leave the original
+    strict behaviour in place rather than break launch.
+    """
+
+    import codecs
+
+    try:
+        import textual.drivers.linux_driver as linux_driver
+    except Exception:  # noqa: BLE001 - non-Linux/mac drivers don't need this.
+        return
+
+    base_decoder = codecs.getincrementaldecoder("utf-8")
+
+    class _TolerantUtf8Decoder(base_decoder):  # type: ignore[valid-type, misc]
+        def __init__(self, errors: str = "strict") -> None:
+            # Ignore the caller's strict default; replace bad bytes.
+            super().__init__(errors="replace")
+
+    def _tolerant_factory(encoding: str):  # type: ignore[no-untyped-def]
+        if encoding.lower().replace("-", "").replace("_", "") == "utf8":
+            return _TolerantUtf8Decoder
+        return codecs.getincrementaldecoder(encoding)
+
+    linux_driver.getincrementaldecoder = _tolerant_factory  # type: ignore[attr-defined]
+
+
 def run_textual_tui() -> None:
     """Run the Python Textual TUI backend."""
 
     from defenseclaw import config
     from defenseclaw.tui.app import DefenseClawTUI
+
+    _harden_textual_stdin_decoder()
 
     try:
         cfg = config.load()
