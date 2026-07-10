@@ -54,7 +54,11 @@ from defenseclaw.doctor_gateway import (
     canonical_path,
     gateway_executable_name,
 )
-from defenseclaw.doctor_hooks import WindowsHookCheck, validate_windows_hook_registration
+from defenseclaw.doctor_hooks import (
+    WindowsHookCheck,
+    _packaged_windows_install_root,
+    validate_windows_hook_registration,
+)
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
 from defenseclaw.scanner_binary import resolve_scanner_binary
@@ -1379,6 +1383,8 @@ def _windows_native_hook_check(
             if paths
             else os.path.expanduser("~/.codex/config.toml" if connector == "codex" else "~/.claude/settings.json")
         )
+    if install_root is None:
+        install_root = _packaged_windows_install_root(getattr(cfg, "data_dir", "") or "")
     if install_root is None:
         install_root = os.path.expanduser("~/.local/bin")
     return validate_windows_hook_registration(
