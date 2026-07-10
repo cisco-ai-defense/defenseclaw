@@ -1273,10 +1273,13 @@ function Invoke-SetupAcceptance {
             'init', '--skip-install', '--non-interactive', '--yes', '--connector', 'codex',
             '--profile', 'observe', '--no-start-gateway', '--no-verify'
         ) -Timeout 300 -Log (Join-Path $logs 'setup-init-codex.log') | Out-Null
+        # ``init`` is intentionally a first-run/replacement workflow. Add a
+        # second hook connector through the documented additive setup path so
+        # the acceptance test verifies roster preservation instead of asking a
+        # second first-run invocation to retain stale peers.
         Invoke-Installed $launcher @(
-            'init', '--skip-install', '--non-interactive', '--yes', '--connector', 'claudecode',
-            '--profile', 'observe', '--no-start-gateway', '--no-verify'
-        ) -Timeout 300 -Log (Join-Path $logs 'setup-init-claudecode.log') | Out-Null
+            'setup', 'claudecode', '--yes', '--no-restart'
+        ) -Timeout 300 -Log (Join-Path $logs 'setup-add-claudecode.log') | Out-Null
         # The packaged Go suite separately executes the hardened absolute-path
         # Antigravity hook command from an untrusted working directory. The
         # installer acceptance must preserve the product's current support
