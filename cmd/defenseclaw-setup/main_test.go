@@ -33,6 +33,33 @@ func TestParseArgsSilentInstallProperties(t *testing.T) {
 	}
 }
 
+func TestParseArgsQuietPropertyMatrix(t *testing.T) {
+	for _, connector := range []string{"none", "codex", "claudecode"} {
+		for _, mode := range []string{"observe", "action"} {
+			for _, start := range []string{"0", "1"} {
+				t.Run(connector+"/"+mode+"/start-"+start, func(t *testing.T) {
+					opts, err := parseArgs([]string{
+						"/quiet",
+						"CONNECTOR=" + connector,
+						"MODE=" + mode,
+						"STARTGATEWAY=" + start,
+					})
+					if err != nil {
+						t.Fatalf("parseArgs returned error: %v", err)
+					}
+					wantStart := start == "1"
+					if !opts.Quiet || opts.Connector != connector || opts.Mode != mode || opts.StartGateway != wantStart {
+						t.Fatalf("quiet property matrix parsed incorrectly: %+v", opts)
+					}
+					if !opts.ConnectorSet || !opts.ModeSet || !opts.StartGatewaySet {
+						t.Fatalf("quiet property matrix omitted explicit markers: %+v", opts)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestParseArgsWaitPID(t *testing.T) {
 	opts, err := parseArgs([]string{"WAITPID=42", "FROMVERSION=1.2.3"})
 	if err != nil {

@@ -171,6 +171,23 @@ type setupWizard struct {
 	mu      sync.Mutex
 }
 
+type wizardChoice struct {
+	Label string
+	Value string
+}
+
+var (
+	wizardConnectorChoices = []wizardChoice{
+		{Label: "Configure later", Value: "none"},
+		{Label: "Codex CLI", Value: "codex"},
+		{Label: "Claude Code", Value: "claudecode"},
+	}
+	wizardModeChoices = []wizardChoice{
+		{Label: "Observe", Value: "observe"},
+		{Label: "Action", Value: "action"},
+	}
+)
+
 var (
 	wizardsMu sync.Mutex
 	wizards   = map[uintptr]*setupWizard{}
@@ -333,18 +350,14 @@ func (w *setupWizard) createControls() error {
 		}
 		procSendMessage.Call(hwnd, wmSetFont, font, 1)
 	}
-	for _, item := range []string{"Configure later", "Codex CLI", "Claude Code"} {
-		procSendMessage.Call(w.connector, cbAddString, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(item))))
+	for _, choice := range wizardConnectorChoices {
+		procSendMessage.Call(w.connector, cbAddString, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(choice.Label))))
 	}
 	procSendMessage.Call(w.connector, cbSetCurSel, uintptr(connectorIndex(w.opts.Connector)), 0)
-	for _, item := range []string{"Observe", "Action"} {
-		procSendMessage.Call(w.mode, cbAddString, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(item))))
+	for _, choice := range wizardModeChoices {
+		procSendMessage.Call(w.mode, cbAddString, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(choice.Label))))
 	}
-	if w.opts.Mode == "action" {
-		procSendMessage.Call(w.mode, cbSetCurSel, 1, 0)
-	} else {
-		procSendMessage.Call(w.mode, cbSetCurSel, 0, 0)
-	}
+	procSendMessage.Call(w.mode, cbSetCurSel, uintptr(modeIndex(w.opts.Mode)), 0)
 	if w.opts.StartGateway {
 		procSendMessage.Call(w.start, bmSetCheck, bstChecked, 0)
 	}
@@ -482,12 +495,12 @@ func (w *setupWizard) startAction() {
 		setText(w.description, "Removing DefenseClaw application files...")
 	} else {
 		if w.opts.Action == "install" {
-			w.opts.Connector = connectorValue(selection(w.connector))
-			w.opts.Mode = modeValue(selection(w.mode))
-			w.opts.StartGateway = checked(w.start)
-			w.opts.ConnectorSet = true
-			w.opts.ModeSet = true
-			w.opts.StartGatewaySet = true
+			w.opts = optionsFromWizardSelections(
+				w.opts,
+				selection(w.connector),
+				selection(w.mode),
+				checked(w.start),
+			)
 		}
 		setText(w.description, "Installing packaged files and updating user registration...")
 	}
@@ -612,32 +625,46 @@ func checked(hwnd uintptr) bool {
 }
 
 func connectorIndex(value string) int {
-	switch value {
-	case "codex":
-		return 1
-	case "claudecode":
-		return 2
-	default:
-		return 0
-	}
+	return wizardChoiceIndex(wizardConnectorChoices, value)
 }
 
 func connectorValue(index int) string {
-	switch index {
-	case 1:
-		return "codex"
-	case 2:
-		return "claudecode"
-	default:
-		return "none"
-	}
+	return wizardChoiceValue(wizardConnectorChoices, index)
+}
+
+func modeIndex(value string) int {
+	return wizardChoiceIndex(wizardModeChoices, value)
 }
 
 func modeValue(index int) string {
-	if index == 1 {
-		return "action"
+	return wizardChoiceValue(wizardModeChoices, index)
+}
+
+func wizardChoiceIndex(choices []wizardChoice, value string) int {
+	for index, choice := range choices {
+		if choice.Value == value {
+			return index
+		}
 	}
-	return "observe"
+	return 0
+}
+
+func wizardChoiceValue(choices []wizardChoice, index int) string {
+	if index >= 0 && index < len(choices) {
+		return choices[index].Value
+	}
+	return choices[0].Value
+}
+
+func optionsFromWizardSelections(opts options, connectorSelection, modeSelection int, startGateway bool) options {
+	opts.Quiet = true
+	opts.Connector = connectorValue(connectorSelection)
+	opts.Mode = modeValue(modeSelection)
+	opts.StartGateway = startGateway
+	opts.ConnectorSet = true
+	opts.ModeSet = true
+	opts.StartGatewaySet = true
+	return opts
 }
 
 func centerWindow(hwnd uintptr, width, height int32) {
