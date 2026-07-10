@@ -265,13 +265,19 @@ func TestPackagedWindowsHookBinaryUsesVerifiedNativeInstallState(t *testing.T) {
 		}
 	}
 	writeState()
-	if got := packagedWindowsHookBinary(gateway); !sameWindowsInstallPath(got, hook) {
-		t.Fatalf("packagedWindowsHookBinary() = %q, want %q", got, hook)
+	if got := packagedWindowsHookBinaryAtRoot(gateway, root); !sameWindowsInstallPath(got, hook) {
+		t.Fatalf("packagedWindowsHookBinaryAtRoot() = %q, want %q", got, hook)
+	}
+	if got := packagedWindowsHookBinary(gateway); got != "" {
+		t.Fatalf("arbitrary self-consistent install root selected production hook binary %q", got)
+	}
+	if got := packagedWindowsHookBinaryAtRoot(gateway, filepath.Join(root, "other-install")); got != "" {
+		t.Fatalf("gateway outside expected install root selected hook binary %q", got)
 	}
 
 	state["command_dir"] = filepath.Join(root, "spoofed-bin")
 	writeState()
-	if got := packagedWindowsHookBinary(gateway); got != "" {
+	if got := packagedWindowsHookBinaryAtRoot(gateway, root); got != "" {
 		t.Fatalf("mismatched installer state selected hook binary %q", got)
 	}
 	state["command_dir"] = commandDir
@@ -279,8 +285,56 @@ func TestPackagedWindowsHookBinaryUsesVerifiedNativeInstallState(t *testing.T) {
 	if err := os.WriteFile(hook, []byte("not-a-windows-executable"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got := packagedWindowsHookBinary(gateway); got != "" {
+	if got := packagedWindowsHookBinaryAtRoot(gateway, root); got != "" {
 		t.Fatalf("non-PE hook selected as packaged launcher %q", got)
+	}
+}
+
+func TestPackagedWindowsHookBinaryRejectsReparseInstallRoot(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows reparse-point trust boundary")
+	}
+	realRoot := t.TempDir()
+	commandDir := filepath.Join(realRoot, "bin")
+	installerDir := filepath.Join(realRoot, "installer")
+	if err := os.MkdirAll(commandDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(installerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(commandDir, windowsGatewayBinaryName),
+		filepath.Join(commandDir, windowsHookBinaryName),
+	} {
+		if err := os.WriteFile(path, []byte("MZnative-fixture"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := nativeWindowsInstallState{
+		SchemaVersion: 1,
+		InstallKind:   "native-windows-exe",
+		InstallScope:  "user",
+		InstallRoot:   realRoot,
+		CommandDir:    commandDir,
+		Runtime:       filepath.Join(realRoot, "runtime", "python"),
+	}
+	body, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installerDir, "install-state.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(filepath.Dir(realRoot), "linked-install")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink privilege unavailable: %v", err)
+	}
+	if got := packagedWindowsHookBinaryAtRoot(
+		filepath.Join(linkRoot, "bin", windowsGatewayBinaryName),
+		linkRoot,
+	); got != "" {
+		t.Fatalf("reparse-point install root selected hook binary %q", got)
 	}
 }
 
@@ -356,6 +410,22 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 	if !isNativeHookCommand(codex) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
+	}
+
+	// Claude Code accepts an exact command string and therefore uses the
+	// absolute, quoted, installer-managed launcher. It must never regress to a
+	// bare or PATH-resolved form that an untrusted current directory can shadow.
+	claude := hookInvocationCommandFor("windows", "claudecode", unix)
+	wantClaude := windowsQuoteExe(windowsExe) + " " + nativeHookFlag + "claudecode"
+	if claude != wantClaude {
+		t.Errorf("claudecode command = %q, want %q", claude, wantClaude)
+	}
+	if strings.HasPrefix(claude, windowsSafePATHCommandPrefix) ||
+		strings.HasPrefix(claude, windowsHookBinaryName+" ") {
+		t.Errorf("claudecode command is PATH/bare resolved: %q", claude)
+	}
+	if !isNativeHookCommand(claude) {
+		t.Errorf("isNativeHookCommand(%q) = false, want true", claude)
 	}
 
 	// Antigravity's direct-exec parser does not dequote command paths. Keep the
