@@ -124,6 +124,16 @@ actor UpdateChecker {
 
     // MARK: - Download + install + restart
 
+    struct ZipArchiveEntry: Equatable {
+        var path: String
+        var mode: String
+    }
+
+    enum ArchiveValidationResult: Equatable {
+        case success(appBundleName: String)
+        case failure(String)
+    }
+
     /// Downloads the release zip, swaps the current bundle, and relaunches.
     /// Returns an error message, or never returns (the app restarts) on success.
     func downloadAndInstall(_ release: ReleaseInfo, progress: @Sendable @escaping (UpgradeState) -> Void) async -> String? {
@@ -169,6 +179,16 @@ actor UpdateChecker {
         // Unpack with ditto (preserves bundle structure + signature).
         let unpackDir = stage.appendingPathComponent("unpacked")
         try? FileManager.default.createDirectory(at: unpackDir, withIntermediateDirectories: true)
+        let entries = await Self.listZipEntries(zipPath)
+        guard entries.exitCode == 0 else {
+            return "Could not inspect update archive: \(entries.output)"
+        }
+        switch Self.validateUpdateArchive(entries: Self.parseZipEntries(entries.output)) {
+        case .success:
+            break
+        case .failure(let message):
+            return "Refusing unsafe update archive: \(message)"
+        }
         let unzip = await Self.runProcess("/usr/bin/ditto", ["-xk", zipPath.path, unpackDir.path])
         guard unzip.exitCode == 0 else { return "Unpack failed: \(unzip.output)" }
         let appNames = (try? FileManager.default.contentsOfDirectory(atPath: unpackDir.path))?
@@ -259,6 +279,57 @@ actor UpdateChecker {
     }
 
     // MARK: - Process helper
+
+    nonisolated static func validateUpdateArchive(entries: [ZipArchiveEntry]) -> ArchiveValidationResult {
+        guard !entries.isEmpty else {
+            return .failure("archive is empty")
+        }
+        var topLevelNames = Set<String>()
+        var appBundleName: String?
+        for entry in entries {
+            let path = entry.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let first = path.split(separator: "/", omittingEmptySubsequences: true).first else {
+                return .failure("empty archive path")
+            }
+            guard !path.hasPrefix("/"), !path.hasPrefix("~") else {
+                return .failure("unsafe path \(path)")
+            }
+            let components = path.split(separator: "/", omittingEmptySubsequences: true)
+            guard !components.contains("..") else {
+                return .failure("unsafe path \(path)")
+            }
+            guard !entry.mode.hasPrefix("l") && !entry.mode.hasPrefix("h") else {
+                return .failure("link entry \(path) is not allowed")
+            }
+            let root = String(first)
+            topLevelNames.insert(root)
+            if root.hasSuffix(".app") {
+                if appBundleName == nil {
+                    appBundleName = root
+                } else if appBundleName != root {
+                    return .failure("archive must contain a single top-level .app bundle")
+                }
+            }
+        }
+        guard topLevelNames.count == 1, let appBundleName else {
+            return .failure("archive must contain a single top-level .app bundle")
+        }
+        return .success(appBundleName: appBundleName)
+    }
+
+    nonisolated static func parseZipEntries(_ output: String) -> [ZipArchiveEntry] {
+        output.split(whereSeparator: \.isNewline).compactMap { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            let fields = line.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: true)
+            guard fields.count >= 9 else { return nil }
+            return ZipArchiveEntry(path: String(fields[8]), mode: String(fields[0]))
+        }
+    }
+
+    nonisolated static func listZipEntries(_ zipPath: URL) async -> (exitCode: Int32, output: String) {
+        await runProcess("/usr/bin/zipinfo", ["-l", zipPath.path])
+    }
 
     nonisolated static func runProcess(
         _ launchPath: String,
