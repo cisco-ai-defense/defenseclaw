@@ -24,6 +24,7 @@ struct CommandPaletteView: View {
     @State private var category = "all"
     @State private var selectedID: String? = CommandRegistry.all.first?.id
     @State private var extraArguments = ""
+    @State private var secretInput = ""
     @State private var output = ""
     @State private var exitCode: Int32?
     @State private var running = false
@@ -90,6 +91,7 @@ struct CommandPaletteView: View {
         }
         .onChange(of: selectedID) {
             extraArguments = ""
+            secretInput = ""
             output = ""
             exitCode = nil
             parseError = nil
@@ -129,12 +131,22 @@ struct CommandPaletteView: View {
 
             if command.requiresInput {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Arguments").font(.caption.weight(.semibold))
+                    Text(command.requiresSecretStandardInput ? "Credential environment name" : "Arguments")
+                        .font(.caption.weight(.semibold))
                     TextField(command.usage.isEmpty ? "Additional arguments" : command.usage,
                               text: $extraArguments)
                         .textFieldStyle(.roundedBorder)
                         .font(.body.monospaced())
                     Text(command.usage).font(.caption2).foregroundStyle(.secondary)
+                    if command.requiresSecretStandardInput {
+                        Text("Secret value").font(.caption.weight(.semibold)).padding(.top, 4)
+                        SecureField("Secret value", text: $secretInput)
+                            .textFieldStyle(.roundedBorder)
+                            .privacySensitive()
+                        Text("The secret is sent over standard input and is never included in the command preview or activity history.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     if let parseError {
                         Label(parseError, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(Cisco.red)
@@ -197,7 +209,11 @@ struct CommandPaletteView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(command.isDestructive ? Cisco.red : Cisco.blue)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(running || (command.requiresInput && extraArguments.trimmingCharacters(in: .whitespaces).isEmpty))
+                    .disabled(
+                        running
+                            || (command.requiresInput && extraArguments.trimmingCharacters(in: .whitespaces).isEmpty)
+                            || (command.requiresSecretStandardInput && secretInput.isEmpty)
+                    )
                 }
             }
         }
@@ -214,7 +230,7 @@ struct CommandPaletteView: View {
 
     private func requestRun(_ command: CommandDefinition) {
         do {
-            _ = try CommandArgumentParser.parse(extraArguments)
+            _ = try executionPlan(for: command)
             parseError = nil
         } catch {
             parseError = error.localizedDescription
@@ -226,9 +242,9 @@ struct CommandPaletteView: View {
 
     private func runSelected() {
         guard let command = selected else { return }
-        let extras: [String]
+        let plan: CommandExecutionPlan
         do {
-            extras = try CommandArgumentParser.parse(extraArguments)
+            plan = try executionPlan(for: command)
             parseError = nil
         } catch {
             parseError = error.localizedDescription
@@ -238,11 +254,13 @@ struct CommandPaletteView: View {
         running = true
         output = ""
         exitCode = nil
+        if plan.standardInput != nil { secretInput = "" }
         Task {
             let result = await appState.runCommand(
                 title: command.title,
                 binary: command.binary,
-                arguments: command.arguments + extras,
+                arguments: plan.arguments,
+                standardInput: plan.standardInput,
                 category: command.category,
                 origin: "Command Palette",
                 refreshOnSuccess: command.changesState
@@ -254,5 +272,13 @@ struct CommandPaletteView: View {
             exitCode = result.exitCode
             running = false
         }
+    }
+
+    private func executionPlan(for command: CommandDefinition) throws -> CommandExecutionPlan {
+        let extras = try CommandArgumentParser.parse(extraArguments)
+        return try command.executionPlan(
+            extraArguments: extras,
+            secretInput: command.requiresSecretStandardInput ? secretInput : nil
+        )
     }
 }

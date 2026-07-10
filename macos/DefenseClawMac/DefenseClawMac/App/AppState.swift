@@ -985,7 +985,7 @@ final class AppState {
     }
 
     /// The TUI's Ctrl+S: write the last command's output (with the run-header
-    /// preamble) to <data_dir>/last-run.log, chmod 0600.
+    /// preamble) to <data_dir>/last-run.log with mode 0600 from creation.
     func exportLastCommandOutput() {
         guard let entry = activity.entries.first else {
             notify(title: "DefenseClaw", body: "No command output to save yet.", id: "export-\(Date().timeIntervalSince1970)")
@@ -1001,13 +1001,7 @@ final class AppState {
         """
         let target = ConfigStore.dataDirectory.appendingPathComponent("last-run.log")
         do {
-            try (header + entry.output + "\n").write(to: target, atomically: true, encoding: .utf8)
-            do {
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
-            } catch {
-                try? FileManager.default.removeItem(at: target)
-                throw error
-            }
+            try SecureFileWriter.write(header + entry.output + "\n", to: target)
             notify(title: "DefenseClaw", body: "Wrote last-run.log → \(target.path)", id: "export-\(Date().timeIntervalSince1970)")
         } catch {
             notify(title: "DefenseClaw", body: "Save failed: \(error.localizedDescription)", id: "export-\(Date().timeIntervalSince1970)")
