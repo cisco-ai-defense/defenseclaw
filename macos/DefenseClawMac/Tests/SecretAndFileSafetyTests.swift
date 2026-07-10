@@ -23,6 +23,7 @@ struct SecretAndFileSafetyTests {
         credentialExecutionPlanValidatesBothInputs()
         normalExecutionPlanPreservesArguments()
         secureWriterPreparesPrivateFileBeforeAtomicInstall()
+        secureWriterRejectsAnInheritableReadACL()
         secureWriterCleansUpWithoutReplacingOnPreinstallFailure()
         print("SecretAndFileSafetyTests passed")
     }
@@ -155,6 +156,22 @@ struct SecretAndFileSafetyTests {
         }
     }
 
+    private static func secureWriterRejectsAnInheritableReadACL() {
+        withTemporaryDirectory { directory in
+            try installInheritedReadACL(on: directory)
+            let target = directory.appendingPathComponent("last-run.log")
+            do {
+                try SecureFileWriter.write(Data("sensitive output".utf8), to: target)
+                fail("an inheritable read ACL should prevent secure export")
+            } catch SecureFileWriter.WriteError.insecureExtendedACL(let path) {
+                expect(path == directory.path, "the parent ACL is identified")
+            } catch {
+                fail("unexpected ACL validation failure: \(error)")
+            }
+            expect(!FileManager.default.fileExists(atPath: target.path), "ACL failure installs no output")
+        }
+    }
+
     private static func credentialCommand() -> CommandDefinition {
         guard let command = CommandRegistry.all.first(where: { $0.arguments == ["keys", "set"] }) else {
             fail("keys set registry command is missing")
@@ -171,6 +188,23 @@ struct SecretAndFileSafetyTests {
             try body(directory)
         } catch {
             fail("temporary directory test failed: \(error)")
+        }
+    }
+
+    private static func installInheritedReadACL(on directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        process.arguments = ["+a", "everyone allow read,file_inherit", directory.path]
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let detail = String(
+                decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self
+            )
+            fail("could not install inherited test ACL: \(detail)")
         }
     }
 
