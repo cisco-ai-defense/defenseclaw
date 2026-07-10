@@ -6387,7 +6387,7 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
         assert app._connector_filter() == ""
         assert render_calls == 0
 
-        assert await pilot.click("#action-menu-row-1")
+        assert await _click_when_ready(pilot, "#action-menu-row-1")
         await _wait_for_background(
             lambda: app._connector_filter() == "codex" and "Codex (codex)" in scope_text()
         )
@@ -6399,7 +6399,7 @@ async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
 
         await pilot.press("m")
         await pilot.pause()
-        assert await pilot.click("#action-menu-row-0")
+        assert await _click_when_ready(pilot, "#action-menu-row-0")
         await _wait_for_background(
             lambda: app._connector_filter() == "" and "All connectors" in scope_text()
         )
