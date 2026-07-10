@@ -390,8 +390,8 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
         ):
             with self.assertRaises(SSRFError):
                 guard_url(
-                    "https://localhost/v1",
-                    resolver=stub({"localhost": ["127.0.0.1"]}),
+                    "https://loopback.internal/v1",
+                    resolver=stub({"loopback.internal": ["127.0.0.1"]}),
                 )
 
     def test_allowed_private_upstream_multiple_ips(self):

@@ -2379,7 +2379,7 @@ func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL st
 				TargetHost:   host,
 				TargetPath:   r.URL.Path,
 				LooksLikeLLM: true,
-				Branch:       "chat",
+				Branch:       "private-upstream",
 				Decision:     "allow",
 				Reason:       "private-ip-allowed",
 				Source:       "go",

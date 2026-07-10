@@ -78,7 +78,10 @@ def _is_allowed_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) ->
     """Return True if ip is in the operator-configured private allowlist."""
     if ip.is_loopback or ip.is_link_local:
         return False
-    return ip in _allowed_private_ips()
+    check_ip = ip
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        check_ip = ip.ipv4_mapped
+    return check_ip in _allowed_private_ips()
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 """Schemes accepted for HTTP-style fetches.

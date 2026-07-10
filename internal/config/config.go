@@ -1764,11 +1764,14 @@ func validateAllowPrivateUpstreams(ips []string) error {
 		if ip.IsLoopback() {
 			return fmt.Errorf("guardrail.allow_private_upstreams: loopback address %q is not allowed (Ollama uses a dedicated bypass)", s)
 		}
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return fmt.Errorf("guardrail.allow_private_upstreams: link-local address %q is not allowed", s)
+		if ip.IsMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("guardrail.allow_private_upstreams: %q is not a valid upstream address", s)
 		}
-		if v4 := ip.To4(); v4 != nil && v4[0] == 169 && v4[1] == 254 {
-			return fmt.Errorf("guardrail.allow_private_upstreams: cloud metadata address %q is not allowed", s)
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			if v4 := ip.To4(); v4 != nil && v4[0] == 169 && v4[1] == 254 {
+				return fmt.Errorf("guardrail.allow_private_upstreams: cloud metadata address %q is not allowed", s)
+			}
+			return fmt.Errorf("guardrail.allow_private_upstreams: link-local address %q is not allowed", s)
 		}
 	}
 	return nil

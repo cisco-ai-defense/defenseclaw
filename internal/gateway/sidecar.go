@@ -637,8 +637,10 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	}
 
 	// Initialize private-upstream allowlist from config + env var.
-	if allowedIPs := netguard.ParseAllowedPrivateUpstreams(s.currentConfig().Guardrail.AllowPrivateUpstreams); len(allowedIPs) > 0 {
-		netguard.SetAllowedPrivateIPs(allowedIPs)
+	// Always call SetAllowedPrivateIPs so config removals clear stale entries.
+	allowedIPs := netguard.ParseAllowedPrivateUpstreams(s.currentConfig().Guardrail.AllowPrivateUpstreams)
+	netguard.SetAllowedPrivateIPs(allowedIPs)
+	if len(allowedIPs) > 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
 	}
 

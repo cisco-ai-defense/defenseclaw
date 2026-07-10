@@ -546,18 +546,15 @@ func isUnsafeIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	// Hardcoded deny: loopback, link-local, multicast, unspecified are
-	// never allowed regardless of operator allowlist.
+	// Hardcoded deny: loopback, link-local (includes 169.254.x.x cloud
+	// metadata), multicast, unspecified are never allowed regardless of
+	// operator allowlist.
 	if ip.IsLoopback() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() ||
 		ip.IsUnspecified() ||
 		ip.IsInterfaceLocalMulticast() {
-		return true
-	}
-	// Cloud metadata (169.254.x.x) — always blocked.
-	if v4 := ip.To4(); v4 != nil && v4[0] == 169 && v4[1] == 254 {
 		return true
 	}
 	// Operator allowlist: specific private IPs that are explicitly trusted.
