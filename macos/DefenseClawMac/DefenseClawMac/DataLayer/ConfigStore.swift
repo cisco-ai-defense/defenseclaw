@@ -19,6 +19,7 @@
 // sufficient for the keys the app consumes. Writes never go through this
 // store; they go via the gateway (/config/patch) or the defenseclaw CLI.
 
+import Darwin
 import Foundation
 
 struct DefenseClawConfig: Sendable {
@@ -251,6 +252,153 @@ enum MiniYAML {
             t = String(t.dropFirst().dropLast())
         }
         return t
+    }
+}
+
+/// Writes sensitive exports without ever installing a permissive inode at the
+/// destination path. The complete payload is prepared in the destination
+/// directory with mode 0600, then atomically renamed into place.
+enum SecureFileWriter {
+    enum WriteError: LocalizedError {
+        case parentIsNotDirectory(String)
+        case couldNotCreateTemporaryFile(String)
+        case insecurePreparedFile(String)
+        case insecureExtendedACL(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .parentIsNotDirectory(let path):
+                "Secure output parent is not a directory: \(path)"
+            case .couldNotCreateTemporaryFile(let path):
+                "Could not create secure temporary file: \(path)"
+            case .insecurePreparedFile(let path):
+                "Refusing to install a temporary file without mode 0600: \(path)"
+            case .insecureExtendedACL(let path):
+                "Refusing secure output because an extended ACL is present: \(path)"
+            }
+        }
+    }
+
+    static func write(_ contents: String, to target: URL) throws {
+        try write(Data(contents.utf8), to: target)
+    }
+
+    /// `preparedFileCheck` is a regression-test seam invoked after the file is
+    /// fully written and synced, immediately before its atomic installation.
+    static func write(
+        _ data: Data,
+        to target: URL,
+        fileManager: FileManager = .default,
+        preparedFileCheck: ((URL) throws -> Void)? = nil
+    ) throws {
+        let parent = target.deletingLastPathComponent()
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: parent.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else {
+                throw WriteError.parentIsNotDirectory(parent.path)
+            }
+        } else {
+            try fileManager.createDirectory(
+                at: parent,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        // Existing DefenseClaw data directories may predate the secure-export
+        // path, so tighten them before the temporary file is created.
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+        guard try !hasExtendedACL(at: parent) else {
+            throw WriteError.insecureExtendedACL(parent.path)
+        }
+
+        let temporary = parent.appendingPathComponent(
+            ".\(target.lastPathComponent).\(UUID().uuidString).tmp",
+            isDirectory: false
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+
+        guard fileManager.createFile(
+            atPath: temporary.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw WriteError.couldNotCreateTemporaryFile(temporary.path)
+        }
+        // A concurrently introduced inheritable ACL must not survive on the
+        // prepared inode even though the parent was checked immediately above.
+        try clearExtendedACL(at: temporary)
+
+        let handle = try FileHandle(forWritingTo: temporary)
+        do {
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
+        }
+
+        let attributes = try fileManager.attributesOfItem(atPath: temporary.path)
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
+        guard permissions == 0o600 else {
+            throw WriteError.insecurePreparedFile(temporary.path)
+        }
+        guard try !hasExtendedACL(at: temporary) else {
+            throw WriteError.insecureExtendedACL(temporary.path)
+        }
+        try preparedFileCheck?(temporary)
+
+        if fileManager.fileExists(atPath: target.path) {
+            _ = try fileManager.replaceItemAt(
+                target,
+                withItemAt: temporary,
+                backupItemName: nil,
+                options: [.usingNewMetadataOnly]
+            )
+        } else {
+            try fileManager.moveItem(at: temporary, to: target)
+        }
+    }
+
+    private static func hasExtendedACL(at url: URL) throws -> Bool {
+        let (acl, capturedErrno) = url.path.withCString { path in
+            errno = 0
+            let value = acl_get_file(path, ACL_TYPE_EXTENDED)
+            return (value, errno)
+        }
+        guard let acl else {
+            if capturedErrno == ENOENT || capturedErrno == EOPNOTSUPP { return false }
+            throw posixError(code: capturedErrno, operation: "inspect ACL", path: url.path)
+        }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        return true
+    }
+
+    private static func clearExtendedACL(at url: URL) throws {
+        errno = 0
+        let allocatedACL = acl_init(0)
+        let allocationErrno = errno
+        guard let emptyACL = allocatedACL else {
+            throw posixError(code: allocationErrno, operation: "allocate empty ACL", path: url.path)
+        }
+        defer { acl_free(UnsafeMutableRawPointer(emptyACL)) }
+
+        let (result, capturedErrno) = url.path.withCString { path in
+            errno = 0
+            let value = acl_set_file(path, ACL_TYPE_EXTENDED, emptyACL)
+            return (value, errno)
+        }
+        guard result == 0 || capturedErrno == EOPNOTSUPP else {
+            throw posixError(code: capturedErrno, operation: "clear ACL", path: url.path)
+        }
+    }
+
+    private static func posixError(code: Int32, operation: String, path: String) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(code),
+            userInfo: [NSLocalizedDescriptionKey: "Could not \(operation) for \(path): \(String(cString: strerror(code)))"]
+        )
     }
 }
 

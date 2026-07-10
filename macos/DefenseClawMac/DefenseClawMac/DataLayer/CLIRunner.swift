@@ -18,13 +18,207 @@
 // diagnostics, and the command palette all share this runner so arguments are
 // never interpolated through a shell.
 
+import Darwin
 import Foundation
 
 struct CLIResult: Sendable {
     var exitCode: Int32
     var output: String
     var cancelled: Bool = false
-    var succeeded: Bool { exitCode == 0 }
+    var outputTruncated: Bool = false
+    var succeeded: Bool { exitCode == 0 && !outputTruncated }
+}
+
+enum CLIOutputLimits {
+    /// Large enough for normal machine-readable scans while preventing an
+    /// accidental or hostile subprocess from retaining arbitrary output.
+    static let maximumOutputBytes = 4 * 1_024 * 1_024
+    /// Reserve room for truncation markers while still allowing compact JSON
+    /// scans to use almost the entire result budget on one line.
+    static let maximumLineBytes = maximumOutputBytes - 1_024
+    static let readChunkBytes = 64 * 1_024
+    static let maximumStreamedBytes = 300_000
+    static let maximumStreamedLines = 4_096
+}
+
+private struct CapturedCLIOutput: Sendable {
+    var output: String
+    var truncated: Bool
+}
+
+private enum CLIUTF8 {
+    /// Returns the longest prefix that fits the byte budget without splitting
+    /// a UTF-8 scalar. Input Strings are valid UTF-8, so at most three bytes
+    /// need to be backed off from the initial cutoff.
+    static func prefix(_ value: String, maximumBytes: Int) -> String {
+        guard maximumBytes > 0 else { return "" }
+        let utf8 = value.utf8
+        guard utf8.count > maximumBytes else { return value }
+        var cutoff = utf8.index(utf8.startIndex, offsetBy: maximumBytes)
+        while cutoff > utf8.startIndex {
+            if let stringIndex = String.Index(cutoff, within: value) {
+                return String(value[..<stringIndex])
+            }
+            cutoff = utf8.index(before: cutoff)
+        }
+        return ""
+    }
+}
+
+/// Incrementally turns raw pipe bytes into bounded lines and a bounded result.
+/// Reading raw chunks is intentional: `FileHandle.AsyncBytes.lines` retains a
+/// complete newline-less line before yielding it.
+private struct BoundedCLIOutputCollector: Sendable {
+    private static let lineTruncationMarker = " [line truncated]"
+    private static let outputTruncationMarker = "\n[output truncated: limit exceeded]\n"
+
+    private var output = Data()
+    private var pendingLine = Data()
+    private var discardingLineRemainder = false
+    private var outputLimitReached = false
+    private(set) var truncated = false
+
+    mutating func consume(_ chunk: Data, emitLines: Bool) -> [String] {
+        guard !outputLimitReached else { return [] }
+
+        var emitted: [String] = []
+        var cursor = chunk.startIndex
+        while cursor < chunk.endIndex, !outputLimitReached {
+            if let newline = chunk[cursor...].firstIndex(of: 0x0A) {
+                appendToPendingLine(chunk[cursor..<newline])
+                if let line = finishPendingLine(), emitLines { emitted.append(line) }
+                cursor = chunk.index(after: newline)
+            } else {
+                appendToPendingLine(chunk[cursor...])
+                break
+            }
+        }
+        return emitted
+    }
+
+    mutating func finish(emitLines: Bool) -> (lines: [String], capture: CapturedCLIOutput) {
+        var lines: [String] = []
+        if !pendingLine.isEmpty || discardingLineRemainder,
+           let line = finishPendingLine(), emitLines {
+            lines.append(line)
+        }
+        return (
+            lines,
+            CapturedCLIOutput(
+                output: String(decoding: output, as: UTF8.self),
+                truncated: truncated
+            )
+        )
+    }
+
+    mutating func appendStreamError(_ message: String, emitLines: Bool) -> [String] {
+        // A read failure means the captured output is incomplete even if the
+        // child later reports exit 0. Parsers must not accept it as success.
+        truncated = true
+        var lines: [String] = []
+        if !pendingLine.isEmpty || discardingLineRemainder,
+           let line = finishPendingLine(), emitLines {
+            lines.append(line)
+        }
+        if let line = appendCompletedLine("[output stream error: \(message)]"), emitLines {
+            lines.append(line)
+        }
+        return lines
+    }
+
+    private mutating func appendToPendingLine(_ bytes: Data.SubSequence) {
+        guard !discardingLineRemainder else { return }
+        let available = CLIOutputLimits.maximumLineBytes - pendingLine.count
+        guard bytes.count <= available else {
+            if available > 0 { pendingLine.append(contentsOf: bytes.prefix(available)) }
+            discardingLineRemainder = true
+            truncated = true
+            return
+        }
+        pendingLine.append(contentsOf: bytes)
+    }
+
+    private mutating func finishPendingLine() -> String? {
+        var line = String(decoding: pendingLine, as: UTF8.self)
+        if discardingLineRemainder { line += Self.lineTruncationMarker }
+        pendingLine.removeAll(keepingCapacity: true)
+        discardingLineRemainder = false
+        return appendCompletedLine(line)
+    }
+
+    private mutating func appendCompletedLine(_ line: String) -> String? {
+        guard !outputLimitReached else { return nil }
+        let recordString = line + "\n"
+        let record = Data(recordString.utf8)
+        let remaining = CLIOutputLimits.maximumOutputBytes - output.count
+        guard record.count <= remaining else {
+            truncated = true
+            outputLimitReached = true
+
+            let marker = Data(Self.outputTruncationMarker.utf8)
+            let maximumPayloadBytes = CLIOutputLimits.maximumOutputBytes - marker.count
+            if output.count > maximumPayloadBytes {
+                let safeOutput = CLIUTF8.prefix(
+                    String(decoding: output, as: UTF8.self),
+                    maximumBytes: maximumPayloadBytes
+                )
+                output = Data(safeOutput.utf8)
+            }
+            let recordPrefix = CLIUTF8.prefix(
+                recordString,
+                maximumBytes: maximumPayloadBytes - output.count
+            )
+            output.append(Data(recordPrefix.utf8))
+            output.append(marker)
+
+            let streamedPrefix = recordPrefix.trimmingCharacters(in: .newlines)
+            let streamedMarker = Self.outputTruncationMarker.trimmingCharacters(in: .newlines)
+            return streamedPrefix.isEmpty
+                ? streamedMarker
+                : streamedPrefix + "\n" + streamedMarker
+        }
+        output.append(record)
+        return line
+    }
+}
+
+/// Streaming is only for live UI feedback; the bounded `CLIResult` remains the
+/// source of truth for parsers and final status. Limiting callback traffic also
+/// prevents a subprocess from scheduling unbounded main-actor updates.
+private struct BoundedCLILineStreamer: Sendable {
+    private static let marker = "[additional live output omitted]"
+
+    private var emittedBytes = 0
+    private var emittedLines = 0
+    private var stopped = false
+
+    var acceptsLines: Bool { !stopped }
+
+    mutating func linesToEmit(from lines: [String]) -> [String] {
+        guard !stopped else { return [] }
+        var result: [String] = []
+        for line in lines {
+            let recordBytes = line.utf8.count + 1
+            let remainingBytes = CLIOutputLimits.maximumStreamedBytes - emittedBytes
+            let markerRecordBytes = Self.marker.utf8.count + 1
+            guard emittedLines < CLIOutputLimits.maximumStreamedLines,
+                  recordBytes + markerRecordBytes <= remainingBytes else {
+                stopped = true
+                let prefixBudget = max(remainingBytes - markerRecordBytes - 1, 0)
+                let prefix = CLIUTF8.prefix(line, maximumBytes: prefixBudget)
+                if !prefix.isEmpty {
+                    result.append(prefix + "\n" + Self.marker)
+                } else {
+                    result.append(Self.marker)
+                }
+                break
+            }
+            result.append(line)
+            emittedBytes += recordBytes
+            emittedLines += 1
+        }
+        return result
+    }
 }
 
 actor CLIRunner {
@@ -114,6 +308,8 @@ actor CLIRunner {
             "/opt/homebrew/sbin",
             "/usr/local/bin",
             "/usr/local/sbin",
+            "/opt/local/bin",
+            "/opt/local/sbin",
             "/Applications/Docker.app/Contents/Resources/bin",
             "/usr/bin",
             "/bin",
@@ -175,7 +371,6 @@ actor CLIRunner {
         let inputPipe = standardInput == nil ? nil : Pipe()
         proc.standardInput = inputPipe
 
-        var collected = ""
         do {
             try proc.run()
         } catch {
@@ -188,18 +383,88 @@ actor CLIRunner {
             try? inputPipe.fileHandleForWriting.close()
         }
 
-        do {
-            for try await line in pipe.fileHandleForReading.bytes.lines {
-                collected += line + "\n"
-                await onLine?(line)
+        // A detached reader keeps draining the pipe even if the calling Task is
+        // cancelled. Stopping reads early can otherwise leave the child blocked
+        // on a full pipe while its parent waits for termination.
+        let outputTask = Task.detached(priority: .utility) {
+            var collector = BoundedCLIOutputCollector()
+            var streamer = BoundedCLILineStreamer()
+            var lineContinuation: AsyncStream<String>.Continuation?
+            var lineDeliveryTask: Task<Void, Never>?
+            if let onLine {
+                let stream = AsyncStream<String> { lineContinuation = $0 }
+                lineDeliveryTask = Task.detached {
+                    for await line in stream { await onLine(line) }
+                }
             }
-        } catch {
-            collected += "\n[output stream error: \(error.localizedDescription)]\n"
+            let emitLines = lineContinuation != nil
+            var readBuffer = [UInt8](repeating: 0, count: CLIOutputLimits.readChunkBytes)
+            readLoop: while true {
+                let byteCount = readBuffer.withUnsafeMutableBytes { buffer in
+                    Darwin.read(
+                        pipe.fileHandleForReading.fileDescriptor,
+                        buffer.baseAddress,
+                        buffer.count
+                    )
+                }
+                switch byteCount {
+                case 0:
+                    break readLoop
+                case ..<0 where errno == EINTR:
+                    continue readLoop
+                case ..<0:
+                    let message = String(cString: strerror(errno))
+                    let lines = collector.appendStreamError(message, emitLines: emitLines)
+                    if lineContinuation != nil {
+                        for line in streamer.linesToEmit(from: lines) {
+                            lineContinuation?.yield(line)
+                        }
+                    }
+                    break readLoop
+                default:
+                    let chunk = Data(readBuffer.prefix(byteCount))
+                    if lineContinuation != nil {
+                        let lines = collector.consume(
+                            chunk,
+                            emitLines: emitLines && streamer.acceptsLines
+                        )
+                        for line in streamer.linesToEmit(
+                            from: lines
+                        ) {
+                            lineContinuation?.yield(line)
+                        }
+                    } else {
+                        _ = collector.consume(chunk, emitLines: false)
+                    }
+                }
+            }
+            let finished = collector.finish(emitLines: emitLines)
+            if lineContinuation != nil {
+                for line in streamer.linesToEmit(from: finished.lines) {
+                    lineContinuation?.yield(line)
+                }
+            }
+            lineContinuation?.finish()
+            if let lineDeliveryTask { await lineDeliveryTask.value }
+            try? pipe.fileHandleForReading.close()
+            return finished.capture
+        }
+
+        let captured = await withTaskCancellationHandler {
+            await outputTask.value
+        } onCancel: {
+            if proc.isRunning { proc.interrupt() }
         }
         proc.waitUntilExit()
-        let cancelled = runID.map { cancellationRequests.remove($0) != nil } ?? false
+        let explicitlyCancelled = runID.map { cancellationRequests.remove($0) != nil } ?? false
+        let cancelled = Task.isCancelled || explicitlyCancelled
         if let runID { runningProcesses[runID] = nil }
-        return CLIResult(exitCode: proc.terminationStatus, output: collected, cancelled: cancelled)
+        return CLIResult(
+            exitCode: proc.terminationStatus,
+            output: captured.output,
+            cancelled: cancelled,
+            outputTruncated: captured.truncated
+        )
     }
 
     /// Interrupt an Activity-owned process. The process remains registered
@@ -213,7 +478,7 @@ actor CLIRunner {
     /// Lightweight doctor probe (TUI Shift+D) — parsed into check rows.
     func doctor() async -> [DoctorCheck] {
         let result = await run(arguments: ["doctor"])
-        guard result.succeeded || !result.output.isEmpty else {
+        guard !result.outputTruncated, result.succeeded || !result.output.isEmpty else {
             return [DoctorCheck(name: "defenseclaw doctor", result: .fail, detail: result.output)]
         }
         var checks: [DoctorCheck] = []

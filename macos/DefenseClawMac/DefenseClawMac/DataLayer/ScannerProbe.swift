@@ -126,28 +126,37 @@ enum ScannerProbe {
         }
     }
 
-    /// One-click repair: recreate the installer's own layout by symlinking
-    /// the discovered binary into ~/.local/bin, plus any executable
-    /// `<name>-*` siblings (…-api, …-pre-commit) the installer also links.
-    /// Stale or broken symlinks are replaced — but a sibling link that
-    /// still resolves to a working executable is left alone (it may
-    /// belong to a different install). A regular file at the destination
-    /// is never overwritten. Throws if the probed source itself vanished
-    /// (e.g. an upgrade rebuilt the venv between the probe and the click),
-    /// so a stale Fix is never a silent no-op.
-    static func linkIntoLocalBin(name: String, source: String) throws {
+    /// One planned symlink for the Fix: absolute source → ~/.local/bin/<target>.
+    struct PlannedLink: Sendable, Equatable {
+        var target: String
+        var source: String
+        var destination: String
+    }
+
+    /// Plan the one-click repair — pure decision pass, no mutation. The
+    /// installer's own layout: symlink the discovered binary into
+    /// ~/.local/bin, plus any executable `<name>-*` siblings (…-api,
+    /// …-pre-commit) the installer also links. A link that still resolves
+    /// to a working executable is left alone — including the probed name
+    /// itself: the probe saw it broken, so a now-working link means the
+    /// probe data is stale (e.g. a dev install was just restored) and
+    /// must not be repointed. A regular file at the destination is never
+    /// overwritten. Throws if the probed source itself vanished, so a
+    /// stale Fix is never a silent no-op. The caller executes the plan as
+    /// recorded `/bin/ln -sfh` steps so the mutation lands in Activity.
+    static func linkPlan(name: String, source: String) throws -> [PlannedLink] {
         let fm = FileManager.default
         guard fm.isExecutableFile(atPath: source) else {
             throw FixError.sourceVanished(source)
         }
         let binDir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin")
-        try fm.createDirectory(at: binDir, withIntermediateDirectories: true)
 
         let sourceDir = URL(fileURLWithPath: source).deletingLastPathComponent()
         var targets = [name]
         if let siblings = try? fm.contentsOfDirectory(atPath: sourceDir.path) {
             targets += siblings.filter { $0.hasPrefix("\(name)-") }.sorted()
         }
+        var plan: [PlannedLink] = []
         for target in targets {
             let src = sourceDir.appendingPathComponent(target).path
             guard fm.isExecutableFile(atPath: src) else { continue }
@@ -156,19 +165,20 @@ enum ScannerProbe {
             // so a stale link is detected as such rather than as missing.
             if let attrs = try? fm.attributesOfItem(atPath: dest.path) {
                 if attrs[.type] as? FileAttributeType == .typeSymbolicLink {
-                    // A sibling link that still works stays untouched; the
-                    // probed binary itself is known-broken on PATH, so its
-                    // link is always safe to recreate.
-                    if target != name, fm.isExecutableFile(atPath: dest.path) { continue }
-                    try fm.removeItem(at: dest)
+                    // Any link that still works stays untouched — for the
+                    // probed name that means the probe went stale between
+                    // pulse and click; the post-fix re-probe shows "installed".
+                    if fm.isExecutableFile(atPath: dest.path) { continue }
                 } else if target == name {
                     throw FixError.destinationOccupied(dest.path)
                 } else {
                     continue // never fight over an extra's real file
                 }
             }
-            try fm.createSymbolicLink(atPath: dest.path, withDestinationPath: src)
+            // ln -sfh replaces a stale/broken link atomically.
+            plan.append(PlannedLink(target: target, source: src, destination: dest.path))
         }
+        return plan
     }
 
     private static func dotEnvNames() -> Set<String> {
@@ -212,10 +222,11 @@ enum ScannerProbe {
     /// nil = no cache yet ("not checked"); [] = all required set.
     /// `cliPath` (the located `defenseclaw` binary) anchors the fallback
     /// search for scanners that exist in the install but aren't on PATH.
-    /// `shellFound` holds scanner names the login-shell PATH resolved
-    /// (checked once at startup) — binDirs only covers the standard three
-    /// dirs, so this keeps a MacPorts/pipx/custom-dir install from being
-    /// mislabeled "not in PATH" with a spurious Fix button.
+    /// `shellFound` holds scanner names an augmented-PATH `which` lookup
+    /// resolved (inherited PATH + standard package-manager dirs, checked
+    /// once at startup) — binDirs only covers the standard three dirs, so
+    /// this keeps a MacPorts/pipx/custom-dir install from being mislabeled
+    /// "not in PATH" with a spurious Fix button.
     static func statuses(
         config: DefenseClawConfig,
         guardrailState: String?,

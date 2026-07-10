@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,8 +15,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-repository = "keitheobrien/defenseclaw_mac"
-tag = "v1.1.5"
-commit = "c3b7681b082eefb8d8e21dc9347270b7bf803b0e"
-source_version = "1.1.5"
-imported_at = "2026-07-10"
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-app-state-safety-tests.XXXXXX")"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+MODULE_CACHE="$BUILD_DIR/ModuleCache"
+mkdir -p "$MODULE_CACHE"
+
+CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
+  -module-cache-path "$MODULE_CACHE" \
+  "$ROOT/DefenseClawMac/DataLayer/Models.swift" \
+  "$ROOT/Tests/AppStateSignalSafetyTests.swift" \
+  -o "$BUILD_DIR/AppStateSignalSafetyTests"
+
+"$BUILD_DIR/AppStateSignalSafetyTests"

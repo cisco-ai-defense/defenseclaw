@@ -350,8 +350,11 @@ actor GatewayClient {
     private static func looseInt(_ value: Any?) -> Int {
         switch value {
         case let i as Int: return i
-        case let n as NSNumber: return n.intValue
-        case let s as String: return Int(s) ?? Int(Double(s) ?? 0)
+        case let n as NSNumber: return DCSafeNumbers.intTruncating(n.doubleValue) ?? 0
+        case let s as String:
+            if let integer = Int(s) { return integer }
+            guard let number = Double(s) else { return 0 }
+            return DCSafeNumbers.intTruncating(number) ?? 0
         default: return 0
         }
     }
@@ -517,6 +520,14 @@ actor GatewayClient {
 
     private func decodeSignal(_ r: [String: Any]) -> AISignal {
         let component = r["component"] as? [String: Any]
+        let presenceBand = (r["presence_band"] as? String) ?? ""
+        // Scores are `omitempty` in the current gateway, so an exact zero can
+        // arrive as a band without a numeric field. Also remember an explicit
+        // zero from other compatible gateways; both mean the axis was reported.
+        let presenceAxisReported = AIPresenceAxis.wasReported(
+            rawScore: r["presence_score"],
+            band: presenceBand
+        )
         return AISignal(
             state: (r["state"] as? String) ?? "",
             product: (r["product"] as? String) ?? (r["name"] as? String) ?? "?",
@@ -531,7 +542,8 @@ actor GatewayClient {
             identityScore: normalizeConfidence(r["identity_score"]),
             identityBand: (r["identity_band"] as? String) ?? "",
             presenceScore: normalizeConfidence(r["presence_score"]),
-            presenceBand: (r["presence_band"] as? String) ?? "",
+            presenceBand: presenceBand,
+            presenceAxisReported: presenceAxisReported,
             firstSeen: DCDates.parse(r["first_seen"]),
             lastSeen: DCDates.parse(r["last_seen"]),
             lastActive: DCDates.parse(r["last_active_at"]),
@@ -602,7 +614,6 @@ actor GatewayClient {
     }
 
     private func normalizeConfidence(_ raw: Any?) -> Double {
-        let value = (raw as? Double) ?? (raw as? Int).map(Double.init) ?? 0
-        return value > 1 ? value / 100 : value // accept 0–100 or 0–1
+        AIConfidence.normalize(raw)
     }
 }

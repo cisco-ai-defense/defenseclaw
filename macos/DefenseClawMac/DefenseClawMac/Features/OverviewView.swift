@@ -410,7 +410,7 @@ struct OverviewView: View {
                             }
                             .controlSize(.small)
                             .help(candidate?.canConfigureInline == true
-                                  ? "Add \(friendlyConnectorName(c.name)) in observe mode without replacing existing connectors"
+                                  ? "Add \(friendlyConnectorName(c.name)) in observe mode without replacing existing connectors. Briefly restarts the DefenseClaw gateway to wire the agent's hooks."
                                   : "Open Setup for \(friendlyConnectorName(c.name))")
                         }
                     }
@@ -929,7 +929,7 @@ struct OverviewView: View {
             var vendor = signal.vendor.nonEmpty ?? signal.category.nonEmpty ?? "-"
             if !signal.version.isEmpty { vendor += " \(signal.version)" }
             if !signal.supportedConnector.isEmpty { vendor += " (\(signal.supportedConnector))" }
-            let pct = min(max(Int(signal.confidence * 100 + 0.5), 0), 100)
+            let pct = AIConfidence.percent(signal.confidence, roundingRule: .toNearestOrAwayFromZero)
             let seenLabel = signal.lastSeen.map { "seen \(DCDates.relative($0))" } ?? "seen -"
             return AIOverviewRow(
                 badge: badge,

@@ -77,9 +77,65 @@ struct CommandDefinition: Identifiable, Hashable, Sendable {
             || arguments.last == "shell"
     }
 
-    func displayCommand(extraArguments: [String] = []) -> String {
-        ([binary] + arguments + extraArguments).map(ShellQuoting.quote).joined(separator: " ")
+    /// `keys set` must receive its credential over stdin. Keeping this
+    /// property on the registry entry gives every command-palette surface the
+    /// same source of truth for rendering, validation, and execution.
+    var requiresSecretStandardInput: Bool {
+        binary == "defenseclaw" && arguments == ["keys", "set"]
     }
+
+    func displayCommand(extraArguments: [String] = []) -> String {
+        // Never echo legacy `--value <secret>` input into the preview or the
+        // pasteboard. The execution plan below rejects it as well.
+        let visibleArguments = requiresSecretStandardInput
+            ? Array(extraArguments.prefix(1))
+            : extraArguments
+        return ([binary] + arguments + visibleArguments).map(ShellQuoting.quote).joined(separator: " ")
+    }
+
+    func executionPlan(
+        extraArguments: [String] = [],
+        secretInput: String? = nil
+    ) throws -> CommandExecutionPlan {
+        guard requiresSecretStandardInput else {
+            return CommandExecutionPlan(arguments: arguments + extraArguments, standardInput: nil)
+        }
+        let environmentName = extraArguments.first ?? ""
+        let environmentNameRange = environmentName.startIndex..<environmentName.endIndex
+        guard extraArguments.count == 1,
+              environmentName.range(
+                  of: #"^[A-Za-z_][A-Za-z0-9_]*$"#,
+                  options: .regularExpression
+              ) == environmentNameRange else {
+            throw CommandExecutionPlan.Error.invalidCredentialName
+        }
+        guard let secretInput, !secretInput.isEmpty else {
+            throw CommandExecutionPlan.Error.missingSecret
+        }
+        return CommandExecutionPlan(
+            arguments: arguments + [environmentName],
+            standardInput: secretInput
+        )
+    }
+}
+
+struct CommandExecutionPlan: Equatable, Sendable {
+    enum Error: LocalizedError {
+        case invalidCredentialName
+        case missingSecret
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidCredentialName:
+                "Enter one environment name using letters, digits, and underscores."
+            case .missingSecret:
+                "Enter the secret value."
+            }
+        }
+    }
+
+    let arguments: [String]
+    let standardInput: String?
 }
 
 enum CommandRegistry {
@@ -208,7 +264,7 @@ enum CommandRegistry {
         CommandDefinition(id: 120, title: "keys list", binary: "defenseclaw", arguments: ["keys", "list"], summary: "List configured and missing credentials", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 121, title: "keys list --json", binary: "defenseclaw", arguments: ["keys", "list", "--json"], summary: "List credentials as JSON for setup parity", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 122, title: "keys check", binary: "defenseclaw", arguments: ["keys", "check"], summary: "Fail if required credentials are missing", category: "info", requiresInput: false, usage: ""),
-        CommandDefinition(id: 123, title: "keys set", binary: "defenseclaw", arguments: ["keys", "set"], summary: "Persist a credential to the DefenseClaw .env", category: "setup", requiresInput: true, usage: "<ENV_NAME> --value <secret>"),
+        CommandDefinition(id: 123, title: "keys set", binary: "defenseclaw", arguments: ["keys", "set"], summary: "Persist a credential to the DefenseClaw .env", category: "setup", requiresInput: true, usage: "<ENV_NAME>"),
         CommandDefinition(id: 124, title: "keys fill-missing", binary: "defenseclaw", arguments: ["keys", "fill-missing", "--yes"], summary: "List missing required credentials", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 125, title: "settings save", binary: "defenseclaw", arguments: ["settings", "save"], summary: "Persist current settings/config", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 126, title: "guardrail status", binary: "defenseclaw", arguments: ["guardrail", "status"], summary: "Show guardrail status", category: "info", requiresInput: false, usage: ""),

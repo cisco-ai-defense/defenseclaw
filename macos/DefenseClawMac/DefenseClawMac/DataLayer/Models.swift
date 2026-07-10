@@ -586,6 +586,49 @@ enum LogPreset: String, CaseIterable, Identifiable {
 
 // MARK: - AI discovery
 
+enum DCSafeNumbers {
+    /// Swift traps when converting a non-finite or out-of-range floating-point
+    /// value to Int. Return nil instead while preserving normal truncation.
+    static func intTruncating(_ value: Double) -> Int? {
+        guard value.isFinite else { return nil }
+        return Int(exactly: value.rounded(.towardZero))
+    }
+}
+
+/// Normalizes gateway confidence values and keeps display conversions safe.
+/// Gateway payloads may use either a 0...1 fraction or a 0...100 percent.
+enum AIConfidence {
+    static func normalize(_ raw: Any?) -> Double {
+        let value = (raw as? Double) ?? (raw as? Int).map(Double.init) ?? 0
+        guard value.isFinite else { return 0 }
+        return clampedUnit(value > 1 ? value / 100 : value)
+    }
+
+    static func clampedUnit(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+
+    static func percent(
+        _ value: Double,
+        roundingRule: FloatingPointRoundingRule = .towardZero
+    ) -> Int {
+        DCSafeNumbers.intTruncating((clampedUnit(value) * 100).rounded(roundingRule)) ?? 0
+    }
+}
+
+enum AIPresenceAxis {
+    /// Current gateways omit an exact numeric zero but still send its
+    /// non-empty confidence band. Compatible gateways may send the zero
+    /// explicitly. Only a missing/null score with no band means the axis was
+    /// unavailable on an older payload.
+    static func wasReported(rawScore: Any?, band: String) -> Bool {
+        if !band.isEmpty { return true }
+        guard let rawScore else { return false }
+        return !(rawScore is NSNull)
+    }
+}
+
 struct AIUsageSnapshot: Sendable {
     var totalDetected: Int = 0
     var activeSignals: Int = 0
@@ -638,6 +681,10 @@ struct AISignal: Sendable, Hashable {
     var identityBand: String
     var presenceScore: Double
     var presenceBand: String
+    /// True when the gateway supplied the presence axis. Older gateways omit
+    /// both presence fields; a reported score of zero must remain distinct
+    /// because it means the signal is confidently no longer present.
+    var presenceAxisReported: Bool = false
     var firstSeen: Date?
     var lastSeen: Date?
     var lastActive: Date?
@@ -646,6 +693,10 @@ struct AISignal: Sendable, Hashable {
     var supportedConnector: String = ""
     var signalID: String = ""
     var signatureID: String = ""
+
+    func hasEligiblePresence(minimum: Double) -> Bool {
+        !presenceAxisReported || presenceScore >= minimum
+    }
 }
 
 /// Grouped product row — exact port of the TUI's AIDiscoveryRow (_rebuild()).
@@ -694,8 +745,9 @@ enum AIDiscoveryGrouping {
     /// TUI format_confidence(): "band (NN%)".
     static func formatConfidence(score: Double, band: String) -> String {
         let band = band.trimmingCharacters(in: .whitespaces)
-        if band.isEmpty && score == 0 { return "" }
-        let pct = Int(score * 100 + 0.5)
+        let normalizedScore = AIConfidence.clampedUnit(score)
+        if band.isEmpty && normalizedScore == 0 { return "" }
+        let pct = AIConfidence.percent(normalizedScore, roundingRule: .toNearestOrAwayFromZero)
         return band.isEmpty ? "\(pct)%" : "\(band) (\(pct)%)"
     }
 
@@ -902,6 +954,31 @@ enum ConnectorAttribution {
     }
 }
 
+enum ActiveConnectorRoster {
+    /// Configured names lead, then live list entries, then the singular health
+    /// primary connector. Matching is case-insensitive while preserving the
+    /// spelling and order of the first occurrence.
+    static func names(
+        configured: [String],
+        legacy: String?,
+        live: [String],
+        primary: String?
+    ) -> [String] {
+        var names = configured
+        if names.isEmpty, let legacy = legacy?.nonEmpty {
+            names.append(legacy)
+        }
+
+        var seen = Set(names.map { $0.lowercased() })
+        for candidate in live + [primary].compactMap({ $0 }) {
+            guard !candidate.isEmpty,
+                  seen.insert(candidate.lowercased()).inserted else { continue }
+            names.append(candidate)
+        }
+        return names
+    }
+}
+
 enum DCDates {
     static let iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -919,6 +996,7 @@ enum DCDates {
             return iso.date(from: s) ?? isoNoFrac.date(from: s)
         }
         if let n = raw as? Double {
+            guard n.isFinite else { return nil }
             // Heuristic: epoch seconds vs milliseconds.
             return Date(timeIntervalSince1970: n > 1e12 ? n / 1000 : n)
         }
