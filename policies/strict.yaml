@@ -70,6 +70,11 @@ first_party_allow_list:
       - ".claude/extensions"
       - ".codex/extensions"
       - ".codex-plugin"
+  - target_type: plugin
+    target_name: insightclaw
+    reason: approved insightclaw observability plugin
+    source_path_contains:
+      - ".openclaw/extensions/insightclaw"
   - target_type: skill
     target_name: codeguard
     reason: first-party DefenseClaw skill
