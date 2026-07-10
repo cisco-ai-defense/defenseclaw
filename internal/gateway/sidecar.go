@@ -2485,6 +2485,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// initialize, remote inspection stays disabled entirely.
 		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
 			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, tel, "proxy remote inspection disabled"))
+			// AID-only posture: every local detector (guardrail regex,
+			// CodeGuard/ClawShield) and explicit local policy (static
+			// block/allow, MCP block, block-list, approval, multi-turn,
+			// judge) is disabled across proxy/hook/router lanes. Cisco AI
+			// Defense is the sole decision-maker; requests it cannot decide
+			// (AID down/timeout/unwired) fail open. Log once at boot so
+			// operators see the posture in the sidecar log.
+			fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: local detections disabled; Cisco AI Defense authoritative (fail-open on AID unavailable)")
 		}
 		// Start connector hook self-heal before the observability-only
 		// short-circuit below. Hook-native connectors (codex, claudecode,

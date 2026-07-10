@@ -495,10 +495,16 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 
 	start := time.Now()
 	var verdict *ScanVerdict
-	switch strategy {
-	case "regex_judge":
+	switch {
+	case g.managedMode:
+		// managed_enterprise: Cisco AI Defense (CMID-authenticated) is
+		// the sole decision-maker. Local regex, judge, and OPA are all
+		// skipped; a request AID cannot decide fails open. See
+		// inspectManagedAIDOnly.
+		verdict = g.inspectManagedAIDOnly(ctx, direction, messages)
+	case strategy == "regex_judge":
 		verdict = g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
-	case "judge_first":
+	case strategy == "judge_first":
 		verdict = g.inspectJudgeFirst(ctx, direction, content, messages, model, mode)
 	default:
 		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
@@ -538,6 +544,38 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		)
 	}
 	return verdict
+}
+
+// inspectManagedAIDOnly is the managed_enterprise inspection path in which
+// Cisco AI Defense (CMID-authenticated) is the sole decision-maker. Every
+// local detector is deliberately skipped: no regex (scanLocalPatterns /
+// ScanAllRules), no LLM judge, and no OPA finalize. This is the "AID is
+// authoritative" contract — see the managed aid-only inspection design.
+//
+// Fail-open semantics: if the managed inspector is unwired (ciscoClient ==
+// nil), there is nothing to inspect (no messages), or AID returns no verdict
+// (transport error, timeout, token failure), the request is ALLOWED rather
+// than blocked. Operators still see the failure via EmitCiscoError on the
+// client side, but traffic is never held hostage to AID availability in
+// managed mode.
+func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, direction string, messages []ChatMessage) *ScanVerdict {
+	if g.ciscoClient == nil || len(messages) == 0 {
+		return allowVerdict("ai-defense")
+	}
+	t0 := time.Now()
+	_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+	v := g.ciscoClient.Inspect(messages)
+	elapsed := float64(time.Since(t0).Milliseconds())
+	endCisco(phaseAction(v), phaseSeverity(v), int64(elapsed))
+	if v == nil {
+		// AID down / timeout / token failure → fail open.
+		return allowVerdict("ai-defense")
+	}
+	v.CiscoElapsedMs = elapsed
+	if len(v.ScannerSources) == 0 {
+		v.ScannerSources = []string{"ai-defense"}
+	}
+	return v
 }
 
 // clampPromptDirectionVerdict applies the prompt-surface UX contract to a
@@ -599,6 +637,12 @@ func categoriesOf(findings []string) []string {
 // content (sensitive paths, dangerous commands, critical injection patterns)
 // and block the stream immediately without waiting for an LLM round-trip.
 func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	// managed_enterprise: per-chunk local regex is off. AID inspects the
+	// full completion on the POST-CALL path (Inspect → inspectManagedAIDOnly),
+	// so mid-stream chunks pass through (fail open).
+	if g.managedMode {
+		return allowVerdict("ai-defense")
+	}
 	verdict := g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
 	clampPromptDirectionVerdict(verdict, direction)
 	return verdict
@@ -1274,6 +1318,12 @@ var bulkAccessRegex = regexp.MustCompile(
 	`(?i)\b(?:users_list|contacts_list|mail_search|delegated_email_list_principals)\b.*\btop\s+\d{2,}\b`)
 
 func scanLocalPatterns(direction, content string) *ScanVerdict {
+	// managed_enterprise: local regex detection is disabled — Cisco AI
+	// Defense is authoritative. Return an allow verdict so any residual
+	// call site (router lane, etc.) produces no local signal.
+	if ManagedEnterpriseActive() {
+		return allowVerdict("local-pattern")
+	}
 	// Snapshot the pattern set once per call under the read mutex so a
 	// concurrent ApplyLocalPatternsOverride from a config reload can't
 	// observe a torn slice mid-scan. The snapshots are slice aliases —
@@ -1463,6 +1513,12 @@ var bare9DigitRegex = regexp.MustCompile(`\b\d{9}\b`)
 var creditCardRegex = regexp.MustCompile(`(?:\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b|\b3[47]\d{2}[- ]?\d{6}[- ]?\d{5}\b)`)
 
 func triagePatterns(direction, content string) []TriageSignal {
+	// managed_enterprise: local regex detection is disabled — Cisco AI
+	// Defense is authoritative. Emit no triage signals so the judge/router
+	// paths see nothing to escalate.
+	if ManagedEnterpriseActive() {
+		return nil
+	}
 	// Snapshot the overridable pattern sets once for the lifetime of
 	// the call, same reasoning as in scanLocalPatterns. The high/low
 	// signal injection splits are not (yet) operator-tunable so they

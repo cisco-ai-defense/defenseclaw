@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -185,6 +186,29 @@ func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction stri
 // Surface gating is intentional — without it, OpenClaw operators
 // who set scanner_mode=remote AND configure cisco_ai_defense.api_key
 // would double-scan chat traffic (proxy lane + hook lane).
+// managedAIDOnly reports whether this hook lane is running under
+// managed_enterprise, where Cisco AI Defense is the sole decision-maker
+// and every local detector (static policy, regex, CodeGuard, judge) is
+// bypassed. Boot- and reload-reliable: a.scannerCfg.DeploymentMode is
+// the config the APIServer was constructed / reloaded with.
+func (a *APIServer) managedAIDOnly() bool {
+	return a != nil && a.scannerCfg != nil && managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode)
+}
+
+// inspectManagedAIDOnly is the managed_enterprise hook-lane inspection
+// path: Cisco AI Defense is the only thing that can block. Static
+// block/allow lists, MCP-server blocks, connector regex packs, CodeGuard,
+// and the LLM judge are all skipped. When AID returns no verdict (unwired /
+// down / timeout / token failure — hookAIDInspect returns nil), the request
+// fails open with an explicit allow verdict.
+func (a *APIServer) inspectManagedAIDOnly(toolName, content string) *ToolInspectVerdict {
+	aid := a.hookAIDInspect(toolName, content)
+	if aid == nil {
+		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	}
+	return mergeWithAIDVerdict(nil, aid)
+}
+
 func (a *APIServer) hookAIDInspect(toolName string, content string) *ScanVerdict {
 	if a == nil || a.ciscoInspector == nil {
 		return nil
@@ -311,6 +335,14 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 // short-circuits there exactly as the message lane does; native hook
 // callers reach this through inspectToolPolicy with context.Background().
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
+	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
+	// Skip static block/allow + MCP-server block, connector regex packs,
+	// CodeGuard, and the judge lane; AID inspects the tool call directly
+	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
+	if a.managedAIDOnly() {
+		return a.inspectManagedAIDOnly(req.Tool, string(req.Args))
+	}
+
 	// Static block/allow list takes priority — checked before any rule
 	// scanning. Connector-scoped (@C/T) entries resolve before the bare
 	// global entry, mirroring the sidecar lane and the PolicyEngine helpers:
@@ -507,6 +539,13 @@ func isWriteToolName(tool string) bool {
 // runCodeGuardOnArgs extracts path/content from write_file/edit_file args
 // and runs CodeGuard content scanning.
 func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
+	// managed_enterprise: local content scanners (CodeGuard/ClawShield)
+	// are disabled — AID is authoritative. Defense-in-depth: short-circuit
+	// here too so no other caller re-introduces CodeGuard blocking in
+	// managed mode (e.g. the allow-listed write-tool path).
+	if a.managedAIDOnly() {
+		return nil
+	}
 	// the managed inspect-tool hook serializes
 	// TOOL_INPUT with `jq -n --arg args "$TOOL_INPUT"`, which yields
 	// {"args": "<json-string>"} where `args` is a JSON STRING that
@@ -602,6 +641,13 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 
 	if content == "" {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	}
+
+	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
+	// Skip the connector regex packs and the judge lane; AID inspects the
+	// message content directly and a nil AID verdict fails open.
+	if a.managedAIDOnly() {
+		return a.inspectManagedAIDOnly("message", content)
 	}
 
 	// Outbound messages get the full scan — tool name "message" for context.
