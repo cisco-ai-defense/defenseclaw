@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -84,6 +85,7 @@ const nativeHookFlag = "hook --connector "
 
 const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 const windowsHookBinaryName = "defenseclaw-hook.exe"
+const nativeWindowsInstallStateMaxBytes = 128 * 1024
 
 // windowsSafePATHCommandPrefix disables cmd.exe's implicit current-directory
 // executable lookup before resolving a command through PATH. Codex runs hook
@@ -158,14 +160,20 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 }
 
 // defenseclawHookBinary returns the stable installed launcher path on Windows.
-// It deliberately does not derive the path from os.Executable(): setup is often
-// run from a repository build, while generated agent config must survive that
-// repository being moved or deleted.
+// A native packaged gateway proves its own installer layout before selecting
+// the sibling launcher. Repository builds have no matching installer state and
+// retain the legacy ~/.local/bin fallback, so generated config never points at
+// a movable checkout merely because that checkout is currently running setup.
 func defenseclawHookBinary() string {
 	if strings.TrimSpace(defenseclawHookBinaryOverride) != "" {
 		return defenseclawHookBinaryOverride
 	}
 	if runtime.GOOS == "windows" {
+		if executable, err := os.Executable(); err == nil {
+			if packaged := packagedWindowsHookBinary(executable); packaged != "" {
+				return packaged
+			}
+		}
 		if home := strings.TrimSpace(userHomeDir()); home != "" {
 			return filepath.Join(home, ".local", "bin", windowsHookBinaryName)
 		}
@@ -175,6 +183,117 @@ func defenseclawHookBinary() string {
 		return exe
 	}
 	return "defenseclaw-gateway"
+}
+
+type nativeWindowsInstallState struct {
+	SchemaVersion int    `json:"schema_version"`
+	InstallKind   string `json:"install_kind"`
+	InstallScope  string `json:"install_scope"`
+	InstallRoot   string `json:"install_root"`
+	CommandDir    string `json:"command_dir"`
+	Runtime       string `json:"runtime"`
+}
+
+func packagedWindowsHookBinary(executable string) string {
+	executable, err := filepath.Abs(executable)
+	if err != nil {
+		return ""
+	}
+	commandDir := filepath.Dir(executable)
+	installRoot := filepath.Dir(commandDir)
+	expectedGateway := filepath.Join(installRoot, "bin", windowsGatewayBinaryName)
+	hookBinary := filepath.Join(installRoot, "bin", windowsHookBinaryName)
+	if !sameWindowsInstallPath(executable, expectedGateway) ||
+		!stableNativeWindowsPE(executable) || !stableNativeWindowsPE(hookBinary) {
+		return ""
+	}
+
+	statePath := filepath.Join(installRoot, "installer", "install-state.json")
+	body, ok := readStableNativeWindowsFile(statePath, nativeWindowsInstallStateMaxBytes)
+	if !ok {
+		return ""
+	}
+	var state nativeWindowsInstallState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return ""
+	}
+	if state.SchemaVersion != 1 || state.InstallKind != "native-windows-exe" || state.InstallScope != "user" {
+		return ""
+	}
+	expectedPaths := [][2]string{
+		{state.InstallRoot, installRoot},
+		{state.CommandDir, commandDir},
+		{state.Runtime, filepath.Join(installRoot, "runtime", "python")},
+	}
+	for _, pair := range expectedPaths {
+		if strings.TrimSpace(pair[0]) == "" || !sameWindowsInstallPath(pair[0], pair[1]) {
+			return ""
+		}
+	}
+	return hookBinary
+}
+
+func sameWindowsInstallPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	return leftErr == nil && rightErr == nil && strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+}
+
+func stableNativeWindowsPE(path string) bool {
+	if !nativeWindowsPathHasNoReparsePoints(path) {
+		return false
+	}
+	before, err := os.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	opened, statErr := file.Stat()
+	header := make([]byte, 2)
+	_, readErr := io.ReadFull(file, header)
+	closeErr := file.Close()
+	if statErr != nil || readErr != nil || closeErr != nil || !sameStableNativeWindowsFile(before, opened) ||
+		string(header) != "MZ" {
+		return false
+	}
+	after, err := os.Lstat(path)
+	return err == nil && after.Mode()&os.ModeSymlink == 0 && after.Mode().IsRegular() &&
+		sameStableNativeWindowsFile(opened, after) && nativeWindowsPathHasNoReparsePoints(path)
+}
+
+func readStableNativeWindowsFile(path string, limit int64) ([]byte, bool) {
+	if limit <= 0 || !nativeWindowsPathHasNoReparsePoints(path) {
+		return nil, false
+	}
+	before, err := os.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > limit {
+		return nil, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	opened, statErr := file.Stat()
+	body, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+	closeErr := file.Close()
+	if statErr != nil || readErr != nil || closeErr != nil || !sameStableNativeWindowsFile(before, opened) ||
+		int64(len(body)) > limit {
+		return nil, false
+	}
+	after, err := os.Lstat(path)
+	if err != nil || after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
+		!sameStableNativeWindowsFile(opened, after) || !nativeWindowsPathHasNoReparsePoints(path) {
+		return nil, false
+	}
+	return body, true
+}
+
+func sameStableNativeWindowsFile(left, right os.FileInfo) bool {
+	return left != nil && right != nil && os.SameFile(left, right) && left.Size() == right.Size() &&
+		left.Mode() == right.Mode() && left.ModTime().Equal(right.ModTime())
 }
 
 func defenseclawGatewayBinary() string {
@@ -273,6 +392,7 @@ func isDefenseClawHookExecutable(exe string) bool {
 	for _, owned := range []string{
 		defenseclawHookBinary(),
 		defenseclawGatewayBinary(), // legacy pre-launcher config
+		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
 	} {
 		if strings.TrimSpace(owned) != "" &&
