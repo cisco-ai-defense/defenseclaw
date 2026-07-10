@@ -181,6 +181,46 @@ func TestManagedChildEnvPinsDataRoot(t *testing.T) {
 	}
 }
 
+func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
+	root := t.TempDir()
+	dataRoot := filepath.Join(root, "profile", ".defenseclaw")
+	openClawRoot := filepath.Join(root, "profile", ".openclaw")
+	cmd := newPackagedMigrationCommand(root, dataRoot, openClawRoot, "0.7.0", "0.8.0")
+
+	wantPrefix := []string{
+		filepath.Join(root, "runtime", "python", "python.exe"),
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedMigrationScript,
+	}
+	if len(cmd.Args) < len(wantPrefix) {
+		t.Fatalf("packaged migration args = %v, want prefix %v", cmd.Args, wantPrefix)
+	}
+	for index, want := range wantPrefix {
+		if got := cmd.Args[index]; got != want {
+			t.Fatalf("packaged migration arg %d = %q, want %q; args=%v", index, got, want, cmd.Args)
+		}
+	}
+
+	wantEnv := map[string]bool{
+		"DEFENSECLAW_HOME=" + dataRoot: false,
+		"PYTHONUTF8=1":                 false,
+		"PYTHONIOENCODING=utf-8":       false,
+	}
+	for _, entry := range cmd.Env {
+		if _, ok := wantEnv[entry]; ok {
+			wantEnv[entry] = true
+		}
+	}
+	for entry, found := range wantEnv {
+		if !found {
+			t.Fatalf("packaged migration environment is missing %q", entry)
+		}
+	}
+}
+
 func TestValidPayloadVersion(t *testing.T) {
 	for _, value := range []string{"0.8.0", "1.2.3-rc.1"} {
 		if !validPayloadVersion(value) {
