@@ -100,6 +100,13 @@ type agentHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive from the evaluator back to the HTTP handler
+	// so finalizeAgentHook can re-inject it onto the context before it
+	// emits the hook_decision event + audit row (the evaluator's
+	// ctx-injection is local to evaluate*). Never serialized on the
+	// hook response wire.
+	RedactionEnabled *bool `json:"-"`
 }
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
@@ -234,6 +241,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if panicked {
 			enrichAgentHookSpanPanic(ctx)
 		}
+
+		// Re-inject the cloud-controlled per-inspection redaction
+		// directive the evaluator resolved (evaluate*'s ctx-injection is
+		// local to that call) so finalizeAgentHook emits the
+		// hook_decision event + audit row under the same decision.
+		ctx = withRedactionDecision(ctx, resp.RedactionEnabled)
 
 		a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
 		finalized = true
@@ -1600,6 +1613,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
+	// Inject the cloud-controlled per-inspection redaction directive
+	// onto the context so the downstream emit choke points and the OS
+	// toast honor it (managed_enterprise only; no-op otherwise).
+	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	profile := a.hookProfileForConnector(req.ConnectorName)
@@ -1646,7 +1664,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	evalCtx := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock, evalCtx)
+		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock, evalCtx,
+			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	// A configured block message overrides the user-facing reason on block
 	// verdicts only. The audit row + notification dispatched above keep the
@@ -1660,6 +1679,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// evaluation_id.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RedactionEnabled = verdict.RedactionEnabled
 	return resp
 }
 
@@ -1746,7 +1766,7 @@ func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
 // req.ConnectorName so the subtitle reads e.g. "DefenseClaw hermes
 // PreToolUse" — operators paging through toasts can attribute each
 // one to a specific framework without opening the audit log.
-func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
+func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -1754,7 +1774,10 @@ func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, 
 	if target == "" {
 		target = req.HookEventName
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	// Honor the cloud-controlled per-inspection redaction policy
+	// (all-sinks scope, managed_enterprise only) when a caller passes
+	// one; otherwise default to the historical ForSinkReason behavior.
+	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -1932,7 +1955,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	safeReason := redaction.ReasonForAgent(reason)
 	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
 	resp := agentHookResponse{
 		Action:            action,

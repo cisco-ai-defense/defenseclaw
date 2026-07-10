@@ -391,6 +391,17 @@ type Event struct {
 	//     events have nothing to authenticate).
 	PayloadHMAC string `json:"payload_hmac,omitempty"`
 
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive (Cisco AI Defense is_redaction_enabled) from
+	// the inspection that produced this event down to the async /
+	// mirror sinks that don't share the originating request context
+	// (e.g. the audit-mirror path). Tri-state: nil = no directive
+	// (honor local config), true = force redact, false = store raw.
+	// In-process control metadata only — never serialized on the wire
+	// (json:"-"); the redaction decision it drives has already been
+	// applied to the payload strings by the time any sink sees them.
+	RedactionEnabled *bool `json:"-"`
+
 	// Type-specific payloads — exactly one is populated.
 	Verdict      *VerdictPayload      `json:"verdict,omitempty"`
 	Judge        *JudgePayload        `json:"judge,omitempty"`

@@ -57,6 +57,14 @@ type ScanVerdict struct {
 	// the wire; for in-process correlation only.
 	EvaluationID string   `json:"-"`
 	RuleIDs      []string `json:"-"`
+	// RedactionEnabled is the cloud-controlled per-inspection
+	// redaction directive from the managed Cisco AI Defense inspect
+	// response (is_redaction_enabled). Tri-state: nil = no directive
+	// (fall through to local privacy config), true = force redact,
+	// false = store raw. Only populated on managed_enterprise
+	// responses; never serialized (in-process control metadata that
+	// rides the verdict to the sink choke points).
+	RedactionEnabled *bool `json:"-"`
 }
 
 func allowVerdict(scanner string) *ScanVerdict {
@@ -1863,11 +1871,12 @@ func mergeVerdicts(local, cisco *ScanVerdict) *ScanVerdict {
 	combined = append(combined, cisco.Findings...)
 
 	return &ScanVerdict{
-		Action:         winner.Action,
-		Severity:       winner.Severity,
-		Reason:         strings.Join(reasons, "; "),
-		Findings:       combined,
-		ScannerSources: []string{"local-pattern", "ai-defense"},
+		Action:           winner.Action,
+		Severity:         winner.Severity,
+		Reason:           strings.Join(reasons, "; "),
+		Findings:         combined,
+		ScannerSources:   []string{"local-pattern", "ai-defense"},
+		RedactionEnabled: cisco.RedactionEnabled,
 	}
 }
 
@@ -1921,12 +1930,13 @@ func mergeVerdictsManaged(local, cisco *ScanVerdict) *ScanVerdict {
 		combined = append(combined, local.Findings...)
 		combined = append(combined, cisco.Findings...)
 		return &ScanVerdict{
-			Action:         "allow",
-			Severity:       "NONE",
-			Reason:         strings.Join(reasons, "; "),
-			Findings:       combined,
-			Scanner:        "ai-defense",
-			ScannerSources: []string{"local-pattern", "ai-defense"},
+			Action:           "allow",
+			Severity:         "NONE",
+			Reason:           strings.Join(reasons, "; "),
+			Findings:         combined,
+			Scanner:          "ai-defense",
+			ScannerSources:   []string{"local-pattern", "ai-defense"},
+			RedactionEnabled: cisco.RedactionEnabled,
 		}
 	}
 
@@ -1972,11 +1982,12 @@ func mergeVerdictsManaged(local, cisco *ScanVerdict) *ScanVerdict {
 	combined = append(combined, cisco.Findings...)
 
 	return &ScanVerdict{
-		Action:         winner.Action,
-		Severity:       winner.Severity,
-		Reason:         strings.Join(reasons, "; "),
-		Findings:       combined,
-		ScannerSources: []string{"local-pattern", "ai-defense"},
+		Action:           winner.Action,
+		Severity:         winner.Severity,
+		Reason:           strings.Join(reasons, "; "),
+		Findings:         combined,
+		ScannerSources:   []string{"local-pattern", "ai-defense"},
+		RedactionEnabled: cisco.RedactionEnabled,
 	}
 }
 
@@ -2017,11 +2028,12 @@ func mergeWithJudge(base, judge *ScanVerdict) *ScanVerdict {
 	}
 
 	return &ScanVerdict{
-		Action:         winner.Action,
-		Severity:       winner.Severity,
-		Reason:         strings.Join(reasons, "; "),
-		Findings:       combined,
-		ScannerSources: sources,
+		Action:           winner.Action,
+		Severity:         winner.Severity,
+		Reason:           strings.Join(reasons, "; "),
+		Findings:         combined,
+		ScannerSources:   sources,
+		RedactionEnabled: base.RedactionEnabled,
 	}
 }
 

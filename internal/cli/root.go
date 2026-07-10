@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -167,6 +168,16 @@ func applyPrivacyConfig(c *config.Config) {
 		return
 	}
 	redaction.SetDisableAll(c.Privacy.DisableRedaction)
+	// managed_enterprise carve-out: the local coding agent must always
+	// see the full, non-redacted verdict reason in its own UI regardless
+	// of DisableRedaction. Scoped to ReasonForAgent only — persistent and
+	// enterprise sinks keep redacting.
+	managedEnterprise := managed.IsManagedEnterprise(c.DeploymentMode)
+	redaction.SetAgentReasonRedactionDisabled(managedEnterprise)
+	// Gate the cloud-controlled per-inspection redaction directive
+	// (Cisco AI Defense is_redaction_enabled) on managed_enterprise so
+	// the gateway emit choke points only honor it in that mode.
+	gateway.SetManagedEnterpriseActive(managedEnterprise)
 }
 
 func initOTelProvider() {

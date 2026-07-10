@@ -1215,6 +1215,13 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	redaction.SetDisableAll(next.Privacy.DisableRedaction)
+	// Keep the managed_enterprise agent-reason carve-out consistent across
+	// hot reloads (mirrors internal/cli/root.go applyPrivacyConfig).
+	nextManagedEnterprise := managed.IsManagedEnterprise(next.DeploymentMode)
+	redaction.SetAgentReasonRedactionDisabled(nextManagedEnterprise)
+	// Keep the cloud-controlled per-inspection redaction gate consistent
+	// across hot reloads too.
+	SetManagedEnterpriseActive(nextManagedEnterprise)
 	appliedCfg := current
 	if !onlyConfigReloadModeChanged(oldCfg, newCfg) {
 		appliedCfg = s.publishConfig(&next)

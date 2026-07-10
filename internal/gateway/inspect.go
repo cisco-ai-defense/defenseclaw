@@ -107,6 +107,12 @@ type ToolInspectVerdict struct {
 	Mode              string        `json:"mode"`
 	WouldBlock        bool          `json:"would_block,omitempty"`
 	ApprovalTimeoutMS int           `json:"approval_timeout_ms,omitempty"`
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive from the AID lane through the hook-side
+	// merge so the evaluate* callers can stamp it onto the request
+	// ctx / emitted events. Tri-state (nil/true/false); never
+	// serialized on the hook response wire.
+	RedactionEnabled *bool `json:"-"`
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -276,6 +282,12 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		} else {
 			local.Reason = aid.Reason
 		}
+	}
+	// Carry the cloud redaction directive through the merge. Guarded
+	// by non-nil so only the AID lane (which alone populates it)
+	// stamps it; the shared judge lane leaves it untouched.
+	if aid.RedactionEnabled != nil {
+		local.RedactionEnabled = aid.RedactionEnabled
 	}
 	return local
 }

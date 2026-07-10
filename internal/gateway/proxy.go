@@ -3301,6 +3301,13 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	if verdict.Findings != nil {
 		findings = len(verdict.Findings)
 	}
+	// Cloud-controlled per-inspection redaction (phase 1, all-sinks
+	// scope): in managed_enterprise the inspect response's
+	// is_redaction_enabled directive overrides local privacy config for
+	// this verdict's reason. Outside managed_enterprise this resolves to
+	// SinkPolicyDefault, so the existing ForSinkReason behavior is
+	// preserved.
+	policy := sinkPolicyFor(nil, verdict.RedactionEnabled)
 	if p.notify != nil {
 		p.notify.Push(SecurityNotification{
 			SubjectType: subject,
@@ -3313,10 +3320,10 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 			Findings:  findings,
 			Actions:   []string{"block"},
 			// verdict.Reason is minted from user content in the regex
-			// path and can carry literal secrets/PII. Always scrub
-			// before the text lands in a system message that gets
-			// shipped off-box to the LLM provider.
-			Reason: redaction.ForSinkReason(verdict.Reason),
+			// path and can carry literal secrets/PII. Scrub before the
+			// text lands in a system message that gets shipped off-box to
+			// the LLM provider — unless the cloud directive says raw.
+			Reason: redaction.ReasonForSink(verdict.Reason, policy),
 		})
 	}
 	// Also fire a user-session OS notification so the operator sees
@@ -3326,7 +3333,7 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	p.notifier.OnBlock(notifier.BlockEvent{
 		Source:       notifier.SourceGuardrail,
 		Target:       model,
-		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Reason:       redaction.ReasonForSink(verdict.Reason, policy),
 		Severity:     verdict.Severity,
 		Connector:    p.connectorName(),
 		Event:        direction,
@@ -3347,10 +3354,11 @@ func (p *GuardrailProxy) enqueueWouldBlockNotification(verdict *ScanVerdict, dir
 	if verdict == nil {
 		return
 	}
+	policy := sinkPolicyFor(nil, verdict.RedactionEnabled)
 	p.notifier.OnWouldBlock(notifier.BlockEvent{
 		Source:       notifier.SourceGuardrail,
 		Target:       model,
-		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Reason:       redaction.ReasonForSink(verdict.Reason, policy),
 		Severity:     verdict.Severity,
 		Connector:    p.connectorName(),
 		Event:        direction,
@@ -4358,6 +4366,17 @@ func patchRawResponseModel(raw json.RawMessage, model string) ([]byte, error) {
 // ---------------------------------------------------------------------------
 
 func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model string, verdict *ScanVerdict, elapsed time.Duration, tokIn, tokOut *int64, rawFields ...rawTelemetryField) {
+	// Cloud-controlled per-inspection redaction (phase 1): stamp the
+	// managed inspect response's is_redaction_enabled directive onto the
+	// ctx so every ctx-aware sink this telemetry choke point fans out to
+	// — the scanner scan/scan_finding emit path
+	// (emitGuardrailScanVerdictFindings) and the audit verdict rows —
+	// honors the same decision. Outside managed_enterprise this resolves
+	// to SinkPolicyDefault (behavior unchanged). The webhook/store rows
+	// below carry the directive on the event itself for the sinks that do
+	// not share this ctx.
+	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	policy := sinkPolicyFor(ctx, verdict.RedactionEnabled)
 	requestID := RequestIDFromContext(ctx)
 	elapsedMs := float64(elapsed.Milliseconds())
 
@@ -4481,13 +4500,14 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// unredacted form to whichever forwarder reads from
 		// audit.Store.
 		evt := audit.Event{
-			Action:    string(audit.ActionGuardrailInspection),
-			Target:    model,
-			Severity:  verdict.Severity,
-			Details:   redaction.ForSinkReason(details),
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-			Connector: p.connectorName(),
+			Action:           string(audit.ActionGuardrailInspection),
+			Target:           model,
+			Severity:         verdict.Severity,
+			Details:          redaction.ReasonForSink(details, policy),
+			Timestamp:        time.Now().UTC(),
+			RequestID:        requestID,
+			Connector:        p.connectorName(),
+			RedactionEnabled: verdict.RedactionEnabled,
 		}
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(ctx))
 		_ = p.store.LogEvent(evt)
@@ -4497,13 +4517,14 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		_ = p.logger.LogActionWithCorrelationConnector(string(audit.ActionGuardrailVerdict), model, details, "", requestID, p.connectorName())
 	}
 	_ = persistAuditEvent(p.logger, p.store, audit.Event{
-		Action:    string(audit.ActionGuardrailInspection),
-		Target:    model,
-		Severity:  verdict.Severity,
-		Details:   details,
-		Timestamp: time.Now().UTC(),
-		RequestID: requestID,
-		Connector: p.connectorName(),
+		Action:           string(audit.ActionGuardrailInspection),
+		Target:           model,
+		Severity:         verdict.Severity,
+		Details:          details,
+		Timestamp:        time.Now().UTC(),
+		RequestID:        requestID,
+		Connector:        p.connectorName(),
+		RedactionEnabled: verdict.RedactionEnabled,
 	})
 
 	if p.otel != nil {
@@ -4526,14 +4547,15 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 
 	if p.webhooks != nil && verdict.Action == "block" {
 		event := audit.Event{
-			ID:        uuid.New().String(),
-			Timestamp: time.Now().UTC(),
-			Action:    string(audit.ActionGuardrailBlock),
-			Target:    model,
-			Actor:     "defenseclaw-guardrail",
-			Details:   details,
-			Severity:  verdict.Severity,
-			Connector: p.connectorName(),
+			ID:               uuid.New().String(),
+			Timestamp:        time.Now().UTC(),
+			Action:           string(audit.ActionGuardrailBlock),
+			Target:           model,
+			Actor:            "defenseclaw-guardrail",
+			Details:          details,
+			Severity:         verdict.Severity,
+			Connector:        p.connectorName(),
+			RedactionEnabled: verdict.RedactionEnabled,
 		}
 		// v7: webhook payloads are one of the five external-facing
 		// surfaces; Splunk/PagerDuty/Slack consumers pivot on the same
