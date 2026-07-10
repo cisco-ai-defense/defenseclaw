@@ -287,11 +287,16 @@ async def test_blocked_state_save_does_not_delay_tab_input(
         app._schedule_state_save(delay=0.01)  # noqa: SLF001
         await _wait_until(entered.is_set)
         try:
-            started = perf_counter()
+            # The save worker is still blocked here. Reaching and completing
+            # the synchronous panel action while that worker remains blocked
+            # is the concurrency contract; a wall-clock threshold is not.
+            # Full-suite coverage instrumentation can pause this test's event
+            # loop for hundreds of milliseconds without the state writer ever
+            # occupying it.
+            assert not release.is_set()
             app.action_switch_panel("alerts")
-            acknowledgement_ms = (perf_counter() - started) * 1_000
 
-            assert acknowledgement_ms < 150
+            assert not release.is_set()
             assert app.active_panel == "alerts"
             assert app.query_one("#tabs").active == "tab-alerts"
         finally:
