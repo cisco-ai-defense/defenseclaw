@@ -155,11 +155,14 @@ final class AppState {
     var scanners: [ScannerStatus] = []
     /// Last scanner Fix failure, shown inline in the Scanners card.
     var scannerFixError: String?
+    /// Scanners with a Fix currently running (double-click guard).
+    private var scannerFixInFlight: Set<String> = []
     /// Located `defenseclaw` binary, cached here so the 5s pulse never
-    /// spawns the login-shell fallback search; refreshed on start/reload.
+    /// spawns the subprocess-backed `which` fallback; refreshed on
+    /// start/reload.
     private var probeCLIPath: String?
-    /// Scanner names the login-shell PATH resolves (custom bin dirs the
-    /// standard probe misses) — checked once, alongside probeCLIPath.
+    /// Scanner names the augmented-PATH `which` lookup resolves (custom bin
+    /// dirs the standard probe misses) — checked once, alongside probeCLIPath.
     private var shellResolvedScanners: Set<String> = []
     private var probeResolved = false
 
@@ -487,13 +490,16 @@ final class AppState {
         guard connectorSetupInFlight.insert(normalized).inserted else { return }
         connectorSetupError = nil
         Task {
-            let commandName = normalized == "claudecode" ? "claude-code" : normalized
+            let commandName = ConnectorOnboarding.setupCommandName(normalized)
             let result = await runCommand(
                 title: "Add \(friendlyConnectorName(normalized)) connector",
                 arguments: ["setup", commandName, "--yes", "--mode", "observe"],
                 category: "setup",
                 origin: "Overview",
-                successEffects: ["\(friendlyConnectorName(normalized)) added to connector roster"],
+                successEffects: [
+                    "\(friendlyConnectorName(normalized)) added to connector roster",
+                    "Gateway restarted to wire \(friendlyConnectorName(normalized)) hooks",
+                ],
                 suggestedNextAction: "Resume the agent so it emits a fresh hook event."
             )
             if result.succeeded {
@@ -1091,7 +1097,14 @@ final class AppState {
             guard !name.isEmpty,
                   signal.state.lowercased() != "gone",
                   score >= 0.8,
-                  Self.knownConnectors.contains(name),
+                  // Presence must agree (a leftover config dir from an
+                  // uninstalled agent keeps identity high forever while
+                  // presence decays with the confidence half-life); zero
+                  // tolerates older gateways that omit the axis.
+                  signal.presenceScore == 0 || signal.presenceScore >= 0.8,
+                  // Only hook connectors have the additive one-click path;
+                  // proxy connectors need their dedicated Setup flow.
+                  TUIWizards.hookConnectors.contains(name),
                   !managed.contains(name)
             else { continue }
 
@@ -1305,12 +1318,13 @@ final class AppState {
     /// Discovery never activates a connector; candidates render with an
     /// explicit repair action in Overview.
     var connectorTableRows: [ConnectorHealth] {
-        // Configured = the guardrail.connectors roster plus the legacy
-        // singular connector.name/guardrail.connector shape, so
-        // single-connector installs keep their agent visible.
+        // Configured = the guardrail.connectors roster; the legacy singular
+        // connector.name/guardrail.connector shape counts only when the
+        // roster is empty — the runtime's active_connectors() treats a
+        // populated roster as exclusive, so a stale singular key on a
+        // migrated config must not render a ghost row.
         var configured = config.connectors
-        if let legacy = config.connectorName?.nonEmpty,
-           !configured.contains(where: { $0.lowercased() == legacy.lowercased() }) {
+        if configured.isEmpty, let legacy = config.connectorName?.nonEmpty {
             configured.append(legacy)
         }
         var seen = Set(configured.map { $0.lowercased() })
@@ -1354,7 +1368,11 @@ final class AppState {
             // connectorDisabled stores the raw roster key — match it
             // case-insensitively like every other name comparison here.
             let disabled = connectorIsDisabled(name)
-            if var row = health.connectors.first(where: { $0.name.lowercased() == lower }) {
+            // Live rows only while the gateway answers — pulse() keeps the
+            // last /health snapshot on error, and a frozen "running" row on
+            // a dead gateway lies. Offline falls through to the audit-stats
+            // fallback whose status is "unknown" (TUI health=None semantics).
+            if gatewayReachable, var row = health.connectors.first(where: { $0.name.lowercased() == lower }) {
                 if disabled { row.state = "disabled" }
                 return row
             }
@@ -1363,8 +1381,9 @@ final class AppState {
             let stats = connectorStatsAllTimeCache.first { $0.key.lowercased() == lower }?.value
                 ?? connectorStatsCache.first { $0.key.lowercased() == lower }?.value
             // Legacy gateways report the hooked agent only via the singular
-            // /health connector object — overlay its live state/counters.
-            if let primary = health.primaryConnector, primary.name.lowercased() == lower {
+            // /health connector object — overlay its live state/counters
+            // (only while the gateway answers; see above).
+            if gatewayReachable, let primary = health.primaryConnector, primary.name.lowercased() == lower {
                 var calls = primary.requests
                 if calls == 0 { calls = stats?.hookCalls ?? 0 }
                 var blocks = primary.toolBlocks + primary.subprocessBlocks
@@ -1515,10 +1534,20 @@ final class AppState {
 
     /// Active connector names in roster order — live health first, then config.
     /// ≤1 means single-connector: no filter chrome (the TUI hides the chip).
+    /// TUI parity (connector_filter.active_connector_names is config-driven):
+    /// the configured roster leads — disabled connectors stay filterable so
+    /// their history can be scoped — and live-only names follow.
     var activeConnectorNames: [String] {
-        let fromHealth = health.connectors.map(\.name).filter { !$0.isEmpty }
-        if !fromHealth.isEmpty { return fromHealth }
-        return config.connectors
+        var names = config.connectors
+        if names.isEmpty, let legacy = config.connectorName?.nonEmpty {
+            names.append(legacy)
+        }
+        var seen = Set(names.map { $0.lowercased() })
+        for live in health.connectors.map(\.name)
+        where !live.isEmpty && seen.insert(live.lowercased()).inserted {
+            names.append(live)
+        }
+        return names
     }
 
     /// Step the filter All → conn0 → conn1 → … → All (collapses to All when ≤1).
@@ -1657,12 +1686,51 @@ final class AppState {
     /// One-click repair for a scanner that exists in the DefenseClaw install
     /// but isn't linked into a PATH dir: recreate the installer's
     /// ~/.local/bin symlinks (binary + its -api/-pre-commit siblings), then
-    /// re-probe so the row flips to "installed" immediately.
+    /// re-probe so the row flips to "installed" immediately. The plan is
+    /// decided in Swift (never clobbers a working link or a real file) but
+    /// each mutation runs as a recorded /bin/ln step so the Activity pane
+    /// shows exactly what changed on disk.
     func fixScanner(_ status: ScannerStatus) {
         guard let source = status.fixSource else { return }
+        guard scannerFixInFlight.insert(status.name).inserted else { return }
         scannerFixError = nil
-        do {
-            try ScannerProbe.linkIntoLocalBin(name: status.name, source: source)
+        Task {
+            defer { scannerFixInFlight.remove(status.name) }
+            let plan: [ScannerProbe.PlannedLink]
+            do {
+                plan = try ScannerProbe.linkPlan(name: status.name, source: source)
+            } catch {
+                scannerFixError = "\(status.name): \(error.localizedDescription)"
+                return
+            }
+            if !plan.isEmpty {
+                let binDir = FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin"
+                let mkdir = await runCommand(
+                    title: "Prepare ~/.local/bin",
+                    binary: "/bin/mkdir",
+                    arguments: ["-p", binDir],
+                    category: "setup",
+                    origin: "Scanners Fix"
+                )
+                guard mkdir.succeeded else {
+                    scannerFixError = "\(status.name): could not create ~/.local/bin (exit \(mkdir.exitCode))."
+                    return
+                }
+                for link in plan {
+                    let result = await runCommand(
+                        title: "Link \(link.target) into ~/.local/bin",
+                        binary: "/bin/ln",
+                        arguments: ["-sfh", link.source, link.destination],
+                        category: "setup",
+                        origin: "Scanners Fix",
+                        successEffects: ["\(link.target) linked into ~/.local/bin"]
+                    )
+                    guard result.succeeded else {
+                        scannerFixError = "\(status.name): linking \(link.target) failed (exit \(result.exitCode))."
+                        return
+                    }
+                }
+            }
             let guardrailState = health.subsystems.first { $0.name == "guardrail" }?.state
             scanners = ScannerProbe.statuses(
                 config: config,
@@ -1671,8 +1739,6 @@ final class AppState {
                 cliPath: probeCLIPath,
                 shellFound: shellResolvedScanners
             )
-        } catch {
-            scannerFixError = "\(status.name): \(error.localizedDescription)"
         }
     }
 

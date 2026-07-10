@@ -25,7 +25,9 @@ struct FirstRunView: View {
     @State private var connector = "codex"
     @State private var detectedConnectors: [String] = []
     @State private var detectedProxyConnectors: [String] = []
+    @State private var registeredConnectors: Set<String> = []
     @State private var actionConnectors: Set<String> = []
+    @State private var discoveryRequested = false
     @State private var connectorDiscoveryInProgress = false
     @State private var connectorDiscoveryError: String?
     @State private var profile = "observe"
@@ -56,8 +58,13 @@ struct FirstRunView: View {
 
     private var isRunning: Bool { runningEntry?.status == .running }
 
+    private var registeredSelection: [String] {
+        detectedConnectors.filter { registeredConnectors.contains($0) }
+    }
+
     private var setupInvalid: Bool {
         connectorDiscoveryInProgress
+            || (!detectedConnectors.isEmpty && registeredSelection.isEmpty)
             || (profile == "action" && !detectedConnectors.isEmpty && actionConnectors.isEmpty)
     }
 
@@ -70,7 +77,7 @@ struct FirstRunView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Set Up DefenseClaw").font(.title2.weight(.semibold))
                     Text(cliFound
-                         ? "DefenseClaw will register every detected hook connector in observe mode. You can optionally choose which connectors enforce policy."
+                         ? "DefenseClaw registers the hook connectors you select (detected ones are pre-selected). You can optionally choose which connectors enforce policy."
                          : "Install the DefenseClaw runtime first, then return here to configure it.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
@@ -136,8 +143,11 @@ struct FirstRunView: View {
         .task {
             guard !checked else { return }
             checked = true
+            // No auto-discovery: `agent discover` executes detected agent
+            // CLIs' --version, and the runtime's trusted-path gate is off
+            // until a config exists — never exec other binaries without an
+            // explicit user action.
             cliFound = await appState.cli.locateBinary() != nil
-            if cliFound { await discoverConnectors() }
         }
     }
 
@@ -156,11 +166,21 @@ struct FirstRunView: View {
                         }
                     }
                 } else if !detectedConnectors.isEmpty {
-                    LabeledContent("Detected hook connectors") {
-                        Text(detectedConnectors.map(friendlyConnectorName).joined(separator: ", "))
-                            .multilineTextAlignment(.trailing)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Register DefenseClaw for").font(.callout.weight(.medium))
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading) {
+                            ForEach(detectedConnectors, id: \.self) { name in
+                                Toggle(friendlyConnectorName(name), isOn: registeredConnectorBinding(name))
+                                    .toggleStyle(.checkbox)
+                            }
+                        }
+                        if registeredSelection.isEmpty {
+                            Label("Select at least one connector to register.", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(Cisco.orange)
+                        }
                     }
-                    Text("All detected hook connectors will be registered. Observe mode never blocks; Action applies only to the checked connectors below.")
+                    Text("Detected connectors are pre-selected; uncheck any you don't want DefenseClaw hooks installed into. Observe mode never blocks; Action applies only to the checked connectors below.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if !detectedProxyConnectors.isEmpty {
@@ -172,7 +192,7 @@ struct FirstRunView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Enforce on").font(.callout.weight(.medium))
                             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading) {
-                                ForEach(detectedConnectors, id: \.self) { name in
+                                ForEach(registeredSelection, id: \.self) { name in
                                     Toggle(friendlyConnectorName(name), isOn: actionConnectorBinding(name))
                                         .toggleStyle(.checkbox)
                                 }
@@ -191,9 +211,6 @@ struct FirstRunView: View {
                                 Text(friendlyConnectorName($0)).tag($0)
                             }
                         }
-                        Text("No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     } else {
                         LabeledContent("Detected proxy connectors") {
                             Text(detectedProxyConnectors.map(friendlyConnectorName).joined(separator: ", "))
@@ -202,6 +219,25 @@ struct FirstRunView: View {
                         Text("Proxy connectors require their dedicated Setup flow. Continue with Open Proxy Connector Setup below.")
                             .font(.caption)
                             .foregroundStyle(Cisco.orange)
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            discoveryRequested = true
+                            Task { await discoverConnectors() }
+                        } label: {
+                            Label(discoveryRequested ? "Detect Again" : "Detect Installed Agents",
+                                  systemImage: "magnifyingglass")
+                        }
+                        Text("Runs `defenseclaw agent discover`, which executes each detected agent CLI's --version to identify it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if detectedProxyConnectors.isEmpty {
+                        Text(discoveryRequested
+                             ? "No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback."
+                             : "Choose a hook connector directly, or detect the agents installed on this Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if let connectorDiscoveryError {
                         Label(connectorDiscoveryError, systemImage: "exclamationmark.triangle.fill")
@@ -339,12 +375,11 @@ struct FirstRunView: View {
     }
 
     private func initialize() {
-        let id = UUID()
-        runID = id
         exitCode = nil
         Task {
-            let arguments = ConnectorOnboarding.initializationArguments(
+            let plan = ConnectorOnboarding.initializationPlan(
                 detectedConnectors: detectedConnectors,
+                registeredConnectors: registeredConnectors,
                 fallbackConnector: connector,
                 actionConnectors: actionConnectors,
                 profile: profile,
@@ -357,25 +392,35 @@ struct FirstRunView: View {
                 verify: verify
             )
 
-            let result = await appState.runCommand(
-                runID: id,
-                title: "Initialize DefenseClaw",
-                arguments: arguments,
-                category: "setup",
-                origin: "First Run",
-                successEffects: ["Configuration initialized"] + (startGateway ? ["Gateway started"] : []),
-                suggestedNextAction: "Review system health on Overview.",
-                refreshOnSuccess: true
-            )
-            exitCode = result.exitCode
-            if result.succeeded {
-                let config = await appState.configStore.reload()
-                appState.config = config
-                appState.installDetected = await appState.configStore.installPresent
-                await appState.gateway.update(config: config)
-                await appState.pulse()
-                if appState.installDetected { dismiss() }
+            for (index, arguments) in plan.enumerated() {
+                let id = UUID()
+                runID = id // the execution box and Cancel track the current step
+                let isLast = index == plan.count - 1
+                let title = arguments.first == "init"
+                    ? "Initialize DefenseClaw"
+                    : "Add \(friendlyConnectorName(ConnectorOnboarding.normalizedConnector(arguments.count > 1 ? arguments[1] : ""))) connector"
+                let result = await appState.runCommand(
+                    runID: id,
+                    title: title,
+                    arguments: arguments,
+                    category: "setup",
+                    origin: "First Run",
+                    successEffects: arguments.first == "init"
+                        ? ["Configuration initialized"] + (startGateway ? ["Gateway started"] : [])
+                        : [],
+                    suggestedNextAction: isLast ? "Review system health on Overview." : "",
+                    refreshOnSuccess: isLast
+                )
+                exitCode = result.exitCode
+                guard result.succeeded else { return }
             }
+
+            let config = await appState.configStore.reload()
+            appState.config = config
+            appState.installDetected = await appState.configStore.installPresent
+            await appState.gateway.update(config: config)
+            await appState.pulse()
+            if appState.installDetected { dismiss() }
         }
     }
 
@@ -384,20 +429,28 @@ struct FirstRunView: View {
         Task {
             cliFound = await appState.cli.locateBinary() != nil
             appState.installDetected = await appState.configStore.installPresent
-            if cliFound { await discoverConnectors() }
+            // Re-discover only after the user opted into discovery — Check
+            // Again must not become a back door into exec'ing agent CLIs.
+            if cliFound, discoveryRequested { await discoverConnectors() }
         }
     }
 
     private func discoverConnectors() async {
         connectorDiscoveryInProgress = true
         connectorDiscoveryError = nil
-        let result = await appState.cli.run(arguments: ["agent", "discover", "--json", "--no-emit-otel"])
+        // --refresh: every call here follows an explicit user action, and the
+        // runtime's discovery cache lives 24h — a stale hit would hide an
+        // agent installed since the last scan.
+        let result = await appState.cli.run(arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"])
         let allDetected = result.succeeded
             ? ConnectorOnboarding.installedConnectors(from: result.output, supportedOrder: Self.connectors)
             : []
         let detected = allDetected.filter { TUIWizards.hookConnectors.contains($0) }
         detectedProxyConnectors = allDetected.filter { TUIWizards.proxyConnectors.contains($0) }
         detectedConnectors = detected
+        // Pre-check everything detected (TUI first-run parity); the user
+        // unchecks what they don't want hooks installed into.
+        registeredConnectors = Set(detected)
         actionConnectors.formIntersection(Set(detected))
         if allDetected.isEmpty {
             connectorDiscoveryError = result.succeeded
@@ -405,6 +458,20 @@ struct FirstRunView: View {
                 : "Agent discovery failed (exit \(result.exitCode)); choose a fallback connector."
         }
         connectorDiscoveryInProgress = false
+    }
+
+    private func registeredConnectorBinding(_ name: String) -> Binding<Bool> {
+        Binding(
+            get: { registeredConnectors.contains(name) },
+            set: { enabled in
+                if enabled {
+                    registeredConnectors.insert(name)
+                } else {
+                    registeredConnectors.remove(name)
+                    actionConnectors.remove(name)
+                }
+            }
+        )
     }
 
     private func actionConnectorBinding(_ name: String) -> Binding<Bool> {

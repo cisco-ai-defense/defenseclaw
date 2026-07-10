@@ -410,7 +410,7 @@ struct OverviewView: View {
                             }
                             .controlSize(.small)
                             .help(candidate?.canConfigureInline == true
-                                  ? "Add \(friendlyConnectorName(c.name)) in observe mode without replacing existing connectors"
+                                  ? "Add \(friendlyConnectorName(c.name)) in observe mode without replacing existing connectors. Briefly restarts the DefenseClaw gateway to wire the agent's hooks."
                                   : "Open Setup for \(friendlyConnectorName(c.name))")
                         }
                     }

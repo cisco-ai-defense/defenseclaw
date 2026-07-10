@@ -114,6 +114,8 @@ actor CLIRunner {
             "/opt/homebrew/sbin",
             "/usr/local/bin",
             "/usr/local/sbin",
+            "/opt/local/bin",
+            "/opt/local/sbin",
             "/Applications/Docker.app/Contents/Resources/bin",
             "/usr/bin",
             "/bin",
