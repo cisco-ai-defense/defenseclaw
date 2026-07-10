@@ -1512,7 +1512,7 @@ function Invoke-WizardInstall(
         StartGateway = $StartGateway
         ActivateInstall = $true
         TimeoutSeconds = 30
-        InstallTimeoutSeconds = 1200
+        InstallTimeoutSeconds = 600
     }
     $output = @(& $driver @arguments)
     Write-BoundedText $LogPath ($output -join [Environment]::NewLine)
@@ -2055,7 +2055,9 @@ function Invoke-Capture {
     if (Test-Path -LiteralPath $root) {
         $interesting = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
             $_.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and $_.Length -le 1048576
-        } | Select-Object -First 30
+        } | Sort-Object @{
+            Expression = { if ($_.Name -eq 'wizard-driver.log') { 0 } else { 1 } }
+        }, FullName | Select-Object -First 30
         foreach ($file in $interesting) {
             $relative = [IO.Path]::GetRelativePath($root, $file.FullName) -replace '[\\/:*?"<>|]', '_'
             Write-BoundedText (Join-Path $destination $relative) ([IO.File]::ReadAllText($file.FullName))
