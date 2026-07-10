@@ -68,6 +68,7 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 | `DEFENSECLAW_PD_ROUTING_KEY` | **medium** | `unset` | `pagerduty-routing-key`, `unset` | PagerDuty routing key default for webhook entries. | — | `cli/defenseclaw/commands/cmd_setup_webhook.py:166` — Webhook setup default |
 | `DEFENSECLAW_PROXY_TOKEN` | low | `unset` | `any-string`, `unset` | Test-harness proxy bearer. | — | `scripts/test-proxy-sandbox.py:940` — Test proxy bearer |
 | `DEFENSECLAW_REGISTRY_TOKEN` | **medium** | `unset` | `registry-token`, `unset` | Default registry auth env var (e.g. | — | `cli/defenseclaw/commands/cmd_registry.py:133` — Registry default auth_env |
+| `DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN` | **HIGH** | `unset` | `provider-token`, `unset` | Short-lived secret transport for 'defenseclaw setup observability add'. | — | `cli/defenseclaw/commands/cmd_setup_observability.py:132` — Click reads the setup token from the child process environment instead of argv |
 | `DEFENSECLAW_SIEM_SECRET` | **medium** | `unset` | `any-string`, `unset` | SIEM webhook secret default. | — | `cli/defenseclaw/commands/cmd_setup_webhook.py:166` — Webhook setup default |
 | `DEFENSECLAW_SKILLSSH_TOKEN` | **medium** | `unset` | `registry-token`, `unset` | Example registry-specific token env var. | — | `cli/defenseclaw/commands/cmd_registry.py:334` — Registry example token |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | **HIGH** | `unset` | `LLM API key string`, `unset` | Override the LLM key used by the skill scanner only. | — | `cli/defenseclaw/credentials.py` — Credentials registry |
