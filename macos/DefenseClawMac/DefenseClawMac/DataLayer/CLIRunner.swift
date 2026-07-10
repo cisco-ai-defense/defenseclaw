@@ -46,6 +46,25 @@ private struct CapturedCLIOutput: Sendable {
     var truncated: Bool
 }
 
+private enum CLIUTF8 {
+    /// Returns the longest prefix that fits the byte budget without splitting
+    /// a UTF-8 scalar. Input Strings are valid UTF-8, so at most three bytes
+    /// need to be backed off from the initial cutoff.
+    static func prefix(_ value: String, maximumBytes: Int) -> String {
+        guard maximumBytes > 0 else { return "" }
+        let utf8 = value.utf8
+        guard utf8.count > maximumBytes else { return value }
+        var cutoff = utf8.index(utf8.startIndex, offsetBy: maximumBytes)
+        while cutoff > utf8.startIndex {
+            if let stringIndex = String.Index(cutoff, within: value) {
+                return String(value[..<stringIndex])
+            }
+            cutoff = utf8.index(before: cutoff)
+        }
+        return ""
+    }
+}
+
 /// Incrementally turns raw pipe bytes into bounded lines and a bounded result.
 /// Reading raw chunks is intentional: `FileHandle.AsyncBytes.lines` retains a
 /// complete newline-less line before yielding it.
@@ -93,6 +112,9 @@ private struct BoundedCLIOutputCollector: Sendable {
     }
 
     mutating func appendStreamError(_ message: String, emitLines: Bool) -> [String] {
+        // A read failure means the captured output is incomplete even if the
+        // child later reports exit 0. Parsers must not accept it as success.
+        truncated = true
         var lines: [String] = []
         if !pendingLine.isEmpty || discardingLineRemainder,
            let line = finishPendingLine(), emitLines {
@@ -126,22 +148,34 @@ private struct BoundedCLIOutputCollector: Sendable {
 
     private mutating func appendCompletedLine(_ line: String) -> String? {
         guard !outputLimitReached else { return nil }
-        let record = Data((line + "\n").utf8)
+        let recordString = line + "\n"
+        let record = Data(recordString.utf8)
         let remaining = CLIOutputLimits.maximumOutputBytes - output.count
         guard record.count <= remaining else {
             truncated = true
             outputLimitReached = true
 
             let marker = Data(Self.outputTruncationMarker.utf8)
-            let prefixCount = max(remaining - marker.count, 0)
-            if prefixCount > 0 { output.append(record.prefix(prefixCount)) }
-            if marker.count <= CLIOutputLimits.maximumOutputBytes - output.count {
-                output.append(marker)
+            let maximumPayloadBytes = CLIOutputLimits.maximumOutputBytes - marker.count
+            if output.count > maximumPayloadBytes {
+                let safeOutput = CLIUTF8.prefix(
+                    String(decoding: output, as: UTF8.self),
+                    maximumBytes: maximumPayloadBytes
+                )
+                output = Data(safeOutput.utf8)
             }
-            let streamedPrefix = String(decoding: record.prefix(prefixCount), as: UTF8.self)
-                .trimmingCharacters(in: .newlines)
-            return streamedPrefix + Self.outputTruncationMarker
-                .trimmingCharacters(in: .newlines)
+            let recordPrefix = CLIUTF8.prefix(
+                recordString,
+                maximumBytes: maximumPayloadBytes - output.count
+            )
+            output.append(Data(recordPrefix.utf8))
+            output.append(marker)
+
+            let streamedPrefix = recordPrefix.trimmingCharacters(in: .newlines)
+            let streamedMarker = Self.outputTruncationMarker.trimmingCharacters(in: .newlines)
+            return streamedPrefix.isEmpty
+                ? streamedMarker
+                : streamedPrefix + "\n" + streamedMarker
         }
         output.append(record)
         return line
@@ -166,13 +200,13 @@ private struct BoundedCLILineStreamer: Sendable {
         for line in lines {
             let recordBytes = line.utf8.count + 1
             let remainingBytes = CLIOutputLimits.maximumStreamedBytes - emittedBytes
+            let markerRecordBytes = Self.marker.utf8.count + 1
             guard emittedLines < CLIOutputLimits.maximumStreamedLines,
-                  recordBytes <= remainingBytes else {
+                  recordBytes + markerRecordBytes <= remainingBytes else {
                 stopped = true
-                let markerBytes = Self.marker.utf8.count + 1
-                let prefixBytes = max(remainingBytes - markerBytes, 0)
-                if prefixBytes > 0 {
-                    let prefix = String(decoding: Data(line.utf8).prefix(prefixBytes), as: UTF8.self)
+                let prefixBudget = max(remainingBytes - markerRecordBytes - 1, 0)
+                let prefix = CLIUTF8.prefix(line, maximumBytes: prefixBudget)
+                if !prefix.isEmpty {
                     result.append(prefix + "\n" + Self.marker)
                 } else {
                     result.append(Self.marker)
@@ -444,7 +478,7 @@ actor CLIRunner {
     /// Lightweight doctor probe (TUI Shift+D) — parsed into check rows.
     func doctor() async -> [DoctorCheck] {
         let result = await run(arguments: ["doctor"])
-        guard result.succeeded || !result.output.isEmpty else {
+        guard !result.outputTruncated, result.succeeded || !result.output.isEmpty else {
             return [DoctorCheck(name: "defenseclaw doctor", result: .fail, detail: result.output)]
         }
         var checks: [DoctorCheck] = []

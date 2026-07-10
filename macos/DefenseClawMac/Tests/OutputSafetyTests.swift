@@ -105,10 +105,24 @@ struct OutputSafetyTests {
     private static func taskCancellationInterruptsChildAndDrainsPipe() async {
         let runner = CLIRunner()
         let recorder = StreamedLineRecorder()
+        let interruptionSentinel = "sigint-handler-output-drained"
+        let childProgram = """
+        import signal
+        import sys
+        import time
+
+        def handle_interrupt(_signal, _frame):
+            print("\(interruptionSentinel)", flush=True)
+            sys.exit(130)
+
+        signal.signal(signal.SIGINT, handle_interrupt)
+        print("ready", flush=True)
+        time.sleep(30)
+        """
         let task = Task {
             await runner.run(
                 binary: "/usr/bin/python3",
-                arguments: ["-c", "import sys,time; print('ready', flush=True); time.sleep(30)"]
+                arguments: ["-c", childProgram]
             ) { line in
                 await recorder.append(line)
             }
@@ -126,6 +140,10 @@ struct OutputSafetyTests {
         let result = await task.value
         expect(result.cancelled, "Task cancellation is reflected in the result")
         expect(result.output.contains("ready"), "output produced before cancellation is drained")
+        expect(
+            result.output.contains(interruptionSentinel),
+            "output produced by the SIGINT handler is drained before return"
+        )
     }
 
     private static func parsesBoundedInventoryDocuments() {
@@ -143,6 +161,21 @@ struct OutputSafetyTests {
         expect(
             InventoryOutputParser.firstJSONArrayData(in: array) != nil,
             "array parser skips an invalid diagnostic candidate"
+        )
+
+        let unmatchedObjectOpeners = String(repeating: "{", count: 12)
+            + " diagnostic then {\"connector\":\"claudecode\",\"summary\":{}}"
+        expect(
+            InventoryOutputParser.parse(unmatchedObjectOpeners)?.documents.first?["connector"]
+                as? String == "claudecode",
+            "object parser finds valid JSON after unmatched openers without rescanning"
+        )
+
+        let unmatchedArrayOpeners = String(repeating: "[", count: 12)
+            + " diagnostic then [{\"connector\":\"codex\"}]"
+        expect(
+            InventoryOutputParser.firstJSONArrayData(in: unmatchedArrayOpeners) != nil,
+            "array parser finds valid JSON after unmatched openers without rescanning"
         )
     }
 
