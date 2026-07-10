@@ -14,8 +14,10 @@ func managedProcessOwnedBy(_, _, _ string) (bool, error) { return false, nil }
 func rejectReparseAncestors(_ string) error              { return nil }
 func rejectReparseExisting(_ string) error               { return nil }
 func isReparsePoint(_ string) (bool, error)              { return false, nil }
-func addUserPath(_ string) (bool, error)                 { return false, errors.New("Windows-only operation") }
-func removeUserPath(_ string) error                      { return errors.New("Windows-only operation") }
+func addUserPath(_ string) (bool, bool, error) {
+	return false, false, errors.New("Windows-only operation")
+}
+func removeUserPath(_ string, _ bool) error              { return errors.New("Windows-only operation") }
 func registerInstalledApp(_, _, _ string, _ bool) error  { return errors.New("Windows-only operation") }
 func unregisterInstalledApp() error                      { return errors.New("Windows-only operation") }
 func defaultInstallRoot() (string, error)                { return "", errors.New("Windows-only operation") }
