@@ -403,6 +403,8 @@ type ContinuousDiscoveryService struct {
 	modelAPIProbeCursor  atomic.Uint64
 	modelAPIItemCursorMu sync.Mutex
 	modelAPIItemCursors  map[string]int
+	modelAPICycleMu      sync.Mutex
+	modelAPICycles       map[string]*localModelAPICycle
 	// modelFileRootCursor rotates the first filesystem root. A busy cache can
 	// otherwise consume the global match budget on every pass and permanently
 	// starve later Ollama, LM Studio, MLX, or configured roots.
@@ -743,7 +745,7 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 		fmt.Fprintf(os.Stderr, "[ai-discovery] previous-scan load failed (treating workspace as new): %v\n", prevErr)
 		prev = aiStateFile{}
 	}
-	signals, stats := s.scanSignals(ctx, full)
+	signals, stats := s.scanSignals(ctx, full, priorModelAPIFingerprints(prev.Signals))
 	if err := ctx.Err(); err != nil {
 		// A canceled refresh/client request is not a complete inventory
 		// observation. Never classify omissions or overwrite the last durable
@@ -840,12 +842,17 @@ type scanStats struct {
 	ModelAPIConclusive  map[string]bool
 	ModelAPIAttempted   map[string]bool
 	ModelAPIDeferred    map[string]bool
+	ModelAPICycleSeen   map[string]map[string]struct{}
 	ModelFileConclusive map[string]bool
 	ModelFileAttempted  map[string]bool
 	ModelFileDeferred   map[string]bool
 }
 
-func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool) ([]AISignal, scanStats) {
+func (s *ContinuousDiscoveryService) scanSignals(
+	ctx context.Context,
+	full bool,
+	priorModelAPI map[string]map[string]struct{},
+) ([]AISignal, scanStats) {
 	stats := scanStats{DetectorDurations: map[string]int{}}
 	var signals []AISignal
 	seen := map[string]bool{}
@@ -898,10 +905,11 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 	if s.opts.IncludeNetworkDomains {
 		measure("local_endpoint", func() ([]AISignal, int, error) { return s.detectLocalEndpoints(), 0, nil })
 		measure("local_model_api", func() ([]AISignal, int, error) {
-			out, files, outcome, err := s.detectLocalAPIModelsWithOutcome(ctx)
+			out, files, outcome, err := s.detectLocalAPIModelsWithPrior(ctx, priorModelAPI)
 			stats.ModelAPIConclusive = outcome.conclusive
 			stats.ModelAPIAttempted = outcome.attempted
 			stats.ModelAPIDeferred = outcome.deferred
+			stats.ModelAPICycleSeen = outcome.cycleSeen
 			return out, files, err
 		})
 	}
@@ -1048,60 +1056,21 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			prevFingerprints = append(prevFingerprints, fp)
 		}
 		sort.Strings(prevFingerprints)
+		carry := carryForwardAccumulator{
+			current:    current,
+			out:        &out,
+			counts:     counts,
+			emittedFps: emittedFps,
+		}
 		for _, fp := range prevFingerprints {
 			old := prevMap[fp]
 			if _, ok := current[fp]; ok {
 				continue
 			}
-			if coverageKey, ok := storedModelAPICoverageKey(old); ok && !stats.ModelAPIConclusive[coverageKey] {
-				deferred := stats.ModelAPIDeferred[coverageKey]
-				attempted := stats.ModelAPIAttempted[coverageKey]
-				carry := deferred || (attempted && old.ModelAPIMisses < maxIndeterminateModelAPIMisses)
-				if carry && apiCarryRemaining > 0 {
-					// A deferred source was not fully observed because an earlier
-					// response exhausted an item/time/endpoint budget. Keep it
-					// until that exact source receives a conclusive observation.
-					// A request that was actually attempted but failed gets one
-					// grace pass for ordinary local-server restarts.
-					carried := old.AISignal
-					carried.State = AIStateSeen
-					old.AISignal = carried
-					if attempted && !deferred {
-						old.ModelAPIMisses++
-					}
-					current[fp] = old
-					apiCarryRemaining--
-					out = append(out, carried)
-					counts[AIStateSeen]++
-					emittedFps[fp] = true
-					continue
-				}
-				if deferred || (attempted && old.ModelAPIMisses < maxIndeterminateModelAPIMisses) {
-					// Persistence is deliberately bounded. If the carry budget is
-					// full, evict silently rather than emit an unsupported `gone`
-					// transition from an incomplete observation.
-					continue
-				}
+			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
+				continue
 			}
-			if old.Detector == "model_file" && old.Model != nil && old.WorkspaceHash != "" &&
-				stats.ModelFileDeferred[old.WorkspaceHash] {
-				// The artifact's root was only partially walked (entry/match
-				// cap, cancellation-adjacent error, or permission failure).
-				// Preserve prior inventory until that exact hashed root is
-				// observed conclusively; omission from a partial walk is not
-				// evidence that the model was removed.
-				if fileCarryRemaining > 0 {
-					carried := old.AISignal
-					carried.State = AIStateSeen
-					old.AISignal = carried
-					current[fp] = old
-					fileCarryRemaining--
-					out = append(out, carried)
-					counts[AIStateSeen]++
-					emittedFps[fp] = true
-				}
-				// If the bounded carry set is full, omit the row without a
-				// `gone` event. A partial walk cannot prove deletion.
+			if carry.handleModelFileCarryForward(fp, old, stats, &fileCarryRemaining) {
 				continue
 			}
 			gone := old.AISignal
@@ -1177,6 +1146,108 @@ func storedModelAPICoverageKey(stored aiStoredSignal) (string, bool) {
 		return "", false
 	}
 	return localModelAPIOutcomeKey(provider, sourceHash, sig.Detector), true
+}
+
+type carryForwardAccumulator struct {
+	current    map[string]aiStoredSignal
+	out        *[]AISignal
+	counts     map[string]int
+	emittedFps map[string]bool
+}
+
+func (c carryForwardAccumulator) persist(fp string, old aiStoredSignal, budget *int) {
+	carried := old.AISignal
+	carried.State = AIStateSeen
+	old.AISignal = carried
+	c.current[fp] = old
+	*budget = *budget - 1
+	*c.out = append(*c.out, carried)
+	c.counts[AIStateSeen]++
+	c.emittedFps[fp] = true
+}
+
+// handleModelAPICarryForward owns the lifecycle rules for an API model that
+// was not emitted on this scan. Its return value means the omission was
+// handled and must not become a gone transition; a bounded carry set may
+// intentionally handle an item without persisting it.
+func (c carryForwardAccumulator) handleModelAPICarryForward(
+	fp string,
+	old aiStoredSignal,
+	stats scanStats,
+	budget *int,
+) bool {
+	coverageKey, ok := storedModelAPICoverageKey(old)
+	if !ok {
+		return false
+	}
+	if stats.ModelAPIConclusive[coverageKey] {
+		if _, seenDuringCycle := stats.ModelAPICycleSeen[coverageKey][fp]; !seenDuringCycle {
+			return false
+		}
+		if *budget > 0 {
+			old.ModelAPIMisses = 0
+			c.persist(fp, old, budget)
+		}
+		return true
+	}
+
+	deferred := stats.ModelAPIDeferred[coverageKey]
+	attempted := stats.ModelAPIAttempted[coverageKey]
+	eligible := deferred || (attempted && old.ModelAPIMisses < maxIndeterminateModelAPIMisses)
+	if !eligible {
+		return false
+	}
+	if *budget > 0 {
+		// A deferred source was not fully observed because an earlier
+		// response exhausted an item/time/endpoint budget. Keep it until
+		// that exact source receives a conclusive observation. A request
+		// that was attempted but failed gets one grace pass for ordinary
+		// local-server restarts.
+		if attempted && !deferred {
+			old.ModelAPIMisses++
+		}
+		c.persist(fp, old, budget)
+	}
+	// Persistence is deliberately bounded. If the carry budget is full,
+	// evict silently rather than emit an unsupported gone transition from
+	// an incomplete observation.
+	return true
+}
+
+func (c carryForwardAccumulator) handleModelFileCarryForward(
+	fp string,
+	old aiStoredSignal,
+	stats scanStats,
+	budget *int,
+) bool {
+	if old.Detector != "model_file" || old.Model == nil || old.WorkspaceHash == "" ||
+		!stats.ModelFileDeferred[old.WorkspaceHash] {
+		return false
+	}
+	// The artifact's root was only partially walked (entry/match cap,
+	// cancellation-adjacent error, or permission failure). Preserve prior
+	// inventory until that exact hashed root is observed conclusively.
+	if *budget > 0 {
+		c.persist(fp, old, budget)
+	}
+	// If the bounded carry set is full, omit the row without a gone event.
+	// A partial walk cannot prove deletion.
+	return true
+}
+
+func priorModelAPIFingerprints(signals map[string]aiStoredSignal) map[string]map[string]struct{} {
+	out := make(map[string]map[string]struct{})
+	for fingerprint, stored := range signals {
+		coverageKey, ok := storedModelAPICoverageKey(stored)
+		if !ok {
+			continue
+		}
+		if out[coverageKey] == nil {
+			out[coverageKey] = make(map[string]struct{})
+		}
+		out[coverageKey][fingerprint] = struct{}{}
+	}
+	return out
 }
 
 // recordScanIfPossible writes a scan to the optional inventory

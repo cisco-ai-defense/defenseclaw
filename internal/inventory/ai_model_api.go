@@ -116,6 +116,11 @@ type localModelAPIPageState struct {
 	resumed     bool
 }
 
+type localModelAPICycle struct {
+	seen     map[string]struct{}
+	overflow bool
+}
+
 // localModelAPIOutcome records coverage separately from observations. A
 // provider can validly return an empty list (conclusive absence), while a
 // timeout, auth failure, malformed response, or detector cap leaves prior
@@ -125,6 +130,7 @@ type localModelAPIOutcome struct {
 	conclusive map[string]bool
 	attempted  map[string]bool
 	deferred   map[string]bool
+	cycleSeen  map[string]map[string]struct{}
 }
 
 // localEndpointsForSignature returns the catalog's endpoints plus Lemonade's
@@ -302,10 +308,18 @@ func (s *ContinuousDiscoveryService) detectLocalAPIModels(ctx context.Context) (
 }
 
 func (s *ContinuousDiscoveryService) detectLocalAPIModelsWithOutcome(ctx context.Context) ([]AISignal, int, localModelAPIOutcome, error) {
+	return s.detectLocalAPIModelsWithPrior(ctx, nil)
+}
+
+func (s *ContinuousDiscoveryService) detectLocalAPIModelsWithPrior(
+	ctx context.Context,
+	prior map[string]map[string]struct{},
+) ([]AISignal, int, localModelAPIOutcome, error) {
 	outcome := localModelAPIOutcome{
 		conclusive: make(map[string]bool),
 		attempted:  make(map[string]bool),
 		deferred:   make(map[string]bool),
+		cycleSeen:  make(map[string]map[string]struct{}),
 	}
 	if s == nil {
 		return nil, 0, outcome, nil
@@ -531,9 +545,22 @@ func (s *ContinuousDiscoveryService) detectLocalAPIModelsWithOutcome(ctx context
 			}
 		}
 		s.setLocalModelAPIItemCursor(page.cursorKey, nextCursor)
+		emittedFingerprints := make([]string, 0, emitted)
+		for _, candidate := range candidates[:emitted] {
+			emittedFingerprints = append(emittedFingerprints, candidate.signal.Fingerprint)
+		}
+		cycleSeen, cycleOverflow := s.updateLocalModelAPICycle(
+			page.cursorKey,
+			!page.resumed,
+			prior != nil,
+			prior[key],
+			emittedFingerprints,
+			nextCursor == 0 && fullyEmitted,
+		)
 		delete(outcome.conclusive, key)
-		if nextCursor == 0 && !page.resumed && fullyEmitted {
+		if nextCursor == 0 && fullyEmitted && !cycleOverflow {
 			outcome.conclusive[key] = true
+			outcome.cycleSeen[key] = cycleSeen
 			delete(outcome.deferred, key)
 		} else {
 			outcome.deferred[key] = true
@@ -627,6 +654,68 @@ func (s *ContinuousDiscoveryService) setLocalModelAPIItemCursor(key string, curs
 		s.modelAPIItemCursors = make(map[string]int)
 	}
 	s.modelAPIItemCursors[key] = cursor
+}
+
+func (s *ContinuousDiscoveryService) updateLocalModelAPICycle(
+	cursorKey string,
+	start bool,
+	trackPrior bool,
+	prior map[string]struct{},
+	emitted []string,
+	complete bool,
+) (map[string]struct{}, bool) {
+	if s == nil || cursorKey == "" {
+		return nil, false
+	}
+	s.modelAPICycleMu.Lock()
+	defer s.modelAPICycleMu.Unlock()
+	if s.modelAPICycles == nil {
+		s.modelAPICycles = make(map[string]*localModelAPICycle)
+	}
+	cycle := s.modelAPICycles[cursorKey]
+	if start {
+		cycle = &localModelAPICycle{seen: make(map[string]struct{})}
+		s.modelAPICycles[cursorKey] = cycle
+	} else if cycle == nil {
+		// A resumed decoder without its prefix membership cannot prove a
+		// complete inventory at EOF. Keep this cycle deferred; the cursor
+		// resets at EOF and the next pass will rebuild from the beginning.
+		cycle = &localModelAPICycle{seen: make(map[string]struct{}), overflow: true}
+		s.modelAPICycles[cursorKey] = cycle
+	}
+	if trackPrior {
+		if len(prior) > maxPersistedLocalModelAPISignals {
+			cycle.overflow = true
+		}
+		for fingerprint := range cycle.seen {
+			if _, retained := prior[fingerprint]; !retained {
+				delete(cycle.seen, fingerprint)
+			}
+		}
+	}
+	const cycleSeenLimit = maxPersistedLocalModelAPISignals + maxLocalModelAPIItems
+	for _, fingerprint := range emitted {
+		if fingerprint == "" {
+			continue
+		}
+		if _, exists := cycle.seen[fingerprint]; exists {
+			continue
+		}
+		if len(cycle.seen) >= cycleSeenLimit {
+			cycle.overflow = true
+			continue
+		}
+		cycle.seen[fingerprint] = struct{}{}
+	}
+	if !complete {
+		return nil, cycle.overflow
+	}
+	delete(s.modelAPICycles, cursorKey)
+	seen := make(map[string]struct{}, len(cycle.seen))
+	for fingerprint := range cycle.seen {
+		seen[fingerprint] = struct{}{}
+	}
+	return seen, cycle.overflow
 }
 
 func localModelAPIProbeGroupKey(probe localModelAPIProbe) string {

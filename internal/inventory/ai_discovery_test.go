@@ -874,6 +874,166 @@ func TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary(t *testing.T
 	}
 }
 
+func TestCarryForwardAccumulatorModelAPIRules(t *testing.T) {
+	const fingerprint = "model-api-fingerprint"
+	old := aiStoredSignal{AISignal: AISignal{
+		Fingerprint:        fingerprint,
+		Detector:           "model_api",
+		ModelAPISourceHash: "source-hash",
+		Model:              &LocalModelInfo{Provider: "test-provider"},
+	}}
+	coverageKey, ok := storedModelAPICoverageKey(old)
+	if !ok {
+		t.Fatal("test model did not produce an API coverage key")
+	}
+	newAccumulator := func() (carryForwardAccumulator, *[]AISignal) {
+		out := []AISignal{}
+		return carryForwardAccumulator{
+			current:    map[string]aiStoredSignal{},
+			out:        &out,
+			counts:     map[string]int{},
+			emittedFps: map[string]bool{},
+		}, &out
+	}
+
+	t.Run("deferred source carries", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIDeferred: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || budget != 0 || len(*out) != 1 || carry.current[fingerprint].State != AIStateSeen {
+			t.Fatalf("deferred carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("attempted failure consumes grace", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIAttempted: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || carry.current[fingerprint].ModelAPIMisses != 1 {
+			t.Fatalf("attempted carry = handled:%v stored:%+v", handled, carry.current[fingerprint])
+		}
+	})
+
+	t.Run("miss limit falls through", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		atLimit := old
+		atLimit.ModelAPIMisses = maxIndeterminateModelAPIMisses
+		handled := carry.handleModelAPICarryForward(fingerprint, atLimit, scanStats{
+			ModelAPIAttempted: map[string]bool{coverageKey: true},
+		}, &budget)
+		if handled || budget != 1 || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("at-limit carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("completed cycle membership carries and clears misses", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		missed := old
+		missed.ModelAPIMisses = 1
+		handled := carry.handleModelAPICarryForward(fingerprint, missed, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen: map[string]map[string]struct{}{
+				coverageKey: {fingerprint: {}},
+			},
+		}, &budget)
+		if !handled || carry.current[fingerprint].ModelAPIMisses != 0 {
+			t.Fatalf("completed-cycle carry = handled:%v stored:%+v", handled, carry.current[fingerprint])
+		}
+	})
+
+	t.Run("completed cycle absence falls through", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen:  map[string]map[string]struct{}{coverageKey: {}},
+		}, &budget)
+		if handled {
+			t.Fatal("model absent from a completed cycle was carried")
+		}
+	})
+
+	t.Run("exhausted budget suppresses unsupported gone", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIDeferred: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
+
+	t.Run("completed membership respects exhausted budget", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen: map[string]map[string]struct{}{
+				coverageKey: {fingerprint: {}},
+			},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero completed carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
+}
+
+func TestCarryForwardAccumulatorModelFileRules(t *testing.T) {
+	const fingerprint = "model-file-fingerprint"
+	old := aiStoredSignal{AISignal: AISignal{
+		Fingerprint:   fingerprint,
+		Detector:      "model_file",
+		WorkspaceHash: "root-hash",
+		Model:         &LocalModelInfo{Format: "gguf"},
+	}}
+	newAccumulator := func() (carryForwardAccumulator, *[]AISignal) {
+		out := []AISignal{}
+		return carryForwardAccumulator{
+			current:    map[string]aiStoredSignal{},
+			out:        &out,
+			counts:     map[string]int{},
+			emittedFps: map[string]bool{},
+		}, &out
+	}
+
+	t.Run("deferred root carries", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		handled := carry.handleModelFileCarryForward(fingerprint, old, scanStats{
+			ModelFileDeferred: map[string]bool{"root-hash": true},
+		}, &budget)
+		if !handled || budget != 0 || len(*out) != 1 || carry.current[fingerprint].State != AIStateSeen {
+			t.Fatalf("file carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("conclusive root falls through", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		if carry.handleModelFileCarryForward(fingerprint, old, scanStats{}, &budget) {
+			t.Fatal("model from a non-deferred root was carried")
+		}
+	})
+
+	t.Run("exhausted budget suppresses unsupported gone", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelFileCarryForward(fingerprint, old, scanStats{
+			ModelFileDeferred: map[string]bool{"root-hash": true},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero file carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
+}
+
 // TestEnrichSignalsWithComponentConfidence pins the Bug B fix:
 // `/api/v1/ai-usage` and `/api/v1/ai-usage/scan` must stamp the
 // per-component identity / presence scores on each signal so

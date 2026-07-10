@@ -590,8 +590,11 @@ func TestDetectLocalAPIModelsAdvancesPastTruncatedItemWindow(t *testing.T) {
 	}
 	probe := buildLocalModelAPIProbes(svc.catalog)[0]
 	key := localModelAPICoverageKey(probe)
-	if !outcome.deferred[key] || outcome.conclusive[key] {
-		t.Fatalf("resumed page outcome = %+v, want deferred to preserve prior page", outcome)
+	if !outcome.conclusive[key] || outcome.deferred[key] {
+		t.Fatalf("resumed EOF outcome = %+v, want conclusive completed cycle", outcome)
+	}
+	if got := len(outcome.cycleSeen[key]); got != len(models) {
+		t.Fatalf("completed cycle membership = %d, want %d", got, len(models))
 	}
 	third, _, _, err := svc.detectLocalAPIModelsWithOutcome(context.Background())
 	if err != nil {
@@ -605,6 +608,43 @@ func TestDetectLocalAPIModelsAdvancesPastTruncatedItemWindow(t *testing.T) {
 		if signal.Model != nil && signal.Model.ID == "paged-256" {
 			t.Fatalf("cursor reset page unexpectedly retained final-window model: %+v", signal.Model)
 		}
+	}
+}
+
+func TestUpdateLocalModelAPICyclePrunesAndRejectsOrphanResume(t *testing.T) {
+	svc := &ContinuousDiscoveryService{}
+	if _, overflow := svc.updateLocalModelAPICycle(
+		"orphan", false, true, map[string]struct{}{"suffix": {}}, []string{"suffix"}, true,
+	); !overflow {
+		t.Fatal("resumed page without prefix cycle was treated as conclusive")
+	}
+
+	if _, overflow := svc.updateLocalModelAPICycle(
+		"cycle", true, true,
+		map[string]struct{}{"first": {}, "retained": {}},
+		[]string{"first", "retained"}, false,
+	); overflow {
+		t.Fatal("bounded first page unexpectedly overflowed")
+	}
+	seen, overflow := svc.updateLocalModelAPICycle(
+		"cycle", false, true,
+		map[string]struct{}{"retained": {}},
+		[]string{"last"}, true,
+	)
+	if overflow {
+		t.Fatal("bounded completed cycle unexpectedly overflowed")
+	}
+	if len(seen) != 2 {
+		t.Fatalf("completed membership = %+v, want retained + last", seen)
+	}
+	if _, ok := seen["retained"]; !ok {
+		t.Fatal("completed membership lost retained prior fingerprint")
+	}
+	if _, ok := seen["last"]; !ok {
+		t.Fatal("completed membership lost final-page fingerprint")
+	}
+	if _, ok := seen["first"]; ok {
+		t.Fatal("completed membership retained a fingerprint evicted from durable prior")
 	}
 }
 
@@ -792,6 +832,75 @@ func TestLocalModelAPILifecycleDistinguishesTransientFailureFromEmptyInventory(t
 	}
 	if got := findModelSignal(t, empty.Signals, "model_api", "stable-model"); got.State != AIStateGone {
 		t.Fatalf("valid empty inventory state = %q, want gone", got.State)
+	}
+}
+
+func TestLocalModelAPILifecycleCompletesPagedInventoryBeforeMarkingRemoval(t *testing.T) {
+	const (
+		modelCount = maxLocalModelAPIItems + 44
+		removedID  = "paged-010"
+	)
+	var removed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		models := make([]map[string]string, 0, modelCount)
+		for i := 0; i < modelCount; i++ {
+			id := fmt.Sprintf("paged-%03d", i)
+			if removed.Load() && id == removedID {
+				continue
+			}
+			models = append(models, map[string]string{"id": id})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": models})
+	}))
+	defer server.Close()
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", IncludeNetworkDomains: true,
+		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
+		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
+	}, []AISignature{openAIAPITestSignature(server.URL)}, nil, nil)
+
+	firstPage, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("initial first page: %v", err)
+	}
+	if got := findModelSignal(t, firstPage.Signals, "model_api", removedID); got.State != AIStateNew {
+		t.Fatalf("initial first-page state = %q, want new", got.State)
+	}
+	initialEOF, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("initial EOF page: %v", err)
+	}
+	if got := findModelSignal(t, initialEOF.Signals, "model_api", "paged-020"); got.State != AIStateSeen {
+		t.Fatalf("initial earlier-page survivor state = %q, want seen", got.State)
+	}
+	findModelSignal(t, initialEOF.Signals, "model_api", "paged-299")
+
+	removed.Store(true)
+	deletionFirstPage, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("deletion first page: %v", err)
+	}
+	if got := findModelSignal(t, deletionFirstPage.Signals, "model_api", removedID); got.State != AIStateSeen {
+		t.Fatalf("partial deletion cycle marked removal early: state=%q", got.State)
+	}
+
+	deletionEOF, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("deletion EOF page: %v", err)
+	}
+	if got := findModelSignal(t, deletionEOF.Signals, "model_api", removedID); got.State != AIStateGone {
+		t.Fatalf("completed deletion cycle state = %q, want gone", got.State)
+	}
+	if got := findModelSignal(t, deletionEOF.Signals, "model_api", "paged-020"); got.State != AIStateSeen {
+		t.Fatalf("earlier-page survivor state = %q, want seen", got.State)
+	}
+	if got := findModelSignal(t, deletionEOF.Signals, "model_api", "paged-299"); got.State != AIStateSeen {
+		t.Fatalf("EOF-page survivor state = %q, want seen", got.State)
+	}
+	if deletionEOF.Summary.GoneSignals != 1 {
+		t.Fatalf("gone signals = %d, want exactly removed model", deletionEOF.Summary.GoneSignals)
 	}
 }
 
