@@ -18,14 +18,14 @@ package config
 
 // TrainingConfig controls continuous model improvement via local fine-tuning.
 type TrainingConfig struct {
-	Enabled              bool                  `mapstructure:"enabled" yaml:"enabled"`
-	Backend              string                `mapstructure:"backend" yaml:"backend,omitempty"`
-	ModelsDir            string                `mapstructure:"models_dir" yaml:"models_dir,omitempty"`
-	LlamaServerPort      int                   `mapstructure:"llama_server_port" yaml:"llama_server_port,omitempty"`
-	TrainingTimeoutHours int                   `mapstructure:"training_timeout_hours" yaml:"training_timeout_hours,omitempty"`
-	TraceRetentionDays   int                   `mapstructure:"trace_retention_days" yaml:"trace_retention_days,omitempty"`
-	BaseModels           []TrainingBaseModel   `mapstructure:"base_models" yaml:"base_models,omitempty"`
-	Categories           []TrainingCategory    `mapstructure:"categories" yaml:"categories,omitempty"`
+	Enabled              bool                `mapstructure:"enabled" yaml:"enabled"`
+	Backend              string              `mapstructure:"backend" yaml:"backend,omitempty"`
+	ModelsDir            string              `mapstructure:"models_dir" yaml:"models_dir,omitempty"`
+	LlamaServerPort      int                 `mapstructure:"llama_server_port" yaml:"llama_server_port,omitempty"`
+	TrainingTimeoutHours int                 `mapstructure:"training_timeout_hours" yaml:"training_timeout_hours,omitempty"`
+	TraceRetentionDays   int                 `mapstructure:"trace_retention_days" yaml:"trace_retention_days,omitempty"`
+	BaseModels           []TrainingBaseModel `mapstructure:"base_models" yaml:"base_models,omitempty"`
+	Categories           []TrainingCategory  `mapstructure:"categories" yaml:"categories,omitempty"`
 }
 
 // TrainingBaseModel defines a base model available for fine-tuning.

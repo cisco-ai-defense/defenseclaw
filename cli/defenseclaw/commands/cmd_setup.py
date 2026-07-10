@@ -10264,9 +10264,9 @@ def setup_training(app: AppContext, enable: bool, disable: bool, status: bool) -
         return
 
     if enable:
+        import platform
         import shutil
         import subprocess as _sp
-        import platform
 
         app.cfg.training.enabled = True
         if not app.cfg.training.backend:
@@ -10279,7 +10279,10 @@ def setup_training(app: AppContext, enable: bool, disable: bool, status: bool) -
         # 1. Install training backend
         backend = app.cfg.training.backend
         if backend == "mlx-lm-lora":
-            if shutil.which("mlx-lm-lora") or _sp.run(["pip", "show", "mlx-lm-lora"], capture_output=True).returncode == 0:
+            already = shutil.which("mlx-lm-lora") or _sp.run(
+                ["pip", "show", "mlx-lm-lora"], capture_output=True
+            ).returncode == 0
+            if already:
                 click.echo("  ✓ mlx-lm-lora already installed")
             else:
                 click.echo("  Installing mlx-lm-lora...")
