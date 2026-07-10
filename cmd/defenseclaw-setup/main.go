@@ -788,11 +788,25 @@ func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error 
 	if err != nil {
 		return err
 	}
+	cmd := newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVersion)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVersion string) *exec.Cmd {
 	python := filepath.Join(root, "runtime", "python", "python.exe")
 	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
 	cmd := exec.Command(
 		python,
 		"-I",
+		// Isolated mode implies -E, so Python intentionally ignores the
+		// PYTHONUTF8/PYTHONIOENCODING values in the managed environment. Keep
+		// isolation and force UTF-8 on the interpreter command line instead.
+		"-X",
+		"utf8",
 		"-c",
 		packagedMigrationScript,
 		fromVersion,
@@ -802,11 +816,7 @@ func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error 
 		manifest,
 	)
 	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
+	return cmd
 }
 
 func startGateway(gatewayPath, dataRoot string) error {
