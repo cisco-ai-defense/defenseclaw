@@ -24,15 +24,33 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestManagedWatchdogCreationFlagsPermitExplicitJobBreakaway(t *testing.T) {
+func TestManagedWatchdogCreationFlagsHonorJobBreakawayPolicy(t *testing.T) {
+	base := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	tests := []struct {
+		name       string
+		queryErr   error
+		limitFlags uint32
+		want       uint32
+	}{
+		{name: "outside job", queryErr: windows.ERROR_INVALID_HANDLE, want: base | windows.CREATE_BREAKAWAY_FROM_JOB},
+		{name: "restricted job", want: base},
+		{name: "explicit breakaway", limitFlags: windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK, want: base | windows.CREATE_BREAKAWAY_FROM_JOB},
+		{name: "silent breakaway", limitFlags: windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, want: base},
+		{name: "unknown query failure", queryErr: windows.ERROR_ACCESS_DENIED, want: base},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := watchdogCreationFlagsForJob(tc.queryErr, tc.limitFlags); got != tc.want {
+				t.Fatalf("watchdog creation flags = %#x, want %#x", got, tc.want)
+			}
+		})
+	}
+
 	attrs := watchdogSysProcAttr()
-	want := uint32(windows.CREATE_NEW_PROCESS_GROUP |
-		windows.DETACHED_PROCESS |
-		windows.CREATE_BREAKAWAY_FROM_JOB)
 	if attrs == nil {
 		t.Fatal("watchdogSysProcAttr returned nil")
 	}
-	if got := attrs.CreationFlags; got != want {
-		t.Fatalf("watchdog creation flags = %#x, want %#x", got, want)
+	if attrs.CreationFlags&base != base {
+		t.Fatalf("watchdog creation flags = %#x, missing required detachment %#x", attrs.CreationFlags, base)
 	}
 }

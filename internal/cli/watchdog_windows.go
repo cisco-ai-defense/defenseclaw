@@ -19,9 +19,11 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -44,15 +46,37 @@ func watchdogStartDir() string {
 // inherited and the child is addressable by GenerateConsoleCtrlEvent for a
 // graceful stop) combined with DETACHED_PROCESS (drop the inherited console
 // so a closing terminal cannot deliver CTRL_CLOSE and kill the watchdog).
-// CREATE_BREAKAWAY_FROM_JOB is scoped to this managed, PID-file-owned child so
-// it survives a successful TUI launch without allowing arbitrary descendants
-// to escape the TUI's kill-on-close job.
+// CREATE_BREAKAWAY_FROM_JOB is scoped to this managed, PID-file-owned child
+// when the enclosing job permits it, so it survives a successful TUI launch
+// without allowing arbitrary descendants to escape the TUI's kill-on-close
+// job. Restricted supervisors such as CI runners keep the watchdog in their
+// job while the other flags still detach it from the launcher's console.
 func watchdogSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP |
-			windows.DETACHED_PROCESS |
-			windows.CREATE_BREAKAWAY_FROM_JOB,
+	return &syscall.SysProcAttr{CreationFlags: watchdogCreationFlags()}
+}
+
+func watchdogCreationFlags() uint32 {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	err := windows.QueryInformationJobObject(
+		0,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+		nil,
+	)
+	return watchdogCreationFlagsForJob(err, info.BasicLimitInformation.LimitFlags)
+}
+
+func watchdogCreationFlagsForJob(queryErr error, limitFlags uint32) uint32 {
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	// Explicit breakaway fails with ERROR_ACCESS_DENIED unless the enclosing
+	// job opts in. A process outside a job may request it harmlessly, while
+	// SILENT_BREAKAWAY requires no creation flag.
+	if errors.Is(queryErr, windows.ERROR_INVALID_HANDLE) ||
+		(queryErr == nil && limitFlags&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0) {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
 	}
+	return flags
 }
 
 func watchdogProcessAlive(pid int, _ *os.Process) bool {
