@@ -59,6 +59,17 @@ try {
     ) -TimeoutSeconds 30
     Assert-True ($profileTest.ExitCode -eq 0 -and $profileTest.StdOut -match 'self-test passed') 'disposable Windows profile and PATH isolation'
 
+    $unicodeInterop = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-File', $wizardHarness,
+        '-SetupPath', $pwsh,
+        '-StateRoot', (Join-Path $temp 'wizard-unicode-interop'),
+        '-InteropSelfTestOnly'
+    ) -TimeoutSeconds 15
+    $unicodeInteropResult = $unicodeInterop.StdOut | ConvertFrom-Json
+    Assert-True ($unicodeInterop.ExitCode -eq 0 -and
+        $unicodeInteropResult.unicode_window_text -eq 'pass') `
+        'bounded wizard interop round-trips Unicode window text'
+
     $allow = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-File', $mock, '-Action', 'allow') -TimeoutSeconds 5
     Assert-True ($allow.ExitCode -eq 0 -and $allow.StdOut -match 'allow') 'mock allow decision'
 
@@ -193,10 +204,15 @@ try {
         $wizardHarnessText -match "RUNNER_ENVIRONMENT -ne 'github-hosted'" -and
         $wizardHarnessText -match 'GetRelativePath\(\$runnerTemp, \$state\)') `
         'install-driving wizard automation is restricted to disposable GitHub-hosted runner state'
-    Assert-True ($wizardHarnessText -match 'SendMessageTimeout' -and
+    Assert-True ($wizardHarnessText -match 'EntryPoint = "SendMessageTimeoutW"' -and
+        $wizardHarnessText -match 'CharSet = CharSet\.Unicode' -and
         $wizardHarnessText -match 'InstallTimeoutSeconds' -and
         $wizardHarnessText -match 'Get-BoundedWindowText') `
-        'wizard automation uses bounded Win32 calls and install timeout'
+        'wizard automation uses bounded Unicode Win32 calls and install timeout'
+    Assert-True ($wizardHarnessText -match 'function Assert-UnicodeWindowTextInterop' -and
+        $wizardHarnessText -match 'DefenseClaw → installed' -and
+        $wizardHarnessText -match "Write-WizardTrace 'unicode-interop-passed'") `
+        'wizard automation round-trips Unicode window text before driving setup'
     Assert-True ($wizardHarnessText -match "wizard-driver\.log" -and
         $wizardHarnessText -match "Write-WizardTrace 'install-progress'" -and
         $wizardHarnessText -match "Write-WizardTrace 'install-timeout'" -and

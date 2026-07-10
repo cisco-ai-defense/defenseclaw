@@ -23,7 +23,6 @@ const (
 	wmDestroy = 0x0002
 	wmClose   = 0x0010
 	wmCommand = 0x0111
-	wmTimer   = 0x0113
 	wmSetFont = 0x0030
 	wmUser    = 0x0400
 	wmDone    = wmUser + 1
@@ -57,10 +56,8 @@ const (
 	swShow       = 5
 	swShowNormal = 1
 
-	colorWindow                 = 5
-	defaultGUIFont              = 17
-	completionTimerID           = 1
-	completionTimerMilliseconds = 100
+	colorWindow    = 5
+	defaultGUIFont = 17
 
 	bmGetCheck = 0x00F0
 	bmSetCheck = 0x00F1
@@ -103,8 +100,6 @@ var (
 	procLoadCursor       = user32.NewProc("LoadCursorW")
 	procMessageBox       = user32.NewProc("MessageBoxW")
 	procPostMessage      = user32.NewProc("PostMessageW")
-	procSetTimer         = user32.NewProc("SetTimer")
-	procKillTimer        = user32.NewProc("KillTimer")
 	procSendMessage      = user32.NewProc("SendMessageW")
 	procSetWindowText    = user32.NewProc("SetWindowTextW")
 	procSetWindowPos     = user32.NewProc("SetWindowPos")
@@ -169,13 +164,11 @@ type setupWizard struct {
 	cancel         uintptr
 	openTerm       uintptr
 
-	running         bool
-	done            bool
-	resultReady     bool
-	completionTimer uintptr
-	code            int
-	err             error
-	mu              sync.Mutex
+	running bool
+	done    bool
+	code    int
+	err     error
+	mu      sync.Mutex
 }
 
 type wizardChoice struct {
@@ -312,11 +305,6 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 			wiz.handleCommand(lowWord(uint32(wParam)))
 			return 0
 		}
-	case wmTimer:
-		if wiz != nil && wiz.completionNotificationReady(message, wParam) {
-			wiz.finish()
-		}
-		return 0
 	case wmClose:
 		if wiz != nil && wiz.running {
 			messageBox(hwnd, "Setup is still running. Wait for it to finish before closing this window.", "DefenseClaw Setup", 0x40)
@@ -325,14 +313,11 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 		procDestroyWindow.Call(hwnd)
 		return 0
 	case wmDone:
-		if wiz != nil && wiz.completionNotificationReady(message, wParam) {
+		if wiz != nil {
 			wiz.finish()
 			return 0
 		}
 	case wmDestroy:
-		if wiz != nil {
-			wiz.stopCompletionTimer()
-		}
 		wizardsMu.Lock()
 		delete(wizards, hwnd)
 		wizardsMu.Unlock()
@@ -505,7 +490,6 @@ func (w *setupWizard) handleCommand(id uint16) {
 func (w *setupWizard) startAction() {
 	w.running = true
 	w.opts.Quiet = true
-	w.startCompletionTimer()
 	if w.opts.Action == "uninstall" {
 		w.opts.DeleteUserData = checked(w.deleteData)
 		setText(w.description, "Removing DefenseClaw application files...")
@@ -532,16 +516,15 @@ func (w *setupWizard) startAction() {
 		} else {
 			code, err = runInstall(opts, w.installRoot, w.dataRoot)
 		}
-		w.recordResult(code, err)
+		w.mu.Lock()
+		w.code = code
+		w.err = err
+		w.mu.Unlock()
 		procPostMessage.Call(w.hwnd, wmDone, 0, 0)
 	}(w.opts)
 }
 
 func (w *setupWizard) finish() {
-	if w.done {
-		return
-	}
-	w.stopCompletionTimer()
 	w.running = false
 	w.done = true
 	w.enableInputs(false)
@@ -575,46 +558,6 @@ func (w *setupWizard) finish() {
 		setText(w.heading, "DefenseClaw is installed")
 		setText(w.description, "Next, open a terminal and run defenseclaw init to configure connectors, then run defenseclaw tui to review activity. This installer installed the existing CLI/TUI, gateway, hook launcher, and managed runtime; it is not a separate DefenseClaw GUI application.")
 	}
-}
-
-func (w *setupWizard) startCompletionTimer() {
-	timer, _, _ := procSetTimer.Call(
-		w.hwnd,
-		completionTimerID,
-		completionTimerMilliseconds,
-		0,
-	)
-	w.completionTimer = timer
-}
-
-func (w *setupWizard) stopCompletionTimer() {
-	if w.completionTimer == 0 {
-		return
-	}
-	procKillTimer.Call(w.hwnd, w.completionTimer)
-	w.completionTimer = 0
-}
-
-func (w *setupWizard) recordResult(code int, err error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.code = code
-	w.err = err
-	w.resultReady = true
-}
-
-func (w *setupWizard) resultIsReady() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.resultReady
-}
-
-func (w *setupWizard) completionNotificationReady(message uint32, wParam uintptr) bool {
-	if !w.resultIsReady() {
-		return false
-	}
-	return message == wmDone ||
-		(message == wmTimer && w.completionTimer != 0 && wParam == w.completionTimer)
 }
 
 func (w *setupWizard) enableInputs(enabled bool) {
