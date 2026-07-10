@@ -129,6 +129,8 @@ def observability() -> None:
 @click.option("--signals", default=None,
               help="Comma-separated OTel signals to enable (traces,metrics,logs)")
 @click.option("--token", "token_value", default=None,
+              envvar="DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN",
+              show_envvar=True,
               help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env")
 @click.option("--enabled/--disabled", "enabled", default=True,
               help="Mark destination enabled (default) or disabled")
@@ -187,6 +189,9 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
       defenseclaw setup observability add splunk-enterprise
     """
     preset = resolve_preset(preset_id.lower())
+    token_source = click.get_current_context().get_parameter_source("token_value")
+    if token_source == click.core.ParameterSource.ENVIRONMENT:
+        click.echo("Using token from DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN.")
 
     raw_inputs: dict[str, str | None] = {
         "realm": realm, "site": site, "region": region, "dataset": dataset,
