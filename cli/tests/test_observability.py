@@ -1032,6 +1032,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
         shutil.rmtree(self.tmp, ignore_errors=True)
         os.environ.pop("DEFENSECLAW_HOME", None)
+        os.environ.pop("DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN", None)
 
     def _invoke(self, args: list[str]):
         return self.runner.invoke(observability_cmd, args, obj=self.app, catch_exceptions=False)
@@ -1073,6 +1074,56 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertEqual(updated.exit_code, 0, updated.output)
         self.assertIn("UPDATE otel:datadog", updated.output)
         self.assertIn("overwriting existing OTel destination", updated.output)
+
+    def test_add_datadog_accepts_secret_from_environment(self) -> None:
+        secret = "environment-only-dd-key"
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": secret},
+            clear=False,
+        ):
+            result = self._invoke(
+                [
+                    "add",
+                    "datadog",
+                    "--non-interactive",
+                    "--site",
+                    "us5",
+                    "--signals",
+                    "traces,metrics",
+                ]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn(secret, result.output)
+        self.assertIn("Using token from DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN.", result.output)
+        self.assertEqual(_read_dotenv(self.tmp).get("DD_API_KEY"), secret)
+
+    def test_explicit_token_takes_precedence_over_environment(self) -> None:
+        environment_secret = "environment-dd-key"
+        explicit_secret = "explicit-dd-key"
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": environment_secret},
+            clear=False,
+        ):
+            result = self._invoke(
+                [
+                    "add",
+                    "datadog",
+                    "--non-interactive",
+                    "--token",
+                    explicit_secret,
+                    "--site",
+                    "us5",
+                    "--signals",
+                    "traces",
+                ]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        dotenv = _read_dotenv(self.tmp)
+        self.assertEqual(dotenv.get("DD_API_KEY"), explicit_secret)
+        self.assertNotIn(environment_secret, result.output)
+        self.assertNotIn(explicit_secret, result.output)
 
     def test_list_identifies_target_kind_and_signals(self) -> None:
         result = self._invoke(

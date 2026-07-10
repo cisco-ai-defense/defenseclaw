@@ -125,6 +125,31 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
 
+## AI discovery
+
+`agent discover` is the fast, gateway-independent connector inventory. The
+continuous scanner is a separate sidecar surface and is the one that inventories
+local model APIs, known model caches, and standalone model files.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
+| `defenseclaw agent discovery enable [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. |
+| `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
+| `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--json]` | Read the sidecar snapshot. Local-model rows show model ID, `installed`/`loaded` status, and format; `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
+| `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |
+| `defenseclaw agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE]` | Show the deduplicated package/SDK component rollup and confidence scores. |
+
+```bash
+defenseclaw agent usage --refresh --category local_model --detail
+defenseclaw agent usage --component Qwen3
+defenseclaw agent usage --state seen
+defenseclaw agent usage --show-gone
+```
+
+See [AI Discovery](/docs/ai-discovery) for supported model servers, standalone
+file formats, lifecycle behavior, and privacy boundaries.
+
 ## Scanning
 
 The Python CLI exposes one scan group per asset family — there is no top-level `scan` group. Code-scanning lives on the Go gateway binary.

@@ -80,7 +80,7 @@ set the global default. `guardrail status` is read-only and takes no
 | Command | Description |
 |---------|-------------|
 | `agent discover [--refresh] [--json]` | Run local agent discovery and best-effort emit sanitized discovery telemetry |
-| `agent usage [--refresh] [--json] [--detail] [--state STATE] [--category CAT] [--product NAME] [--show-gone] [--limit N]` | Show continuous AI visibility inventory from the sidecar. The default view groups signals by `(state, category, product, vendor, detector)` so wide-net detectors (e.g. `package_dependency` rolling up every `package.json`/`pyproject.toml`/`requirements.txt`) collapse into a single row with a count and sample basenames. `--detail` falls back to the per-signal view (with two-axis confidence and rich evidence columns when the gateway has them); `--state`/`--category`/`--product` filter the table; `gone` signals are hidden by default unless `--show-gone` (or `--state gone`) is passed; `--json` is the unfiltered raw payload for tooling. |
+| `agent usage [--refresh] [--json] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--limit N]` | Show continuous AI visibility inventory from the sidecar. The default view groups repeated observations of the same product, SDK/component, or local model and rolls their categories/detectors into compact list columns. Local-model rows display model ID, installed/loaded status, and format when available. `--detail` falls back to per-signal rows; `--state`/`--category`/`--product` filter the table; `--component` also matches local model IDs by case-insensitive substring; `gone` signals are hidden unless `--show-gone` (or `--state gone`) is passed; `--by-detector` restores detector-level rows; `--json` is the unfiltered raw payload for tooling. |
 | `agent processes [--refresh] [--json] [--limit N]` | List AI processes the sidecar currently observes (PID, PPID, user, uptime, comm, vendor/product). Sourced from the `runtime` block on each process-detector signal. |
 | `agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE] [--min-identity 0..1] [--min-presence 0..1] [--limit N]` | Show the deduped AI components/SDK rollup (one row per `(ecosystem, name)`) with versions, install counts, two-axis confidence (identity + presence) and the detector set. `--min-identity`/`--min-presence` filter on the Bayesian engine output for fast triage. |
 | `agent components show NAME [--ecosystem ECO] [--json]` | Print every per-install location for one component: detector, state, workspace hash, basename, evidence quality, match kind, last-seen. Raw paths only surface when both `privacy.disable_redaction=true` and `ai_discovery.store_raw_local_paths=true`. |
@@ -95,6 +95,37 @@ set the global default. `guardrail status` is read-only and takes no
 | `agent discovery status [--json]` | Show on-disk + live AI discovery state and warn on drift between the two |
 | `agent discovery scan [--json]` | Trigger one immediate AI discovery scan via the sidecar (`POST /api/v1/ai-usage/scan`) and render a one-line summary. Returns an actionable error when the sidecar is disabled (HTTP 503) pointing at `agent discovery enable`. |
 | `agent signatures list \| validate \| install \| disable \| enable` | Manage AI discovery signature packs |
+
+Continuous scans classify installed or loaded local models as `local_model` and
+place the dynamic identity under a dedicated `model` block rather than the
+bounded product/component fields. For example:
+
+```bash
+defenseclaw agent usage --category local_model
+defenseclaw agent usage --component Qwen3
+defenseclaw agent usage --category local_model --detail
+```
+
+The built-in [Lemonade Server configuration](https://lemonade-server.ai/docs/guide/configuration/)
+signature recognizes its binaries/processes, app/config metadata, environment
+variable names, and loopback service on port `13305`. Bounded reads of the
+documented [`/v1/models`](https://lemonade-server.ai/docs/api/openai/) metadata
+list downloaded models; `/v1/health` reports loaded models. Filesystem discovery
+also covers GGUF/GGML, MLX, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, Hugging Face
+caches, and Ollama stores. It stats and groups model artifacts but never reads
+model-binary contents; small Ollama manifest JSON is the bounded exception.
+Inference and model-control API routes are never called.
+
+The local usage API retains model IDs for operator display and filtering.
+Outbound gateway events, OTel logs, and webhooks apply the normal redaction
+policy: extended model metadata is omitted unless
+`privacy.disable_redaction=true`, and raw paths additionally require
+`ai_discovery.store_raw_local_paths=true`. Authenticated Lemonade discovery uses
+only `LEMONADE_API_KEY` after the configured origin passes a credential-free
+`/live` check; it never sends `LEMONADE_ADMIN_API_KEY`, and credentials are never
+printed or emitted. The API pass
+caps each decoded response at 1 MiB and each pass at 256 model items; bounded
+per-source cursors continue through larger inventories on later passes.
 
 ### skill
 

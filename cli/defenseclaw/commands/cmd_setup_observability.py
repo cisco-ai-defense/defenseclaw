@@ -169,6 +169,8 @@ def observability() -> None:
     "--token",
     "token_value",
     default=None,
+    envvar="DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN",
+    show_envvar=True,
     help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env",
 )
 @click.option("--enabled/--disabled", "enabled", default=True, help="Mark destination enabled (default) or disabled")
@@ -245,6 +247,9 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     if preset_id.lower() == "local-otlp" and not local_observability_stack_supported():
         raise click.ClickException("Bundled local observability is unavailable on this platform.")
     preset = resolve_preset(preset_id.lower())
+    token_source = click.get_current_context().get_parameter_source("token_value")
+    if token_source == click.core.ParameterSource.ENVIRONMENT:
+        click.echo("Using token from DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN.")
 
     raw_inputs: dict[str, str | None] = {
         "realm": realm,

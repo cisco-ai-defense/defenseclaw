@@ -48,7 +48,7 @@ OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle \
+        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -78,7 +78,7 @@ set-version:
 	fi
 	@scripts/stamp-version.sh "$(VERSION)"
 
-# CI gate that fails when the four version sources disagree, catching
+# CI gate that fails when the five version sources disagree, catching
 # drift before it reaches a release artifact. Mirrors the contract
 # enforced by scripts/stamp-version.sh.
 check-version-sync:
@@ -86,7 +86,8 @@ check-version-sync:
 	py_ver=$$(grep -E '^version[[:space:]]*=' pyproject.toml | head -1 | awk -F'"' '{print $$2}'); \
 	init_ver=$$(grep -E '^__version__[[:space:]]*=' cli/defenseclaw/__init__.py | head -1 | awk -F'"' '{print $$2}'); \
 	pkg_ver=$$(grep -E '^  "version":' extensions/defenseclaw/package.json | head -1 | awk -F'"' '{print $$4}'); \
-	if [ "$${mk_ver}" = "$${py_ver}" ] && [ "$${py_ver}" = "$${init_ver}" ] && [ "$${init_ver}" = "$${pkg_ver}" ]; then \
+	mac_ver=$$(grep -E '^[[:space:]]*MARKETING_VERSION[[:space:]]*=' macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj | head -1 | awk -F'=' '{gsub(/[;[:space:]]/,"",$$2); print $$2}'); \
+	if [ "$${mk_ver}" = "$${py_ver}" ] && [ "$${py_ver}" = "$${init_ver}" ] && [ "$${init_ver}" = "$${pkg_ver}" ] && [ "$${pkg_ver}" = "$${mac_ver}" ]; then \
 		echo "version sync OK: $${mk_ver}"; \
 	else \
 		echo "version drift detected:" >&2; \
@@ -94,6 +95,7 @@ check-version-sync:
 		echo "  pyproject.toml                   : $${py_ver}" >&2; \
 		echo "  cli/defenseclaw/__init__.py      : $${init_ver}" >&2; \
 		echo "  extensions/defenseclaw/package.json: $${pkg_ver}" >&2; \
+		echo "  macos/DefenseClawMac project     : $${mac_ver}" >&2; \
 		echo "" >&2; \
 		echo "fix with: make set-version VERSION=X.Y.Z" >&2; \
 		exit 1; \
@@ -644,6 +646,38 @@ packaging-macos-bundle:
 	    "$(CMID_OVERLAY)" \
 	    "$(CMID_VERSION)"
 
+# Native SwiftUI companion-app checks and release packaging. The release target
+# builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update
+# zip. Both are ad-hoc signed by default; scripts/build-macos-app-release.sh
+# switches to Developer ID signing/notarization when credentials are present.
+macos-app-license-check:
+	python3 scripts/macos_license_headers.py
+
+macos-app-upstream-check:
+	python3 scripts/check-macos-upstream.py
+
+macos-app-build: macos-app-license-check
+	xcodebuild \
+	    -project macos/DefenseClawMac/DefenseClawMac.xcodeproj \
+	    -scheme DefenseClawMac \
+	    -configuration Release \
+	    -destination 'generic/platform=macOS' \
+	    -derivedDataPath build/macos-app/DerivedData \
+	    ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+	    MARKETING_VERSION="$(VERSION)" \
+	    CODE_SIGNING_ALLOWED=NO \
+	    build
+
+macos-app-test:
+	macos/DefenseClawMac/script/test_connector_onboarding.sh
+	$(MAKE) macos-app-build
+
+macos-app-release: macos-app-license-check extensions dist-cli
+	scripts/build-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
+
+macos-app-release-verify:
+	scripts/verify-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
+
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
 # No LLM key or running gateway required; this is the CI-safe tier and is
@@ -947,4 +981,5 @@ clean:
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml
 	rm -rf cli/defenseclaw/_data
+	rm -rf build/macos-app
 	find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

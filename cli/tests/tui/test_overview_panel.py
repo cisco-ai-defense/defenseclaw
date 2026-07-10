@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from defenseclaw.tui.panels.ai_discovery import AIUsageSignal, AIUsageSnapshot, AIUsageSummary
+from defenseclaw.tui.panels.ai_discovery import AIUsageModel, AIUsageSignal, AIUsageSnapshot, AIUsageSummary
 from defenseclaw.tui.panels.overview import (
     MAX_AI_DISCOVERY_OVERVIEW_ROWS,
     STALENESS_WINDOW,
@@ -571,6 +571,38 @@ def test_overview_ai_discovery_box_dedupes_agent_signals_before_cap() -> None:
     assert box.overflow == 0
 
 
+def test_overview_ai_agents_excludes_local_models_from_rows_and_cap() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    agents = (
+        AIUsageSignal(name="Claude Code", vendor="Anthropic", category="ai_cli", state="seen", last_seen=now),
+        AIUsageSignal(name="Codex", vendor="OpenAI", category="ai_cli", state="seen", last_seen=now),
+    )
+    models = tuple(
+        AIUsageSignal(
+            product="Lemonade Server",
+            vendor="Lemonade",
+            category="local_model",
+            state="seen",
+            last_seen=now,
+            model=AIUsageModel(id=f"model-{index}", status="installed"),
+        )
+        for index in range(MAX_AI_DISCOVERY_OVERVIEW_ROWS + 4)
+    )
+    model.set_ai_usage(
+        AIUsageSnapshot(
+            enabled=True,
+            summary=AIUsageSummary(scanned_at=now, active_signals=len(agents) + len(models)),
+            signals=agents + models,
+        )
+    )
+
+    box = model.ai_discovery_box(now=now)
+    assert [row.name for row in box.rows] == ["Claude Code", "Codex"]
+    assert box.overflow == 0
+    assert "2 active" in box.summary_parts
+
+
 def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
     now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
     signals = (
@@ -583,6 +615,24 @@ def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
         "Alpha",
         "Bravo",
     ]
+
+    model_signals = (
+        AIUsageSignal(
+            product="Lemonade Server",
+            model=AIUsageModel(id="Qwen3", status="installed"),
+            state="seen",
+            last_seen=now,
+        ),
+        AIUsageSignal(
+            product="Lemonade Server",
+            model=AIUsageModel(id="Qwen3", status="loaded"),
+            state="seen",
+            last_seen=now,
+        ),
+    )
+    ordered = sort_ai_discovery_signals_for_overview(model_signals)
+    assert ordered[0].model is not None
+    assert ordered[0].model.status == "loaded"
 
 
 def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -> None:

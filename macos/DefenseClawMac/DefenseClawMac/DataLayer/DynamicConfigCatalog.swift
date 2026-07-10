@@ -1,0 +1,182 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// Runtime-generated config-editor catalog. The installed DefenseClaw runtime
+// ships its own Setup section catalog (tui/panels/setup.py
+// build_setup_sections) — dumping it through the venv python means the Mac
+// editor gains new sections/fields the moment the runtime is upgraded, with
+// no Mac code changes. The static ConfigEditorCatalog stays as the offline
+// fallback, and an "Other (uncatalogued)" section surfaces config.yaml keys
+// that even the runtime catalog doesn't describe yet, so brand-new features
+// remain configurable until a wizard exists.
+
+import Foundation
+
+enum DynamicConfigCatalog {
+    /// Sentinel-prefixed dump so CLIRunner's merged stdout/stderr (Python
+    /// warnings etc.) can't corrupt the JSON parse.
+    static let sentinel = "DCCATALOG:"
+
+    static let dumpScript = """
+    import json
+    from defenseclaw import config as dc_config
+    from defenseclaw.tui.panels.setup import build_setup_sections
+    cfg = dc_config.load()
+    out = []
+    for s in build_setup_sections(cfg):
+        fields = []
+        for f in s.fields:
+            kind = str(f.kind)
+            # Passwords are write-only in the editor — never ship the value.
+            value = "" if kind == "password" else str(f.value)
+            fields.append({
+                "label": f.label, "key": f.key, "kind": kind,
+                "value": value, "options": [str(o) for o in f.options],
+                "hint": f.hint,
+            })
+        out.append({"name": s.name, "summary": s.summary,
+                    "help": getattr(s, "help", ""), "fields": fields})
+    print(\(String(reflecting: sentinel)) + json.dumps(out))
+    """
+
+    static var runtimePython: String {
+        FileManager.default.homeDirectoryForCurrentUser.path + "/.defenseclaw/.venv/bin/python"
+    }
+
+    /// One dumped field's resolved value, keyed by config path — seeds the
+    /// editor's "original" values so no separate YAML read is needed.
+    struct LoadResult {
+        var sections: [ConfigEditorSection]
+        var values: [String: String]
+    }
+
+    /// Dump the runtime's catalog. nil on any failure (missing venv, renamed
+    /// symbol in a future runtime, parse error) — callers fall back to the
+    /// static catalog.
+    static func load(using cli: CLIRunner) async -> LoadResult? {
+        guard FileManager.default.isExecutableFile(atPath: runtimePython) else { return nil }
+        let result = await cli.run(binary: runtimePython, arguments: ["-c", dumpScript])
+        guard result.succeeded,
+              let line = result.output.split(separator: "\n").first(where: { $0.hasPrefix(sentinel) }),
+              let data = String(line.dropFirst(sentinel.count)).data(using: .utf8),
+              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+        else { return nil }
+
+        var values: [String: String] = [:]
+        let sections: [ConfigEditorSection] = raw.compactMap { section in
+            guard let name = section["name"] as? String else { return nil }
+            let fields: [ConfigEditorField] = ((section["fields"] as? [Any]) ?? []).compactMap { item in
+                guard let row = item as? [String: Any],
+                      let label = row["label"] as? String else { return nil }
+                let key = (row["key"] as? String) ?? ""
+                let kind = Self.kind((row["kind"] as? String) ?? "string")
+                let value = (row["value"] as? String) ?? ""
+                if !key.isEmpty, kind != .header, kind != .password {
+                    values[key] = value
+                }
+                return ConfigEditorField(
+                    label: label,
+                    key: key,
+                    kind: kind,
+                    options: (row["options"] as? [String]) ?? [],
+                    hint: (row["hint"] as? String) ?? "",
+                    headerValue: kind == .header ? value : ""
+                )
+            }
+            return ConfigEditorSection(
+                name: name,
+                summary: (section["summary"] as? String) ?? "",
+                help: (section["help"] as? String) ?? "",
+                fields: fields
+            )
+        }
+        guard !sections.isEmpty else { return nil }
+        return LoadResult(sections: sections, values: values)
+    }
+
+    /// Unknown runtime kinds degrade to free-text so future field types stay
+    /// editable rather than invisible.
+    private static func kind(_ raw: String) -> ConfigEditorField.Kind {
+        switch raw {
+        case "bool": .bool
+        case "int": .int
+        case "choice": .choice
+        case "password": .password
+        case "header": .header
+        default: .string
+        }
+    }
+
+    /// Scalar config.yaml keys not covered by the catalog — brand-new runtime
+    /// features stay configurable here until the runtime catalog (or a Mac
+    /// wizard) describes them.
+    static func uncataloguedSection(
+        raw: YAMLNode,
+        knownKeys: Set<String>
+    ) -> (section: ConfigEditorSection, values: [String: String])? {
+        var fields: [ConfigEditorField] = []
+        var values: [String: String] = [:]
+
+        func walk(_ node: YAMLNode, path: String) {
+            switch node {
+            case .scalar(let scalar):
+                guard !path.isEmpty, !knownKeys.contains(path) else { return }
+                let lower = path.lowercased()
+                let secret = lower.contains("api_key")
+                    || lower.contains("private_key")
+                    || lower.contains("token")
+                    || lower.contains("secret")
+                    || lower.contains("password")
+                    || lower.contains("credential")
+                let kind: ConfigEditorField.Kind = secret
+                    ? .password
+                    : ["true", "false"].contains(scalar.lowercased()) ? .bool
+                    : Int(scalar) != nil ? .int
+                    : .string
+                fields.append(ConfigEditorField(
+                    label: path, key: path, kind: kind,
+                    hint: "Uncatalogued key present in config.yaml."
+                ))
+                if kind != .password { values[path] = scalar }
+            case .mapping(let map):
+                for key in map.keys.sorted() {
+                    walk(map[key]!, path: path.isEmpty ? key : "\(path).\(key)")
+                }
+            case .sequence(let items):
+                // CSV-editable only when every element is a scalar.
+                guard !path.isEmpty, !knownKeys.contains(path) else { return }
+                let scalars = items.compactMap(\.string)
+                guard scalars.count == items.count else { return }
+                fields.append(ConfigEditorField(
+                    label: path, key: path, kind: .string,
+                    hint: "Uncatalogued list (comma-separated) present in config.yaml."
+                ))
+                values[path] = scalars.joined(separator: ", ")
+            }
+        }
+        walk(raw, path: "")
+        guard !fields.isEmpty else { return nil }
+        return (
+            ConfigEditorSection(
+                name: "Other (uncatalogued)",
+                summary: "config.yaml keys the runtime catalog doesn't describe yet — editable here until a wizard exists.",
+                help: "Values save through the runtime's own config writer; unknown keys stay exactly where they are in config.yaml.",
+                fields: fields
+            ),
+            values
+        )
+    }
+}

@@ -102,6 +102,36 @@ func TestValidator_AcceptsValidVerdict(t *testing.T) {
 	}
 }
 
+func TestValidator_LocalModelMetadataContract(t *testing.T) {
+	v := newRepoValidator(t)
+	base := Event{
+		Timestamp: time.Now().UTC(), EventType: EventAIDiscovery,
+		Severity: SeverityInfo, SchemaVersion: 7,
+		AIDiscovery: &AIDiscoveryPayload{
+			ScanID: "scan-model", Category: "local_model", State: "new",
+			Model: &AIDiscoveryModel{ID: "Qwen3-0.6B-GGUF", Status: "installed", Format: "gguf"},
+		},
+	}
+	if err := v.Validate(base); err != nil {
+		t.Fatalf("valid local model event rejected: %v", err)
+	}
+
+	redacted := base
+	redacted.AIDiscovery = &AIDiscoveryPayload{ScanID: "scan-redacted", Category: "local_model", State: "new"}
+	if err := v.Validate(redacted); err != nil {
+		t.Fatalf("redacted local model event without model block rejected: %v", err)
+	}
+
+	invalid := base
+	invalid.AIDiscovery = &AIDiscoveryPayload{
+		ScanID: "scan-invalid", Category: "local_model", State: "new",
+		Model: &AIDiscoveryModel{ID: "Qwen3-0.6B-GGUF"},
+	}
+	if err := v.Validate(invalid); err == nil {
+		t.Fatal("local model event without a valid status was accepted")
+	}
+}
+
 func TestValidator_AcceptsHookDecision(t *testing.T) {
 	v := newRepoValidator(t)
 	e := Event{

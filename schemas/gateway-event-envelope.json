@@ -246,7 +246,7 @@
       "properties": {
         "scan_id":        { "type": "string", "maxLength": 128 },
         "signal_id":      { "type": "string", "maxLength": 128 },
-        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint"] },
+        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint", "local_model"] },
         "vendor":         { "type": ["string", "null"], "maxLength": 128 },
         "product":        { "type": ["string", "null"], "maxLength": 128 },
         "confidence":     { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
@@ -265,6 +265,21 @@
             "name":      { "type": ["string", "null"], "maxLength": 256 },
             "version":   { "type": ["string", "null"], "maxLength": 64 },
             "framework": { "type": ["string", "null"], "maxLength": 256 }
+          }
+        },
+        "model":          { "type": ["object", "null"],
+          "description": "local model metadata; populated only when privacy.disable_redaction=true",
+          "required": ["id", "status"],
+          "properties": {
+            "id":         { "type": "string", "minLength": 1, "maxLength": 512 },
+            "status":     { "type": "string", "enum": ["installed", "loaded"] },
+            "format":     { "type": ["string", "null"], "maxLength": 64 },
+            "provider":   { "type": ["string", "null"], "maxLength": 96 },
+            "recipe":     { "type": ["string", "null"], "maxLength": 128 },
+            "modality":   { "type": ["string", "null"], "maxLength": 64 },
+            "device":     { "type": ["string", "null"], "maxLength": 128 },
+            "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "pinned":     { "type": ["boolean", "null"] }
           }
         },
         "runtime":        { "type": ["object", "null"],
