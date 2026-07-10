@@ -29,20 +29,20 @@ const (
 
 // PipelineConfig holds all settings for a pipeline run.
 type PipelineConfig struct {
-	Category       string
-	Backend        string  // "unsloth" or "mlx-lm-lora"
-	Algorithm      string
-	BaseModel      string  // HF or MLX repo
-	MinTraces      int
-	EvalThreshold  float64
-	EvalPrompts    int
-	DataDir        string // ~/.defenseclaw
-	ModelsDir      string // ~/.defenseclaw/models
-	LlamaPort      int
-	JudgeEndpoint  string
-	JudgeModel     string
-	JudgeAPIKey    string
-	TimeoutSec     int
+	Category      string
+	Backend       string // "unsloth" or "mlx-lm-lora"
+	Algorithm     string
+	BaseModel     string // HF or MLX repo
+	MinTraces     int
+	EvalThreshold float64
+	EvalPrompts   int
+	DataDir       string // ~/.defenseclaw
+	ModelsDir     string // ~/.defenseclaw/models
+	LlamaPort     int
+	JudgeEndpoint string
+	JudgeModel    string
+	JudgeAPIKey   string
+	TimeoutSec    int
 }
 
 // PipelineResult holds the outcome of a pipeline run.

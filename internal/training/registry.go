@@ -11,18 +11,18 @@ import (
 
 // ModelVersion represents a trained model version with its metadata
 type ModelVersion struct {
-	ID                 string    `json:"id"`
-	File               string    `json:"file"`
-	BaseModel          string    `json:"base_model"`
-	Algorithm          string    `json:"algorithm"`
-	Created            time.Time `json:"created"`
-	TracesUsed         int       `json:"traces_used"`
-	EvalScoreLocal     float64   `json:"eval_score_local"`
-	EvalScoreFrontier  float64   `json:"eval_score_frontier"`
-	EvalRatio          float64   `json:"eval_ratio"`
-	Promoted           bool      `json:"promoted"`
-	PromotedAt         time.Time `json:"promoted_at,omitempty"`
-	RolledBack         bool      `json:"rolled_back"`
+	ID                string    `json:"id"`
+	File              string    `json:"file"`
+	BaseModel         string    `json:"base_model"`
+	Algorithm         string    `json:"algorithm"`
+	Created           time.Time `json:"created"`
+	TracesUsed        int       `json:"traces_used"`
+	EvalScoreLocal    float64   `json:"eval_score_local"`
+	EvalScoreFrontier float64   `json:"eval_score_frontier"`
+	EvalRatio         float64   `json:"eval_ratio"`
+	Promoted          bool      `json:"promoted"`
+	PromotedAt        time.Time `json:"promoted_at,omitempty"`
+	RolledBack        bool      `json:"rolled_back"`
 }
 
 // registryData represents the internal structure of the registry

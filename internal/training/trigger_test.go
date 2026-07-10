@@ -53,9 +53,9 @@ func TestAutoTrigger_DoesNotFireBelowThreshold(t *testing.T) {
 	// Insert 10 traces for category "test"
 	for i := 0; i < 10; i++ {
 		err := store.CaptureTrace(TraceEntry{
-			Category: "test",
-			Prompt:   "test prompt",
-			Response: "test response",
+			Category:  "test",
+			Prompt:    "test prompt",
+			Response:  "test response",
 			ModelUsed: "test-model",
 		})
 		if err != nil {

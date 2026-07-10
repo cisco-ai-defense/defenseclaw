@@ -104,7 +104,9 @@ sqlite3 ~/.defenseclaw/training-store.db \
 ### Test 2.4: Run training manually
 
 ```bash
-defenseclaw training run --category code_route
+defenseclaw setup training --status  # check pipeline status
+# Training runs are triggered automatically when min_traces threshold is reached
+# Or triggered via the gateway API (future CLI command)
 ```
 
 Expected output:
