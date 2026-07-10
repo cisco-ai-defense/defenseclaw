@@ -56,6 +56,8 @@ import (
 	tracehttp "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 )
 
 // Provider holds the OTel SDK providers and exposes telemetry emission methods.
@@ -91,24 +93,58 @@ type Provider struct {
 	routingByName  map[string]*destinationRoutingCounters
 	deliveryMu     sync.RWMutex
 	deliveryByName map[string]*destinationDeliveryCounters
+
+	// cloudAuth is the CMID credential source shared with the managed
+	// inspector. Set only in managed_enterprise when the Cisco AI Defense
+	// telemetry log sink is provisioned (see newCiscoAIDLogProcessor).
+	cloudAuth cloudreg.Provider
+}
+
+// ProviderOption customizes provider construction.
+type ProviderOption func(*providerOptions)
+
+type providerOptions struct {
+	cloudAuth cloudreg.Provider
+}
+
+// WithCloudAuthProvider injects a shared CMID credential provider so the
+// managed inspector and the Cisco AI Defense telemetry log sink coordinate one
+// token cache and one Invalidate lifecycle. When omitted, the provider is
+// lazily constructed via cloudreg.New only if the Cisco sink is required.
+func WithCloudAuthProvider(p cloudreg.Provider) ProviderOption {
+	return func(o *providerOptions) {
+		o.cloudAuth = p
+	}
 }
 
 // NewProvider initializes the OTel SDK providers and exporters. When
 // cfg.Enabled is false, it returns a no-op provider safe to call.
-func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
-	return newProvider(ctx, fullCfg, version, true)
+func NewProvider(ctx context.Context, fullCfg *config.Config, version string, opts ...ProviderOption) (*Provider, error) {
+	return newProvider(ctx, fullCfg, version, true, opts...)
 }
 
 // NewProviderInactive constructs a provider without installing it as the
 // package-global telemetry provider. Config reload uses this to validate and
 // prepare a replacement before committing the new config snapshot.
-func NewProviderInactive(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
-	return newProvider(ctx, fullCfg, version, false)
+func NewProviderInactive(ctx context.Context, fullCfg *config.Config, version string, opts ...ProviderOption) (*Provider, error) {
+	return newProvider(ctx, fullCfg, version, false, opts...)
 }
 
-func newProvider(ctx context.Context, fullCfg *config.Config, version string, install bool) (*Provider, error) {
+func newProvider(ctx context.Context, fullCfg *config.Config, version string, install bool, opts ...ProviderOption) (*Provider, error) {
+	var po providerOptions
+	for _, opt := range opts {
+		opt(&po)
+	}
 	cfg := fullCfg.OTel
-	if !cfg.Enabled {
+	// The managed_enterprise Cisco AI Defense log sink is auto-provisioned
+	// from deployment_mode + cisco_ai_defense.endpoint alone — it does NOT
+	// require otel.enabled or any user destination. So the SDK must be built
+	// (not short-circuited to a no-op) whenever either otel.enabled is set OR
+	// the managed sink applies. Keep this predicate in sync with the log
+	// fan-out block below and config.hasManagedAIDLogSink.
+	ciscoAIDLogSink := managed.IsManagedEnterprise(fullCfg.DeploymentMode) &&
+		strings.TrimSpace(fullCfg.CiscoAIDefense.Endpoint) != ""
+	if !cfg.Enabled && !ciscoAIDLogSink {
 		p := &Provider{
 			enabled: false,
 			tracer:  traceNoop.NewTracerProvider().Tracer("defenseclaw"),
@@ -178,6 +214,23 @@ func newProvider(ctx context.Context, fullCfg *config.Config, version string, in
 		}
 		logOpts = append(logOpts, sdklog.WithProcessor(processor))
 		logCount++
+	}
+	// Managed_enterprise fast path: fan DefenseClaw's own OTEL log events to
+	// the Cisco AI Defense event-ingest API, authenticated with a CMID bearer
+	// token. This sink is auto-provisioned (not a user destination), never
+	// receives user credentials, and is independent of otel.enabled and of any
+	// otel.destinations[] entry. Fail-closed: if the CMID provider or token is
+	// unavailable (e.g. OSS build, agent down), the sink is skipped and user
+	// destinations are unaffected.
+	if ciscoAIDLogSink {
+		processor, err := p.newCiscoAIDLogProcessor(ctx, fullCfg, po.cloudAuth)
+		if err != nil {
+			fmt.Fprintf(os.Stderr,
+				"warning: cisco ai defense telemetry log sink disabled: %v\n", err)
+		} else {
+			logOpts = append(logOpts, sdklog.WithProcessor(processor))
+			logCount++
+		}
 	}
 	if logCount > 0 {
 		lp := sdklog.NewLoggerProvider(logOpts...)
@@ -1019,6 +1072,57 @@ func newLogProcessor(ctx context.Context, cfg destinationExporterConfig, headers
 	)
 
 	return batcher, nil
+}
+
+// CloudAuthProvider returns the CMID credential provider backing the Cisco AI
+// Defense telemetry log sink, or nil when no such sink was provisioned. The
+// managed inspector reuses this instance so both share one token cache and one
+// Invalidate lifecycle.
+func (p *Provider) CloudAuthProvider() cloudreg.Provider {
+	if p == nil {
+		return nil
+	}
+	return p.cloudAuth
+}
+
+// newCiscoAIDLogProcessor builds the batched log processor that ships
+// DefenseClaw's OTEL log events to the Cisco AI Defense event-ingest API. It
+// resolves the CMID provider (injected shared instance, else lazily via
+// cloudreg.New) and mints a token once to confirm availability, returning an
+// error when the credential source is unavailable so the caller can fail-closed.
+func (p *Provider) newCiscoAIDLogProcessor(ctx context.Context, fullCfg *config.Config, injected cloudreg.Provider) (sdklog.Processor, error) {
+	provider := injected
+	if provider == nil {
+		var err error
+		provider, err = cloudreg.New(cloudreg.Config{LibPath: fullCfg.CloudAuth.LibPath})
+		if err != nil {
+			return nil, fmt.Errorf("cloud auth provider: %w", err)
+		}
+	}
+
+	// Mint once to confirm the credential source is reachable before wiring
+	// the sink into the log fan-out. A short timeout keeps boot responsive.
+	tokenCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := provider.Token(tokenCtx); err != nil {
+		return nil, fmt.Errorf("cloud auth token: %w", err)
+	}
+	p.cloudAuth = provider
+
+	exporter := newCiscoAIDLogExporter(ciscoAIDefenseIngestURL(fullCfg.CiscoAIDefense.Endpoint), provider)
+
+	batchOpts := []sdklog.BatchProcessorOption{}
+	if fullCfg.OTel.Batch.MaxQueueSize > 0 {
+		batchOpts = append(batchOpts, sdklog.WithMaxQueueSize(fullCfg.OTel.Batch.MaxQueueSize))
+	}
+	if fullCfg.OTel.Batch.MaxExportBatchSize > 0 {
+		batchOpts = append(batchOpts, sdklog.WithExportMaxBatchSize(fullCfg.OTel.Batch.MaxExportBatchSize))
+	}
+	if fullCfg.OTel.Batch.ScheduledDelayMs > 0 {
+		batchOpts = append(batchOpts,
+			sdklog.WithExportInterval(time.Duration(fullCfg.OTel.Batch.ScheduledDelayMs)*time.Millisecond))
+	}
+	return sdklog.NewBatchProcessor(exporter, batchOpts...), nil
 }
 
 // temporalitySelector returns a TemporalitySelector based on the config value.

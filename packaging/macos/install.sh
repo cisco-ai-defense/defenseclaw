@@ -232,6 +232,10 @@ Gateway options:
                             managed daemon uses to inspect content.
                             Use 'preview' only for internal validation against
                             the aiteam preview deployment.
+  --override-endpoint URL   Point cisco_ai_defense.endpoint at an arbitrary AI
+                            Defense host for adhoc testing. Takes precedence
+                            over --env. Must be a full http(s) URL, e.g.
+                            https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
@@ -254,6 +258,7 @@ MODE="${DEFAULT_MODE}"
 CONNECTOR="${DEFAULT_CONNECTOR}"
 API_PORT="${DEFAULT_API_PORT}"
 AID_ENV="${DEFAULT_ENV}"
+OVERRIDE_ENDPOINT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -261,6 +266,7 @@ while [[ $# -gt 0 ]]; do
     --connector)        CONNECTOR="${2:?}"; shift 2;;
     --port)             API_PORT="${2:?}"; shift 2;;
     --env)              AID_ENV="${2:?}"; shift 2;;
+    --override-endpoint) OVERRIDE_ENDPOINT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
     --plist)            PLIST_SRC="${2:?}"; PLIST_SRC_ORIGIN="override"; shift 2;;
@@ -279,8 +285,23 @@ case "${MODE}" in
   *) die "--mode must be 'observe' or 'action' (got: ${MODE})";;
 esac
 
-AID_ENDPOINT="$(aid_endpoint_for_env "${AID_ENV}")" || \
+# --override-endpoint (when set) wins over --env; resolve_aid_endpoint
+# validates it and strips a trailing slash. Distinct return codes let us
+# report exactly which flag was wrong.
+_ep_rc=0
+AID_ENDPOINT="$(resolve_aid_endpoint "${AID_ENV}" "${OVERRIDE_ENDPOINT}")" || _ep_rc=$?
+if (( _ep_rc == 2 )); then
+  die "--override-endpoint must be a full http(s) URL without spaces or quotes (got: ${OVERRIDE_ENDPOINT})"
+elif (( _ep_rc != 0 )); then
   die "--env must be 'prod' or 'preview' (got: ${AID_ENV})"
+fi
+unset _ep_rc
+if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
+  case "${OVERRIDE_ENDPOINT}" in
+    http://*) warn "--override-endpoint uses plaintext http://; the CMID bearer token would traverse the wire unencrypted — use only for local/adhoc testing";;
+  esac
+  log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --env ${AID_ENV})"
+fi
 
 if [[ ! "${API_PORT}" =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
   die "--port must be an integer between 1 and 65535 (got: ${API_PORT})"

@@ -809,7 +809,26 @@ type OTelSpanFilterOperationConfig struct {
 // per exporter, but duplicate/empty names would make CLI lifecycle operations
 // nondeterministic and must fail fast.
 func (c OTelConfig) ValidateNamedDestinations() error {
-	if c.Enabled && len(c.Destinations) == 0 {
+	return c.validateNamedDestinations(false)
+}
+
+// hasManagedAIDLogSink reports whether the auto-provisioned Cisco AI Defense
+// telemetry log sink is active for this config: managed_enterprise mode with a
+// non-empty cisco_ai_defense.endpoint. This sink is independent of otel.enabled
+// and otel.destinations[], so its presence waives the "otel.enabled requires a
+// destination" rule. Mirrors the gate in telemetry.newProvider.
+func (c *Config) hasManagedAIDLogSink() bool {
+	return managed.IsManagedEnterprise(c.DeploymentMode) &&
+		strings.TrimSpace(c.CiscoAIDefense.Endpoint) != ""
+}
+
+// validateNamedDestinations is the implementation behind
+// ValidateNamedDestinations. hasImplicitSink is true when an auto-provisioned
+// sink (the managed_enterprise Cisco AI Defense log sink) makes otel.enabled
+// meaningful even with zero user destinations, so the "needs a destination"
+// rule is waived. See Config.hasManagedAIDLogSink.
+func (c OTelConfig) validateNamedDestinations(hasImplicitSink bool) error {
+	if c.Enabled && len(c.Destinations) == 0 && !hasImplicitSink {
 		return fmt.Errorf("otel.enabled requires at least one named destination in otel.destinations[]")
 	}
 	seen := make(map[string]struct{}, len(c.Destinations))
@@ -2294,7 +2313,7 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		return nil, err
 	}
 
-	if err := cfg.OTel.ValidateNamedDestinations(); err != nil {
+	if err := cfg.OTel.validateNamedDestinations(cfg.hasManagedAIDLogSink()); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "otel_destination_invalid")
 		}

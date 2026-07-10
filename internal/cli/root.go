@@ -27,6 +27,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -172,7 +174,19 @@ func initOTelProvider() {
 		return
 	}
 
-	p, err := telemetry.NewProvider(context.Background(), cfg, appVersion)
+	var opts []telemetry.ProviderOption
+	// In managed_enterprise, construct the CMID credential provider once and
+	// share it with the telemetry provider so the Cisco AI Defense telemetry
+	// sink and the managed inspector coordinate one token cache. Best-effort:
+	// on OSS builds cloudreg.New returns ErrNoProviderRegistered and the sink
+	// fail-closes inside NewProvider.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if prov, provErr := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath}); provErr == nil {
+			opts = append(opts, telemetry.WithCloudAuthProvider(prov))
+		}
+	}
+
+	p, err := telemetry.NewProvider(context.Background(), cfg, appVersion, opts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: otel init: %v\n", err)
 		return

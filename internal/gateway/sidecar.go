@@ -1320,7 +1320,16 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 }
 
 func (s *Sidecar) buildReloadOTelProvider(ctx context.Context, cfg *config.Config) (*telemetry.Provider, error) {
-	p, err := telemetry.NewProviderInactive(ctx, cfg, version.Current().BinaryVersion)
+	var opts []telemetry.ProviderOption
+	// Reuse the already-cached CMID provider so the reloaded telemetry sink and
+	// the managed inspector keep sharing one token cache + Invalidate. Best-
+	// effort: on error (OSS build, agent unavailable) the sink fail-closes.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if prov, provErr := s.ensureCMIDProvider(ctx); provErr == nil && prov != nil {
+			opts = append(opts, telemetry.WithCloudAuthProvider(prov))
+		}
+	}
+	p, err := telemetry.NewProviderInactive(ctx, cfg, version.Current().BinaryVersion, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("config reload otel: %w", err)
 	}
@@ -1539,6 +1548,14 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
 		return s.cmidProviderInst, nil
+	}
+	// Prefer the telemetry provider's CMID instance so the inspector and the
+	// Cisco AI Defense telemetry log sink share one token cache + Invalidate.
+	if tel := s.otelSnapshot(); tel != nil {
+		if prov := tel.CloudAuthProvider(); prov != nil {
+			s.cmidProviderInst = prov
+			return prov, nil
+		}
 	}
 	cfg := s.currentConfig()
 	prov, err := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath})
