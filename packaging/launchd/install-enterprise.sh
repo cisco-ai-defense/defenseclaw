@@ -8,15 +8,18 @@ export PATH
 
 SERVICE_USER=defenseclaw
 SERVICE_GROUP=defenseclaw
-BINARY_ROOT=/Library/DefenseClaw
+BINARY_ROOT=/opt/cisco/secureclient/defenseclaw
 BIN_DIR="${BINARY_ROOT}/bin"
-MANAGED_ROOT="/Library/Application Support/DefenseClaw"
-RUNTIME_DIR="${MANAGED_ROOT}/runtime"
-GUARDIAN_DIR="${MANAGED_ROOT}/hook-guardian"
-AUTH_DIR="${MANAGED_ROOT}/hook-guardian-state"
-LOG_DIR=/Library/Logs/DefenseClaw
-CONFIG_DEST="${MANAGED_ROOT}/config.yaml"
-MANIFEST_DEST="${GUARDIAN_DIR}/targets.yaml"
+MANAGED_ROOT="/opt/cisco/secureclient/defenseclaw"
+ETC_DIR="/opt/cisco/secureclient/defenseclaw/etc"
+RUNTIME_DIR="/opt/cisco/secureclient/defenseclaw/runtime"
+GUARDIAN_DIR="/opt/cisco/secureclient/defenseclaw/hook-guardian"
+AUTH_DIR="/opt/cisco/secureclient/defenseclaw/hook-guardian-state"
+LOG_DIR=/Library/Logs/Cisco/SecureClient/DefenseClaw
+CONFIG_DEST="/opt/cisco/secureclient/defenseclaw/etc/config.yaml"
+MANIFEST_DEST="/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml"
+GATEWAY_LABEL=com.cisco.secureclient.defenseclaw
+GUARDIAN_LABEL=com.cisco.secureclient.defenseclaw.hook-guardian
 GATEWAY_PLIST_DEST=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
 GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
 
@@ -240,11 +243,14 @@ SERVICE_GID="$(/usr/bin/id -g "$SERVICE_USER" 2>/dev/null)" || die "service grou
 WHEEL_GID="$(/usr/bin/stat -f '%g' /Library)"
 
 assert_trusted_system_dir /Library
-assert_trusted_system_dir "/Library/Application Support"
 assert_trusted_system_dir /Library/LaunchDaemons
 assert_trusted_system_dir /Library/Logs
+assert_existing_secure_dir_or_absent /opt
+assert_existing_secure_dir_or_absent /opt/cisco
+assert_existing_secure_dir_or_absent /opt/cisco/secureclient
 assert_existing_secure_dir_or_absent "$BINARY_ROOT"
 assert_existing_secure_dir_or_absent "$BIN_DIR"
+assert_existing_secure_dir_or_absent "$ETC_DIR"
 assert_existing_secure_dir_or_absent "$MANAGED_ROOT"
 assert_existing_secure_dir_or_absent "$GUARDIAN_DIR"
 assert_existing_secure_dir_or_absent "$AUTH_DIR"
@@ -268,7 +274,7 @@ stop_job_if_loaded com.cisco.secureclient.defenseclaw.hook-guardian
 stop_job_if_loaded com.cisco.secureclient.defenseclaw
 
 /usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR"
-/usr/bin/install -d -o root -g "$SERVICE_GROUP" -m 0750 "$MANAGED_ROOT" "$GUARDIAN_DIR" "$AUTH_DIR"
+/usr/bin/install -d -o root -g "$SERVICE_GROUP" -m 0750 "$ETC_DIR" "$GUARDIAN_DIR" "$AUTH_DIR"
 /usr/bin/install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$RUNTIME_DIR" "$LOG_DIR"
 
 install_file_atomic "$BINARY_SOURCE" "${BIN_DIR}/defenseclaw-gateway" root wheel 0755
@@ -279,7 +285,7 @@ install_file_atomic "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guard
 
 assert_path_metadata "$BINARY_ROOT" dir 0 "$WHEEL_GID" 755
 assert_path_metadata "$BIN_DIR" dir 0 "$WHEEL_GID" 755
-assert_path_metadata "$MANAGED_ROOT" dir 0 "$SERVICE_GID" 750
+assert_path_metadata "$ETC_DIR" dir 0 "$SERVICE_GID" 750
 assert_path_metadata "$RUNTIME_DIR" dir "$SERVICE_UID" "$SERVICE_GID" 750
 assert_path_metadata "$GUARDIAN_DIR" dir 0 "$SERVICE_GID" 750
 assert_path_metadata "$AUTH_DIR" dir 0 "$SERVICE_GID" 750
@@ -293,13 +299,13 @@ assert_path_metadata "$GUARDIAN_PLIST_DEST" file 0 "$WHEEL_GID" 644
 if [ "$START_JOBS" = true ]; then
     /bin/launchctl bootstrap system "$GATEWAY_PLIST_DEST" || die "failed to bootstrap gateway LaunchDaemon"
     if ! /bin/launchctl bootstrap system "$GUARDIAN_PLIST_DEST"; then
-        /bin/launchctl bootout system/com.defenseclaw.gateway >/dev/null 2>&1 || true
+        /bin/launchctl bootout "system/${GATEWAY_LABEL}" >/dev/null 2>&1 || true
         die "failed to bootstrap hook guardian LaunchDaemon"
     fi
-    /bin/launchctl enable system/com.defenseclaw.gateway
-    /bin/launchctl enable system/com.defenseclaw.hook-guardian
-    /bin/launchctl kickstart -k system/com.defenseclaw.gateway
-    /bin/launchctl kickstart -k system/com.defenseclaw.hook-guardian
+    /bin/launchctl enable "system/${GATEWAY_LABEL}"
+    /bin/launchctl enable "system/${GUARDIAN_LABEL}"
+    /bin/launchctl kickstart -k "system/${GATEWAY_LABEL}"
+    /bin/launchctl kickstart -k "system/${GUARDIAN_LABEL}"
 fi
 
 printf 'DefenseClaw managed enterprise installation verified.\n'

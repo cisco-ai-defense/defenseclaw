@@ -196,7 +196,7 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
 
     text = installer.read_text(encoding="utf-8")
     required = {
-        'CONFIG_DEST="${MANAGED_ROOT}/config.yaml"',
+        'CONFIG_DEST="/opt/cisco/secureclient/defenseclaw/etc/config.yaml"',
         'install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root "$SERVICE_GROUP" 0640',
         'assert_path_metadata "$CONFIG_DEST" file 0 "$SERVICE_GID" 640',
         'refuse_symlink "$CONFIG_DEST"',
@@ -216,3 +216,33 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
     assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
     assert "installer accepted a write-capable managed-root ACL" in smoke
+
+
+def test_launchd_enterprise_installer_matches_cisco_plist_layout():
+    installer = ROOT / "packaging" / "launchd" / "install-enterprise.sh"
+    text = installer.read_text(encoding="utf-8")
+
+    gateway_plist = ROOT / "packaging" / "launchd" / "com.cisco.secureclient.defenseclaw.plist"
+    guardian_plist = (
+        ROOT / "packaging" / "launchd" / "com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+    )
+    with gateway_plist.open("rb") as fh:
+        gateway = plistlib.load(fh)
+    with guardian_plist.open("rb") as fh:
+        guardian = plistlib.load(fh)
+
+    home = gateway["EnvironmentVariables"]["DEFENSECLAW_HOME"]
+    config = gateway["EnvironmentVariables"]["DEFENSECLAW_CONFIG"]
+    auth_dir = gateway["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
+    manifest = guardian["ProgramArguments"][-1]
+
+    assert f"BINARY_ROOT={home}" in text
+    assert f'MANAGED_ROOT="{home}"' in text
+    assert f'CONFIG_DEST="{config}"' in text
+    assert f'MANIFEST_DEST="{manifest}"' in text
+    assert f'AUTH_DIR="{auth_dir}"' in text
+    assert f'GATEWAY_LABEL={gateway["Label"]}' in text
+    assert f'GUARDIAN_LABEL={guardian["Label"]}' in text
+    assert '"system/${GATEWAY_LABEL}"' in text
+    assert '"system/${GUARDIAN_LABEL}"' in text
+    assert "system/com.defenseclaw." not in text
