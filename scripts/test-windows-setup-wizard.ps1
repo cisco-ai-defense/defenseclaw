@@ -28,7 +28,7 @@ param(
     [switch]$StartGateway,
     [switch]$ActivateInstall,
     [ValidateRange(30, 1800)]
-    [int]$InstallTimeoutSeconds = 1200
+    [int]$InstallTimeoutSeconds = 600
 )
 
 Set-StrictMode -Version Latest
@@ -178,11 +178,90 @@ function Send-WizardCommand([IntPtr]$Window, [int]$ControlId, [string]$Label) {
     }
 }
 
+function Write-WizardTrace([string]$Event, [System.Collections.IDictionary]$Fields = $null) {
+    if (-not $ActivateInstall) { return }
+    $record = [ordered]@{
+        timestamp_utc = [DateTime]::UtcNow.ToString('o')
+        elapsed_ms    = [Math]::Round($total.Elapsed.TotalMilliseconds, 1)
+        event         = $Event
+    }
+    if ($null -ne $Fields) {
+        foreach ($entry in $Fields.GetEnumerator()) {
+            $record[[string]$entry.Key] = $entry.Value
+        }
+    }
+    [IO.File]::AppendAllText(
+        $wizardTracePath,
+        (($record | ConvertTo-Json -Compress -Depth 4) + [Environment]::NewLine),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Get-WizardObservation(
+    [Diagnostics.Process]$WizardProcess,
+    [IntPtr]$PrimaryControl,
+    [IntPtr]$HeadingControl
+) {
+    $cpuMilliseconds = $null
+    $workingSetBytes = $null
+    try {
+        $WizardProcess.Refresh()
+        $cpuMilliseconds = [Math]::Round($WizardProcess.TotalProcessorTime.TotalMilliseconds, 1)
+        $workingSetBytes = $WizardProcess.WorkingSet64
+    } catch {
+        # HasExited below remains the authoritative process-state check.
+    }
+    $maintenanceBytes = 0
+    if (Test-Path -LiteralPath $observedMaintenancePath -PathType Leaf) {
+        $maintenanceBytes = (Get-Item -LiteralPath $observedMaintenancePath -Force).Length
+    }
+    return [ordered]@{
+        process_id       = $WizardProcess.Id
+        process_exited   = $WizardProcess.HasExited
+        process_cpu_ms   = $cpuMilliseconds
+        working_set      = $workingSetBytes
+        primary_text     = Get-BoundedWindowText $PrimaryControl
+        heading_text     = Get-BoundedWindowText $HeadingControl
+        install_root     = Test-Path -LiteralPath $observedInstallRoot -PathType Container
+        install_state    = Test-Path -LiteralPath $observedInstallState -PathType Leaf
+        maintenance_copy = Test-Path -LiteralPath $observedMaintenancePath -PathType Leaf
+        maintenance_size = $maintenanceBytes
+        installed_app    = Test-Path -LiteralPath $observedARPKey
+        config_present   = Test-Path -LiteralPath $observedConfigPath -PathType Leaf
+        gateway_pid      = Test-Path -LiteralPath $observedGatewayPID -PathType Leaf
+        watchdog_pid     = Test-Path -LiteralPath $observedWatchdogPID -PathType Leaf
+    }
+}
+
 $connectorIndices = @{ none = 0; codex = 1; claudecode = 2 }
 $modeIndices = @{ observe = 0; action = 1 }
 $process = $null
 $finished = $false
 $total = [Diagnostics.Stopwatch]::StartNew()
+$wizardTracePath = Join-Path $state 'wizard-driver.log'
+$observedInstallRoot = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::LocalApplicationData
+)) 'Programs\DefenseClaw'
+$observedInstallState = Join-Path $observedInstallRoot 'installer\install-state.json'
+$observedMaintenancePath = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::LocalApplicationData
+)) 'DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe'
+$observedDataRoot = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::UserProfile
+)) '.defenseclaw'
+$observedConfigPath = Join-Path $observedDataRoot 'config.yaml'
+$observedGatewayPID = Join-Path $observedDataRoot 'gateway.pid'
+$observedWatchdogPID = Join-Path $observedDataRoot 'watchdog.pid'
+$observedARPKey = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
+if ($ActivateInstall) {
+    [IO.File]::WriteAllText($wizardTracePath, '', [Text.UTF8Encoding]::new($false))
+    Write-WizardTrace 'driver-start' ([ordered]@{
+        connector      = $Connector
+        mode           = $Mode
+        start_gateway  = $StartGateway.IsPresent
+        timeout_seconds = $InstallTimeoutSeconds
+    })
+}
 try {
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $setup
@@ -192,6 +271,7 @@ try {
     if ($null -eq $process) {
         throw 'Starting the setup wizard returned no process.'
     }
+    Write-WizardTrace 'process-started' ([ordered]@{ process_id = $process.Id })
 
     $inputIdle = [Diagnostics.Stopwatch]::StartNew()
     if (-not $process.WaitForInputIdle($TimeoutSeconds * 1000)) {
@@ -239,27 +319,53 @@ try {
     Set-AndAssertComboSelection $modeControl $modeIndices[$Mode] 'Mode'
     Set-AndAssertCheckState $startControl $StartGateway.IsPresent
     $control.Stop()
+    Write-WizardTrace 'controls-selected' ([ordered]@{
+        connector_index = $connectorIndices[$Connector]
+        mode_index      = $modeIndices[$Mode]
+        start_gateway   = $StartGateway.IsPresent
+    })
 
     $completion = $null
     if ($ActivateInstall) {
         $install = [Diagnostics.Stopwatch]::StartNew()
         Send-WizardCommand $window 1005 'Install'
+        Write-WizardTrace 'install-posted'
+        $nextTraceSeconds = 0
+        $lastObservation = $null
         while ($install.Elapsed.TotalSeconds -lt $InstallTimeoutSeconds) {
             if ($process.HasExited) {
                 throw "Setup wizard exited before showing its completion page (exit code $($process.ExitCode))."
             }
             $null = Invoke-BoundedWindowMessage -Window $window -Message 0x0000
-            if ((Get-BoundedWindowText $primaryControl) -eq 'Finish') {
+            $primaryText = Get-BoundedWindowText $primaryControl
+            if ($primaryText -eq 'Finish') {
+                $lastObservation = Get-WizardObservation $process $primaryControl $headingControl
                 break
+            }
+            try {
+                if ($install.Elapsed.TotalSeconds -ge $nextTraceSeconds) {
+                    $lastObservation = Get-WizardObservation $process $primaryControl $headingControl
+                    Write-WizardTrace 'install-progress' $lastObservation
+                    $nextTraceSeconds += 5
+                }
+            } catch {
+                Write-WizardTrace 'ui-probe-failed' ([ordered]@{ error = $_.Exception.Message })
+                throw
             }
             Start-Sleep -Milliseconds 100
         }
         $install.Stop()
-        if ((Get-BoundedWindowText $primaryControl) -ne 'Finish') {
-            throw "Setup wizard did not reach Finish within $InstallTimeoutSeconds seconds."
+        if ($null -eq $lastObservation -or $lastObservation.primary_text -ne 'Finish') {
+            $lastObservation = Get-WizardObservation $process $primaryControl $headingControl
+            Write-WizardTrace 'install-timeout' $lastObservation
+            throw "Setup wizard did not reach Finish within $InstallTimeoutSeconds seconds: $($lastObservation | ConvertTo-Json -Compress -Depth 4)"
         }
         $heading = Get-BoundedWindowText $headingControl
         $description = Get-BoundedWindowText $descriptionControl
+        Write-WizardTrace 'completion-visible' ([ordered]@{
+            heading = $heading
+            install_ms = [Math]::Round($install.Elapsed.TotalMilliseconds, 1)
+        })
         if ($heading -ne 'DefenseClaw is installed') {
             throw "Setup wizard completion heading was '$heading': $description"
         }
@@ -309,6 +415,11 @@ try {
         if (-not $finished) {
             try {
                 if (-not $process.HasExited) {
+                    try {
+                        Write-WizardTrace 'terminating-failed-probe' ([ordered]@{ process_id = $process.Id })
+                    } catch {
+                        Write-Warning "Could not record failed setup wizard probe: $($_.Exception.Message)"
+                    }
                     $process.Kill($true)
                     $null = $process.WaitForExit(5000)
                 }

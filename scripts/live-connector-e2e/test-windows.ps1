@@ -197,6 +197,11 @@ try {
         $wizardHarnessText -match 'InstallTimeoutSeconds' -and
         $wizardHarnessText -match 'Get-BoundedWindowText') `
         'wizard automation uses bounded Win32 calls and install timeout'
+    Assert-True ($wizardHarnessText -match "wizard-driver\.log" -and
+        $wizardHarnessText -match "Write-WizardTrace 'install-progress'" -and
+        $wizardHarnessText -match "Write-WizardTrace 'install-timeout'" -and
+        $nativeHarnessText -match "Name -eq 'wizard-driver\.log'") `
+        'wizard automation records and prioritizes bounded install-transition diagnostics'
     foreach ($controlID in @(1001, 1002, 1003, 1005, 1009, 1011)) {
         Assert-True ($wizardHarnessText -match "Get-WizardControl \`$window $controlID") `
             "wizard automation reaches required real control id $controlID"
@@ -213,6 +218,12 @@ try {
     Assert-True ($nativeHarnessText -match "Invoke-WizardConfigureLaterAcceptance" -and
         $nativeHarnessText -match "(?s)Invoke-WizardConnectorAcceptance.*?'codex' 'observe'.*?Invoke-WizardConnectorAcceptance.*?'claudecode' 'action'") `
         'setup acceptance performs Configure Later, Codex Observe, and Claude Code Action wizard installs'
+    $wizardInstall = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-WizardInstall\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($wizardInstall -match 'InstallTimeoutSeconds = 600') `
+        'each interactive wizard install has a ten-minute diagnostic timeout'
     $wizardAcceptance = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Invoke-WizardConnectorAcceptance\b.*?(?=\r?\nfunction )'

@@ -5,7 +5,33 @@
 
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+func TestWizardCompletionNotificationFallback(t *testing.T) {
+	wizard := &setupWizard{completionTimer: 7}
+	if wizard.completionNotificationReady(wmDone, 0) || wizard.completionNotificationReady(wmTimer, 7) {
+		t.Fatal("new wizard unexpectedly accepted a completion notification")
+	}
+	testErr := errors.New("wizard test result")
+	wizard.recordResult(restartRequiredCode, testErr)
+	if !wizard.completionNotificationReady(wmDone, 0) {
+		t.Fatal("recorded result did not accept the primary completion message")
+	}
+	if !wizard.completionNotificationReady(wmTimer, 7) {
+		t.Fatal("recorded result did not accept the matching timer fallback")
+	}
+	if wizard.completionNotificationReady(wmTimer, 8) {
+		t.Fatal("recorded result accepted an unrelated timer")
+	}
+	wizard.mu.Lock()
+	defer wizard.mu.Unlock()
+	if wizard.code != restartRequiredCode || wizard.err != testErr {
+		t.Fatalf("recorded result = (%d, %v), want (%d, %v)", wizard.code, wizard.err, restartRequiredCode, testErr)
+	}
+}
 
 func TestWizardChoiceMappings(t *testing.T) {
 	connectors := []wizardChoice{
