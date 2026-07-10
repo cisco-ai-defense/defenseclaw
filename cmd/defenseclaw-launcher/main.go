@@ -60,7 +60,7 @@ func main() {
 func launcherArgs(executable string, userArgs []string) ([]string, error) {
 	name := strings.ToLower(strings.TrimSuffix(executable, filepath.Ext(executable)))
 	if name == "defenseclaw" {
-		return append([]string{"-I", "-m", "defenseclaw"}, userArgs...), nil
+		return append([]string{"-I", "-m", "defenseclaw.main"}, userArgs...), nil
 	}
 	entryPoints := map[string]string{
 		"skill-scanner":             "skill-scanner",
