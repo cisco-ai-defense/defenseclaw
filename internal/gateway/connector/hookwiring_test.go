@@ -228,6 +228,89 @@ func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
 	}
 }
 
+func TestPackagedWindowsHookBinaryUsesVerifiedNativeInstallState(t *testing.T) {
+	root := t.TempDir()
+	commandDir := filepath.Join(root, "bin")
+	runtimeDir := filepath.Join(root, "runtime", "python")
+	installerDir := filepath.Join(root, "installer")
+	for _, directory := range []string{commandDir, runtimeDir, installerDir} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gateway := filepath.Join(commandDir, windowsGatewayBinaryName)
+	hook := filepath.Join(commandDir, windowsHookBinaryName)
+	for _, path := range []string{gateway, hook} {
+		if err := os.WriteFile(path, []byte("MZnative-fixture"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := map[string]interface{}{
+		"schema_version": 1,
+		"install_kind":   "native-windows-exe",
+		"install_scope":  "user",
+		"install_root":   root,
+		"command_dir":    commandDir,
+		"runtime":        runtimeDir,
+	}
+	statePath := filepath.Join(installerDir, "install-state.json")
+	writeState := func() {
+		t.Helper()
+		body, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statePath, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeState()
+	if got := packagedWindowsHookBinary(gateway); !sameWindowsInstallPath(got, hook) {
+		t.Fatalf("packagedWindowsHookBinary() = %q, want %q", got, hook)
+	}
+
+	state["command_dir"] = filepath.Join(root, "spoofed-bin")
+	writeState()
+	if got := packagedWindowsHookBinary(gateway); got != "" {
+		t.Fatalf("mismatched installer state selected hook binary %q", got)
+	}
+	state["command_dir"] = commandDir
+	writeState()
+	if err := os.WriteFile(hook, []byte("not-a-windows-executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := packagedWindowsHookBinary(gateway); got != "" {
+		t.Fatalf("non-PE hook selected as packaged launcher %q", got)
+	}
+}
+
+func TestNativeHookOwnershipRetainsLegacyUserInstall(t *testing.T) {
+	legacy := filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName)
+	command := windowsQuoteExe(legacy) + " " + nativeHookFlag + "claudecode"
+	if !isNativeHookCommand(command) {
+		t.Fatalf("legacy managed hook command was not recognized: %q", command)
+	}
+}
+
+func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows native launcher contract")
+	}
+	root := t.TempDir()
+	launcher := filepath.Join(root, windowsHookBinaryName)
+	if err := os.WriteFile(launcher, []byte("MZfixture-launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setHookBinaryOverride(t, launcher)
+	opts := SetupOpts{DataDir: filepath.Join(root, "data"), HookFailMode: "closed"}
+	entry := NewHookContractLockEntry(opts, NewClaudeCodeConnector(), "test")
+	if entry.HookScriptDigests[windowsHookBinaryName] == "" {
+		t.Fatalf("native launcher digest missing: %v", entry.HookScriptDigests)
+	}
+	if !stringInSlice(entry.Locations.HookScriptPaths, launcher) {
+		t.Fatalf("native launcher path missing: %v", entry.Locations.HookScriptPaths)
+	}
+}
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
 // path; ordinary Windows connectors invoke the native Go `hook` subcommand
 // instead of any Bash/.cmd wrapper. Cursor and Antigravity have separately
