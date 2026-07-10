@@ -1607,21 +1607,13 @@ function Invoke-WizardConnectorAcceptance(
         -Log (Join-Path $Logs "wizard-$ConnectorName-gateway-status.log") | Out-Null
     $beforeGateway = Get-GatewayIdentity $DataRoot
     Assert-OwnedManagedProcess $beforeGateway $gateway 'wizard-started gateway'
-    if (Test-Path -LiteralPath (Join-Path $DataRoot 'watchdog.pid')) {
-        throw 'STARTGATEWAY unexpectedly requested a watchdog on a fresh install'
+    $watchdogRunning = Invoke-Installed $gateway @('watchdog', 'status') -Timeout 30 `
+        -Log (Join-Path $Logs "wizard-$ConnectorName-watchdog-status.log")
+    if (($watchdogRunning.StdOut + $watchdogRunning.StdErr) -notmatch '(?i)watchdog:\s+running') {
+        throw 'STARTGATEWAY did not auto-start the configured watchdog'
     }
-    $watchdogStopped = Invoke-Installed $gateway @('watchdog', 'status') @(0, 1) 30 `
-        (Join-Path $Logs "wizard-$ConnectorName-watchdog-stopped.log")
-    if (($watchdogStopped.StdOut + $watchdogStopped.StdErr) -match '(?i)watchdog:\s+running') {
-        throw 'fresh STARTGATEWAY install reported an unrequested running watchdog'
-    }
-    Assert-OnlyInstalledGatewayProcesses $gateway @($beforeGateway.ProcessId)
-
-    Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 `
-        -Log (Join-Path $Logs "wizard-$ConnectorName-watchdog-start.log") | Out-Null
-    Invoke-Installed $gateway @('watchdog', 'status') -Timeout 30 | Out-Null
     $beforeWatchdog = Get-WatchdogIdentity $DataRoot
-    Assert-OwnedManagedProcess $beforeWatchdog $gateway 'explicitly started watchdog'
+    Assert-OwnedManagedProcess $beforeWatchdog $gateway 'wizard-started watchdog'
     if ($beforeGateway.ProcessId -eq $beforeWatchdog.ProcessId) {
         throw 'gateway and watchdog unexpectedly share one process identity'
     }
@@ -1657,7 +1649,7 @@ function Invoke-WizardConnectorAcceptance(
         throw 'setup repair did not restart the wizard-started gateway'
     }
     if (-not (Test-GatewayIdentityChanged $beforeWatchdog $afterWatchdog)) {
-        throw 'setup repair did not restart the explicitly started watchdog'
+        throw 'setup repair did not restart the wizard-started watchdog'
     }
     Assert-OnlyInstalledGatewayProcesses $gateway @(
         $afterGateway.ProcessId,

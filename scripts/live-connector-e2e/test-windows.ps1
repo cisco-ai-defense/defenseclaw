@@ -251,10 +251,12 @@ try {
         $wizardAcceptance -match 'setup repair changed the selected' -and
         $wizardAcceptance -notmatch 'DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT') `
         'wizard connector acceptance validates canonical state, hooks, health, and repair without a contract override'
-    Assert-True ($wizardAcceptance -match "watchdog\.pid" -and
-        $wizardAcceptance -match "@\('watchdog', 'start'\)" -and
-        $wizardAcceptance -match 'Assert-OnlyInstalledGatewayProcesses') `
-        'wizard lifecycle distinguishes STARTGATEWAY from an explicit owned watchdog request'
+    Assert-True ($wizardAcceptance -match 'Get-WatchdogIdentity' -and
+        $wizardAcceptance -match "@\('watchdog', 'status'\)" -and
+        $wizardAcceptance -match 'wizard-started watchdog' -and
+        $wizardAcceptance -match 'Assert-OnlyInstalledGatewayProcesses' -and
+        $wizardAcceptance -notmatch "@\('watchdog', 'start'\)") `
+        'wizard lifecycle requires STARTGATEWAY to auto-start an owned gateway and watchdog'
     Assert-True ($nativeHarnessText -match '\[IO\.FileShare\]::None' -and
         $nativeHarnessText -notmatch 'import time; time\.sleep\(60\)') `
         'setup locked-file acceptance uses a deterministic non-shareable handle'
