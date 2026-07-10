@@ -1278,7 +1278,7 @@ function Invoke-SetupAcceptance {
         # the acceptance test verifies roster preservation instead of asking a
         # second first-run invocation to retain stale peers.
         Invoke-Installed $launcher @(
-            'setup', 'claudecode', '--yes', '--no-restart'
+            'setup', 'claude-code', '--yes', '--no-restart'
         ) -Timeout 300 -Log (Join-Path $logs 'setup-add-claudecode.log') | Out-Null
         # The packaged Go suite separately executes the hardened absolute-path
         # Antigravity hook command from an untrusted working directory. The
