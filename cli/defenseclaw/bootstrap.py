@@ -192,7 +192,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     Safe to call repeatedly. Each step is idempotent:
 
-    * directories — ``os.makedirs(exist_ok=True)``
+    * directories — private owner/SYSTEM-only creation (idempotent)
     * policy seeding — skipped when destination already exists
     * audit DB — ``Store.init()`` runs ``CREATE TABLE IF NOT EXISTS``
     * gateway token — re-read from ``openclaw.json`` on every call
@@ -203,6 +203,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """
     from defenseclaw.config import config_path
     from defenseclaw.db import Store
+    from defenseclaw.file_permissions import make_private_directory
 
     report = BootstrapReport(
         data_dir=cfg.data_dir,
@@ -218,7 +219,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
         if not d:
             continue
         try:
-            os.makedirs(d, exist_ok=True)
+            make_private_directory(d)
             report.dirs_created.append(d)
         except OSError as exc:
             report.errors.append(f"mkdir {d}: {exc}")
@@ -235,7 +236,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
             continue
         if os.path.realpath(d).startswith(data_real + os.sep):
             try:
-                os.makedirs(d, exist_ok=True)
+                make_private_directory(d)
                 report.dirs_created.append(d)
             except OSError as exc:
                 report.errors.append(f"mkdir {d}: {exc}")

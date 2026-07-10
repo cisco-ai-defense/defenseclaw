@@ -67,7 +67,7 @@ from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
 from defenseclaw.file_lock import locked_file_update
-from defenseclaw.file_permissions import atomic_write_text_secure
+from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
 
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
@@ -2666,7 +2666,15 @@ class Config:
 @contextmanager
 def locked_config_yaml(path: str):
     """Hold an exclusive per-config lock for a read/merge/write cycle."""
-
+    directory = os.path.dirname(path) or "."
+    # On elevated Windows accounts, a directory created with bare
+    # ``os.makedirs`` can inherit the token's default owner (for example the
+    # Administrators group) instead of the interactive user's SID.  The
+    # subsequent fail-closed config/audit writers then correctly refuse to
+    # mutate that foreign-owned directory.  Apply the private creation DACL at
+    # creation time so the config lock is never exposed in a permissive or
+    # ambiguously owned parent.
+    make_private_directory(directory)
     with locked_file_update(path):
         yield
 
