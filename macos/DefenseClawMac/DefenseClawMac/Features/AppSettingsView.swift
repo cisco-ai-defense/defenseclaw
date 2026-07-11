@@ -100,7 +100,7 @@ private struct GeneralSettings: View {
                         }
                         .controlSize(.small)
                     }
-                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Path below for a copy/paste command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.")
+                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Path below for a copy/paste command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://github.com/cisco-ai-defense/defenseclaw/blob/0.8.4/docs/CLI.md#upgrade.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
