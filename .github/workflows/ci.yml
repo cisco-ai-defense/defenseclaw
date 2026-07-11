@@ -166,6 +166,7 @@ jobs:
         with:
           go-version-file: go.mod
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
       # Exercises real historical `defenseclaw upgrade` commands against a
       # localhost-served candidate release before a tag exists. The seeded
       # baselines keep the test stable even when an old release's dependency
@@ -428,12 +429,12 @@ jobs:
   windows-installer-smoke:
     name: Windows Installer Smoke (install.ps1)
     runs-on: windows-latest
-    # End-to-end check of the PowerShell installer's local-install path:
-    # build the two release artifacts it consumes (the windows gateway .zip
-    # and the CLI wheel), run scripts/install.ps1 -Local against them, then
-    # assert the gateway binary and CLI shim land on PATH and respond to
-    # --version. Guards scripts/install.ps1, the .goreleaser.yaml windows
-    # archive shape, and the install layout `defenseclaw upgrade` relies on.
+    # End-to-end check of the PowerShell installer's legacy local-install path.
+    # Ordinary PR CI cannot mint the release workflow's main-branch Fulcio
+    # identity and must never stub provenance verification, so this generic
+    # layout smoke is intentionally stamped to schema-1 release 0.8.3. The
+    # protected release workflow separately runs the exact signed schema-2
+    # Windows fresh-install gate against the sealed candidate before publish.
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
@@ -456,10 +457,15 @@ jobs:
             "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
             > "$embed_dir/.placeholder"
 
-      # Reproduce GoReleaser's windows outputs by hand so the smoke test stays
-      # fast and self-contained: the in-archive binary is defenseclaw.exe and
-      # the archive is defenseclaw_<ver>_windows_amd64.zip (the name
-      # install.ps1 -Local globs). The CLI wheel is built via `make dist-cli`,
+      - name: Stamp legacy schema-1 installer fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/stamp-version.sh 0.8.3
+          python3 scripts/source_release_identity.py check --expected-release 0.8.3
+
+      # Reproduce the legacy GoReleaser Windows output by hand so the smoke
+      # stays fast and self-contained. The CLI wheel is built via `make dist-cli`,
       # the same target `make dist` uses — it stages cli/defenseclaw/_data
       # (policies, skills, dashboards) before `uv build`, so the wheel matches
       # a real release. `make install` already runs this _bundle-data path on
@@ -469,7 +475,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/gwstage
-          CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.0.0-smoke" \
+          CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.8.3" \
             -o dist/gwstage/defenseclaw.exe ./cmd/defenseclaw
           make dist-cli
           ls -la dist
@@ -477,9 +483,25 @@ jobs:
       - name: Package windows gateway zip
         shell: pwsh
         run: |
-          $zip = "dist/defenseclaw_0.0.0-smoke_windows_amd64.zip"
+          $zip = "dist/defenseclaw_0.8.3_windows_amd64.zip"
           Compress-Archive -Path dist/gwstage/defenseclaw.exe -DestinationPath $zip -Force
           Get-ChildItem dist
+
+      - name: Build and verify legacy installer policy fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          make dist-upgrade-manifest dist-checksums
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("dist/upgrade-manifest.json").read_text(encoding="utf-8"))
+          if manifest.get("schema_version") != 1 or manifest.get("release_version") != "0.8.3":
+              raise SystemExit("Windows installer smoke must remain a schema-1 0.8.3 fixture")
+          if "release_artifacts" in manifest:
+              raise SystemExit("legacy Windows installer smoke unexpectedly selected protected artifacts")
+          PY
 
       - name: Run install.ps1 against local artifacts
         shell: pwsh
@@ -498,7 +520,11 @@ jobs:
           if (-not (Test-Path $gw))   { throw "gateway not installed: $gw" }
           if (-not (Test-Path $shim)) { throw "CLI shim not installed: $shim" }
           $env:PATH = "$bin;$env:PATH"
-          & $gw --version
-          if ($LASTEXITCODE -ne 0) { throw "defenseclaw-gateway --version exit $LASTEXITCODE" }
-          & defenseclaw --version
-          if ($LASTEXITCODE -ne 0) { throw "defenseclaw --version exit $LASTEXITCODE" }
+          foreach ($command in @($gw, "defenseclaw")) {
+            $output = (& $command --version 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "$command --version exit $LASTEXITCODE" }
+            $versions = @([regex]::Matches($output, '(?<![0-9.])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9.])'))
+            if ($versions.Count -ne 1 -or $versions[0].Groups[1].Value -cne "0.8.3") {
+              throw "$command did not report exact 0.8.3: $output"
+            }
+          }

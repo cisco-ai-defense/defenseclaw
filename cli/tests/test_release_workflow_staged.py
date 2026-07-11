@@ -15,6 +15,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
+CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
@@ -22,6 +23,29 @@ POSIX_INSTALLER = ROOT / "scripts/install.sh"
 
 def _workflow() -> dict[str, object]:
     return yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def _ci_workflow() -> dict[str, object]:
+    return yaml.load(CI_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def test_upgrade_smoke_installs_cosign_before_historical_authentication() -> None:
+    steps = _ci_workflow()["jobs"]["upgrade-smoke"]["steps"]
+    cosign = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("sigstore/cosign-installer@")
+    )
+    smoke = next(
+        index
+        for index, step in enumerate(steps)
+        if "make upgrade-smoke-matrix" in step.get("run", "")
+    )
+
+    assert steps[cosign]["uses"] == (
+        "sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409"
+    )
+    assert cosign < smoke
 
 
 def test_release_is_manual_and_default_permissions_are_read_only() -> None:

@@ -45,6 +45,8 @@ COMMAND_REGISTRY = (
 )
 BUILD_MACOS_RELEASE = ROOT / "scripts" / "build-macos-app-release.sh"
 VERIFY_MACOS_RELEASE = ROOT / "scripts" / "verify-macos-app-release.sh"
+MACOS_CI_WORKFLOW = ROOT / ".github" / "workflows" / "macos-app.yml"
+UPGRADE_RELEASE_SMOKE = ROOT / "scripts" / "test-upgrade-release.sh"
 
 
 def _source() -> str:
@@ -274,6 +276,48 @@ def test_macos_release_signer_requirement_pins_production_team_only() -> None:
     assert status_detection < verify_base < verify_production < verify_anchor
     assert 'APP_REQUIREMENT="=identifier \\"com.cisco.defenseclaw.macos\\"' in verify
     assert 'codesign --verify --strict -R "${APP_REQUIREMENT}"' in verify
+
+
+def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
+    workflow = MACOS_CI_WORKFLOW.read_text(encoding="utf-8")
+    smoke = UPGRADE_RELEASE_SMOKE.read_text(encoding="utf-8")
+    prepare = workflow.index("- name: Prepare reviewed runtime candidate fixture")
+    package = workflow.index("- name: Build unified ad-hoc release artifact", prepare)
+    fixture = workflow[prepare:package]
+
+    for required in (
+        "scripts/source_release_identity.py check --machine",
+        "scripts/test-upgrade-release.sh",
+        '--target-version "$version"',
+        "--prepare-only",
+        "--platform darwin/arm64",
+        "Prepared candidate release root:",
+        'ditto "$candidate_root/$version" dist',
+        "scripts/release_candidate.py verify-runtime",
+        "scripts/release_candidate.py extract-gateway",
+        'echo "MACOS_CI_RELEASE_VERSION=$version"',
+        'echo "MACOS_GATEWAY_INPUT=$GITHUB_WORKSPACE/',
+    ):
+        assert required in fixture
+
+    package_step = workflow[package : workflow.index("- uses:", package)]
+    assert 'scripts/build-macos-app-release.sh "$MACOS_CI_RELEASE_VERSION" dist' in package_step
+    assert "make macos-app-release" not in package_step
+    for watched in (
+        '"cli/**"',
+        '"release/source-install-identity.json"',
+        '"release/upgrade-baselines.json"',
+        '"scripts/generate-upgrade-manifest.py"',
+        '"scripts/release_candidate.py"',
+        '"scripts/source_release_identity.py"',
+        '"scripts/test-upgrade-release.sh"',
+    ):
+        assert workflow.count(watched) == 2
+    assert 'make -C "${build_root}" dist-cli DIST_DIR="${out}"' in smoke
+    assert 'make -C "${build_root}" dist-plugin DIST_DIR="${out}"' in smoke
+    assert '"${build_root}/scripts/generate-upgrade-manifest.py"' in smoke
+    assert '"${build_root}/scripts/release_candidate.py" prepare-runtime' in smoke
+    assert '"${build_root}/scripts/release_candidate.py" verify-runtime' in smoke
 
 
 def test_mac_app_runtime_update_is_guidance_only_and_never_runs_bare_cli_upgrade() -> None:

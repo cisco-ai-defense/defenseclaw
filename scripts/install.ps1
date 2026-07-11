@@ -19,10 +19,10 @@
     DefenseClaw installer for Windows (PowerShell).
 
 .DESCRIPTION
-    Installs DefenseClaw from pre-built release artifacts on Windows. The Go
-    gateway ships as defenseclaw_<version>_windows_<arch>.zip (containing
-    defenseclaw.exe) and the CLI ships as a pure-Python wheel. This is the
-    Windows counterpart to scripts/install.sh; it lands:
+    Installs DefenseClaw from pre-built release artifacts on Windows. Legacy
+    releases use a gateway ZIP and wheel; 0.8.4+ releases use signed,
+    manifest-bound protected envelopes that are decoded only after provenance
+    verification. This is the Windows counterpart to scripts/install.sh; it lands:
 
       * <home>\bin\defenseclaw-gateway.exe  (the Go gateway/sidecar binary)
       * <home>\bin\defenseclaw.cmd          (shim to the CLI in the venv)
@@ -47,8 +47,9 @@
     .\install.ps1 -Version 0.7.0 -Connector codex -Yes -Quickstart
 
 .EXAMPLE
-    # Install from a locally built dist directory (for testing):
-    .\install.ps1 -Local .\dist
+    # Install from a complete authenticated release-asset directory:
+    .\install.ps1 -Local C:\path\to\release-assets
+    # An unsigned directory produced by `make dist` is rejected for 0.8.4+.
 #>
 
 [CmdletBinding()]
@@ -833,7 +834,7 @@ Usage:
   `$Version = "0.8.4"
   `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
   & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
-  .\install.ps1 -Local .\dist                 # from a local build
+  .\install.ps1 -Local C:\path\to\release-assets  # complete authenticated assets
   .\install.ps1 -Yes                          # non-interactive
   .\install.ps1 -Connector codex -Quickstart  # pick connector + bootstrap
 
@@ -841,7 +842,7 @@ Options:
   -Connector <name>    Pick agent connector ($($ConnectorChoices -join '|'))
   -NoOpenclaw          Install gateway/CLI only when no connector is selected
   -Version <x.y.z>     Install a specific release version
-  -Local <dir>         Fresh install from a local dist directory (never upgrades)
+  -Local <dir>         Fresh install from a complete local release-asset directory
   -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install
   -QuickstartMode <m>  Pass --mode m to quickstart (observe|action)
   -Yes                 Skip confirmation prompts (for CI/automation)

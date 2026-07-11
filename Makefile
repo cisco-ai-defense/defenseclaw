@@ -804,11 +804,13 @@ go-lint: sync-openclaw-extension
 
 dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-checksums
 	@echo ""
-	@echo "Release artifacts:"
+	@echo "Unsigned release-build inputs:"
 	@ls -lh $(DIST_DIR)/
 	@echo ""
-	@echo "Test locally:"
-	@echo "  ./scripts/install.sh --local $(DIST_DIR)"
+	@echo "Local source install:"
+	@echo "  make install"
+	@echo "  NOTE: $(DIST_DIR)/ is not authenticated installer input for 0.8.4+."
+	@echo "  The protected release workflow wraps, signs, seals, and tests these inputs."
 	@echo ""
 	@echo "Cut a release (the protected workflow creates the tag + assets atomically):"
 	@echo "  Actions UI -> 'Release' workflow -> Run workflow -> enter $(VERSION)"

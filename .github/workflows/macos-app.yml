@@ -24,12 +24,19 @@ on:
       - "scripts/build-macos-app-release.sh"
       - "scripts/check-macos-upstream.py"
       - "scripts/export-uv-overrides.py"
+      - "scripts/generate-upgrade-manifest.py"
       - "scripts/macos_license_headers.py"
+      - "scripts/release_candidate.py"
+      - "scripts/source_release_identity.py"
       - "scripts/stamp-version.sh"
+      - "scripts/test-upgrade-release.sh"
       - "scripts/update-macos-app.sh"
       - "scripts/verify-macos-app-release.sh"
+      - "release/source-install-identity.json"
+      - "release/upgrade-baselines.json"
       - "Makefile"
       - "pyproject.toml"
+      - "cli/**"
       - "go.mod"
       - "go.sum"
       - "cmd/**"
@@ -42,12 +49,19 @@ on:
       - "scripts/build-macos-app-release.sh"
       - "scripts/check-macos-upstream.py"
       - "scripts/export-uv-overrides.py"
+      - "scripts/generate-upgrade-manifest.py"
       - "scripts/macos_license_headers.py"
+      - "scripts/release_candidate.py"
+      - "scripts/source_release_identity.py"
       - "scripts/stamp-version.sh"
+      - "scripts/test-upgrade-release.sh"
       - "scripts/update-macos-app.sh"
       - "scripts/verify-macos-app-release.sh"
+      - "release/source-install-identity.json"
+      - "release/upgrade-baselines.json"
       - "Makefile"
       - "pyproject.toml"
+      - "cli/**"
       - "go.mod"
       - "go.sum"
       - "cmd/**"
@@ -93,8 +107,38 @@ jobs:
           python-version: "3.13"
       - name: Test connector onboarding
         run: macos/DefenseClawMac/script/test_connector_onboarding.sh
+      - name: Prepare reviewed runtime candidate fixture
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/source_release_identity.py check --machine | cut -f1)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          prepare_log="$RUNNER_TEMP/defenseclaw-macos-runtime-fixture.log"
+          scripts/test-upgrade-release.sh \
+            --target-version "$version" \
+            --prepare-only \
+            --platform darwin/arm64 \
+            | tee "$prepare_log"
+          candidate_root="$(
+            sed -n 's/^OK: Prepared candidate release root: //p' "$prepare_log"
+          )"
+          [[ -n "$candidate_root" && -d "$candidate_root/$version" ]]
+          [[ "$(grep -c '^OK: Prepared candidate release root: ' "$prepare_log")" == "1" ]]
+          [[ ! -e dist ]]
+          ditto "$candidate_root/$version" dist
+          python3 scripts/release_candidate.py verify-runtime \
+            --release-dir dist \
+            --version "$version"
+          python3 scripts/release_candidate.py extract-gateway \
+            --release-dir dist \
+            --output build/macos-app/runtime-input/defenseclaw \
+            --version "$version" \
+            --os darwin \
+            --arch arm64
+          echo "MACOS_CI_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "MACOS_GATEWAY_INPUT=$GITHUB_WORKSPACE/build/macos-app/runtime-input/defenseclaw" \
+            >> "$GITHUB_ENV"
       - name: Build unified ad-hoc release artifact
-        run: make macos-app-release
+        run: scripts/build-macos-app-release.sh "$MACOS_CI_RELEASE_VERSION" dist
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: DefenseClawMac-ci-macos-arm64-unverified

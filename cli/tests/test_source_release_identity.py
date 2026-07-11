@@ -152,6 +152,26 @@ def test_release_stamp_is_provably_noop_for_reviewed_source(tmp_path: Path) -> N
     assert {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS} == before
 
 
+def test_legacy_windows_smoke_stamp_remains_a_coherent_schema1_source(tmp_path: Path) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    stamp = repo / "scripts/stamp-version.sh"
+    shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
+
+    completed = subprocess.run(
+        ["/bin/bash", str(stamp), "0.8.3"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    identity = source_release_identity.validate_source_tree(repo, expected_release="0.8.3")
+    assert identity["source_release"] == "0.8.3"
+    assert identity["runtime_config_version"] == 7
+
+
 def test_release_workflow_rejects_unstamped_source_before_publish_and_tags_reviewed_commit() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
     tracked = workflow.index("git ls-files --error-unmatch --")

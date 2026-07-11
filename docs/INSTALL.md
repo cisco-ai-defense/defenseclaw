@@ -243,8 +243,9 @@ source .venv/bin/activate
 
 ## Building Release Artifacts (`make dist`)
 
-The `make dist` target builds all release artifacts for distribution.
-Use this when preparing a release or testing the installer locally.
+The `make dist` target builds unsigned inputs for the protected release
+workflow. It is useful for development inspection and release preparation, but
+it is not a publishable or authenticated `0.8.4+` release candidate by itself.
 
 ### Produce All Artifacts
 
@@ -257,12 +258,13 @@ This runs `dist-cli`, `dist-gateway`, `dist-plugin`, and
 
 ```
 dist/
-├── defenseclaw-0.2.0-py3-none-any.whl       # Python CLI wheel
+├── defenseclaw-0.8.4-py3-none-any.whl       # unsigned Python CLI input
 ├── defenseclaw-gateway-linux-amd64           # Gateway binary (linux/amd64)
 ├── defenseclaw-gateway-linux-arm64           # Gateway binary (linux/arm64)
 ├── defenseclaw-gateway-darwin-amd64          # Gateway binary (macOS Intel)
 ├── defenseclaw-gateway-darwin-arm64          # Gateway binary (macOS Apple Silicon)
-├── defenseclaw-plugin-0.2.0.tar.gz           # OpenClaw plugin tarball
+├── defenseclaw-plugin-0.8.4.tar.gz           # OpenClaw plugin tarball
+├── upgrade-manifest.json                     # reviewed transition policy
 └── checksums.txt                             # SHA-256 checksums
 ```
 
@@ -278,18 +280,23 @@ make dist-checksums # Generate SHA-256 checksums.txt
 `dist-cli` bundles data files into the wheel before building:
 Rego policies, `data.json`, YAML policy templates, and the CodeGuard skill.
 
-### Install from Local Dist
+### Test Local Development or Release Assets
 
-Test the release artifacts locally using the install script:
+For a source-owned development installation, use the source workflow:
 
 ```bash
-./scripts/install.sh --local dist/
+make install
 ```
 
-This installs the gateway binary, Python CLI wheel (into
-`~/.defenseclaw/.venv`), and plugin without downloading anything. It is a
-fresh-install test only: `--local` refuses an existing installation and cannot
-be used to bypass the release-owned upgrade manifest or bridge resolver.
+Do not pass the unsigned output of `make dist` to `install.sh --local` or
+`install.ps1 -Local` for `0.8.4+`. Those entry points require a complete
+release-owned asset set: signed checksums and certificate, schema-2 manifest,
+and protected `.dcwheel`/`.dcgateway` payloads. This refusal is intentional;
+otherwise a local directory could bypass release provenance and bridge policy.
+
+`--local` remains useful for testing a complete authenticated release-asset
+directory. It is fresh-install-only and refuses any existing or partial
+installation before dependency or artifact changes.
 
 ### Cut a GitHub Release
 

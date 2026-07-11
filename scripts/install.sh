@@ -26,8 +26,9 @@
 #   INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 #   curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 #
-#   # From local dist/ directory (for testing):
-#   ./scripts/install.sh --local ./dist
+#   # From a complete authenticated release-asset directory (fresh installs only):
+#   ./scripts/install.sh --local /path/to/release-assets
+#   # For 0.8.4+, an unsigned directory produced by `make dist` is intentionally rejected.
 #
 #   # Pick a specific agent connector at install time:
 #   curl ... | bash -s -- --connector codex          # Codex (no OpenClaw install)
@@ -37,7 +38,7 @@
 # Options:
 #   --connector <name>  Pick agent connector (see --help for choices)
 #   --no-openclaw       Skip OpenClaw install (alias for --connector none when used alone)
-#   --local <dir>       Install from a local dist directory instead of downloading
+#   --local <dir>       Install from a complete local release-asset directory
 #   --yes, -y           Skip confirmation prompts (for CI/automation)
 #   --help, -h          Show help
 #
@@ -960,8 +961,9 @@ fetch_artifact() {
     fi
 }
 
-# Download and verify checksums.txt, then validate a file against it.
-# Skipped for --local installs (assumes the user built locally).
+# Download and verify checksums.txt, then validate a file against it. Legacy
+# local fixtures predate signed policy; schema-2 local assets are always
+# signature- and checksum-verified exactly like downloaded release assets.
 verify_checksum() {
     local file="$1" filename="$2"
     VERIFIED_CHECKSUM=""
@@ -1458,14 +1460,14 @@ while [[ $# -gt 0 ]]; do
             echo '  VERSION=0.8.4'
             echo '  INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"'
             echo '  curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash'
-            echo "  ./scripts/install.sh --local ./dist               # from local build"
+            echo "  ./scripts/install.sh --local /path/to/release-assets  # complete authenticated assets"
             echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
             echo "  curl ... | bash -s -- --sandbox                   # OpenClaw/OpenShell sandbox support"
             echo "  curl ... | bash -s -- --quickstart                # run quickstart after install"
             echo ""
             echo "Options:"
             echo "  --sandbox             Also install openshell-sandbox (experimental Linux/OpenClaw path)"
-            echo "  --local <dir>         Install from a local dist directory"
+            echo "  --local <dir>         Install from a complete local release-asset directory"
             echo "  --yes, -y             Skip all confirmation prompts"
             echo "  --connector <name>    Pick agent connector (${CONNECTOR_CHOICES[*]})"
             echo "  --no-openclaw         Skip OpenClaw runtime+plugin install (alias for --connector none)"
@@ -1478,8 +1480,9 @@ while [[ $# -gt 0 ]]; do
             echo "  VERSION            Specific release version to install"
             echo "  OPENSHELL_VERSION  openshell-sandbox version (default: 0.0.16)"
             echo ""
-            echo "Build artifacts locally first:"
-            echo "  make dist          # produces dist/ with all artifacts"
+            echo "For a source-owned development install:"
+            echo "  make install"
+            echo "  NOTE: make dist is not authenticated installer input for 0.8.4+."
             echo ""
             exit 0
             ;;
