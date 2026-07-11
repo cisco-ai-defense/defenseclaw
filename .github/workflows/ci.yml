@@ -491,16 +491,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make dist-upgrade-manifest dist-checksums
+          make dist-upgrade-manifest
           python3 - <<'PY'
+          import hashlib
           import json
           from pathlib import Path
 
-          manifest = json.loads(Path("dist/upgrade-manifest.json").read_text(encoding="utf-8"))
+          root = Path("dist")
+          manifest = json.loads((root / "upgrade-manifest.json").read_text(encoding="utf-8"))
           if manifest.get("schema_version") != 1 or manifest.get("release_version") != "0.8.3":
               raise SystemExit("Windows installer smoke must remain a schema-1 0.8.3 fixture")
           if "release_artifacts" in manifest:
               raise SystemExit("legacy Windows installer smoke unexpectedly selected protected artifacts")
+          excluded = {"checksums.txt", "checksums.txt.sig", "checksums.txt.pem"}
+          artifacts = sorted(
+              (path for path in root.rglob("*") if path.is_file() and path.name not in excluded),
+              key=lambda path: path.relative_to(root).as_posix(),
+          )
+          (root / "checksums.txt").write_text(
+              "".join(
+                  f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+                  f"{path.relative_to(root).as_posix()}\n"
+                  for path in artifacts
+              ),
+              encoding="utf-8",
+          )
           PY
 
       - name: Run install.ps1 against local artifacts

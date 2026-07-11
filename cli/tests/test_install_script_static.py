@@ -46,7 +46,10 @@ def test_windows_installer_smoke_never_stubs_schema2_provenance() -> None:
     assert "scripts/stamp-version.sh 0.8.3" in job
     assert "scripts/source_release_identity.py check --expected-release 0.8.3" in job
     assert "main.version=0.8.3" in job
-    assert "make dist-upgrade-manifest dist-checksums" in job
+    assert "make dist-upgrade-manifest" in job
+    assert "make dist-upgrade-manifest dist-checksums" not in job
+    assert "hashlib.sha256(path.read_bytes()).hexdigest()" in job
+    assert 'path.relative_to(root).as_posix()' in job
     assert 'manifest.get("schema_version") != 1' in job
     assert 'manifest.get("release_version") != "0.8.3"' in job
     assert '"release_artifacts" in manifest' in job
@@ -58,7 +61,8 @@ def test_windows_installer_smoke_never_stubs_schema2_provenance() -> None:
     policy = job.index("Build and verify legacy installer policy fixture")
     install = job.index("Run install.ps1 against local artifacts")
     assert policy < job.index("upgrade-manifest.json", policy) < install
-    assert policy < job.index("make dist-upgrade-manifest dist-checksums", policy) < install
+    assert policy < job.index("make dist-upgrade-manifest", policy) < install
+    assert policy < job.index('root / "checksums.txt"', policy) < install
 
 
 def test_sandbox_installer_fallback_uses_selected_release() -> None:
