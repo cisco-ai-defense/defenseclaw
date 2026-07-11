@@ -39,6 +39,13 @@ export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # Disabling DefenseClaw (or an absent install) must fail OPEN for the
+  # agent. Cursor treats a failClosed:true hook entry that produces empty
+  # stdout as a hook failure and blocks the tool, so emit an explicit
+  # allow instead of exiting silently — otherwise dropping the .disabled
+  # marker would brick a fail-closed Cursor install with no way to
+  # self-recover.
+  printf '{"continue":true,"permission":"allow"}\n'
   exit 0
 fi
 {{end}}
@@ -57,8 +64,29 @@ DEFENSECLAW_HOOK_CONNECTOR="cursor"
 DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
+# Cursor treats a failClosed:true hook that produces empty stdout as a
+# hook failure and blocks the tool. Every allow / observe / fail-open
+# path below therefore emits an explicit allow envelope rather than
+# exiting silently; block paths emit an explicit deny. This keeps a
+# deliberate fail-OPEN (gateway outage, missing token, disabled install)
+# from being silently inverted into a fail-closed block on a
+# failClosed:true install.
+emit_cursor_allow() { printf '{"continue":true,"permission":"allow"}\n'; }
+
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token cursor cursor-hook "cursor tool"
+  # Strict availability / managed installs fail closed here (the shared
+  # helper logs, warns on stderr, and exits 2). Everything else fails
+  # OPEN — but must still emit an explicit allow so Cursor does not read
+  # the historical silent `exit 0` as a fail-closed no-output block.
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_handle_missing_token cursor cursor-hook "cursor tool"
+  fi
+  defenseclaw_log_hook_failure cursor cursor-hook \
+    "missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)" \
+    transport "${FAIL_MODE:-open}"
+  echo "defenseclaw: missing gateway token, allowing cursor tool" >&2
+  emit_cursor_allow
+  exit 0
 fi
 
 # Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
@@ -69,6 +97,7 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
     printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
     exit 2
   fi
+  emit_cursor_allow
   exit 0
 }
 API_ADDR="{{.APIAddr}}"
@@ -91,6 +120,7 @@ fail_unreachable() {
     printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
     exit 2
   fi
+  emit_cursor_allow
   exit 0
 }
 
@@ -98,6 +128,7 @@ fail_response() {
   defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
+    emit_cursor_allow
     exit 0
   fi
   printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
@@ -142,5 +173,10 @@ OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
+else
+  # Gateway answered but carried no hook_output (e.g. an observe-mode
+  # response with nothing to enforce). Emit an explicit allow so a
+  # failClosed:true entry never misreads the empty stdout as a failure.
+  emit_cursor_allow
 fi
 exit 0
