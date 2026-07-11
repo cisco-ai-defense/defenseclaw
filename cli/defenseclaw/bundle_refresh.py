@@ -51,6 +51,7 @@ midway through a copy can't leave the seeded copy half-overwritten.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -460,6 +461,47 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
         except OSError:
             pass
         raise
+
+
+def _restore_local_observability_backup(
+    destination: Path,
+    backup_managed: Path,
+    managed_paths: set[str],
+    existing_paths: set[str],
+    old_digests: dict[str, str],
+    old_modes: dict[str, int],
+) -> None:
+    """Restore the target transaction's exact managed-file inventory.
+
+    This is the only local-observability transaction primitive needed by the
+    config-v7 bridge.  The target wheel owns staging/activation; if the hard
+    cut later fails, the bridge replays the authenticated backup metadata and
+    verifies every restored digest before reporting rollback success.
+    """
+
+    for relative in sorted(managed_paths):
+        destination_path = destination / relative
+        if relative in existing_paths:
+            backup_path = backup_managed / relative
+            if not backup_path.is_file() or backup_path.is_symlink():
+                raise OSError("backup member missing")
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_copy_file(str(backup_path), str(destination_path))
+            os.chmod(destination_path, old_modes[relative])
+            if _sha256_file(destination_path) != old_digests[relative]:
+                raise OSError("restored member digest mismatch")
+        elif destination_path.exists() or destination_path.is_symlink():
+            if destination_path.is_dir() and not destination_path.is_symlink():
+                raise OSError("unexpected directory at managed file path")
+            destination_path.unlink()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 __all__ = [

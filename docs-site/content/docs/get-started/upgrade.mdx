@@ -24,18 +24,77 @@ defenseclaw upgrade --version X.Y.Z --yes
 ```
 
 <Callout title="Prefer the upgrade command over re-running the installer">
-The install scripts are appropriate for a fresh host. `defenseclaw upgrade`
-adds the safety work an existing host needs: artifact verification, a state
-backup, release-manifest validation, migrations, service restart, and a health
-check.
+The install scripts are fresh-install-only and refuse an existing DefenseClaw
+installation before making host changes. `defenseclaw upgrade` adds the safety
+work an existing host needs: artifact verification, a state backup,
+release-manifest validation, migrations, service restart, and a health check.
+</Callout>
+
+## The 0.8.4 bridge release
+
+Release `0.8.4` deliberately keeps configuration and runtime schema v7. It does
+not contain or run the observability-v8 migration. Its purpose is to install a
+protocol-2 upgrade controller that can safely drive the later v8 hard cut.
+
+For an existing installation, run the release-owned resolver without a target
+version. Latest mode is allowed to follow a manifest-declared bridge; an
+explicit request that skips a required bridge is refused before services or
+installed files change.
+
+```bash
+# macOS/Linux checkout or downloaded release script
+./scripts/upgrade.sh --yes
+```
+
+```powershell
+# Windows checkout or downloaded release script
+.\scripts\upgrade.ps1 -Yes
+```
+
+When a hard-cut manifest requires `0.8.4`, the resolver first authenticates and
+health-checks the bridge, then hands control to its freshly installed
+controller. Before target mutation, that controller retains authenticated
+bridge artifacts and exact snapshots of the active gateway, `config.yaml`,
+`.env`, and migration cursor. It stops and proves the target gateway quiescent,
+runs target migrations, verifies the target's reported binary provenance in a
+fresh target-wheel process, and records a durable receipt. A target install,
+migration, start, or health failure triggers restoration of the bridge wheel,
+gateway, managed state, and any refreshed local-observability bundle files;
+rollback is only reported successful after the restored `0.8.4` gateway passes
+the same exact-version health check.
+
+The first hop is transactional too. Before stopping an older source, the
+resolver durably journals its exact CLI, gateway, managed configuration and
+state, source health endpoint, and prior running state. A caught failure or
+abrupt termination restores that source and proves its version-bound health
+before the journal is cleared or another upgrade begins.
+
+Immediately before phase two, the bridge also commits a private recovery
+journal and a fixed mutator lease. Every wheel install, migration, bundle
+refresh, and service mutation inherits that lease, so killing only the upgrade
+controller cannot let recovery race a child that is still writing. On the next
+resolver invocation, recovery waits for that child, reinstalls the retained
+authenticated `0.8.4` wheel without importing a possibly partial target wheel,
+restores exact bridge state, and then retries only after bridge health passes.
+
+Release `0.8.4` and later require local `cosign` verification against the exact
+protected release workflow identity. `--allow-unverified` cannot weaken that
+boundary.
+
+<Callout title="Release order is part of the safety contract">
+Release engineering must publish and soak immutable `0.8.4`, with the complete
+historical baseline matrix green, before merging or cutting the v8 hard-cut
+release. The hard cut must consume the published `0.8.4` bridge—not an
+unpublished branch artifact.
 </Callout>
 
 ## What the upgrade does
 
 1. Resolves the target release and downloads its checksum, provenance, gateway,
    and CLI artifacts.
-2. Verifies the release manifest and SHA-256 checksums. When `cosign` is
-   installed, it also verifies Sigstore provenance.
+2. Verifies the release manifest and SHA-256 checksums. For release `0.8.4` and
+   later, it requires `cosign` and verifies Sigstore provenance against the
+   protected release workflow identity.
 3. Saves managed state under
    `~/.defenseclaw/backups/upgrade-<timestamp>/`, including `config.yaml`,
    `.env`, policies, connector backups, device identity, and the previous

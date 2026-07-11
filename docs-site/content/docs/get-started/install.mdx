@@ -11,6 +11,14 @@ keywords:
 
 DefenseClaw ships pre-built binaries for macOS, Linux, and Windows. The macOS/Linux installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`. The Windows installer uses the same per-user layout under `%USERPROFILE%`: `defenseclaw-gateway.exe` plus a `defenseclaw.cmd` CLI shim in `%USERPROFILE%\.local\bin`, with the virtualenv under `%USERPROFILE%\.defenseclaw\.venv`.
 
+<Callout title="Installers are for fresh hosts only">
+Both release installers stop without changing the host when they detect an
+existing DefenseClaw CLI, gateway, or managed virtual environment. Use the
+release-owned [upgrade path](/docs/get-started/upgrade) for an existing
+installation; it enforces the signed manifest, any required bridge release,
+rollback preparation, migrations, and post-upgrade health checks.
+</Callout>
+
 <Callout>
 Installing as `root` is supported but discouraged — DefenseClaw is per-user by design so each operator's audit DB and connector state stays isolated.
 </Callout>
@@ -50,7 +58,11 @@ curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 defenseclaw init
 ```
 
-The installer fetches the latest release for your platform, drops the binaries into `~/.local/bin/`, and writes nothing else — it does not configure DefenseClaw. The follow-up [`defenseclaw init`](/docs/get-started/quickstart) does that interactively. For an existing installation, use [`defenseclaw upgrade`](/docs/get-started/upgrade) so DefenseClaw verifies release artifacts, backs up operator state, applies release-owned schema migrations, restarts the gateway, and checks health. Re-running the curl installer replaces the installed artifacts but does not provide that complete upgrade transaction.
+The installer fetches the selected release for your platform and lays down a
+new installation; it does not configure DefenseClaw. The follow-up
+[`defenseclaw init`](/docs/get-started/quickstart) does that interactively. It
+will not replace an existing installation—use
+[`defenseclaw upgrade`](/docs/get-started/upgrade) instead.
 
 If you'd rather skip the wizard entirely (CI, scripted demos), use the zero-prompt sibling instead:
 
@@ -69,7 +81,7 @@ $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$V
 defenseclaw init
 ```
 
-The PowerShell installer downloads the Windows release ZIP for your architecture, verifies it against the release checksums, installs `defenseclaw-gateway.exe`, creates the CLI shim, and adds `%USERPROFILE%\.local\bin` to the user `PATH`. It also installs `uv` when needed so the Python CLI can run from the per-user virtualenv.
+The PowerShell installer downloads the Windows release ZIP for your architecture, verifies it against the release checksums, installs `defenseclaw-gateway.exe`, creates the CLI shim, and adds `%USERPROFILE%\.local\bin` to the user `PATH`. It also installs `uv` when needed so the Python CLI can run from the per-user virtualenv. If an installation already exists, it exits before dependency or artifact changes and directs you to `scripts\upgrade.ps1`.
 
 For non-interactive demos or CI, download the script and pass flags directly:
 

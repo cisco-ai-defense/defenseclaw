@@ -54,6 +54,7 @@ PAYLOAD="${APP}/Contents/Resources/RuntimePayload"
 DMG_STAGE="${WORK}/dmg-stage"
 WHEEL="${ROOT}/dist/defenseclaw-${VERSION}-py3-none-any.whl"
 GATEWAY="${WORK}/defenseclaw-gateway"
+GATEWAY_INPUT="${MACOS_GATEWAY_INPUT:-}"
 OVERRIDES="${WORK}/overrides.txt"
 KEYCHAIN_PATH=""
 KEYCHAIN_PASSWORD=""
@@ -73,12 +74,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in xcodebuild xcrun codesign ditto file go hdiutil python3 shasum spctl; do
+for command in xcodebuild xcrun codesign ditto file hdiutil python3 shasum spctl cmp; do
     command -v "${command}" >/dev/null || {
         echo "required command not found: ${command}" >&2
         exit 1
     }
 done
+if [[ -z "${GATEWAY_INPUT}" ]]; then
+    command -v go >/dev/null || { echo "required command not found: go" >&2; exit 1; }
+fi
 [[ -d "${PROJECT}" ]] || { echo "Xcode project not found: ${PROJECT}" >&2; exit 1; }
 [[ -f "${WHEEL}" ]] || {
     echo "matching wheel not found: ${WHEEL}" >&2
@@ -137,17 +141,39 @@ if [[ -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" ]]; then
     VERIFICATION_STATUS="signed-unnotarized"
 fi
 
-echo "Building DefenseClaw gateway ${VERSION} (darwin/arm64)"
-COMMIT="$(git -C "${ROOT}" rev-parse --short=12 HEAD)"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-(
-    cd "${ROOT}"
-    CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
-        -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
-        -o "${GATEWAY}" ./cmd/defenseclaw
-)
+if [[ -n "${GATEWAY_INPUT}" ]]; then
+    [[ -f "${GATEWAY_INPUT}" && ! -L "${GATEWAY_INPUT}" ]] || {
+        echo "MACOS_GATEWAY_INPUT must name a regular non-symlink candidate binary" >&2
+        exit 1
+    }
+    echo "Using sealed DefenseClaw gateway candidate ${GATEWAY_INPUT}"
+    cp "${GATEWAY_INPUT}" "${GATEWAY}"
+    chmod 755 "${GATEWAY}"
+    cmp -s "${GATEWAY_INPUT}" "${GATEWAY}" || {
+        echo "copied gateway bytes differ from MACOS_GATEWAY_INPUT" >&2
+        exit 1
+    }
+else
+    echo "Building DefenseClaw gateway ${VERSION} (darwin/arm64)"
+    COMMIT="$(git -C "${ROOT}" rev-parse --short=12 HEAD)"
+    (
+        cd "${ROOT}"
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
+            -o "${GATEWAY}" ./cmd/defenseclaw
+    )
+fi
 file "${GATEWAY}" | grep -q 'Mach-O 64-bit executable arm64' || {
     echo "gateway is not a darwin/arm64 Mach-O" >&2
+    exit 1
+}
+GATEWAY_VERSION_OUTPUT="$("${GATEWAY}" --version 2>&1)" || {
+    echo "gateway candidate did not execute for version verification" >&2
+    exit 1
+}
+printf '%s' "${GATEWAY_VERSION_OUTPUT}" | grep -Fq "${VERSION}" || {
+    echo "gateway candidate version mismatch: expected ${VERSION}" >&2
     exit 1
 }
 

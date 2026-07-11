@@ -277,7 +277,9 @@ Test the release artifacts locally using the install script:
 ```
 
 This installs the gateway binary, Python CLI wheel (into
-`~/.defenseclaw/.venv`), and plugin without downloading anything.
+`~/.defenseclaw/.venv`), and plugin without downloading anything. It is a
+fresh-install test only: `--local` refuses an existing installation and cannot
+be used to bypass the release-owned upgrade manifest or bridge resolver.
 
 ### Cut a GitHub Release
 
@@ -327,7 +329,10 @@ curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 The installer detects the platform, downloads the correct gateway
 binary + CLI wheel + plugin tarball, installs them, and prompts to run
 `defenseclaw init --enable-guardrail`. Use `--yes` / `-y` to skip
-confirmations.
+confirmations. The release installers are fresh-install-only. If the CLI,
+gateway, or managed virtual environment already exists, they exit before
+platform/dependency setup or artifact replacement. Use `scripts/upgrade.sh`,
+`scripts/upgrade.ps1`, or `defenseclaw upgrade` for an existing host.
 
 Pin a specific version:
 
@@ -728,6 +733,29 @@ defenseclaw upgrade --version 0.4.0
 # Skip confirmation prompt
 defenseclaw upgrade --yes
 ```
+
+Release `0.8.4` is the config-v7/runtime-v7 protocol bridge for the subsequent
+observability-v8 hard cut. Run the current release-owned updater without
+`--version` when crossing that boundary so its signed manifest can select and
+health-check the bridge before a fresh controller starts the target phase.
+Explicit targets that skip a required bridge fail before installed state is
+changed. Release `0.8.4` and later require `cosign`; `--allow-unverified` cannot
+override their provenance checks.
+
+Before the first service stop, the resolver commits a private phase-one journal
+covering the exact source CLI, gateway, configuration, migration cursor, policy,
+connector, and OpenClaw state plus whether the source gateway was running. If
+bridge installation, migration, start, or version-bound health fails—or the
+resolver is killed—the next invocation restores and health-checks that exact
+source before it detects versions or begins new upgrade work.
+
+The bridge commits a private phase-two recovery journal and fixed mutator
+lease before stopping services. Wheel, migration, bundle, and service child
+processes inherit that lease, so an abrupt controller or host interruption
+cannot race rollback. Re-run the release-owned resolver: it waits for any
+surviving child, bootstraps the retained authenticated `0.8.4` wheel without
+trusting a partial target install, restores exact bridge state, proves bridge
+health, and only then retries.
 
 The CLI command performs the same steps as the shell script: pre-flight
 artifact verification, config backup, stop-install-migrate-restart, and

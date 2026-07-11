@@ -78,7 +78,21 @@ ssh openclaw-vineeth 'scripts/test-upgrade-release.sh --release-root /tmp/candid
 
 The default matrix covers every published 0.4.0+ baseline that has both a Python wheel, platform gateway archives, and an upgrade command: `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. Baselines newer than the candidate target are skipped automatically so local CI does not accidentally test downgrades before a release workflow stamps the next version. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so they are not live-upgradeable by this harness.
 
-The release workflow also runs `make upgrade-smoke-matrix ARGS="--release-dir dist --baseline-mode seed"` after artifacts/checksums are finalized and before `gh release create`, so a broken upgrade path aborts before assets are published.
+The release workflow builds the runtime once, seals the exact candidate bytes,
+and runs manifest-derived Linux, macOS, and native Windows upgrade gates before
+the protected publish job can create an immutable release. The publisher then
+reads the release back and verifies the exact sealed asset set and digests.
+
+### 0.8.4 bridge rollout order
+
+Publish `0.8.4` as the latest release before merging or cutting the
+observability-v8 hard-cut release. Confirm GitHub reports the release immutable,
+let the bridge soak, and retain evidence that the sealed `0.8.4` candidate
+upgraded successfully from every version in
+`release/upgrade-baselines.json` on the required native platforms. Only after
+that proof is green should the hard-cut change land and its candidate be cut.
+The later hard-cut baseline policy must include published `0.8.4`; do not treat
+an uncut branch artifact as the bridge.
 
 ## CI Workflows
 

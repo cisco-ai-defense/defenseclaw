@@ -31,9 +31,11 @@
     Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
     by the cross-platform CLI via `defenseclaw init` / `quickstart`.
 
-    Layout matches scripts/install.sh and `defenseclaw upgrade`: binaries land in
-    %USERPROFILE%\.local\bin and the CLI venv lives in
-    %USERPROFILE%\.defenseclaw\.venv, so an installed setup upgrades in place.
+    Layout matches scripts/install.sh and the managed upgrade path: binaries
+    land in %USERPROFILE%\.local\bin and the CLI venv lives in
+    %USERPROFILE%\.defenseclaw\.venv. This installer is fresh-install-only;
+    existing installations must use scripts\upgrade.ps1 (or the supported CLI
+    upgrade command) so release manifests and hard-cut bridge rules are applied.
 
 .EXAMPLE
     $Version = "0.8.3"
@@ -120,7 +122,7 @@ Options:
   -Connector <name>    Pick agent connector ($($ConnectorChoices -join '|'))
   -NoOpenclaw          Install gateway/CLI only when no connector is selected
   -Version <x.y.z>     Install a specific release version
-  -Local <dir>         Install from a local dist directory instead of downloading
+  -Local <dir>         Fresh install from a local dist directory (never upgrades)
   -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install
   -QuickstartMode <m>  Pass --mode m to quickstart (observe|action)
   -Yes                 Skip confirmation prompts (for CI/automation)
@@ -137,6 +139,54 @@ Environment variables:
 function Test-HasCommand {
     param([string]$Name)
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Test-InstallMarker {
+    param([string]$Path)
+
+    if (Test-Path -LiteralPath $Path) { return $true }
+
+    # Test-Path can report false for a dangling reparse point. Enumerating the
+    # parent catches that entry without following it, so a broken installer
+    # symlink cannot bypass the fresh-install-only boundary.
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    if (-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        return $false
+    }
+    try {
+        return [bool](Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop |
+            Where-Object { $_.Name -eq $leaf } |
+            Select-Object -First 1)
+    } catch {
+        # An unreadable managed parent is not proof that the target is fresh.
+        return $true
+    }
+}
+
+function Assert-FreshInstall {
+    # install.ps1 is deliberately fresh-install-only.  In particular, -Local
+    # is a developer convenience for a *new* installation; it must never turn
+    # into an unsigned/unmanifested upgrade path around the hard-cut resolver.
+    $markers = @(
+        $DefenseClawHome,
+        $Venv,
+        (Join-Path $Venv "Scripts\defenseclaw.exe"),
+        (Join-Path $InstallDir "defenseclaw.cmd"),
+        (Join-Path $InstallDir "defenseclaw-gateway.exe")
+    )
+    $existing = @($markers | Where-Object { Test-InstallMarker -Path $_ })
+    $installedCli = Get-Command defenseclaw -CommandType Application, ExternalScript -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($installedCli) {
+        $existing += [string]$installedCli.Source
+    }
+    if ($existing.Count -eq 0) { return }
+
+    Write-Err2 "An existing DefenseClaw installation was detected."
+    Write-Host "  No changes were made." -ForegroundColor Yellow
+    Write-Host "  Use scripts\upgrade.ps1 (or defenseclaw upgrade where supported) to upgrade safely." -ForegroundColor Yellow
+    exit 1
 }
 
 # ── Platform detection ────────────────────────────────────────────────────────
@@ -455,6 +505,10 @@ function Write-Success {
 
 function Main {
     if ($Help) { Show-Help; return }
+
+    # This guard must precede platform/dependency discovery: Install-Uv and
+    # Ensure-Python can mutate the host even before release artifacts are read.
+    Assert-FreshInstall
 
     Write-Host ""
     Write-Host "  DefenseClaw Installer (Windows)" -ForegroundColor White

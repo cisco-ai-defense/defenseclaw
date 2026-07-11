@@ -38,7 +38,6 @@ from pathlib import Path
 
 from defenseclaw.envvars import load_registry
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Directories to skip wholesale. Each entry is checked against any
@@ -96,6 +95,11 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "scripts/gen_envvars_docs.py",
     "docs/ENV-VARS.md",
     "docs-site/content/docs/reference/env-vars.mdx",
+    # Historical-upgrade harness fixture names model environment entries that
+    # the later v8 migration will generate. They are test data, not bridge
+    # runtime inputs, so the v7 bridge registry must not advertise them.
+    "scripts/test-upgrade-release.sh",
+    "cli/tests/test_upgrade_release_smoke_contract.py",
     # Configuration docs that explicitly mention env vars users SOMETIMES
     # try to set (DEFENSECLAW_DATA_DIR, DEFENSECLAW_LOG_LEVEL, ...) but
     # which DefenseClaw does NOT honor. These pages tell users to use
@@ -201,7 +205,7 @@ def _extract_envvar_references(repo_root: Path) -> dict[str, list[str]]:
             if _is_allowlisted_path(rel):
                 continue
             try:
-                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                with open(full, encoding="utf-8", errors="replace") as fh:
                     for lineno, line in enumerate(fh, start=1):
                         for match in _ENV_TOKEN.finditer(line):
                             token = match.group(0)

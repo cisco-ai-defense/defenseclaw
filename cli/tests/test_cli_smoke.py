@@ -51,6 +51,68 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Initialize DefenseClaw environment", result.output)
 
+    def test_upgrade_recovers_before_config_load_then_reexecs_fresh_bridge(self):
+        from defenseclaw.main import cli
+
+        argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.5"]
+        runner = CliRunner()
+        with (
+            patch.object(sys, "argv", argv),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._recover_interrupted_hard_cut",
+                return_value=True,
+            ) as recover,
+            patch("defenseclaw.main.os.execve") as execve,
+        ):
+            result = runner.invoke(cli, argv[1:])
+
+        self.assertNotEqual(result.exit_code, 0)
+        recover.assert_called_once_with()
+        execve.assert_called_once()
+        executable, child_argv, child_env = execve.call_args.args
+        self.assertEqual(executable, sys.executable)
+        self.assertEqual(
+            child_argv,
+            [sys.executable, "-I", "-m", "defenseclaw.main", *argv[1:]],
+        )
+        self.assertNotIn("PYTHONHOME", child_env)
+        self.assertNotIn("PYTHONPATH", child_env)
+
+    def test_upgrade_help_never_triggers_interrupted_recovery(self):
+        from defenseclaw.main import cli
+
+        argv = ["defenseclaw", "upgrade", "--help"]
+        runner = CliRunner()
+        with (
+            patch.object(sys, "argv", argv),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._recover_interrupted_hard_cut"
+            ) as recover,
+        ):
+            result = runner.invoke(cli, argv[1:])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Usage:", result.output)
+        recover.assert_not_called()
+
+    def test_upgrade_recovery_reexec_failure_is_controlled(self):
+        from defenseclaw.main import cli
+
+        argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.5"]
+        runner = CliRunner()
+        with (
+            patch.object(sys, "argv", argv),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._recover_interrupted_hard_cut",
+                return_value=True,
+            ),
+            patch("defenseclaw.main.os.execve", side_effect=OSError("injected exec failure")),
+        ):
+            result = runner.invoke(cli, argv[1:])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Hard-cut recovery re-exec failed: injected exec failure", result.output)
+
     def test_setup_splunk_o11y_bootstraps_clean_home(self):
         from defenseclaw.main import cli
 

@@ -168,6 +168,20 @@ class TestReleaseInvariants(unittest.TestCase):
         self.assertEqual(manifest["release_version"], __version__)
         self.assertEqual(manifest["required_cli_migrations"], expected)
 
+    def test_stamped_0_8_4_manifest_is_protocol_one_reachable_protocol_two_controller(self):
+        """Exercise the bridge release policy without stamping source files."""
+        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
+
+        self.assertEqual(
+            generator["release_upgrade_policy"]("0.8.4"),
+            {"min_upgrade_protocol": 1},
+        )
+        self.assertEqual(generator["controller_upgrade_protocol"](), 2)
+        self.assertNotIn(
+            "required_bridge_version",
+            generator["release_upgrade_policy"]("0.8.4"),
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

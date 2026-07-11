@@ -34,7 +34,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-UPGRADE_PROTOCOL_VERSION = 1
+LEGACY_UPGRADE_PROTOCOL_VERSION = 1
+HARD_CUT_UPGRADE_PROTOCOL_VERSION = 2
+OBSERVABILITY_V8_BRIDGE_VERSION = "0.8.4"
+OBSERVABILITY_V8_HARD_CUT_VERSION = "0.8.5"
+UPGRADE_BASELINES_PATH = ROOT / "release" / "upgrade-baselines.json"
 
 
 def _ver_tuple(value: str) -> tuple[int, int, int]:
@@ -87,6 +91,7 @@ def current_version() -> str:
 def migration_versions() -> list[str]:
     path = ROOT / "cli" / "defenseclaw" / "migrations.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    function_names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     for node in tree.body:
         value: ast.AST | None = None
         if isinstance(node, ast.Assign) and any(
@@ -102,11 +107,19 @@ def migration_versions() -> list[str]:
             raise RuntimeError("MIGRATIONS must be a list literal")
         versions: list[str] = []
         for item in value.elts:
-            if not isinstance(item, ast.Tuple) or not item.elts:
-                raise RuntimeError("each MIGRATIONS entry must be a tuple")
-            version_node = item.elts[0]
+            if not isinstance(item, ast.Tuple) or len(item.elts) != 3:
+                raise RuntimeError("each MIGRATIONS entry must be a three-field tuple")
+            version_node, description_node, callable_node = item.elts
             if not isinstance(version_node, ast.Constant) or not isinstance(version_node.value, str):
                 raise RuntimeError("each MIGRATIONS entry must start with a string version")
+            if (
+                not isinstance(description_node, ast.Constant)
+                or not isinstance(description_node.value, str)
+                or not description_node.value
+            ):
+                raise RuntimeError("each MIGRATIONS entry must contain a non-empty string description")
+            if not isinstance(callable_node, ast.Name) or callable_node.id not in function_names:
+                raise RuntimeError("each MIGRATIONS entry must reference a module-level migration function")
             _ver_tuple(version_node.value)
             versions.append(version_node.value)
         expected = sorted(versions, key=_ver_tuple)
@@ -118,26 +131,106 @@ def migration_versions() -> list[str]:
     raise RuntimeError("MIGRATIONS registry not found")
 
 
+def controller_upgrade_protocol() -> int:
+    """Read the protocol supported by the controller shipped in the wheel.
+
+    This is deliberately separate from ``min_upgrade_protocol``.  The 0.8.4
+    bridge must be reachable by protocol-1 controllers while installing a
+    protocol-2 controller capable of driving the 0.8.5 hard cut.
+    """
+    path = ROOT / "cli" / "defenseclaw" / "commands" / "cmd_upgrade.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "_UPGRADE_PROTOCOL_VERSION"
+            for target in node.targets
+        ):
+            value = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_UPGRADE_PROTOCOL_VERSION"
+        ):
+            value = node.value
+        if value is None:
+            continue
+        if (
+            not isinstance(value, ast.Constant)
+            or not isinstance(value.value, int)
+            or isinstance(value.value, bool)
+            or value.value < 1
+        ):
+            raise RuntimeError("_UPGRADE_PROTOCOL_VERSION must be a positive integer literal")
+        return value.value
+    raise RuntimeError("_UPGRADE_PROTOCOL_VERSION not found")
+
+
+def published_upgrade_baselines() -> list[str]:
+    """Load the single release-gate/source-support matrix."""
+    try:
+        payload = json.loads(UPGRADE_BASELINES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not load {UPGRADE_BASELINES_PATH}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise RuntimeError("upgrade baseline policy must be a schema_version 1 object")
+    baselines = payload.get("published_baselines")
+    if not isinstance(baselines, list) or not baselines:
+        raise RuntimeError("published_baselines must be a non-empty list")
+    if not all(isinstance(value, str) and SEMVER_RE.fullmatch(value) for value in baselines):
+        raise RuntimeError("published_baselines must contain canonical X.Y.Z versions")
+    expected = sorted(baselines, key=_ver_tuple, reverse=True)
+    if baselines != expected:
+        raise RuntimeError(
+            f"published_baselines must be strictly descending: got {baselines}, want {expected}"
+        )
+    if len(baselines) != len(set(baselines)):
+        raise RuntimeError(f"published_baselines contains duplicates: {baselines}")
+    return baselines
+
+
+def release_upgrade_policy(version: str) -> dict[str, Any]:
+    """Return transition policy independently of controller capability."""
+    if _ver_tuple(version) < _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION):
+        return {"min_upgrade_protocol": LEGACY_UPGRADE_PROTOCOL_VERSION}
+
+    bridge_t = _ver_tuple(OBSERVABILITY_V8_BRIDGE_VERSION)
+    auto_bridge_from = [
+        baseline
+        for baseline in published_upgrade_baselines()
+        if _ver_tuple(baseline) < bridge_t
+    ]
+    if not auto_bridge_from:
+        raise RuntimeError("hard-cut policy has no tested pre-bridge source versions")
+    return {
+        "min_upgrade_protocol": HARD_CUT_UPGRADE_PROTOCOL_VERSION,
+        "minimum_source_version": OBSERVABILITY_V8_BRIDGE_VERSION,
+        "required_bridge_version": OBSERVABILITY_V8_BRIDGE_VERSION,
+        "auto_bridge_from": auto_bridge_from,
+    }
+
+
 def build_manifest() -> dict[str, Any]:
     version = current_version()
     migrations = migration_versions()
     current_t = _ver_tuple(version)
-    future = [migration for migration in migrations if _ver_tuple(migration) > current_t]
-    if future:
-        raise RuntimeError(
-            "migration registry contains versions newer than the package version "
-            f"{version}: {', '.join(future)}. Bump the release version first."
-        )
-
+    # Migration rows may be forward-keyed before a release is cut. This lets a
+    # migration land and pass source CI without pretending that the unstamped
+    # checkout is already the future release. The release workflow stamps all
+    # package version sources from the tag before invoking this generator, so a
+    # row becomes mandatory in the manifest precisely when the release version
+    # reaches that row.
     required = [migration for migration in migrations if _ver_tuple(migration) <= current_t]
-    return {
+    manifest = {
         "schema_version": 1,
         "release_version": version,
-        "min_upgrade_protocol": UPGRADE_PROTOCOL_VERSION,
+        "controller_upgrade_protocol": controller_upgrade_protocol(),
         "migration_failure_policy": "fail" if required else "warn",
         "required_cli_migrations": required,
         "generated_by": "scripts/generate-upgrade-manifest.py",
     }
+    manifest.update(release_upgrade_policy(version))
+    return manifest
 
 
 def main(argv: list[str] | None = None) -> int:

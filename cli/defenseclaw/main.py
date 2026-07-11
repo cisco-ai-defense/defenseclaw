@@ -22,6 +22,7 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import os
 import sys
 
 import click
@@ -100,6 +101,33 @@ def cli(ctx: click.Context) -> None:
     app = ctx.obj
 
     invoked = ctx.invoked_subcommand
+    if invoked == "upgrade" and not _is_help_invocation(ctx):
+        from defenseclaw.commands.cmd_upgrade import _recover_interrupted_hard_cut
+
+        try:
+            recovered = _recover_interrupted_hard_cut()
+        except (OSError, ValueError) as exc:
+            click.echo(f"Interrupted hard-cut recovery failed: {exc}", err=True)
+            raise SystemExit(1) from exc
+        if recovered:
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except (OSError, ValueError):
+                    pass
+            child_env = os.environ.copy()
+            child_env.pop("PYTHONHOME", None)
+            child_env.pop("PYTHONPATH", None)
+            try:
+                os.execve(
+                    sys.executable,
+                    [sys.executable, "-I", "-m", "defenseclaw.main", *sys.argv[1:]],
+                    child_env,
+                )
+            except OSError as exc:
+                click.echo(f"Hard-cut recovery re-exec failed: {exc}", err=True)
+                raise SystemExit(1) from exc
+            raise SystemExit("hard-cut recovery re-exec unexpectedly returned")
     if invoked in SKIP_LOAD_COMMANDS or _is_help_invocation(ctx):
         return
 

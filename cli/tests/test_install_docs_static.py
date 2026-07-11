@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +61,52 @@ INSTALLER_FILES = (
     "scripts/install.sh",
     "scripts/install.ps1",
 )
+
+
+def test_posix_installer_refuses_partial_home_and_dangling_entrypoints(tmp_path: Path) -> None:
+    installer = ROOT / "scripts/install.sh"
+    for case in ("partial-home", "dangling-cli"):
+        home = tmp_path / case / "home"
+        data_home = home / ".defenseclaw"
+        home.mkdir(parents=True)
+        if case == "partial-home":
+            data_home.mkdir()
+            marker = data_home / "partial-state"
+            marker.write_bytes(b"preserve\n")
+        else:
+            install_dir = home / ".local/bin"
+            install_dir.mkdir(parents=True)
+            marker = install_dir / "defenseclaw"
+            marker.symlink_to(home / "missing-cli")
+
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "HOME": str(home),
+                "DEFENSECLAW_HOME": str(data_home),
+                "PATH": "/usr/bin:/bin",
+            }
+        )
+        completed = subprocess.run(
+            ["/bin/bash", str(installer), "--yes", "--connector", "none"],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+
+        output = completed.stdout + completed.stderr
+        assert completed.returncode == 1, output
+        assert "An existing DefenseClaw installation was detected" in output
+        assert "No changes were made" in output
+        assert "Detecting platform" not in output
+        if case == "partial-home":
+            assert marker.read_bytes() == b"preserve\n"
+        else:
+            assert marker.is_symlink()
+            assert not marker.exists()
 
 
 def test_quickstart_docs_do_not_pipe_main_installer() -> None:

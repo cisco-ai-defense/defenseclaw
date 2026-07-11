@@ -17,11 +17,16 @@
 
 set -euo pipefail
 
+# Match the production installer/upgrade custody boundary and make the smoke
+# deterministic on development hosts with a permissive login umask.
+umask 077
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="cisco-ai-defense/defenseclaw"
 FROM_VERSION="${FROM_VERSION:-0.7.2}"
 FROM_VERSIONS="${FROM_VERSIONS:-}"
 TARGET_VERSION="${TARGET_VERSION:-}"
+V8_ACTIVATION_VERSION="0.8.5"
 RELEASE_ROOT="${RELEASE_ROOT:-}"
 RELEASE_DIR="${RELEASE_DIR:-}"
 BASELINE_MODE="${BASELINE_MODE:-auto}" # auto | install | seed
@@ -61,8 +66,9 @@ Options:
 
 Examples:
   make upgrade-smoke
+  make upgrade-smoke-matrix
   scripts/test-upgrade-release.sh --from-version 0.7.2
-  scripts/test-upgrade-release.sh --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.0,0.5.0,0.4.0"
+  scripts/test-upgrade-release.sh --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1"
   scripts/test-upgrade-release.sh --release-dir dist --baseline-mode seed
 
 For a Linux host without the repo's Go toolchain, build/copy artifacts first:
@@ -225,6 +231,10 @@ raise SystemExit(0 if parse(sys.argv[1]) <= parse(sys.argv[2]) else 1)
 PY
 }
 
+target_uses_observability_v8() {
+    version_lte "${V8_ACTIVATION_VERSION}" "${TARGET_VERSION}"
+}
+
 validate_inputs() {
     normalize_baseline_versions
     [[ "${TARGET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid --target-version: ${TARGET_VERSION}"
@@ -345,6 +355,28 @@ tail_log() {
     fi
 }
 
+tail_v8_upgrade_log_secret_safe() {
+    local file="$1"
+    [[ -f "${file}" ]] || return 0
+    printf '\n--- %s redacted tail ---\n' "${file}" >&2
+    python3 - "${file}" <<'PY' >&2
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+protected = (
+    "upgrade-smoke-flat-protected-value",
+    "upgrade-smoke-splunk-protected-value",
+    "upgrade-smoke-http-protected-value",
+    "Bearer upgrade-smoke-otlp-protected-value",
+    "upgrade-smoke-otlp-protected-value",
+)
+for value in protected:
+    text = text.replace(value, "[REDACTED]")
+print("\n".join(text.splitlines()[-80:]))
+PY
+}
+
 download_old_asset() {
     local name="$1"
     local dest="$2"
@@ -408,8 +440,8 @@ install_baseline() {
     seed_baseline_install
 }
 
-seed_legacy_otel_fixture() {
-    log "Seeding legacy flat OTel upgrade fixture"
+seed_pre_v8_otel_fixture() {
+    log "Seeding pre-v8 flat OTel upgrade fixture"
     mkdir -p "${SMOKE_HOME}/.defenseclaw"
     cat >"${SMOKE_HOME}/.defenseclaw/config.yaml" <<'YAML'
 config_version: 6
@@ -439,6 +471,152 @@ otel:
 YAML
 }
 
+seed_v8_observability_fixture() {
+    log "Seeding representative comment-heavy v7 observability fixture"
+    local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    mkdir -p "${data_dir}/state" "${evidence_dir}"
+    chmod 700 "${data_dir}" "${data_dir}/state" "${evidence_dir}"
+
+    # The values are deliberately recognizable test canaries. Verification
+    # checks that they move into the private .env transaction and never occur
+    # in the v8 YAML or command output. They are never printed by this script.
+    cat >"${data_dir}/config.yaml" <<YAML
+# ┌──── OBSERVABILITY UPGRADE SMOKE ────┐
+# comments, order, and unrelated settings must survive
+config_version: 7
+data_dir: ${data_dir}
+audit_db: ${data_dir}/state/audit-custom.db # custom audit path
+judge_bodies_db: ${data_dir}/state/judge-custom.db # custom judge path
+guardrail:
+  enabled: true
+  retain_judge_bodies: false
+otel:
+  enabled: true
+  protocol: grpc
+  endpoint: 127.0.0.1:4317
+  headers:
+    X-Flat-Protected: upgrade-smoke-flat-protected-value
+  traces:
+    enabled: true
+    sampler: always_on
+  metrics:
+    enabled: true
+    export_interval_s: 60
+    temporality: delta
+  logs:
+    enabled: true
+    emit_individual_findings: true
+  resource:
+    attributes:
+      service.name: defenseclaw-upgrade-smoke
+      deployment.environment: historical-matrix
+  destinations:
+    - name: existing-otlp
+      preset: generic-otlp
+      enabled: true
+      protocol: grpc
+      endpoint: collector.example.test:4317
+      traces: {enabled: true}
+      metrics: {enabled: false}
+      logs: {enabled: true}
+    - name: galileo
+      preset: galileo
+      enabled: true
+      protocol: http
+      endpoint: https://api.galileo.ai/otel/traces
+      traces: {enabled: true}
+      metrics: {enabled: true}
+      logs: {enabled: true}
+audit_sinks:
+  - name: splunk-protected
+    kind: splunk_hec
+    enabled: true
+    splunk_hec:
+      endpoint: https://splunk.example.test/services/collector
+      token: upgrade-smoke-splunk-protected-value
+  - name: http-protected
+    kind: http_jsonl
+    enabled: true
+    http_jsonl:
+      url: https://events.example.test/v1/audit
+      bearer_token: upgrade-smoke-http-protected-value
+  - name: audit-otlp
+    kind: otlp_logs
+    enabled: true
+    otlp_logs:
+      endpoint: https://audit.example.test/v1/logs
+      protocol: http
+      logger_name: defenseclaw.upgrade-smoke
+      headers:
+        Authorization: Bearer upgrade-smoke-otlp-protected-value
+observability:
+  connectors:
+    codex:
+      audit_sinks: [] # explicit connector export suppression
+      webhooks: []
+privacy:
+  disable_redaction: false # compatibility redaction must be materialized
+ai_discovery:
+  enabled: true
+  emit_otel: false # legacy provider-specific export override
+notifications:
+  enabled: true # unrelated section survives
+YAML
+    cat >"${data_dir}/.env" <<'ENV'
+# exact pre-upgrade environment bytes must be recoverable
+PRESERVE_UPGRADE_SMOKE_ENV=preserved
+ENV
+    chmod 600 "${data_dir}/config.yaml" "${data_dir}/.env"
+    cp -p "${data_dir}/config.yaml" "${evidence_dir}/config.v7.source"
+    cp -p "${data_dir}/.env" "${evidence_dir}/environment.v7.source"
+
+    # An installed but stopped stack exercises the production bundle refresh
+    # without requiring Docker or a remote service. Runtime restart behavior,
+    # down-without--v, fault rollback, and live inventory are covered by the
+    # focused production contract tests invoked once for every v8 smoke run.
+    cp -R "${ROOT}/bundles/local_observability_stack" "${data_dir}/observability-stack"
+    mkdir -p \
+        "${data_dir}/observability-stack/operator" \
+        "${data_dir}/observability-stack/grafana/dashboards"
+    cat >"${data_dir}/observability-stack/operator/volume-continuity.txt" <<'EOF'
+operator-owned volume continuity marker
+EOF
+    cat >"${data_dir}/observability-stack/grafana/dashboards/team-upgrade-smoke.json" <<'EOF'
+{"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}
+EOF
+}
+
+seed_upgrade_fixture() {
+    if target_uses_observability_v8; then
+        seed_v8_observability_fixture
+    else
+        seed_pre_v8_otel_fixture
+    fi
+}
+
+run_v8_source_contract_tests() {
+    target_uses_observability_v8 || return 0
+    if [[ "${UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS:-0}" == "1" ]]; then
+        warn "Skipping v8 source contract tests by explicit UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS=1"
+        return 0
+    fi
+
+    local result_log="${WORKDIR}/v8-source-contracts.log"
+    touch "${result_log}"
+    chmod 600 "${result_log}"
+    log "Proving v8 permission, retry, rollback, and bundle contracts"
+    if ! PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -q \
+        cli/tests/test_observability_v8_activation.py \
+        cli/tests/test_observability_v8_upgrade_migration.py \
+        cli/tests/test_local_observability_bundle_upgrade.py \
+        cli/tests/test_local_observability_upgrade_wiring.py \
+        >"${result_log}" 2>&1; then
+        die "v8 source contract tests failed (private log: ${result_log})"
+    fi
+    ok "v8 source contracts passed (permission, retry, rollback, bundle)"
+}
+
 patch_installed_upgrade_endpoint() {
     local upgrade_py
     upgrade_py="$(find "${SMOKE_HOME}/.defenseclaw/.venv" \
@@ -460,6 +638,27 @@ path.write_text(text.replace(old, new, 1), encoding="utf-8")
 PY
 }
 
+prepare_isolated_docker_path() {
+    # The fixture represents an installed but stopped stack. An unreachable
+    # DOCKER_HOST alone is ambiguous when a developer's real local stack has
+    # bound the standard ports, and the production refresher correctly fails
+    # closed in that situation. Put a private, purpose-limited docker shim
+    # first on PATH so only this throwaway HOME observes an authoritative empty
+    # `docker ps`; every mutating docker operation remains forbidden.
+    local shim_dir="${SMOKE_HOME}/.upgrade-test-bin"
+    mkdir -p "${shim_dir}"
+    chmod 700 "${shim_dir}"
+    cat >"${shim_dir}/docker" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "ps" ]; then
+    exit 0
+fi
+printf '%s\n' 'upgrade smoke docker isolation forbids mutating operations' >&2
+exit 125
+SH
+    chmod 700 "${shim_dir}/docker"
+}
+
 upgrade_supports_allow_unverified() {
     HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
     PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
@@ -473,15 +672,26 @@ candidate_has_checksum_signature() {
 
 run_upgrade() {
     log "Running upgrade ${FROM_VERSION} -> ${TARGET_VERSION}"
+    prepare_isolated_docker_path
     local -a args=(upgrade --version "${TARGET_VERSION}" --yes --health-timeout "${HEALTH_TIMEOUT}")
     if upgrade_supports_allow_unverified && ! candidate_has_checksum_signature; then
         args+=(--allow-unverified)
     fi
 
+    # The fixture represents an installed but stopped optional stack. Point
+    # Docker discovery at a nonexistent private socket so a developer running
+    # this smoke cannot stop a real host stack that shares the compose project
+    # name. Running-stack restart/down-without--v is proven by the invoked
+    # production contract tests.
     if ! HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-        PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw "${args[@]}" \
+        DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
+        PATH="${SMOKE_HOME}/.upgrade-test-bin:${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw "${args[@]}" \
         >"${SMOKE_HOME}/upgrade.log" 2>&1; then
-        tail_log "${SMOKE_HOME}/upgrade.log"
+        if target_uses_observability_v8; then
+            tail_v8_upgrade_log_secret_safe "${SMOKE_HOME}/upgrade.log"
+        else
+            tail_log "${SMOKE_HOME}/upgrade.log"
+        fi
         die "upgrade command failed"
     fi
 
@@ -501,6 +711,10 @@ verify_upgrade() {
     log "Verifying upgraded install"
     local venv_python="${SMOKE_HOME}/.defenseclaw/.venv/bin/python"
     local release_dir="${RELEASE_ROOT}/${TARGET_VERSION}"
+    local require_v8=0
+    if target_uses_observability_v8; then
+        require_v8=1
+    fi
 
     HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
     PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
@@ -512,13 +726,19 @@ verify_upgrade() {
         defenseclaw-gateway --version | grep -F "${TARGET_VERSION}" >/dev/null \
         || die "defenseclaw-gateway --version does not report ${TARGET_VERSION}"
 
-    "${venv_python}" - "${SMOKE_HOME}/.defenseclaw" "${release_dir}/upgrade-manifest.json" <<'PY'
+    "${venv_python}" - \
+        "${SMOKE_HOME}/.defenseclaw" \
+        "${release_dir}/upgrade-manifest.json" \
+        "${require_v8}" \
+        "${V8_ACTIVATION_VERSION}" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 data_dir = Path(sys.argv[1])
 manifest_path = Path(sys.argv[2])
+require_v8 = sys.argv[3] == "1"
+v8_activation_version = sys.argv[4]
 cursor_path = data_dir / ".migration_state.json"
 cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -530,10 +750,289 @@ missing = [
 ]
 if missing:
     raise SystemExit(f"missing required migrations in cursor: {', '.join(missing)}")
+if require_v8:
+    if v8_activation_version not in manifest.get("required_cli_migrations", []):
+        raise SystemExit("target manifest does not require observability-v8 migration")
+    if v8_activation_version not in applied:
+        raise SystemExit("observability-v8 migration is absent from the cursor")
 print("cursor_applied=" + ",".join(cursor.get("applied", [])))
 PY
 
-    "${venv_python}" - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+    if target_uses_observability_v8; then
+        "${venv_python}" - \
+            "${SMOKE_HOME}/.defenseclaw" \
+            "${SMOKE_HOME}/fixture-evidence" \
+            "${SMOKE_HOME}/upgrade.log" \
+            "${TARGET_VERSION}" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import stat
+import sys
+
+from dotenv import dotenv_values
+import yaml
+from defenseclaw.paths import bundled_local_observability_dir
+
+data_dir = Path(sys.argv[1])
+evidence_dir = Path(sys.argv[2])
+upgrade_log = Path(sys.argv[3])
+target_version = sys.argv[4]
+config_path = data_dir / "config.yaml"
+config_bytes = config_path.read_bytes()
+config_text = config_bytes.decode("utf-8")
+config = yaml.safe_load(config_text) or {}
+
+if config.get("config_version") != 8:
+    raise SystemExit(f"config_version={config.get('config_version')!r}; want 8")
+for legacy in ("otel", "audit_sinks", "privacy"):
+    if legacy in config:
+        raise SystemExit(f"rejected legacy block remains in v8 config: {legacy}")
+if (config.get("ai_discovery") or {}).get("emit_otel") is not None:
+    raise SystemExit("legacy ai_discovery.emit_otel remains in v8 config")
+
+observability = config.get("observability") or {}
+if (observability.get("defaults") or {}).get("redaction_profile") != "legacy-v7":
+    raise SystemExit("legacy-v7 compatibility redaction was not materialized")
+if (observability.get("trace_policy") or {}).get("sampler") != "always_on":
+    raise SystemExit("trace sampler was not preserved")
+if observability.get("metric_policy") != {
+    "export_interval_seconds": 60,
+    "temporality": "delta",
+}:
+    raise SystemExit("metric interval/temporality was not preserved")
+if (observability.get("resource") or {}).get("attributes") != {
+    "service.name": "defenseclaw-upgrade-smoke",
+    "deployment.environment.name": "historical-matrix",
+}:
+    raise SystemExit("resource attributes were not canonicalized exactly")
+if observability.get("local") != {
+    "path": str(data_dir / "state/audit-custom.db"),
+    "judge_bodies_path": str(data_dir / "state/judge-custom.db"),
+}:
+    raise SystemExit("non-default audit/judge paths were not preserved")
+if (config.get("guardrail") or {}).get("retain_judge_bodies") is not False:
+    raise SystemExit("judge-body retention enablement was not preserved")
+
+destinations = {
+    item.get("name"): item
+    for item in observability.get("destinations", [])
+    if isinstance(item, dict) and isinstance(item.get("name"), str)
+}
+required_destinations = {
+    "gateway-jsonl",
+    "gateway-console",
+    "local-observability",
+    "existing-otlp",
+    "galileo",
+    "galileo-logs-metrics",
+    "splunk-protected",
+    "http-protected",
+    "audit-otlp",
+}
+missing = sorted(required_destinations - destinations.keys())
+if missing:
+    raise SystemExit(f"missing migrated destinations: {missing!r}")
+local = destinations["local-observability"]
+if (
+    local.get("kind") != "otlp"
+    or local.get("protocol") != "grpc"
+    or local.get("endpoint") != "127.0.0.1:4317"
+    or (local.get("network_safety") or {}).get("allow_private_networks") is not True
+):
+    raise SystemExit("flat OTel transport did not become local-observability")
+if local.get("headers") != {
+    "X-Flat-Protected": {"env": "DEFENSECLAW_MIGRATED_LOCAL_OBSERVABILITY_X_FLAT_PROTECTED"}
+}:
+    raise SystemExit("flat OTel header was not promoted to a protected reference")
+
+def route_signals(destination: dict) -> set[tuple[str, ...]]:
+    return {
+        tuple(route.get("signals", []))
+        for route in destination.get("routes", [])
+        if isinstance(route, dict) and route.get("action", "send") == "send"
+    }
+
+gateway_jsonl = destinations["gateway-jsonl"]
+if (
+    gateway_jsonl.get("kind") != "jsonl"
+    or gateway_jsonl.get("enabled", True) is not True
+    or gateway_jsonl.get("path") != str(data_dir / "gateway.jsonl")
+    or gateway_jsonl.get("rotation")
+    != {"max_size_mb": 50, "max_backups": 5, "max_age_days": 30, "compress": True}
+    or route_signals(gateway_jsonl) != {("logs",)}
+):
+    raise SystemExit("gateway JSONL behavior was not generated exactly")
+gateway_console = destinations["gateway-console"]
+if gateway_console.get("kind") != "console" or route_signals(gateway_console) != {("logs",)}:
+    raise SystemExit("gateway console behavior was not generated exactly")
+
+if not {("logs",), ("traces",), ("metrics",)}.issubset(route_signals(local)):
+    raise SystemExit("flat OTel logs/traces/metrics routes were not preserved")
+if route_signals(destinations["existing-otlp"]) != {("logs",), ("traces",)}:
+    raise SystemExit("named OTel signal narrowing was not preserved")
+galileo = destinations["galileo"]
+if galileo.get("preset") != "galileo" or route_signals(galileo) != {("traces",)}:
+    raise SystemExit("Galileo trace preset/route was not preserved")
+if (galileo.get("batch") or {}).get("scheduled_delay_ms") != 1000:
+    raise SystemExit("Galileo inherited delay did not receive the v8 preset")
+if route_signals(destinations["galileo-logs-metrics"]) != {("logs",), ("metrics",)}:
+    raise SystemExit("Galileo non-trace signals were not split losslessly")
+
+for destination_name in required_destinations:
+    destination = destinations[destination_name]
+    for route in destination.get("routes", []):
+        if not isinstance(route, dict) or route.get("action", "send") != "send":
+            continue
+        signals = set(route.get("signals", []))
+        if signals.intersection({"logs", "traces"}) and route.get("redaction_profile") != "legacy-v7":
+            raise SystemExit(f"compatibility redaction missing from {destination_name}")
+
+if destinations["splunk-protected"].get("kind") != "splunk_hec":
+    raise SystemExit("Splunk HEC audit sink was not generated")
+if destinations["http-protected"].get("kind") != "http_jsonl":
+    raise SystemExit("HTTP JSONL audit sink was not generated")
+if destinations["audit-otlp"].get("kind") != "otlp":
+    raise SystemExit("OTLP audit-log sink was not generated")
+for destination_name in ("splunk-protected", "http-protected", "audit-otlp"):
+    if route_signals(destinations[destination_name]) != {("logs",)}:
+        raise SystemExit(f"audit push route mismatch for {destination_name}")
+
+for destination_name in ("local-observability", "existing-otlp", "galileo", "galileo-logs-metrics"):
+    routes = destinations[destination_name].get("routes", [])
+    if not any(
+        isinstance(route, dict)
+        and route.get("selector") == {"buckets": ["ai.discovery"]}
+        and route.get("action") == "drop"
+        for route in routes
+    ):
+        raise SystemExit(f"ai_discovery.emit_otel=false was lost for {destination_name}")
+
+for destination_name in ("splunk-protected", "http-protected", "audit-otlp"):
+    routes = destinations[destination_name].get("routes", [])
+    if not any(
+        isinstance(route, dict)
+        and route.get("selector") == {"connectors": ["codex"]}
+        and route.get("action") == "drop"
+        for route in routes
+    ):
+        raise SystemExit(f"connector audit suppression was lost for {destination_name}")
+if destinations["splunk-protected"].get("token_env") != "DEFENSECLAW_MIGRATED_SPLUNK_PROTECTED_TOKEN":
+    raise SystemExit("Splunk token was not promoted")
+if destinations["http-protected"].get("bearer_env") != "DEFENSECLAW_MIGRATED_HTTP_PROTECTED_BEARER":
+    raise SystemExit("HTTP bearer token was not promoted")
+audit_otlp = destinations["audit-otlp"]
+if audit_otlp.get("logger_name") != "defenseclaw.upgrade-smoke":
+    raise SystemExit("OTLP logger_name was not preserved")
+if audit_otlp.get("headers") != {
+    "Authorization": {"env": "DEFENSECLAW_MIGRATED_AUDIT_OTLP_AUTHORIZATION"}
+}:
+    raise SystemExit("OTLP audit header was not promoted")
+
+expected_environment = {
+    "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
+    "DEFENSECLAW_MIGRATED_LOCAL_OBSERVABILITY_X_FLAT_PROTECTED": "upgrade-smoke-flat-protected-value",
+    "DEFENSECLAW_MIGRATED_SPLUNK_PROTECTED_TOKEN": "upgrade-smoke-splunk-protected-value",
+    "DEFENSECLAW_MIGRATED_HTTP_PROTECTED_BEARER": "upgrade-smoke-http-protected-value",
+    "DEFENSECLAW_MIGRATED_AUDIT_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-otlp-protected-value",
+}
+actual_environment = dotenv_values(data_dir / ".env")
+for name, value in expected_environment.items():
+    if actual_environment.get(name) != value:
+        raise SystemExit(f"protected environment promotion mismatch for {name}")
+if os.name != "nt" and stat.S_IMODE((data_dir / ".env").stat().st_mode) != 0o600:
+    raise SystemExit("promoted .env is not mode 0600")
+protected_values = tuple(value for name, value in expected_environment.items() if name != "PRESERVE_UPGRADE_SMOKE_ENV")
+log_text = upgrade_log.read_text(encoding="utf-8", errors="replace")
+if any(value in config_text or value in log_text for value in protected_values):
+    raise SystemExit("protected fixture value escaped into v8 YAML or upgrade output")
+
+source_config = evidence_dir / "config.v7.source"
+source_environment = evidence_dir / "environment.v7.source"
+normal_backups = sorted((data_dir / "backups").glob("upgrade-*/config.yaml"))
+if not normal_backups or any(path.read_bytes() != source_config.read_bytes() for path in normal_backups):
+    raise SystemExit("every normal/staged upgrade backup must be the byte-exact v7 source")
+
+activation_manifests = sorted((data_dir / "backups").glob("observability-v8-*/manifest.json"))
+if len(activation_manifests) != 1:
+    raise SystemExit("expected exactly one observability-v8 recovery manifest")
+activation_dir = activation_manifests[0].parent
+activation_manifest = json.loads(activation_manifests[0].read_text(encoding="utf-8"))
+activation_config = activation_dir / "config.source"
+activation_environment = activation_dir / "environment.source"
+if yaml.safe_load(activation_config.read_text(encoding="utf-8")).get("config_version") != 7:
+    raise SystemExit("activation recovery config is not the exact pre-v8 source")
+if activation_environment.read_bytes() != source_environment.read_bytes():
+    raise SystemExit("activation recovery .env is not byte-exact")
+manifest_by_role = {item["role"]: item for item in activation_manifest.get("files", [])}
+if manifest_by_role.get("config", {}).get("sha256") != hashlib.sha256(activation_config.read_bytes()).hexdigest():
+    raise SystemExit("activation config recovery digest mismatch")
+if manifest_by_role.get("environment", {}).get("sha256") != hashlib.sha256(
+    activation_environment.read_bytes()
+).hexdigest():
+    raise SystemExit("activation environment recovery digest mismatch")
+
+for comment in (
+    "# ┌──── OBSERVABILITY UPGRADE SMOKE ────┐",
+    "# comments, order, and unrelated settings must survive",
+    "# unrelated section survives",
+):
+    if comment not in config_text:
+        raise SystemExit(f"comment-heavy YAML token was lost: {comment}")
+
+stack = data_dir / "observability-stack"
+manifest_path = stack / ".defenseclaw-bundle-manifest.json"
+bundle_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+if bundle_manifest.get("bundle_version") != target_version:
+    raise SystemExit("local bundle manifest is not stamped with the target version")
+if len(bundle_manifest.get("dashboard_uids", [])) != 14:
+    raise SystemExit("local bundle manifest does not contain all fourteen dashboards")
+if set(bundle_manifest.get("named_volumes", [])) != {
+    "grafana-data",
+    "loki-data",
+    "prometheus-data",
+    "tempo-data",
+}:
+    raise SystemExit("local bundle named-volume contract changed")
+if (stack / "operator/volume-continuity.txt").read_bytes() != b"operator-owned volume continuity marker\n":
+    raise SystemExit("operator volume-continuity marker was not preserved")
+if (stack / "grafana/dashboards/team-upgrade-smoke.json").read_bytes() != (
+    b'{"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}\n'
+):
+    raise SystemExit("operator custom dashboard was not preserved")
+
+target_bundle = bundled_local_observability_dir()
+for item in bundle_manifest.get("files", []):
+    relative = item.get("path")
+    digest = item.get("sha256")
+    if not isinstance(relative, str) or not isinstance(digest, str):
+        raise SystemExit("invalid local bundle manifest entry")
+    installed = stack / relative
+    packaged = target_bundle / relative
+    if hashlib.sha256(installed.read_bytes()).hexdigest() != digest:
+        raise SystemExit(f"installed managed bundle digest mismatch: {relative}")
+    if installed.read_bytes() != packaged.read_bytes():
+        raise SystemExit(f"installed managed bundle differs from target package: {relative}")
+
+sqlite_path = data_dir / "state/audit-custom.db"
+if not sqlite_path.is_file():
+    raise SystemExit("fresh target gateway did not initialize the configured SQLite database")
+connection = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+try:
+    if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+        raise SystemExit("configured SQLite database failed quick_check")
+finally:
+    connection.close()
+
+print("config_v8_historical_fixture=ok")
+print("v8_secret_promotion=ok")
+print("v8_recovery_backups=byte_exact")
+print("local_bundle_manifest=target_exact_custom_preserved")
+PY
+    else
+        "${venv_python}" - "${SMOKE_HOME}/.defenseclaw" <<'PY'
 from pathlib import Path
 import sys
 
@@ -564,6 +1063,16 @@ if not backup.is_file():
     raise SystemExit("named OTel migration did not create its one-time backup")
 print("config_v7_named_otel=ok")
 PY
+    fi
+
+    local gateway_status_log="${SMOKE_HOME}/gateway-status.log"
+    if ! HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw-gateway status \
+        >"${gateway_status_log}" 2>&1; then
+        tail_log "${gateway_status_log}"
+        die "freshly started target gateway is not healthy"
+    fi
+    ok "Fresh target gateway is running and healthy"
 
     "${venv_python}" - <<'PY'
 import textual
@@ -593,7 +1102,7 @@ run_one_upgrade_smoke() {
     mkdir -p "${SMOKE_HOME}"
 
     install_baseline
-    seed_legacy_otel_fixture
+    seed_upgrade_fixture
     patch_installed_upgrade_endpoint
     run_upgrade
     verify_upgrade
@@ -614,7 +1123,11 @@ main() {
     validate_inputs
     detect_platform
 
-    WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade-smoke.XXXXXX")"
+    # macOS exposes its private temporary root through the /var symlink.  The
+    # production v8 activation correctly rejects symlinks anywhere in the
+    # protected config parent chain, so carry the physical path into every
+    # fixture rather than accidentally testing the public /var alias.
+    WORKDIR="$(abs_path "$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade-smoke.XXXXXX")")"
 
     prepare_release_root
     assert_candidate_assets
@@ -624,6 +1137,7 @@ main() {
         return
     fi
     start_release_server
+    run_v8_source_contract_tests
     local version
     for version in "${FROM_VERSION_LIST[@]}"; do
         run_one_upgrade_smoke "${version}"
@@ -637,4 +1151,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

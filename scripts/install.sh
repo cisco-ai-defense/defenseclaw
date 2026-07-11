@@ -43,6 +43,12 @@
 #
 set -euo pipefail
 
+# Installation material includes credentials, device keys, policy state, and a
+# private Python environment. Do not let an operator's permissive login umask
+# make newly-created DefenseClaw directories or transient files group/world
+# accessible; explicit wider modes are still applied where intentionally needed.
+umask 077
+
 # Entire script wrapped in main() so bash parses everything before executing.
 # Critical for curl|sh safety — prevents partial execution on network drops.
 main() {
@@ -782,6 +788,18 @@ fi
 
 if [[ -n "${LOCAL_DIR}" ]]; then
     info "Installing from local directory: ${LOCAL_DIR}"
+fi
+
+# This installer intentionally owns fresh hosts only. Re-running it over an
+# installed controller would bypass release-owned upgrade manifests, bridge
+# selection, migration rollback, and post-upgrade health verification.
+if has defenseclaw \
+    || [[ -e "${DEFENSECLAW_HOME}" || -L "${DEFENSECLAW_HOME}" ]] \
+    || [[ -e "${DEFENSECLAW_VENV}" || -L "${DEFENSECLAW_VENV}" ]] \
+    || [[ -e "${INSTALL_DIR}/defenseclaw" || -L "${INSTALL_DIR}/defenseclaw" ]] \
+    || [[ -e "${INSTALL_DIR}/defenseclaw-gateway" || -L "${INSTALL_DIR}/defenseclaw-gateway" ]]; then
+    die "An existing DefenseClaw installation was detected. No changes were made.
+  Use the release-owned upgrade resolver so required bridge releases, rollback, and health checks are enforced."
 fi
 
 detect_platform

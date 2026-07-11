@@ -1,0 +1,219 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Offline contracts for the single historical release-upgrade harness."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "test-upgrade-release.sh"
+INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
+UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
+MAKEFILE = ROOT / "Makefile"
+BASELINE_POLICY = ROOT / "release" / "upgrade-baselines.json"
+
+
+def _source_script(command: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-c", f'source "$1"; {command}', "upgrade-smoke-contract", str(SCRIPT), *arguments],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_posix_install_upgrade_and_smoke_pin_private_umask() -> None:
+    for path in (INSTALL_SCRIPT, UPGRADE_SCRIPT, SCRIPT):
+        text = path.read_text(encoding="utf-8")
+        assert re.search(r"^set -euo pipefail\n(?:.*\n){0,8}umask 077$", text, re.MULTILINE), path
+
+
+def test_upgrade_failure_guidance_does_not_restore_gateway_jsonl_ownership() -> None:
+    lines = [
+        line
+        for line in UPGRADE_SCRIPT.read_text(encoding="utf-8").splitlines()
+        if "gateway.jsonl" in line
+    ]
+    assert lines
+    for line in lines:
+        normalized = line.lower()
+        assert "optional" in normalized, line
+        assert "destination" in normalized, line
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("0.8.3", False),
+        ("0.8.4", False),
+        ("0.8.5", True),
+        ("0.9.0", True),
+        ("1.0.0", True),
+    ],
+)
+def test_only_hard_cut_targets_select_the_forward_v8_contract(target: str, expected: bool) -> None:
+    completed = _source_script(
+        'TARGET_VERSION="$2"; target_uses_observability_v8',
+        target,
+    )
+    assert (completed.returncode == 0) is expected, completed.stderr
+
+
+def _seed_fixture(tmp_path: Path) -> Path:
+    home = tmp_path / "home"
+    completed = _source_script(
+        'SMOKE_HOME="$2"; mkdir -p "$SMOKE_HOME"; seed_v8_observability_fixture',
+        str(home),
+    )
+    assert completed.returncode == 0, completed.stderr
+    return home / ".defenseclaw"
+
+
+def test_v8_fixture_covers_the_historical_matrix_contract(tmp_path: Path) -> None:
+    data_dir = _seed_fixture(tmp_path)
+    document = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8"))
+
+    assert document["config_version"] == 7
+    assert document["otel"]["endpoint"] == "127.0.0.1:4317"
+    assert {item["name"] for item in document["otel"]["destinations"]} == {
+        "existing-otlp",
+        "galileo",
+    }
+    assert document["otel"]["logs"]["enabled"] is True
+    assert document["otel"]["traces"]["enabled"] is True
+    assert document["otel"]["metrics"]["enabled"] is True
+    assert {item["kind"] for item in document["audit_sinks"]} == {
+        "splunk_hec",
+        "http_jsonl",
+        "otlp_logs",
+    }
+    assert document["observability"]["connectors"]["codex"]["audit_sinks"] == []
+    assert document["privacy"]["disable_redaction"] is False
+    assert document["ai_discovery"]["emit_otel"] is False
+    assert document["audit_db"].endswith("/state/audit-custom.db")
+    assert document["judge_bodies_db"].endswith("/state/judge-custom.db")
+    assert (data_dir / "observability-stack/operator/volume-continuity.txt").is_file()
+    assert (data_dir / "observability-stack/grafana/dashboards/team-upgrade-smoke.json").is_file()
+    assert (tmp_path / "home/fixture-evidence/config.v7.source").read_bytes() == (data_dir / "config.yaml").read_bytes()
+
+
+def test_bridge_source_tree_does_not_ship_the_v8_runtime_or_migration() -> None:
+    package = ROOT / "cli" / "defenseclaw"
+    assert not (package / "observability" / "v8_migration.py").exists()
+    assert not (package / "observability" / "v8_activation.py").exists()
+    assert "SUPPORTED_CONFIG_VERSIONS = (8,)" not in (package / "config.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_matrix_matches_every_current_downloadable_v7_baseline() -> None:
+    line = next(
+        line for line in MAKEFILE.read_text(encoding="utf-8").splitlines() if line.startswith("UPGRADE_SMOKE_FROM")
+    )
+    policy = json.loads(BASELINE_POLICY.read_text(encoding="utf-8"))
+    baselines = policy["published_baselines"]
+
+    assert policy["schema_version"] == 1
+    assert baselines[0] == "0.8.3"
+    assert line.split("?=", 1)[1].split() == baselines
+
+
+def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert "run_v8_source_contract_tests" in script
+    assert 'WORKDIR="$(abs_path "$(mktemp -d ' in script
+    function_start = script.index("run_v8_source_contract_tests()")
+    gate = script.index("target_uses_observability_v8 || return 0", function_start)
+    pytest_call = script.index("uv run python -m pytest", function_start)
+    assert gate < pytest_call
+    assert 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]' in script
+
+
+def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+    lines = script.splitlines()
+    programs: list[str] = []
+    index = 0
+    while index < len(lines):
+        if re.search(r"<<'PY'\s*$", lines[index]):
+            end = index + 1
+            while end < len(lines) and lines[end] != "PY":
+                end += 1
+            assert end < len(lines), f"unterminated Python heredoc after line {index + 1}"
+            programs.append("\n".join(lines[index + 1 : end]) + "\n")
+            index = end
+        index += 1
+
+    assert programs
+    for program in programs:
+        compile(program, str(SCRIPT), "exec")
+    for verifier_contract in (
+        'config.get("config_version") != 8',
+        'for legacy in ("otel", "audit_sinks", "privacy")',
+        '"DEFENSECLAW_MIGRATED_SPLUNK_PROTECTED_TOKEN"',
+        'glob("observability-v8-*/manifest.json")',
+        'bundle_manifest.get("bundle_version") != target_version',
+        "defenseclaw-gateway status",
+        "DOCKER_HOST=",
+        "prepare_isolated_docker_path",
+        "upgrade smoke docker isolation forbids mutating operations",
+        "tail_v8_upgrade_log_secret_safe",
+    ):
+        assert verifier_contract in script
+
+
+def test_retired_named_otel_backup_is_checked_only_for_pre_v8_targets() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert script.count("config.yaml.pre-observability-migration.bak") == 1
+
+
+def test_docker_isolation_reports_stopped_fixture_and_forbids_mutation(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    completed = _source_script(
+        'SMOKE_HOME="$2"; mkdir -p "$SMOKE_HOME"; prepare_isolated_docker_path; '
+        'PATH="$SMOKE_HOME/.upgrade-test-bin:$PATH"; docker ps; docker compose down',
+        str(home),
+    )
+
+    assert completed.returncode == 125
+    assert "forbids mutating operations" in completed.stderr
+
+
+def test_v8_failure_tail_redacts_every_fixture_value(tmp_path: Path) -> None:
+    protected = (
+        "upgrade-smoke-flat-protected-value",
+        "upgrade-smoke-splunk-protected-value",
+        "upgrade-smoke-http-protected-value",
+        "Bearer upgrade-smoke-otlp-protected-value",
+    )
+    log = tmp_path / "upgrade.log"
+    log.write_text("\n".join(protected) + "\nordinary diagnostic\n", encoding="utf-8")
+
+    completed = _source_script('tail_v8_upgrade_log_secret_safe "$2"', str(log))
+
+    assert completed.returncode == 0
+    assert "ordinary diagnostic" in completed.stderr
+    assert "[REDACTED]" in completed.stderr
+    assert all(value not in completed.stderr for value in protected)
