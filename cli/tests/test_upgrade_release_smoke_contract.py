@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -48,6 +49,56 @@ def test_posix_install_upgrade_and_smoke_pin_private_umask() -> None:
     for path in (INSTALL_SCRIPT, UPGRADE_SCRIPT, SCRIPT):
         text = path.read_text(encoding="utf-8")
         assert re.search(r"^set -euo pipefail\n(?:.*\n){0,8}umask 077$", text, re.MULTILINE), path
+
+
+def test_protected_release_test_artifact_is_authenticated_before_private_decode(
+    tmp_path: Path,
+) -> None:
+    magic = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+    payload = b"authenticated test wheel payload"
+    protected = magic + bytes(value ^ 0xA5 for value in payload)
+    source = tmp_path / "defenseclaw-0.8.4-2-py3-none-any.dcwheel"
+    source.write_bytes(protected)
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text(f"{hashlib.sha256(protected).hexdigest()}  {source.name}\n")
+    custody = tmp_path / "custody"
+    custody.mkdir(mode=0o700)
+    destination = custody / "defenseclaw-0.8.4-2-py3-none-any.whl"
+
+    completed = _source_script(
+        'materialize_authenticated_artifact "$2" "$3" "$4"',
+        str(source),
+        str(checksums),
+        str(destination),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert destination.read_bytes() == payload
+    assert destination.stat().st_mode & 0o077 == 0
+
+
+def test_protected_release_test_artifact_rejects_checksum_mismatch_without_output(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "defenseclaw-0.8.4-2-py3-none-any.dcwheel"
+    source.write_bytes(
+        b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(value ^ 0xA5 for value in b"wheel")
+    )
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text(f"{'0' * 64}  {source.name}\n")
+    custody = tmp_path / "custody"
+    custody.mkdir(mode=0o700)
+    destination = custody / "defenseclaw-0.8.4-2-py3-none-any.whl"
+
+    completed = _source_script(
+        'materialize_authenticated_artifact "$2" "$3" "$4"',
+        str(source),
+        str(checksums),
+        str(destination),
+    )
+
+    assert completed.returncode != 0
+    assert not destination.exists()
 
 
 def test_upgrade_failure_guidance_does_not_restore_gateway_jsonl_ownership() -> None:
@@ -182,6 +233,27 @@ def test_harness_embedded_python_and_v8_verifier_contract_are_static_valid() -> 
         "tail_v8_upgrade_log_secret_safe",
     ):
         assert verifier_contract in script
+
+
+def test_prepare_only_windows_candidate_validates_zip_and_plain_refusal_envelope() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "windows/amd64|windows/arm64" in script
+    assert 'extension = "zip" if os_name == "windows" else "tar.gz"' in script
+    assert 'with zipfile.ZipFile(gateway_source) as archive:' in script
+    assert 'Path(member.filename.replace("\\\\", "/")).is_absolute()' in script
+    assert 'Path(member.filename.replace("\\\\", "/")).name == "defenseclaw.exe"' in script
+    assert "canonical Windows gateway refusal envelope became installable" in script
+
+
+def test_bridge_candidate_refusal_contract_uses_bridge_specific_message() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'if version == "0.8.4":' in script
+    assert (
+        "DefenseClaw 0.8.4 must be installed by the release-owned staged upgrade resolver."
+        in script
+    )
 
 
 def test_retired_named_otel_backup_is_checked_only_for_pre_v8_targets() -> None:

@@ -76,7 +76,7 @@ scp -r /tmp/defenseclaw-upgrade-smoke.xxxxxx/candidate-release openclaw-vineeth:
 ssh openclaw-vineeth 'scripts/test-upgrade-release.sh --release-root /tmp/candidate-release --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.5,0.6.4,0.6.3,0.6.2,0.6.1,0.6.0,0.5.0,0.4.0" --baseline-mode seed'
 ```
 
-The default matrix covers every published 0.4.0+ baseline that has both a Python wheel, platform gateway archives, and an upgrade command: `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. Baselines newer than the candidate target are skipped automatically so local CI does not accidentally test downgrades before a release workflow stamps the next version. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so they are not live-upgradeable by this harness.
+The default matrix covers the POSIX published 0.4.0+ baselines that have all three: a Python wheel, platform gateway archives, and an upgrade command: `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. The native Windows matrix is deliberately narrower: `0.8.3`, `0.8.2`, `0.8.1`, and `0.8.0`. Baselines newer than the candidate target are skipped automatically so local CI does not accidentally test downgrades before a release workflow stamps the next version. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so they are not live-upgradeable by this harness.
 
 The release workflow builds the runtime once, seals the exact candidate bytes,
 and runs manifest-derived Linux, macOS, and native Windows upgrade gates before

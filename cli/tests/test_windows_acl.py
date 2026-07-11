@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import ntpath
 import os
 import struct
 import sys
@@ -70,6 +72,15 @@ class _FakeApi:
         self.events.append(("open", (path, access, directory)))
         return self.paths[path]
 
+    def open_directory_no_delete(self, path: str) -> int:
+        handle = self.next_handle
+        self.next_handle += 1
+        self.events.append(("lease-open", path))
+        return handle
+
+    def assert_real_directory(self, handle: int) -> None:
+        self.events.append(("lease-validate", handle))
+
     def close_handle(self, handle: int) -> None:
         self.events.append(("close", handle))
 
@@ -103,6 +114,12 @@ class _FakeApi:
 
     def move_file_no_replace(self, source: str, target: str) -> None:
         self.events.append(("move", (source, target)))
+
+    def replace_regular_file_by_handle(self, source: str, target: str) -> None:
+        self.events.append(("handle-replace", (source, target)))
+
+    def delete_regular_file_by_handle(self, path: str) -> None:
+        self.events.append(("handle-delete", path))
 
     def private_security(self, owner: bytes, *, ace_flags: int = 0) -> WindowsFileSecurity:
         assert owner == OWNER
@@ -158,6 +175,148 @@ def test_private_directory_acl_requests_object_and_container_inheritance(
 
     assert windows_acl.private_security_for_directory("backups", inherit_children=True) == PRIVATE
     assert api.private_flags == [0x03]
+
+
+def test_windows_directory_chain_stays_held_across_handle_mutations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    monkeypatch.setattr(windows_acl, "_api", api)
+    monkeypatch.setattr(windows_acl.os, "name", "nt")
+
+    with windows_acl.hold_directory_chain(r"C:\Users\operator\.defenseclaw"):
+        outer_handles = [
+            value for event, value in api.events if event == "lease-validate"
+        ]
+        windows_acl.replace_regular_file_by_handle(
+            r"C:\Users\operator\.defenseclaw\candidate.tmp",
+            r"C:\Users\operator\.defenseclaw\config.yaml",
+        )
+        windows_acl.delete_regular_file_by_handle(
+            r"C:\Users\operator\.defenseclaw\retired.yaml",
+        )
+        assert not any(
+            event == "close" and value in outer_handles
+            for event, value in api.events
+        )
+
+    opened = [value for event, value in api.events if event == "lease-open"]
+    assert opened[:4] == [
+        "C:\\",
+        r"C:\Users",
+        r"C:\Users\operator",
+        r"C:\Users\operator\.defenseclaw",
+    ]
+    assert tuple(map(ntpath.normcase, opened[4:8])) == tuple(
+        map(ntpath.normcase, opened[:4]),
+    )
+    assert tuple(map(ntpath.normcase, opened[8:12])) == tuple(
+        map(ntpath.normcase, opened[:4]),
+    )
+    replace_index = next(
+        index for index, event in enumerate(api.events) if event[0] == "handle-replace"
+    )
+    delete_index = next(
+        index for index, event in enumerate(api.events) if event[0] == "handle-delete"
+    )
+    outer_close_indexes = [
+        index
+        for index, event in enumerate(api.events)
+        if event[0] == "close" and event[1] in outer_handles
+    ]
+    assert replace_index < outer_close_indexes[0]
+    assert delete_index < outer_close_indexes[0]
+    assert [api.events[index][1] for index in outer_close_indexes] == list(
+        reversed(outer_handles),
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (
+            r"C:\Users\operator\.defenseclaw",
+            ("C:\\", r"C:\Users", r"C:\Users\operator", r"C:\Users\operator\.defenseclaw"),
+        ),
+        (
+            r"\\server\share\state\bundle",
+            (
+                "\\\\server\\share\\",
+                r"\\server\share\state",
+                r"\\server\share\state\bundle",
+            ),
+        ),
+        (
+            r"\\?\UNC\server\share\state",
+            ("\\\\?\\UNC\\server\\share\\", r"\\?\UNC\server\share\state"),
+        ),
+    ],
+)
+def test_windows_directory_prefixes_cover_drive_unc_and_extended_unc(
+    path: str,
+    expected: tuple[str, ...],
+) -> None:
+    assert windows_acl._windows_directory_prefixes(path) == expected
+
+
+@pytest.mark.parametrize("path", [r"relative\state", r"C:relative\state", r"\rooted"])
+def test_windows_directory_prefixes_reject_non_absolute_paths(path: str) -> None:
+    with pytest.raises(WindowsAclError, match="absolute path"):
+        windows_acl._windows_directory_prefixes(path)
+
+
+def test_windows_rename_and_disposition_layouts_match_x86_and_x64_abi() -> None:
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    expected_root_offset = 8 if pointer_size == 8 else 4
+    assert windows_acl._FileRenameInformation.root_directory.offset == expected_root_offset
+    assert windows_acl._FileRenameInformation.file_name_length.offset == (
+        expected_root_offset + pointer_size
+    )
+    assert windows_acl._FileRenameInformation.file_name.offset == (
+        expected_root_offset + pointer_size + ctypes.sizeof(ctypes.c_uint32)
+    )
+    assert ctypes.sizeof(windows_acl._FileRenameInformation) > (
+        windows_acl._FileRenameInformation.file_name.offset
+    )
+    assert ctypes.sizeof(ctypes.c_ubyte) == 1
+
+
+def test_handle_publication_refuses_cross_directory_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    monkeypatch.setattr(windows_acl, "_api", api)
+
+    with pytest.raises(WindowsAclError, match="one held directory"):
+        windows_acl.replace_regular_file_by_handle(
+            r"C:\state\.rollback-candidate",
+            r"C:\outside\active.yaml",
+        )
+    assert not any(event == "handle-replace" for event, _value in api.events)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
+def test_native_windows_directory_lease_and_handle_mutators(tmp_path) -> None:
+    parent = tmp_path / "held"
+    moved = tmp_path / "moved"
+    parent.mkdir()
+    source = parent / "candidate.tmp"
+    target = parent / "active.yaml"
+    retired = parent / "retired.yaml"
+    source.write_bytes(b"restored\n")
+    target.write_bytes(b"target\n")
+    retired.write_bytes(b"retired\n")
+
+    with windows_acl.hold_directory_chain(str(parent)):
+        with pytest.raises(OSError):
+            parent.rename(moved)
+        windows_acl.replace_regular_file_by_handle(str(source), str(target))
+        windows_acl.delete_regular_file_by_handle(str(retired))
+
+    assert target.read_bytes() == b"restored\n"
+    assert not source.exists()
+    assert not retired.exists()
+    parent.rename(moved)
 
 
 @pytest.mark.parametrize(

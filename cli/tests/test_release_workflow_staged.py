@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,9 +46,108 @@ def test_release_requires_protected_main_and_non_bypassable_environment() -> Non
     assert "is not the current origin/main tip" in text
     assert "can_admins_bypass" in text
     assert "required_reviewers" in text
+    assert 'reviewer.get("type") != "Team"' in text
+    assert 'team.get("id") != 16849702' in text
+    assert 'team.get("slug") != "defenseclaw-reviewers"' in text
+    assert 'reviewer_rules[0].get("prevent_self_review") is not True' in text
+    assert "release environment must prevent initiator self-review" in text
     assert "protected_branches" in text
     assert "custom_branch_policies" in text
     assert "refs/heads/release/" not in text
+
+
+def _release_environment_validator() -> str:
+    steps = _workflow()["jobs"]["release-preflight"]["steps"]
+    command = next(step["run"] for step in steps if step.get("name") == "Require protected release environment")
+    marker = "python3 - release-environment.json <<'PY'\n"
+    return command.split(marker, 1)[1].rsplit("\nPY", 1)[0]
+
+
+def _valid_release_environment(reviewers: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "can_admins_bypass": False,
+        "protection_rules": [
+            {
+                "type": "required_reviewers",
+                "prevent_self_review": True,
+                "reviewers": reviewers,
+            }
+        ],
+        "deployment_branch_policy": {
+            "protected_branches": True,
+            "custom_branch_policies": False,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "reviewers",
+    [
+        [{"type": "User", "reviewer": {"id": 16849702, "slug": "defenseclaw-reviewers"}}],
+        [{"type": "Team", "reviewer": {"id": 1, "slug": "weak-reviewers"}}],
+        [
+            {"type": "Team", "reviewer": {"id": 16849702, "slug": "defenseclaw-reviewers"}},
+            {"type": "Team", "reviewer": {"id": 1, "slug": "weak-reviewers"}},
+        ],
+    ],
+)
+def test_release_environment_rejects_user_wrong_or_extra_reviewers(
+    tmp_path: Path,
+    reviewers: list[dict[str, object]],
+) -> None:
+    environment = tmp_path / "release-environment.json"
+    environment.write_text(json.dumps(_valid_release_environment(reviewers)), encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, "-", str(environment)],
+        input=_release_environment_validator(),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode != 0
+    assert "defenseclaw-reviewers" in completed.stderr
+
+
+def test_release_environment_accepts_exact_required_team(tmp_path: Path) -> None:
+    environment = tmp_path / "release-environment.json"
+    environment.write_text(
+        json.dumps(
+            _valid_release_environment(
+                [
+                    {
+                        "type": "Team",
+                        "reviewer": {
+                            "id": 16849702,
+                            "slug": "defenseclaw-reviewers",
+                        },
+                    }
+                ]
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-", str(environment)],
+        input=_release_environment_validator(),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_release_target_must_advance_reviewed_and_published_stable_state() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "gh api --paginate --slurp" in text
+    assert '"repos/$GITHUB_REPOSITORY/releases?per_page=100"' in text
+    assert "scripts/release_candidate.py validate-version" in text
+    assert "--releases-json published-releases.json" in text
 
 
 def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
@@ -53,8 +156,11 @@ def test_publish_job_is_downstream_of_every_native_upgrade_gate() -> None:
     assert set(publish["needs"]) == {
         "release-preflight",
         "assemble-release-candidate",
+        "posix-fresh-install",
+        "windows-fresh-install",
         "linux-upgrade",
         "macos-upgrade",
+        "historical-baseline-canary",
         "windows-upgrade",
         "live-continuity",
     }
@@ -83,13 +189,48 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     for name in (
         "linux-upgrade",
         "macos-upgrade",
+        "historical-baseline-canary",
         "windows-upgrade",
+        "posix-fresh-install",
+        "windows-fresh-install",
         "live-continuity",
         "publish-release",
     ):
         rendered = str(jobs[name])
         assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
         assert "scripts/release_candidate.py verify" in rendered
+
+
+def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal() -> None:
+    jobs = _workflow()["jobs"]
+    posix = str(jobs["posix-fresh-install"])
+    windows = str(jobs["windows-fresh-install"])
+
+    assert jobs["posix-fresh-install"]["strategy"]["matrix"]["runner"] == [
+        "ubuntu-latest",
+        "macos-15",
+    ]
+    assert "scripts/test-fresh-install-release.sh" in posix
+    assert "scripts/test-fresh-install-release-windows.ps1" in windows
+    for rendered in (posix, windows):
+        assert "needs.assemble-release-candidate.outputs.artifact_name" in rendered
+        assert "scripts/release_candidate.py verify" in rendered
+
+
+def test_real_historical_dependency_canaries_cover_common_oldest_and_running_source() -> None:
+    job = _workflow()["jobs"]["historical-baseline-canary"]
+    includes = job["strategy"]["matrix"]["include"]
+
+    assert includes == [
+        {"baseline": "0.8.3", "start_source_gateway": "true"},
+        {"baseline": "0.4.0", "start_source_gateway": "false"},
+    ]
+    rendered = str(job)
+    assert "--baseline-dependencies published" in rendered
+    assert "--success-path-only" in rendered
+    assert "--start-source-gateway" in rendered
+    assert "scripts/test-upgrade-protocol-release.sh" in rendered
+    assert "scripts/release_candidate.py verify" in rendered
 
 
 def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
@@ -115,14 +256,27 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     jobs = _workflow()["jobs"]
     assert "release/upgrade-baselines.json" in text
     assert 'json.dumps(older, separators=(",", ":"))' in text
+    assert "platform_published_baselines" in text
+    assert "release/historical-artifact-digests.json" in text
+    assert "historical wheel digest exceptions do not exactly cover" in text
+    assert "signed_wheel_coverage_starts_at" in text
+    assert "platform_tested_source_versions" in text
+    assert "tested_source_versions does not match the reviewed release matrix" in text
+    assert "platform_tested_source_versions.windows does not match" in text
+    assert "modern release candidate must use upgrade manifest schema 2" in text
+    assert "runtime_config_version does not attest the expected bridge/hard-cut runtime" in text
+    assert "required bridge is absent from the signed Windows matrix" in text
+    assert "signed Windows matrix has no pre-bridge source" in text
+    assert "windows_prebridge_baselines" in text
+    assert "CurrentConfigVersion" in text
     for name in ("linux-upgrade", "macos-upgrade"):
         assert jobs[name]["strategy"]["matrix"]["baseline"] == (
             "${{ fromJSON(needs.release-preflight.outputs.baselines) }}"
         )
     assert jobs["windows-upgrade"]["strategy"]["matrix"]["baseline"] == (
-        "${{ fromJSON(needs.assemble-release-candidate.outputs.windows_baselines) }}"
+        "${{ fromJSON(needs.assemble-release-candidate.outputs.windows_prebridge_baselines) }}"
     )
-    assert "-SourceVersion \"$env:BASELINE\"" in text
+    assert '-SourceVersion "$env:BASELINE"' in text
     assert "scripts/test-upgrade-protocol-release.sh" in text
     assert "scripts/test-upgrade-release-windows.ps1" in text
     assert "required_bridge_version" in text
@@ -156,25 +310,68 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     assert 'receipt.get("migration_status") != "completed"' in text
     for contract in (
         "CANDIDATE_MIN_PROTOCOL",
+        "CANDIDATE_SCHEMA_VERSION",
+        "CANDIDATE_RUNTIME_CONFIG_VERSION",
         "MINIMUM_SOURCE_VERSION",
         "REQUIRED_BRIDGE_VERSION",
         "baseline_protocol",
+        "baseline_has_schema_gate",
         "run_installed_controller_refusal",
+        "for invocation in explicit latest",
+        'patch_installed_upgrade_endpoint "${TARGET_VERSION}"',
+        'defenseclaw upgrade "${target_args[@]}"',
         "run_candidate_updater_refusal",
+        "run_candidate_explicit_bridge_refusal",
         "run_candidate_updater_staged_success",
+        "run_candidate_updater_direct_success",
         "prepare_required_bridge_assets",
         "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL",
         "assert_staged_success_receipt",
         "UPGRADE_GATE_STOP_MARKER",
         "gateway sentinel PID changed",
         "assert_no_success_receipt",
+        'record(openclaw_home, "openclaw")',
+        "refusal-must-not-mutate",
         "run_one_upgrade_smoke",
+        "manifest_array_contains tested_source_versions",
+        "canonical gateway refusal envelope",
+        "artifact-envelope",
+        "there is intentionally no --version argument",
+        "stage_authenticated_baseline",
+        "SUCCESS_PATH_ONLY",
+        "start_source_gateway_canary",
         "upgrade bridge|without --version",
     ):
         assert contract in text
-    assert "scripts/upgrade.sh\" --yes --version" in text
-    assert 'scripts/upgrade.sh\" --yes >"${log_file}"' in text
+    assert 'scripts/upgrade.sh" --yes --version' in text
+    assert 'scripts/upgrade.sh" --yes >"${log_file}"' in text
     assert not re.search(r"TARGET_VERSION[^\n]*0\.8\.", text)
+    smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
+    assert "force_latest_version" in smoke
+    assert 'target_version = "{force_latest_version}"' in smoke
+
+
+def test_protocol_gate_treats_a_baseline_without_upgrade_module_as_no_schema_gate(
+    tmp_path: Path,
+) -> None:
+    text = PROTOCOL_GATE.read_text(encoding="utf-8")
+    function = text.index("baseline_has_schema_gate() {")
+    start = text.index("<<'PY'\n", function) + len("<<'PY'\n")
+    end = text.index("\nPY\n}", start)
+    program = text[start:end]
+    baseline = tmp_path / "legacy.whl"
+    with zipfile.ZipFile(baseline, "w") as archive:
+        archive.writestr("defenseclaw/__init__.py", "")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program, str(baseline)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "0"
 
 
 def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
@@ -190,5 +387,6 @@ def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
         text=True,
         capture_output=True,
         check=False,
+        timeout=30,
     )
     assert completed.returncode == 0, completed.stderr

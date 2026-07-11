@@ -384,11 +384,71 @@ t_uninstall_still_sweeps_legacy_cmid_log_file() {
     "uninstall MUST NOT recurse into the shared log tree (no-quote form)"
 }
 
+t_install_refuses_existing_state_before_build_or_launchd_mutation() {
+  local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
+  assert_contains "${body}" "existing DefenseClaw installation detected at" \
+    "managed bundle refuses an in-place hard-cut bypass"
+  assert_contains "${body}" "no changes were made. This installer is fresh-install-only" \
+    "managed bundle gives an explicit no-change refusal"
+  assert_contains "${body}" "remain on the current version" \
+    "managed bundle gives a fail-closed path when no staged enterprise upgrader exists"
+  assert_contains "${body}" "dscl . -list /Users" \
+    "managed bundle checks every local home even when a target user is selected"
+  assert_not_contains "${body}" 'elif [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]' \
+    "all-user dscl enumeration must not be conditional on TARGET_HOME being empty"
+  assert_contains "${body}" "command -v \"\${_installed_command}\"" \
+    "managed bundle checks package-manager/custom PATH installations"
+  assert_contains "${body}" '"${GUARDIAN_PLIST_DST}"' \
+    "managed bundle detects the current guardian plist"
+  assert_contains "${body}" '"${LEGACY_GUARDIAN_PLIST_DST}"' \
+    "managed bundle detects the legacy guardian plist"
+  assert_contains "${body}" '"${GUARDIAN_LAUNCHD_LABEL}"' \
+    "managed bundle detects the current guardian job"
+  assert_contains "${body}" '"${LEGACY_GUARDIAN_LAUNCHD_LABEL}"' \
+    "managed bundle detects the legacy guardian job"
+
+  local guard_line build_line mutation_line
+  guard_line="$(grep -n "existing DefenseClaw installation detected at" \
+    "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
+  build_line="$(grep -n 'go build -o defenseclaw-gateway' \
+    "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
+  mutation_line="$(grep -n 'create_install_directory_no_replace "${INSTALL_PREFIX}"' \
+    "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
+  if [[ -z "${guard_line}" || -z "${build_line}" || -z "${mutation_line}" \
+     || "${guard_line}" -ge "${build_line}" \
+     || "${guard_line}" -ge "${mutation_line}" ]]; then
+    _fail "existing-install guard must precede build and installed-file writes"
+  fi
+  assert_not_contains "${body}" 'mv -f -- "${temporary}" "${destination}"' \
+    "managed bundle publication must not force-replace a concurrent destination"
+  assert_contains "${body}" 'ln "${temporary}" "${destination}"' \
+    "managed bundle uses no-replace publication"
+  assert_contains "${body}" "appeared concurrently and was preserved" \
+    "managed bundle reports concurrent-state preservation"
+
+  # The final boundary after a potentially slow local build must repeat every
+  # current and legacy gateway/guardian job+plist pair from the initial
+  # preflight. Merely mentioning these variables in the initial marker list is
+  # insufficient: a guardian can appear while the binary is being built.
+  local final_boundary
+  final_boundary="$(sed -n '/# Repeat the launchd\/path boundary immediately before mutation/,/unset _lbl_plist/p' \
+    "${REPO_ROOT}/packaging/macos/install.sh")"
+  for expected in \
+    '"${LAUNCHD_LABEL}:${PLIST_DST}"' \
+    '"${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}"' \
+    '"${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}"' \
+    '"${LEGACY_GUARDIAN_LAUNCHD_LABEL}:${LEGACY_GUARDIAN_PLIST_DST}"'; do
+    assert_contains "${final_boundary}" "${expected}" \
+      "final mutation boundary repeats ${expected}"
+  done
+}
+
 run_case "plist exists and lints"     t_plist_exists_and_parses
 run_case "plist references managed paths" t_plist_contains_managed_paths
 run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
 run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms
 run_case "uninstall still sweeps legacy CMID log file from pre-root installs"        t_uninstall_still_sweeps_legacy_cmid_log_file
+run_case "install refuses existing state before build or launchd mutation"           t_install_refuses_existing_state_before_build_or_launchd_mutation
 run_case "plist runs as root by default (managed CMID needs it)" t_plist_runs_as_root_by_default
 run_case "installer_lib.sh syntax"    t_install_lib_syntax
 run_case "install.sh syntax"          t_install_sh_syntax

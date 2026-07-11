@@ -51,67 +51,68 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Initialize DefenseClaw environment", result.output)
 
-    def test_upgrade_recovers_before_config_load_then_reexecs_fresh_bridge(self):
+    def test_direct_upgrade_refuses_active_recovery_and_points_to_resolver(self):
         from defenseclaw.main import cli
 
         argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.5"]
         runner = CliRunner()
-        with (
-            patch.object(sys, "argv", argv),
-            patch(
-                "defenseclaw.commands.cmd_upgrade._recover_interrupted_hard_cut",
-                return_value=True,
-            ) as recover,
-            patch("defenseclaw.main.os.execve") as execve,
-        ):
-            result = runner.invoke(cli, argv[1:])
+        with runner.isolated_filesystem():
+            home = Path.cwd() / ".defenseclaw"
+            journal = home / ".upgrade-recovery/phase-two-active.json"
+            journal.parent.mkdir(parents=True)
+            journal.write_text("{}\n", encoding="utf-8")
+            before = {path.relative_to(home) for path in home.rglob("*")}
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"DEFENSECLAW_HOME": str(home)},
+            ):
+                result = runner.invoke(cli, argv[1:])
+            self.assertEqual(journal.read_text(encoding="utf-8"), "{}\n")
+            self.assertEqual(
+                {path.relative_to(home) for path in home.rglob("*")},
+                before,
+            )
 
-        self.assertNotEqual(result.exit_code, 0)
-        recover.assert_called_once_with()
-        execve.assert_called_once()
-        executable, child_argv, child_env = execve.call_args.args
-        self.assertEqual(executable, sys.executable)
-        self.assertEqual(
-            child_argv,
-            [sys.executable, "-I", "-m", "defenseclaw.main", *argv[1:]],
-        )
-        self.assertNotIn("PYTHONHOME", child_env)
-        self.assertNotIn("PYTHONPATH", child_env)
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("requires the release-owned resolver", result.output)
+        self.assertIn("without --version/-Version", result.output)
+        self.assertIn("mktemp -d", result.output)
+        self.assertIn("cosign verify-blob", result.output)
+        self.assertIn("releases/download/", result.output)
+        self.assertIn("defenseclaw-upgrade.sh", result.output)
+        self.assertIn("DefenseClaw upgrade resolver complete v1", result.output)
+        self.assertIn("bash -n \"$d/defenseclaw-upgrade.sh\"", result.output)
+        self.assertNotIn("upgrade.sh | bash", result.output)
+        self.assertIn("[Guid]::NewGuid()", result.output)
+        self.assertIn("-ErrorAction Stop", result.output)
+        self.assertIn("finally", result.output)
+        self.assertIn("& $r -Yes", result.output)
+        self.assertIn("no recovery mutation was attempted", result.output)
 
     def test_upgrade_help_never_triggers_interrupted_recovery(self):
         from defenseclaw.main import cli
 
         argv = ["defenseclaw", "upgrade", "--help"]
         runner = CliRunner()
-        with (
-            patch.object(sys, "argv", argv),
-            patch(
-                "defenseclaw.commands.cmd_upgrade._recover_interrupted_hard_cut"
-            ) as recover,
-        ):
-            result = runner.invoke(cli, argv[1:])
+        with runner.isolated_filesystem():
+            home = Path.cwd() / ".defenseclaw"
+            journal = home / ".upgrade-recovery/phase-two-active.json"
+            journal.parent.mkdir(parents=True)
+            journal.write_text("{}\n", encoding="utf-8")
+            before = {path.relative_to(home) for path in home.rglob("*")}
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"DEFENSECLAW_HOME": str(home)},
+            ):
+                result = runner.invoke(cli, argv[1:])
+            self.assertEqual(journal.read_text(encoding="utf-8"), "{}\n")
+            self.assertEqual(
+                {path.relative_to(home) for path in home.rglob("*")},
+                before,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Usage:", result.output)
-        recover.assert_not_called()
-
-    def test_upgrade_recovery_reexec_failure_is_controlled(self):
-        from defenseclaw.main import cli
-
-        argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.5"]
-        runner = CliRunner()
-        with (
-            patch.object(sys, "argv", argv),
-            patch(
-                "defenseclaw.commands.cmd_upgrade._recover_interrupted_hard_cut",
-                return_value=True,
-            ),
-            patch("defenseclaw.main.os.execve", side_effect=OSError("injected exec failure")),
-        ):
-            result = runner.invoke(cli, argv[1:])
-
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Hard-cut recovery re-exec failed: injected exec failure", result.output)
 
     def test_setup_splunk_o11y_bootstraps_clean_home(self):
         from defenseclaw.main import cli

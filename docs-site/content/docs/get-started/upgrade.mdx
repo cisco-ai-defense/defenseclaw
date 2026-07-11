@@ -9,25 +9,33 @@ keywords:
   - DefenseClaw rollback
 ---
 
-Use `defenseclaw upgrade` for an existing installation. It treats a release as
-one transaction across the Python CLI, Go gateway, operator configuration, and
-release-owned migrations:
+Choose the upgrade entrypoint from the installed version. A `0.8.4`-or-newer
+controller can drive a compatible direct target with:
 
 ```bash
 defenseclaw upgrade --yes
 ```
 
-To install a specific release:
+To select a specific compatible release:
 
 ```bash
 defenseclaw upgrade --version X.Y.Z --yes
 ```
 
-<Callout title="Prefer the upgrade command over re-running the installer">
+Do not use either built-in form to cross a manifest-required bridge. A
+`0.8.3`-or-older host must use the authenticated current release-owned shell or
+PowerShell resolver in latest mode, as shown below. Its immutable built-in
+command and an explicit hard-cut target both refuse before stopping services or
+changing installed state.
+
+<Callout title="Never re-run the fresh installer over an existing host">
 The install scripts are fresh-install-only and refuse an existing DefenseClaw
-installation before making host changes. `defenseclaw upgrade` adds the safety
-work an existing host needs: artifact verification, a state backup,
-release-manifest validation, migrations, service restart, and a health check.
+installation before making host changes. The release-owned resolver supplies
+the safety work an old host needs: bridge selection, artifact verification,
+state backup, fresh-controller handoff, migrations, restart, health checks, and
+exact rollback. An already-published `0.8.3`-or-older built-in command cannot
+learn that orchestration retroactively; it therefore fails closed rather than
+attempting a partial hard-cut upgrade.
 </Callout>
 
 ## The 0.8.4 bridge release
@@ -41,15 +49,13 @@ version. Latest mode is allowed to follow a manifest-declared bridge; an
 explicit request that skips a required bridge is refused before services or
 installed files change.
 
-```bash
-# macOS/Linux checkout or downloaded release script
-./scripts/upgrade.sh --yes
-```
-
-```powershell
-# Windows checkout or downloaded release script
-.\scripts\upgrade.ps1 -Yes
-```
+Installed users must download and authenticate the release-owned resolver
+asset before running it. Use the complete POSIX or PowerShell `cosign` and
+SHA-256 bootstrap in the
+[repository CLI reference](https://github.com/cisco-ai-defense/defenseclaw/blob/0.8.4/docs/CLI.md#upgrade);
+it does not require a source checkout. From a checkout of the current release,
+the equivalent local commands are `./scripts/upgrade.sh --yes` on macOS/Linux
+and `.\scripts\upgrade.ps1 -Yes` on Windows.
 
 When a hard-cut manifest requires `0.8.4`, the resolver first authenticates and
 health-checks the bridge, then hands control to its freshly installed
@@ -68,6 +74,14 @@ resolver durably journals its exact CLI, gateway, managed configuration and
 state, source health endpoint, and prior running state. A caught failure or
 abrupt termination restores that source and proves its version-bound health
 before the journal is cleared or another upgrade begins.
+
+Rollback never deletes a bridge-state inode solely because it owns the
+temporary name: another process may still hold that inode open and append after
+the atomic restore. Such evidence is retained under a plan-scoped, mode-0700
+custody directory on the same filesystem as its original path, and a private
+`phase1-state/retained-quarantines.json` in the timestamped backup records its
+location. Keep that custody directory and index together until the upgrade has
+been validated; inspect them before any manual cleanup.
 
 Immediately before phase two, the bridge also commits a private recovery
 journal and a fixed mutator lease. Every wheel install, migration, bundle

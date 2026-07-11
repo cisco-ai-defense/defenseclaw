@@ -53,9 +53,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -471,29 +474,823 @@ def _restore_local_observability_backup(
     old_digests: dict[str, str],
     old_modes: dict[str, int],
 ) -> None:
-    """Restore the target transaction's exact managed-file inventory.
+    """Restore the transaction's exact managed-file inventory."""
 
-    This is the only local-observability transaction primitive needed by the
-    config-v7 bridge.  The target wheel owns staging/activation; if the hard
-    cut later fails, the bridge replays the authenticated backup metadata and
-    verifies every restored digest before reporting rollback success.
-    """
+    if os.name != "posix":
+        _restore_local_observability_backup_by_path(
+            destination,
+            backup_managed,
+            managed_paths,
+            existing_paths,
+            old_digests,
+            old_modes,
+        )
+        return
+
+    root_descriptor = _open_rollback_root_descriptor(destination)
+    try:
+        backup_root_descriptor = _open_rollback_root_descriptor(backup_managed)
+        try:
+            for relative in sorted(managed_paths):
+                parts = _rollback_path_parts(relative)
+                parent_descriptor = _open_rollback_parent(
+                    root_descriptor,
+                    parts[:-1],
+                    create=relative in existing_paths,
+                )
+                if parent_descriptor is None:
+                    continue
+                try:
+                    if relative in existing_paths:
+                        backup_parent_descriptor = _open_rollback_parent(
+                            backup_root_descriptor,
+                            parts[:-1],
+                            create=False,
+                        )
+                        if backup_parent_descriptor is None:
+                            raise OSError("backup member missing")
+                        try:
+                            _restore_rollback_file_at(
+                                backup_parent_descriptor,
+                                parts[-1],
+                                parent_descriptor,
+                                parts[-1],
+                                old_modes[relative],
+                                old_digests[relative],
+                            )
+                        finally:
+                            os.close(backup_parent_descriptor)
+                    else:
+                        _remove_rollback_file_at(parent_descriptor, parts[-1])
+                finally:
+                    os.close(parent_descriptor)
+        finally:
+            os.close(backup_root_descriptor)
+    finally:
+        os.close(root_descriptor)
+
+
+def _restore_local_observability_backup_by_path(
+    destination: Path,
+    backup_managed: Path,
+    managed_paths: set[str],
+    existing_paths: set[str],
+    old_digests: dict[str, str],
+    old_modes: dict[str, int],
+) -> None:
+    """Fail closed around symlinks and reparse points without POSIX dirfds."""
+
+    if os.name == "nt":
+        _restore_local_observability_backup_windows(
+            destination,
+            backup_managed,
+            managed_paths,
+            existing_paths,
+            old_digests,
+            old_modes,
+        )
+        return
+
+    root_chain = [(destination, _rollback_directory_info(destination))]
+    backup_root_chain = [(backup_managed, _rollback_directory_info(backup_managed))]
+    for relative in sorted(managed_paths):
+        parts = _rollback_path_parts(relative)
+        parent_chain = _open_rollback_parent_by_path(
+            root_chain,
+            parts[:-1],
+            create=relative in existing_paths,
+        )
+        if parent_chain is None:
+            continue
+        destination_path = parent_chain[-1][0] / parts[-1]
+        if relative in existing_paths:
+            backup_parent_chain = _open_rollback_parent_by_path(
+                backup_root_chain,
+                parts[:-1],
+                create=False,
+            )
+            if backup_parent_chain is None:
+                raise OSError("backup member missing")
+            _restore_rollback_file_by_path(
+                backup_parent_chain[-1][0] / parts[-1],
+                backup_parent_chain,
+                destination_path,
+                parent_chain,
+                old_modes[relative],
+                old_digests[relative],
+            )
+        else:
+            destination_info = _rollback_file_info(destination_path, missing_ok=True)
+            if destination_info is None:
+                continue
+            _revalidate_rollback_directory_chain(parent_chain)
+            _revalidate_rollback_file(destination_path, destination_info)
+            destination_path.unlink()
+            _revalidate_rollback_directory_chain(parent_chain)
+            if _rollback_file_info(destination_path, missing_ok=True) is not None:
+                raise OSError("local observability rollback managed file reappeared")
+
+
+def _restore_local_observability_backup_windows(
+    destination: Path,
+    backup_managed: Path,
+    managed_paths: set[str],
+    existing_paths: set[str],
+    old_digests: dict[str, str],
+    old_modes: dict[str, int],
+) -> None:
+    """Restore below native, non-delete-sharing Windows directory leases."""
+
+    from defenseclaw import windows_acl
 
     for relative in sorted(managed_paths):
-        destination_path = destination / relative
-        if relative in existing_paths:
-            backup_path = backup_managed / relative
-            if not backup_path.is_file() or backup_path.is_symlink():
-                raise OSError("backup member missing")
-            destination_path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_copy_file(str(backup_path), str(destination_path))
-            os.chmod(destination_path, old_modes[relative])
-            if _sha256_file(destination_path) != old_digests[relative]:
-                raise OSError("restored member digest mismatch")
-        elif destination_path.exists() or destination_path.is_symlink():
-            if destination_path.is_dir() and not destination_path.is_symlink():
-                raise OSError("unexpected directory at managed file path")
-            destination_path.unlink()
+        parts = _rollback_path_parts(relative)
+        with ExitStack() as leases:
+            parent_chain = _open_windows_rollback_parent(
+                destination,
+                parts[:-1],
+                create=relative in existing_paths,
+                leases=leases,
+            )
+            if parent_chain is None:
+                continue
+            destination_path = parent_chain[-1][0] / parts[-1]
+            if relative in existing_paths:
+                backup_parent_chain = _open_windows_rollback_parent(
+                    backup_managed,
+                    parts[:-1],
+                    create=False,
+                    leases=leases,
+                )
+                if backup_parent_chain is None:
+                    raise OSError("backup member missing")
+                _restore_rollback_file_by_path(
+                    backup_parent_chain[-1][0] / parts[-1],
+                    backup_parent_chain,
+                    destination_path,
+                    parent_chain,
+                    old_modes[relative],
+                    old_digests[relative],
+                )
+                continue
+
+            destination_info = _rollback_file_info(destination_path, missing_ok=True)
+            if destination_info is None:
+                continue
+            # The exact-leaf delete is safe without another path-chain stat:
+            # every ancestor lease remains held until this ExitStack unwinds.
+            windows_acl.delete_regular_file_by_handle(str(destination_path))
+            if _rollback_file_info(destination_path, missing_ok=True) is not None:
+                raise OSError("local observability rollback managed file reappeared")
+
+
+def _open_windows_rollback_parent(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+    leases: ExitStack,
+) -> list[tuple[Path, os.stat_result]] | None:
+    """Bind a no-reparse parent chain before any Windows mutation."""
+
+    from defenseclaw import windows_acl
+
+    leases.enter_context(windows_acl.hold_directory_chain(str(root)))
+    chain = [(root, _rollback_directory_info(root))]
+    current = root
+    for part in parts:
+        candidate = current / part
+        try:
+            _rollback_directory_info(candidate)
+        except FileNotFoundError:
+            if not create:
+                return None
+            try:
+                os.mkdir(candidate, 0o700)
+            except FileExistsError:
+                pass
+        # The parent is already bound. Opening the child without delete sharing
+        # either binds the current real directory or rejects a raced reparse.
+        leases.enter_context(windows_acl.hold_directory(str(candidate)))
+        chain.append((candidate, _rollback_directory_info(candidate)))
+        current = candidate
+    return chain
+
+
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_WINDOWS_ROLLBACK_MEMBER_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _is_rollback_link_or_reparse(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _rollback_directory_info(path: Path) -> os.stat_result:
+    """Inspect one fallback-path directory without following a reparse point."""
+
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise OSError("could not inspect local observability rollback destination") from exc
+    if _is_rollback_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise OSError("unsafe local observability rollback destination ancestor")
+    return info
+
+
+def _rollback_file_info(path: Path, *, missing_ok: bool) -> os.stat_result | None:
+    """Inspect one fallback-path managed file without following it."""
+
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise OSError("restored member is missing") from None
+    except OSError as exc:
+        raise OSError("could not inspect local observability rollback member") from exc
+    if _is_rollback_link_or_reparse(info):
+        raise OSError("unsafe local observability rollback managed file")
+    if stat.S_ISDIR(info.st_mode):
+        raise OSError("unexpected directory at managed file path")
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("unsafe local observability rollback managed file")
+    return info
+
+
+def _revalidate_rollback_directory_chain(
+    chain: list[tuple[Path, os.stat_result]],
+) -> None:
+    """Ensure every fallback ancestor is still the same real directory."""
+
+    for path, expected in chain:
+        current = _rollback_directory_info(path)
+        if not os.path.samestat(expected, current):
+            raise OSError("local observability rollback destination ancestor changed")
+
+
+def _revalidate_rollback_file(path: Path, expected: os.stat_result) -> None:
+    current = _rollback_file_info(path, missing_ok=False)
+    if current is None or not os.path.samestat(expected, current):
+        raise OSError("local observability rollback managed file changed")
+
+
+def _open_rollback_parent_by_path(
+    root_chain: list[tuple[Path, os.stat_result]],
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+) -> list[tuple[Path, os.stat_result]] | None:
+    """Validate or create a fallback parent chain without accepting links."""
+
+    chain = list(root_chain)
+    _revalidate_rollback_directory_chain(chain)
+    current = chain[-1][0]
+    for part in parts:
+        candidate = current / part
+        try:
+            info = _rollback_directory_info(candidate)
+        except FileNotFoundError:
+            if not create:
+                return None
+            _revalidate_rollback_directory_chain(chain)
+            try:
+                os.mkdir(candidate, 0o700)
+            except FileExistsError:
+                # A competing creator must still pass the no-link inspection.
+                pass
+            info = _rollback_directory_info(candidate)
+            _revalidate_rollback_directory_chain(chain)
+        chain.append((candidate, info))
+        _revalidate_rollback_directory_chain(chain)
+        current = candidate
+    return chain
+
+
+def _rollback_path_parts(relative: str) -> tuple[str, ...]:
+    """Return a normalized managed path that cannot escape its dirfd root."""
+
+    parts = tuple(relative.replace("\\", "/").split("/"))
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise OSError("local observability rollback contains an unsafe path")
+    return parts
+
+
+def _open_rollback_root_descriptor(path: Path) -> int:
+    """Open and bind a real rollback root without accepting a swapped leaf."""
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise OSError("unsafe local observability rollback root") from exc
+    try:
+        opened = os.fstat(descriptor)
+        named = os.lstat(path)
+        if (
+            _is_rollback_link_or_reparse(named)
+            or not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+            or not os.path.samestat(opened, named)
+        ):
+            raise OSError("unsafe local observability rollback root")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_rollback_parent(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+) -> int | None:
+    """Open one managed file's parent without following any path component."""
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current = os.dup(root_descriptor)
+    try:
+        for part in parts:
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    os.close(current)
+                    return None
+                try:
+                    os.mkdir(part, 0o700, dir_fd=current)
+                except FileExistsError:
+                    # A competing creator still has to pass the no-follow open.
+                    pass
+                else:
+                    os.fsync(current)
+                try:
+                    child = os.open(part, flags, dir_fd=current)
+                except OSError as exc:
+                    raise OSError("unsafe local observability rollback destination ancestor") from exc
+            except OSError as exc:
+                raise OSError("unsafe local observability rollback destination ancestor") from exc
+            try:
+                child_info = os.fstat(child)
+            except BaseException:
+                os.close(child)
+                raise
+            if not stat.S_ISDIR(child_info.st_mode):
+                os.close(child)
+                raise OSError("unsafe local observability rollback destination ancestor")
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _restore_rollback_file_at(
+    backup_parent_descriptor: int,
+    backup_name: str,
+    parent_descriptor: int,
+    destination_name: str,
+    mode: int,
+    expected_digest: str,
+) -> None:
+    """Atomically restore, flush, and verify one file below a trusted dirfd."""
+
+    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_descriptor = os.open(
+            backup_name,
+            source_flags,
+            dir_fd=backup_parent_descriptor,
+        )
+    except OSError as exc:
+        raise OSError("backup member missing") from exc
+    temporary_name = ""
+    temporary_descriptor = -1
+    try:
+        source_before = os.fstat(source_descriptor)
+        source_named_before = os.stat(
+            backup_name,
+            dir_fd=backup_parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(source_before.st_mode)
+            or not stat.S_ISREG(source_named_before.st_mode)
+            or not os.path.samestat(source_before, source_named_before)
+        ):
+            raise OSError("backup member missing")
+        destination_before = _rollback_file_info_at(
+            parent_descriptor,
+            destination_name,
+            missing_ok=True,
+        )
+        create_flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        for _ in range(128):
+            temporary_name = f".rollback-{secrets.token_hex(8)}"
+            try:
+                temporary_descriptor = os.open(
+                    temporary_name,
+                    create_flags,
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError("could not allocate rollback temporary file")
+
+        while True:
+            block = os.read(source_descriptor, 1024 * 1024)
+            if not block:
+                break
+            view = memoryview(block)
+            while view:
+                written = os.write(temporary_descriptor, view)
+                if written == 0:
+                    raise OSError("short write while restoring rollback member")
+                view = view[written:]
+        source_after = os.fstat(source_descriptor)
+        try:
+            source_named_after = os.stat(
+                backup_name,
+                dir_fd=backup_parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise OSError("backup member changed during restore") from exc
+        if (
+            not _rollback_source_snapshot_unchanged(source_before, source_after)
+            or not os.path.samestat(source_before, source_named_after)
+        ):
+            raise OSError("backup member changed during restore")
+        if _sha256_descriptor(temporary_descriptor) != expected_digest:
+            raise OSError("backup member digest mismatch")
+        os.fchmod(temporary_descriptor, mode)
+        os.fsync(temporary_descriptor)
+        _revalidate_rollback_file_at(
+            parent_descriptor,
+            destination_name,
+            destination_before,
+        )
+        os.replace(
+            temporary_name,
+            destination_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_name = ""
+        published = os.stat(
+            destination_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if not os.path.samestat(os.fstat(temporary_descriptor), published):
+            raise OSError("restored member identity changed during publish")
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(source_descriptor)
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
+            except OSError:
+                pass
+
+
+
+def _rollback_file_info_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    missing_ok: bool,
+) -> os.stat_result | None:
+    try:
+        info = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise OSError("restored member is missing") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("unsafe local observability rollback managed file")
+    return info
+
+
+def _revalidate_rollback_file_at(
+    parent_descriptor: int,
+    name: str,
+    expected: os.stat_result | None,
+) -> None:
+    current = _rollback_file_info_at(parent_descriptor, name, missing_ok=True)
+    if expected is None:
+        if current is not None:
+            raise OSError("local observability rollback managed file changed")
+        return
+    if current is None or not os.path.samestat(expected, current):
+        raise OSError("local observability rollback managed file changed")
+
+
+def _rollback_source_snapshot_unchanged(
+    before: os.stat_result,
+    after: os.stat_result,
+) -> bool:
+    """Reject in-place writes while a retained rollback member is copied."""
+
+    return (
+        os.path.samestat(before, after)
+        and before.st_mode == after.st_mode
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ctime_ns == after.st_ctime_ns
+    )
+
+
+def _restore_rollback_file_by_path(
+    backup_path: Path,
+    backup_parent_chain: list[tuple[Path, os.stat_result]],
+    destination_path: Path,
+    destination_parent_chain: list[tuple[Path, os.stat_result]],
+    mode: int,
+    expected_digest: str,
+) -> None:
+    """Stage and authenticate fallback rollback bytes before publication."""
+
+    _revalidate_rollback_directory_chain(backup_parent_chain)
+    _revalidate_rollback_directory_chain(destination_parent_chain)
+    source_named_before = _rollback_file_info(backup_path, missing_ok=False)
+    if source_named_before is None:
+        raise OSError("backup member missing")
+    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_descriptor = os.open(backup_path, source_flags)
+    except OSError as exc:
+        raise OSError("backup member missing") from exc
+    temporary_path: Path | None = None
+    temporary_descriptor = -1
+    try:
+        source_before = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(source_before.st_mode)
+            or not os.path.samestat(source_before, source_named_before)
+        ):
+            raise OSError("backup member missing")
+        destination_before = _rollback_file_info(destination_path, missing_ok=True)
+        if os.name == "nt":
+            _restore_windows_rollback_file_by_path(
+                source_descriptor,
+                source_before,
+                backup_path,
+                backup_parent_chain,
+                destination_path,
+                destination_parent_chain,
+                destination_before,
+                mode,
+                expected_digest,
+            )
+            return
+        create_flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        for _ in range(128):
+            candidate = destination_path.parent / f".rollback-{secrets.token_hex(8)}"
+            try:
+                temporary_descriptor = os.open(candidate, create_flags, 0o600)
+                temporary_path = candidate
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError("could not allocate rollback temporary file")
+
+        while True:
+            block = os.read(source_descriptor, 1024 * 1024)
+            if not block:
+                break
+            view = memoryview(block)
+            while view:
+                written = os.write(temporary_descriptor, view)
+                if written == 0:
+                    raise OSError("short write while restoring rollback member")
+                view = view[written:]
+
+        source_after = os.fstat(source_descriptor)
+        _revalidate_rollback_directory_chain(backup_parent_chain)
+        source_named_after = _rollback_file_info(backup_path, missing_ok=False)
+        if (
+            source_named_after is None
+            or not _rollback_source_snapshot_unchanged(source_before, source_after)
+            or not os.path.samestat(source_before, source_named_after)
+        ):
+            raise OSError("backup member changed during restore")
+        if _sha256_descriptor(temporary_descriptor) != expected_digest:
+            raise OSError("backup member digest mismatch")
+
+        descriptor_chmod = getattr(os, "fchmod", None)
+        if descriptor_chmod is not None:
+            descriptor_chmod(temporary_descriptor, mode)
+        else:
+            os.chmod(temporary_path, mode)
+        os.fsync(temporary_descriptor)
+        staged_info = os.fstat(temporary_descriptor)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+        staged_named = _rollback_file_info(temporary_path, missing_ok=False)
+        if staged_named is None or not os.path.samestat(staged_info, staged_named):
+            raise OSError("rollback temporary identity changed")
+
+        _revalidate_rollback_directory_chain(backup_parent_chain)
+        source_named_final = _rollback_file_info(backup_path, missing_ok=False)
+        if source_named_final is None or not os.path.samestat(source_before, source_named_final):
+            raise OSError("backup member changed during restore")
+        _revalidate_rollback_directory_chain(destination_parent_chain)
+        destination_current = _rollback_file_info(destination_path, missing_ok=True)
+        if destination_before is None:
+            if destination_current is not None:
+                raise OSError("local observability rollback managed file changed")
+        elif destination_current is None or not os.path.samestat(
+            destination_before,
+            destination_current,
+        ):
+            raise OSError("local observability rollback managed file changed")
+
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+        _fsync_directory(destination_path.parent)
+        _revalidate_rollback_directory_chain(destination_parent_chain)
+        restored_info = _rollback_file_info(destination_path, missing_ok=False)
+        if restored_info is None or not os.path.samestat(staged_info, restored_info):
+            raise OSError("restored member identity changed during publish")
+    finally:
+        os.close(source_descriptor)
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if temporary_path is not None:
+            try:
+                _revalidate_rollback_directory_chain(destination_parent_chain)
+                temporary_path.unlink()
+                _fsync_directory(temporary_path.parent)
+            except OSError:
+                pass
+
+
+def _restore_windows_rollback_file_by_path(
+    source_descriptor: int,
+    source_before: os.stat_result,
+    backup_path: Path,
+    backup_parent_chain: list[tuple[Path, os.stat_result]],
+    destination_path: Path,
+    destination_parent_chain: list[tuple[Path, os.stat_result]],
+    destination_before: os.stat_result | None,
+    mode: int,
+    expected_digest: str,
+) -> None:
+    """Use a protected Windows DACL before staging the first rollback byte."""
+
+    payload = bytearray()
+    while True:
+        block = os.read(source_descriptor, 1024 * 1024)
+        if not block:
+            break
+        payload.extend(block)
+        if len(payload) > _WINDOWS_ROLLBACK_MEMBER_MAX_BYTES:
+            raise OSError("backup member exceeds rollback size bound")
+    source_after = os.fstat(source_descriptor)
+    _revalidate_rollback_directory_chain(backup_parent_chain)
+    source_named_after = _rollback_file_info(backup_path, missing_ok=False)
+    if (
+        source_named_after is None
+        or not _rollback_source_snapshot_unchanged(source_before, source_after)
+        or not os.path.samestat(source_before, source_named_after)
+    ):
+        raise OSError("backup member changed during restore")
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise OSError("backup member digest mismatch")
+
+    from defenseclaw import windows_acl
+
+    temporary_path = destination_path.parent / f".rollback-{secrets.token_hex(16)}"
+    if os.path.lexists(temporary_path):
+        raise OSError("rollback temporary path collision")
+    created = False
+    try:
+        security = windows_acl.private_security_for_directory(str(destination_path.parent))
+        windows_acl.write_new_file(str(temporary_path), bytes(payload), security)
+        created = True
+        # Windows authorization is restored as a native protected DACL. Do
+        # not translate the retained POSIX mode through a path-based chmod:
+        # that both loses ACE semantics and would reopen a leaf-race window.
+        _ = mode
+        temporary_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        temporary_descriptor = os.open(temporary_path, temporary_flags)
+        try:
+            staged_info = os.fstat(temporary_descriptor)
+            staged_named = _rollback_file_info(temporary_path, missing_ok=False)
+            if staged_named is None or not os.path.samestat(staged_info, staged_named):
+                raise OSError("rollback temporary identity changed")
+            if _sha256_descriptor(temporary_descriptor) != expected_digest:
+                raise OSError("rollback temporary digest changed")
+            os.fsync(temporary_descriptor)
+        finally:
+            os.close(temporary_descriptor)
+
+        _revalidate_rollback_directory_chain(backup_parent_chain)
+        source_named_final = _rollback_file_info(backup_path, missing_ok=False)
+        if source_named_final is None or not os.path.samestat(source_before, source_named_final):
+            raise OSError("backup member changed during restore")
+        _revalidate_rollback_directory_chain(destination_parent_chain)
+        destination_current = _rollback_file_info(destination_path, missing_ok=True)
+        if destination_before is None:
+            if destination_current is not None:
+                raise OSError("local observability rollback managed file changed")
+        elif destination_current is None or not os.path.samestat(
+            destination_before,
+            destination_current,
+        ):
+            raise OSError("local observability rollback managed file changed")
+
+        windows_acl.replace_regular_file_by_handle(
+            str(temporary_path),
+            str(destination_path),
+        )
+        created = False
+        _fsync_directory(destination_path.parent)
+        _revalidate_rollback_directory_chain(destination_parent_chain)
+        restored_info = _rollback_file_info(destination_path, missing_ok=False)
+        if restored_info is None or not os.path.samestat(staged_info, restored_info):
+            raise OSError("restored member identity changed during publish")
+    finally:
+        if created:
+            try:
+                windows_acl.delete_regular_file_by_handle(
+                    str(temporary_path),
+                    missing_ok=True,
+                )
+                _fsync_directory(temporary_path.parent)
+            except OSError:
+                pass
+
+
+def _remove_rollback_file_at(parent_descriptor: int, destination_name: str) -> None:
+    """Durably unlink one target-created managed entry without following it."""
+
+    try:
+        info = os.stat(destination_name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        raise OSError("unexpected directory at managed file path")
+    os.unlink(destination_name, dir_fd=parent_descriptor)
+    os.fsync(parent_descriptor)
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+def _fsync_directory(path: Path) -> None:
+    """Durably publish a same-directory rename where the platform supports it."""
+
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        return
+    fd = os.open(path, os.O_RDONLY | directory_flag)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _sha256_file(path: Path) -> str:

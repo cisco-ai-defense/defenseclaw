@@ -2741,8 +2741,14 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     except OSError:
         existing_mode = None
 
+    mutation_token = os.environ.get("DEFENSECLAW_UPGRADE_MUTATION_TOKEN", "")
+    token_suffix = (
+        f"upgrade-{mutation_token}."
+        if len(mutation_token) == 32 and all(character in "0123456789abcdef" for character in mutation_token)
+        else ""
+    )
     fd, tmp = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.",
+        prefix=f".{os.path.basename(path)}.{token_suffix}",
         suffix=".tmp",
         dir=directory,
     )
@@ -4641,11 +4647,16 @@ def _warn_disable_redaction_config(cfg: Config) -> None:
     )
 
 
-def load() -> Config:
-    """Load config from ~/.defenseclaw/config.yaml, applying defaults."""
-    data_dir = str(default_data_path())
+def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
+    """Load config from the active config path, applying defaults.
+
+    ``data_dir`` scopes transactional reloads (notably upgrades) to the
+    installation that is actually being mutated.  ``DEFENSECLAW_CONFIG``
+    remains authoritative when set, including for a scoped load.
+    """
+    data_dir = str(Path(data_dir) if data_dir is not None else default_data_path())
     _load_dotenv_into_os(data_dir)
-    cfg_file = str(config_path())
+    cfg_file = str(config_path_for_data_dir(data_dir))
 
     raw: dict[str, Any] = {}
     try:

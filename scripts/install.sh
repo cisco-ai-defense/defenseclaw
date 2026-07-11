@@ -22,7 +22,7 @@
 # No Go, Node.js, or git required — only Python and uv.
 #
 #   # From GitHub release:
-#   VERSION=0.8.3
+#   VERSION=0.8.4
 #   INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 #   curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 #
@@ -60,6 +60,7 @@ readonly DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"
 readonly INSTALL_DIR="${HOME}/.local/bin"
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly OPENCLAW_VERSION="2026.3.24"
+VERIFIED_CHECKSUM=""
 
 # Supported connectors. Keep in sync with cli/defenseclaw/connector_paths.py
 # KNOWN_CONNECTORS. The "none" pseudo-value means "lay binaries only — pick
@@ -89,6 +90,283 @@ die() { err "$@"; exit 1; }
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 has() { command -v "$1" &>/dev/null; }
+
+# Return a device/inode pair without following a symlink. The two stat forms
+# cover BSD/macOS and GNU/Linux respectively. Identity checks keep failure
+# cleanup from removing a path that another process substituted mid-install.
+path_identity() {
+    local value="" platform_name="${OS:-}"
+    if [[ -z "${platform_name}" ]]; then
+        platform_name="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    fi
+    case "${platform_name}" in
+        linux) value="$(stat -c '%d:%i' "$1" 2>/dev/null || true)" ;;
+        darwin) value="$(stat -f '%d:%i' "$1" 2>/dev/null || true)" ;;
+        *) return 1 ;;
+    esac
+    [[ "${value}" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    printf '%s\n' "${value}"
+}
+
+path_has_identity() {
+    local path="$1" expected="$2" allow_symlink="${3:-false}" actual
+    [[ -n "${expected}" ]] || return 1
+    [[ "${allow_symlink}" == true || ! -L "${path}" ]] || return 1
+    actual="$(path_identity "${path}")" || return 1
+    [[ "${actual}" == "${expected}" ]]
+}
+
+cleanup_install_attempt() {
+    local status=$?
+    set +e
+
+    if [[ "${INSTALL_SUCCEEDED:-false}" != true ]]; then
+        if [[ -n "${CLI_PUBLISHED_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" unlink-exact \
+                    "${INSTALL_DIR}/defenseclaw" \
+                    "${CLI_PUBLISHED_ID%%:*}" "${CLI_PUBLISHED_ID#*:}" || true
+            elif path_has_identity \
+                "${INSTALL_DIR}/defenseclaw" "${CLI_PUBLISHED_ID}" true; then
+                rm -f "${INSTALL_DIR}/defenseclaw"
+            fi
+        fi
+        if [[ -n "${GATEWAY_ROLLBACK_TOKEN:-}" \
+            && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rollback-token \
+                "${GATEWAY_ROLLBACK_TOKEN}" || true
+        fi
+        if [[ -n "${GATEWAY_PUBLISHED_ID:-}" ]] \
+            && path_has_identity \
+                "${INSTALL_DIR}/defenseclaw-gateway" \
+                "${GATEWAY_PUBLISHED_ID}"; then
+            rm -f "${INSTALL_DIR}/defenseclaw-gateway"
+        fi
+        if [[ -n "${GATEWAY_ACTIVATION:-}" ]] \
+            && path_has_identity \
+                "${GATEWAY_ACTIVATION}" "${GATEWAY_ACTIVATION_ID:-}"; then
+            rm -f "${GATEWAY_ACTIVATION}"
+        fi
+        if [[ -n "${VENV_CLAIM_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" remove-tree-exact \
+                    "${DEFENSECLAW_VENV}" \
+                    "${VENV_CLAIM_ID%%:*}" "${VENV_CLAIM_ID#*:}" || true
+            elif path_has_identity "${DEFENSECLAW_VENV}" "${VENV_CLAIM_ID}"; then
+                rm -rf "${DEFENSECLAW_VENV}"
+            fi
+        fi
+        if [[ -n "${CONNECTOR_MARKER_ROLLBACK_TOKEN:-}" \
+            && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rollback-token \
+                "${CONNECTOR_MARKER_ROLLBACK_TOKEN}" || true
+        elif [[ -n "${CONNECTOR_MARKER_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" unlink-exact \
+                    "${DEFENSECLAW_HOME}/picked_connector" \
+                    "${CONNECTOR_MARKER_ID%%:*}" \
+                    "${CONNECTOR_MARKER_ID#*:}" || true
+            elif path_has_identity \
+                "${DEFENSECLAW_HOME}/picked_connector" \
+                "${CONNECTOR_MARKER_ID}"; then
+                rm -f "${DEFENSECLAW_HOME}/picked_connector"
+            fi
+        fi
+        if [[ -n "${PICKED_CONNECTOR_ACTIVATION:-}" ]] \
+            && path_has_identity \
+                "${PICKED_CONNECTOR_ACTIVATION}" \
+                "${PICKED_CONNECTOR_ACTIVATION_ID:-}"; then
+            rm -f "${PICKED_CONNECTOR_ACTIVATION}"
+        fi
+        if [[ -n "${PLUGIN_CLAIM_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" remove-tree-exact \
+                    "${DEFENSECLAW_HOME}/extensions/defenseclaw" \
+                    "${PLUGIN_CLAIM_ID%%:*}" "${PLUGIN_CLAIM_ID#*:}" || true
+            elif path_has_identity \
+                "${DEFENSECLAW_HOME}/extensions/defenseclaw" \
+                "${PLUGIN_CLAIM_ID}"; then
+                rm -rf "${DEFENSECLAW_HOME}/extensions/defenseclaw"
+            fi
+        fi
+        if [[ -n "${EXTENSIONS_CLAIM_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
+                    "${DEFENSECLAW_HOME}/extensions" \
+                    "${EXTENSIONS_CLAIM_ID%%:*}" \
+                    "${EXTENSIONS_CLAIM_ID#*:}" || true
+            elif path_has_identity \
+                "${DEFENSECLAW_HOME}/extensions" "${EXTENSIONS_CLAIM_ID}"; then
+                rmdir "${DEFENSECLAW_HOME}/extensions" 2>/dev/null || true
+            fi
+        fi
+        if [[ -n "${HOME_CLAIM_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
+                    "${DEFENSECLAW_HOME}" \
+                    "${HOME_CLAIM_ID%%:*}" "${HOME_CLAIM_ID#*:}" || true
+            elif path_has_identity "${DEFENSECLAW_HOME}" "${HOME_CLAIM_ID}"; then
+                rmdir "${DEFENSECLAW_HOME}" 2>/dev/null || true
+            fi
+        fi
+        if [[ -n "${INSTALL_DIR_CLAIM_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
+                    "${INSTALL_DIR}" \
+                    "${INSTALL_DIR_CLAIM_ID%%:*}" "${INSTALL_DIR_CLAIM_ID#*:}" || true
+            elif path_has_identity "${INSTALL_DIR}" "${INSTALL_DIR_CLAIM_ID}"; then
+                rmdir "${INSTALL_DIR}" 2>/dev/null || true
+            fi
+        fi
+        if [[ -n "${LOCAL_BIN_PARENT_CLAIM_ID:-}" ]]; then
+            local bin_parent
+            bin_parent="$(dirname "${INSTALL_DIR}")"
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
+                    "${bin_parent}" \
+                    "${LOCAL_BIN_PARENT_CLAIM_ID%%:*}" \
+                    "${LOCAL_BIN_PARENT_CLAIM_ID#*:}" || true
+            elif path_has_identity "${bin_parent}" "${LOCAL_BIN_PARENT_CLAIM_ID}"; then
+                rmdir "${bin_parent}" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    if [[ -n "${POLICY_DIR:-}" && -n "${POLICY_DIR_ID:-}" ]]; then
+        if [[ "${MODERN_RELEASE:-false}" == true \
+            && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" remove-tree-exact \
+                "${POLICY_DIR}" \
+                "${POLICY_DIR_ID%%:*}" "${POLICY_DIR_ID#*:}" || true
+        elif path_has_identity "${POLICY_DIR}" "${POLICY_DIR_ID}"; then
+            rm -rf "${POLICY_DIR}"
+        fi
+    fi
+    return "${status}"
+}
+
+claim_fresh_install_home() {
+    local home_parent
+    home_parent="$(dirname "${DEFENSECLAW_HOME}")"
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" ensure-real-directory "${home_parent}" \
+            || die "Could not bind the fresh-install home parent"
+        HOME_CLAIM_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-directory "${DEFENSECLAW_HOME}"
+        )" || die "A DefenseClaw home appeared during installation; it was preserved and no payload was activated"
+        VENV_CLAIM_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-directory "${DEFENSECLAW_VENV}"
+        )" || die "A DefenseClaw environment appeared during installation; it was preserved and no payload was activated"
+    else
+        mkdir -p "${home_parent}"
+        if ! mkdir "${DEFENSECLAW_HOME}"; then
+            die "A DefenseClaw home appeared during installation; it was preserved and no payload was activated"
+        fi
+        HOME_CLAIM_ID="$(path_identity "${DEFENSECLAW_HOME}")" \
+            || die "Could not bind the new DefenseClaw home identity"
+        if ! mkdir "${DEFENSECLAW_VENV}"; then
+            die "A DefenseClaw environment appeared during installation; it was preserved and no payload was activated"
+        fi
+        VENV_CLAIM_ID="$(path_identity "${DEFENSECLAW_VENV}")" \
+            || die "Could not bind the new DefenseClaw environment identity"
+    fi
+    [[ "${HOME_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ \
+       && "${VENV_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+        || die "Fresh-install directory custody returned an invalid identity"
+
+    claim_fresh_install_bin_dir
+}
+
+claim_fresh_install_bin_dir() {
+    local bin_parent
+    bin_parent="$(dirname "${INSTALL_DIR}")"
+
+    if [[ -e "${bin_parent}" || -L "${bin_parent}" ]]; then
+        if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" ensure-real-directory "${bin_parent}" \
+                || die "Could not bind the fresh-install binary parent"
+        else
+            [[ -d "${bin_parent}" && ! -L "${bin_parent}" ]] \
+                || die "Fresh-install binary parent is not a real directory"
+        fi
+    elif [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        LOCAL_BIN_PARENT_CLAIM_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-directory "${bin_parent}"
+        )" || die "A fresh-install binary parent appeared concurrently and was preserved"
+    else
+        mkdir "${bin_parent}" \
+            || die "A fresh-install binary parent appeared concurrently and was preserved"
+        LOCAL_BIN_PARENT_CLAIM_ID="$(path_identity "${bin_parent}")" \
+            || die "Could not bind the fresh-install binary parent identity"
+    fi
+
+    if [[ -e "${INSTALL_DIR}" || -L "${INSTALL_DIR}" ]]; then
+        if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" ensure-real-directory "${INSTALL_DIR}" \
+                || die "Could not bind the fresh-install binary directory"
+        else
+            [[ -d "${INSTALL_DIR}" && ! -L "${INSTALL_DIR}" ]] \
+                || die "Fresh-install binary directory is not a real directory"
+        fi
+    elif [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        INSTALL_DIR_CLAIM_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-directory "${INSTALL_DIR}"
+        )" || die "A fresh-install binary directory appeared concurrently and was preserved"
+    else
+        mkdir "${INSTALL_DIR}" \
+            || die "A fresh-install binary directory appeared concurrently and was preserved"
+        INSTALL_DIR_CLAIM_ID="$(path_identity "${INSTALL_DIR}")" \
+            || die "Could not bind the fresh-install binary directory identity"
+    fi
+
+    [[ -z "${LOCAL_BIN_PARENT_CLAIM_ID}" \
+        || "${LOCAL_BIN_PARENT_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+        || die "Fresh-install binary parent custody returned an invalid identity"
+    [[ -z "${INSTALL_DIR_CLAIM_ID}" \
+        || "${INSTALL_DIR_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+        || die "Fresh-install binary directory custody returned an invalid identity"
+}
+
+complete_install_attempt() {
+    if [[ -n "${CONNECTOR_MARKER_ROLLBACK_TOKEN:-}" ]]; then
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" commit-token \
+            "${CONNECTOR_MARKER_ROLLBACK_TOKEN}" \
+            || die "Could not close connector marker rollback custody"
+        CONNECTOR_MARKER_ROLLBACK_TOKEN=""
+    fi
+    if [[ -n "${GATEWAY_ROLLBACK_TOKEN:-}" ]]; then
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" commit-token \
+            "${GATEWAY_ROLLBACK_TOKEN}" \
+            || die "Could not close fresh gateway rollback custody"
+        GATEWAY_ROLLBACK_TOKEN=""
+    fi
+    if [[ -n "${GATEWAY_ACTIVATION:-}" ]] \
+        && path_has_identity \
+            "${GATEWAY_ACTIVATION}" "${GATEWAY_ACTIVATION_ID:-}"; then
+        rm -f "${GATEWAY_ACTIVATION}"
+    fi
+    GATEWAY_ACTIVATION=""
+    GATEWAY_PRECLAIM_ID=""
+    GATEWAY_ACTIVATION_ID=""
+    GATEWAY_PUBLISHED_ID=""
+    if [[ -n "${PICKED_CONNECTOR_ACTIVATION:-}" ]] \
+        && path_has_identity \
+            "${PICKED_CONNECTOR_ACTIVATION}" \
+            "${PICKED_CONNECTOR_ACTIVATION_ID:-}"; then
+        rm -f "${PICKED_CONNECTOR_ACTIVATION}"
+    fi
+    PICKED_CONNECTOR_ACTIVATION=""
+    PICKED_CONNECTOR_ACTIVATION_ID=""
+    INSTALL_SUCCEEDED=true
+}
 
 version_gte() {
     printf '%s\n%s' "$2" "$1" | sort -V -C
@@ -229,8 +507,51 @@ record_picked_connector() {
     if [[ -z "${CONNECTOR}" ]] || [[ "${CONNECTOR}" == "none" ]]; then
         return
     fi
-    mkdir -p "${DEFENSECLAW_HOME}"
-    printf "%s\n" "${CONNECTOR}" > "${DEFENSECLAW_HOME}/picked_connector"
+    local destination="${DEFENSECLAW_HOME}/picked_connector"
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        local source
+        source="$(mktemp "${POLICY_DIR}/picked-connector.XXXXXX")" \
+            || die "Could not allocate private connector marker custody"
+        printf "%s\n" "${CONNECTOR}" > "${source}" \
+            || die "Could not stage the selected connector marker"
+        CONNECTOR_MARKER_ROLLBACK_TOKEN="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-regular \
+                "${source}" "${destination}" --retain-token
+        )" || die "A connector marker appeared during installation; it was preserved"
+        [[ -n "${CONNECTOR_MARKER_ROLLBACK_TOKEN}" ]] \
+            || die "Connector marker publication did not return rollback custody"
+        local retained_stages=(
+            "${DEFENSECLAW_HOME}"/.picked_connector.source-install-*
+        )
+        [[ ${#retained_stages[@]} -eq 1 ]] \
+            || die "Connector marker rollback custody could not be bound"
+        local observed_marker_id retained_stage_id
+        observed_marker_id="$(path_identity "${destination}")" \
+            || die "Could not bind the selected connector marker identity"
+        retained_stage_id="$(path_identity "${retained_stages[0]}")" \
+            || die "Could not bind retained connector marker custody"
+        [[ "${observed_marker_id}" == "${retained_stage_id}" ]] \
+            || die "Connector marker rollback custody changed during publication"
+        CONNECTOR_MARKER_ID="${observed_marker_id}"
+    else
+        PICKED_CONNECTOR_ACTIVATION="$(
+            mktemp "${DEFENSECLAW_HOME}/.picked-connector.install.XXXXXX"
+        )" || die "Could not allocate connector marker activation custody"
+        PICKED_CONNECTOR_ACTIVATION_ID="$(
+            path_identity "${PICKED_CONNECTOR_ACTIVATION}"
+        )" || die "Could not bind connector marker activation custody"
+        printf "%s\n" "${CONNECTOR}" > "${PICKED_CONNECTOR_ACTIVATION}" \
+            || die "Could not stage the selected connector marker"
+        if ! ln "${PICKED_CONNECTOR_ACTIVATION}" "${destination}"; then
+            die "A connector marker appeared during installation; it was preserved"
+        fi
+        local observed_marker_id
+        observed_marker_id="$(path_identity "${destination}")" \
+            || die "Could not bind the selected connector marker identity"
+        [[ "${observed_marker_id}" == "${PICKED_CONNECTOR_ACTIVATION_ID}" ]] \
+            || die "Connector marker activation identity changed during publication"
+        CONNECTOR_MARKER_ID="${observed_marker_id}"
+    fi
 }
 
 # ── Interrupt handler ─────────────────────────────────────────────────────────
@@ -295,6 +616,7 @@ ensure_python() {
             ver="$(extract_version "$("$cmd" --version 2>&1)")"
             if version_gte "$ver" "3.10"; then
                 PYTHON_VERSION="$ver"
+                POLICY_PYTHON="$(command -v "$cmd")"
                 ok "Python ${ver}"
                 return
             fi
@@ -305,14 +627,18 @@ ensure_python() {
     uv_py="$(uv python find 3.12 2>/dev/null || true)"
     if [[ -n "$uv_py" ]] && [[ -x "$uv_py" ]]; then
         PYTHON_VERSION="$(extract_version "$("$uv_py" --version 2>&1)")"
+        POLICY_PYTHON="$uv_py"
         ok "Python ${PYTHON_VERSION} (managed by uv)"
         return
     fi
 
     info "Installing Python 3.12 via uv..."
     uv python install 3.12 || die "Failed to install Python via uv."
-    PYTHON_VERSION="3.12"
-    ok "Python 3.12 installed"
+    POLICY_PYTHON="$(uv python find 3.12 2>/dev/null)"
+    [[ -n "${POLICY_PYTHON}" && -x "${POLICY_PYTHON}" ]] \
+        || die "uv installed Python 3.12 but its interpreter could not be resolved"
+    PYTHON_VERSION="$(extract_version "$("${POLICY_PYTHON}" --version 2>&1)")"
+    ok "Python ${PYTHON_VERSION} installed"
 }
 
 # ── Resolve dist artifacts ────────────────────────────────────────────────────
@@ -338,6 +664,274 @@ resolve_version() {
         || die "Could not parse release version. Use VERSION=x.y.z or --local <dir>."
 
     ok "Latest release: ${RELEASE_VERSION}"
+}
+
+sha256_file() {
+    if has sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif has shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "sha256sum or shasum is required to authenticate release artifacts"
+    fi
+}
+
+load_release_policy() {
+    step "Authenticating release policy"
+    [[ -n "${POLICY_PYTHON:-}" && -x "${POLICY_PYTHON}" ]] \
+        || die "A supported Python interpreter is required to validate the signed release artifact policy"
+    POLICY_DIR="$(mktemp -d)"
+    POLICY_DIR_ID="$(path_identity "${POLICY_DIR}")" \
+        || die "Could not bind the release-policy staging directory identity"
+
+    local manifest_path="${POLICY_DIR}/upgrade-manifest.json"
+    CHECKSUMS_FILE="${POLICY_DIR}/checksums.txt"
+    if [[ -n "${LOCAL_DIR}" ]]; then
+        [[ -f "${LOCAL_DIR}/upgrade-manifest.json" && -f "${LOCAL_DIR}/checksums.txt" ]] \
+            || die "Local installs require upgrade-manifest.json and checksums.txt"
+        cp "${LOCAL_DIR}/upgrade-manifest.json" "${manifest_path}"
+        cp "${LOCAL_DIR}/checksums.txt" "${CHECKSUMS_FILE}"
+        RELEASE_VERSION="$("${POLICY_PYTHON}" - "${manifest_path}" <<'PY'
+import json, re, sys
+value = json.load(open(sys.argv[1], encoding="utf-8")).get("release_version")
+if not isinstance(value, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value) is None:
+    raise SystemExit("local upgrade manifest has no canonical release_version")
+print(value)
+PY
+)"
+        if [[ -n "${VERSION:-}" && "${VERSION}" != "${RELEASE_VERSION}" ]]; then
+            die "Local manifest release ${RELEASE_VERSION} does not match VERSION=${VERSION}"
+        fi
+    else
+        fetch_artifact "$(artifact_path "checksums.txt")" "${CHECKSUMS_FILE}"
+        fetch_artifact "$(artifact_path "upgrade-manifest.json")" "${manifest_path}"
+    fi
+
+    MODERN_RELEASE=false
+    if version_gte "${RELEASE_VERSION}" "0.8.4"; then
+        MODERN_RELEASE=true
+        has cosign || die "cosign is required to authenticate DefenseClaw ${RELEASE_VERSION} before installation"
+        local signature="${POLICY_DIR}/checksums.txt.sig"
+        local certificate="${POLICY_DIR}/checksums.txt.pem"
+        if [[ -n "${LOCAL_DIR}" ]]; then
+            [[ -f "${LOCAL_DIR}/checksums.txt.sig" && -f "${LOCAL_DIR}/checksums.txt.pem" ]] \
+                || die "Local schema-2 installs require checksums.txt.sig and checksums.txt.pem"
+            cp "${LOCAL_DIR}/checksums.txt.sig" "${signature}"
+            cp "${LOCAL_DIR}/checksums.txt.pem" "${certificate}"
+        else
+            fetch_artifact "$(artifact_path "checksums.txt.sig")" "${signature}"
+            fetch_artifact "$(artifact_path "checksums.txt.pem")" "${certificate}"
+        fi
+        cosign verify-blob \
+            --certificate "${certificate}" \
+            --signature "${signature}" \
+            --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${CHECKSUMS_FILE}" >/dev/null \
+            || die "Sigstore verification failed; no DefenseClaw payload was activated"
+    fi
+
+    local manifest_expected manifest_actual
+    manifest_expected="$(awk '$2 == "upgrade-manifest.json" {print $1; exit}' "${CHECKSUMS_FILE}")"
+    [[ "${manifest_expected}" =~ ^[0-9A-Fa-f]{64}$ ]] \
+        || die "checksums.txt does not authenticate upgrade-manifest.json"
+    manifest_actual="$(sha256_file "${manifest_path}")"
+    [[ "${manifest_actual}" == "${manifest_expected}" ]] \
+        || die "upgrade-manifest.json checksum mismatch"
+
+    local policy_fields
+    policy_fields="$(
+        "${POLICY_PYTHON}" - "${manifest_path}" "${RELEASE_VERSION}" "${OS}" "${ARCH_NORM}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path, expected_version, os_name, arch = sys.argv[1:]
+manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+version = manifest.get("release_version")
+if version != expected_version:
+    raise SystemExit("release manifest version mismatch")
+key = tuple(map(int, version.split(".")))
+schema = manifest.get("schema_version")
+if key >= (0, 8, 4):
+    expected_gateways = {}
+    for platform_name in ("darwin", "linux", "windows"):
+        expected_gateways[platform_name] = {
+            platform_arch: f"defenseclaw_{version}_protocol2_{platform_name}_{platform_arch}.dcgateway"
+            for platform_arch in ("amd64", "arm64")
+        }
+    expected_wheel = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
+    expected_artifacts = {"wheel": expected_wheel, "gateways": expected_gateways}
+    if schema != 2 or manifest.get("release_artifacts") != expected_artifacts:
+        raise SystemExit("schema-2 release_artifacts policy is missing or invalid")
+    gateway = manifest["release_artifacts"]["gateways"][os_name][arch]
+    wheel = manifest["release_artifacts"]["wheel"]
+else:
+    if schema != 1 or "release_artifacts" in manifest:
+        raise SystemExit("legacy release manifest policy is invalid")
+    gateway = f"defenseclaw_{version}_{os_name}_{arch}.tar.gz"
+    wheel = f"defenseclaw-{version}-py3-none-any.whl"
+print(version, schema, gateway, wheel)
+PY
+    )" || die "Release policy validation failed"
+    read -r POLICY_RELEASE POLICY_SCHEMA GATEWAY_ARTIFACT WHEEL_ARTIFACT <<<"${policy_fields}"
+    [[ "${POLICY_RELEASE}" == "${RELEASE_VERSION}" ]] || die "Release policy validation failed"
+
+    if [[ "${MODERN_RELEASE}" == true ]]; then
+        local gateway_protected="${POLICY_DIR}/${GATEWAY_ARTIFACT}"
+        local wheel_protected="${POLICY_DIR}/${WHEEL_ARTIFACT}"
+        fetch_artifact "$(artifact_path "${GATEWAY_ARTIFACT}")" "${gateway_protected}"
+        fetch_artifact "$(artifact_path "${WHEEL_ARTIFACT}")" "${wheel_protected}"
+        verify_checksum "${gateway_protected}" "${GATEWAY_ARTIFACT}"
+        local gateway_outer_sha256="${VERIFIED_CHECKSUM}"
+        verify_checksum "${wheel_protected}" "${WHEEL_ARTIFACT}"
+        local wheel_outer_sha256="${VERIFIED_CHECKSUM}"
+
+        # Published payloads are custom envelopes, not merely renamed wheels or
+        # archives: suffix sniffing or renaming must not bypass the resolver.
+        # Only this authenticated private directory receives the unwrapped
+        # bytes under conventional suffixes, using no-follow/exclusive opens.
+        GATEWAY_STAGED="${POLICY_DIR}/defenseclaw-gateway-authenticated.tar.gz"
+        WHEEL_STAGED="${POLICY_DIR}/defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
+        "${POLICY_PYTHON}" - \
+            "${gateway_protected}" "${GATEWAY_STAGED}" "${gateway_outer_sha256}" \
+            "${wheel_protected}" "${WHEEL_STAGED}" "${wheel_outer_sha256}" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+XOR_TRANSLATION = bytes(value ^ 0xA5 for value in range(256))
+arguments = sys.argv[1:]
+for source_value, destination_value, expected_outer_sha256 in zip(
+    arguments[::3], arguments[1::3], arguments[2::3], strict=True
+):
+    expected_outer_sha256 = expected_outer_sha256.lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_outer_sha256) is None:
+        raise SystemExit("protected release asset lacks an authenticated outer digest")
+    source = Path(source_value)
+    destination = Path(destination_value)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | nofollow)
+    destination_fd = -1
+    payload_digest = hashlib.sha256()
+    outer_digest = hashlib.sha256()
+    try:
+        info = os.fstat(source_fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"protected release asset is not a regular file: {source.name}")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | nofollow,
+            0o600,
+        )
+        with os.fdopen(source_fd, "rb", closefd=False) as input_stream, os.fdopen(
+            destination_fd, "wb", closefd=False
+        ) as output_stream:
+            observed_magic = input_stream.read(len(MAGIC))
+            if observed_magic != MAGIC:
+                raise SystemExit(f"protected release envelope magic is invalid: {source.name}")
+            outer_digest.update(observed_magic)
+            payload_size = 0
+            while encoded_chunk := input_stream.read(1024 * 1024):
+                outer_digest.update(encoded_chunk)
+                chunk = encoded_chunk.translate(XOR_TRANSLATION)
+                payload_size += len(chunk)
+                payload_digest.update(chunk)
+                output_stream.write(chunk)
+            if payload_size == 0:
+                raise SystemExit(f"protected release envelope is empty: {source.name}")
+            if outer_digest.hexdigest() != expected_outer_sha256:
+                raise SystemExit(
+                    f"protected release asset changed after checksum authentication: {source.name}"
+                )
+            output_stream.flush()
+            os.fsync(destination_fd)
+    except BaseException:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        os.close(source_fd)
+        if destination_fd >= 0:
+            os.close(destination_fd)
+
+    materialized_digest = hashlib.sha256()
+    verified_fd = os.open(destination, os.O_RDONLY | os.O_CLOEXEC | nofollow)
+    try:
+        with os.fdopen(verified_fd, "rb", closefd=False) as verified_stream:
+            for chunk in iter(lambda: verified_stream.read(1024 * 1024), b""):
+                materialized_digest.update(chunk)
+    finally:
+        os.close(verified_fd)
+    if payload_digest.digest() != materialized_digest.digest():
+        raise SystemExit(f"private materialization changed protected payload bytes: {source.name}")
+    directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+PY
+        GATEWAY_STAGED_BINARY="${POLICY_DIR}/defenseclaw"
+        PUBLISH_HELPER="${POLICY_DIR}/install_publish.py"
+        "${POLICY_PYTHON}" - \
+            "${GATEWAY_STAGED}" "${WHEEL_STAGED}" \
+            "${GATEWAY_STAGED_BINARY}" "${PUBLISH_HELPER}" <<'PY'
+import os
+import stat
+import sys
+import tarfile
+import zipfile
+
+gateway, wheel, output, helper_output = sys.argv[1:]
+with tarfile.open(gateway, "r:gz") as archive:
+    matches = [member for member in archive.getmembers() if member.isfile() and member.name == "defenseclaw"]
+    if len(matches) != 1:
+        raise SystemExit("protected gateway archive lacks its exact runtime binary")
+    if not 0 < matches[0].size <= 512 * 1024 * 1024:
+        raise SystemExit("protected gateway runtime is outside its size bound")
+    stream = archive.extractfile(matches[0])
+    if stream is None:
+        raise SystemExit("protected gateway runtime could not be read")
+    with open(output, "xb") as handle:
+        handle.write(stream.read())
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(output, 0o700)
+with zipfile.ZipFile(wheel) as archive:
+    if not any(name.endswith(".dist-info/METADATA") for name in archive.namelist()):
+        raise SystemExit("protected wheel lacks package metadata")
+    helper_name = "defenseclaw/install_publish.py"
+    helpers = [info for info in archive.infolist() if info.filename == helper_name]
+    if len(helpers) != 1:
+        raise SystemExit("protected wheel lacks its exact install publisher")
+    helper = helpers[0]
+    mode = helper.external_attr >> 16
+    if (
+        helper.is_dir()
+        or helper.flag_bits & 0x1
+        or not 0 < helper.file_size <= 512 * 1024
+        or (mode and stat.S_ISLNK(mode))
+    ):
+        raise SystemExit("protected wheel install publisher is unsafe")
+    with archive.open(helper) as source, open(helper_output, "xb") as destination:
+        destination.write(source.read())
+        destination.flush()
+        os.fsync(destination.fileno())
+    os.chmod(helper_output, 0o500)
+directory_fd = os.open(os.path.dirname(output), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+    fi
+    ok "Release policy and protected artifacts verified (${RELEASE_VERSION})"
 }
 
 # Find artifact in local dir or construct download URL
@@ -370,7 +964,8 @@ fetch_artifact() {
 # Skipped for --local installs (assumes the user built locally).
 verify_checksum() {
     local file="$1" filename="$2"
-    if [[ -n "${LOCAL_DIR}" ]]; then
+    VERIFIED_CHECKSUM=""
+    if [[ -n "${LOCAL_DIR}" && "${MODERN_RELEASE:-false}" != true ]]; then
         return 0
     fi
     if [[ -z "${CHECKSUMS_FILE:-}" ]]; then
@@ -383,20 +978,17 @@ verify_checksum() {
     local expected actual
     expected="$(awk -v f="${filename}" '$2 == f {print $1; exit}' "${CHECKSUMS_FILE}")"
     if [[ -z "${expected}" ]]; then
+        if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+            die "Signed checksums do not cover required artifact ${filename}"
+        fi
         warn "No checksum entry for ${filename} — skipping verification"
         return 0
     fi
-    if command -v sha256sum &>/dev/null; then
-        actual="$(sha256sum "${file}" | awk '{print $1}')"
-    elif command -v shasum &>/dev/null; then
-        actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
-    else
-        warn "Neither sha256sum nor shasum found — skipping verification"
-        return 0
-    fi
+    actual="$(sha256_file "${file}")"
     if [[ "${expected}" != "${actual}" ]]; then
         die "Checksum mismatch for ${filename}: expected ${expected}, got ${actual}"
     fi
+    VERIFIED_CHECKSUM="${actual}"
 }
 
 # ── Install: Gateway binary ──────────────────────────────────────────────────
@@ -404,29 +996,90 @@ verify_checksum() {
 install_gateway() {
     step "Installing gateway"
 
-    mkdir -p "${INSTALL_DIR}"
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" ensure-real-directory "${INSTALL_DIR}" \
+            || die "Could not bind the fresh-install binary directory"
+    else
+        mkdir -p "${INSTALL_DIR}"
+    fi
+    local gateway_source=""
+    local extraction_dir=""
 
-    if [[ -n "${LOCAL_DIR}" ]]; then
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        gateway_source="${GATEWAY_STAGED_BINARY}"
+    elif [[ -n "${LOCAL_DIR}" ]]; then
         local artifact
         artifact="$(artifact_path "defenseclaw-gateway-${OS}-${ARCH_NORM}")"
-        cp "${artifact}" "${INSTALL_DIR}/defenseclaw-gateway"
-        chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
+        gateway_source="${artifact}"
     else
-        local url tmp
+        local url
         local tarball_name="defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz"
         url="$(artifact_path "${tarball_name}")"
-        tmp="$(mktemp -d)"
-        fetch_artifact "${url}" "${tmp}/gateway.tar.gz"
-        verify_checksum "${tmp}/gateway.tar.gz" "${tarball_name}"
-        tar -xzf "${tmp}/gateway.tar.gz" -C "${tmp}"
-        cp "${tmp}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
-        chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
-        rm -rf "${tmp}"
+        extraction_dir="$(mktemp -d)"
+        fetch_artifact "${url}" "${extraction_dir}/gateway.tar.gz"
+        verify_checksum "${extraction_dir}/gateway.tar.gz" "${tarball_name}"
+        tar -xzf "${extraction_dir}/gateway.tar.gz" -C "${extraction_dir}"
+        gateway_source="${extraction_dir}/defenseclaw"
     fi
 
-    if [[ "${OS}" == "darwin" ]]; then
-        codesign -f -s - "${INSTALL_DIR}/defenseclaw-gateway" 2>/dev/null || true
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        if [[ "${OS}" == "darwin" ]]; then
+            /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
+                "${gateway_source}" >/dev/null 2>&1 \
+                || die "Could not normalize the macOS gateway signature; installation was not activated"
+        fi
+        GATEWAY_ROLLBACK_TOKEN="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-regular \
+                "${gateway_source}" "${INSTALL_DIR}/defenseclaw-gateway" \
+                --retain-token
+        )" || die "A DefenseClaw gateway appeared during installation; it was preserved and this installation was not activated"
+        [[ -n "${GATEWAY_ROLLBACK_TOKEN}" ]] \
+            || die "Fresh gateway publication did not return rollback custody"
+    else
+        local activation
+        activation="$(mktemp "${INSTALL_DIR}/.defenseclaw-gateway.install.XXXXXX")" \
+            || die "Could not allocate a gateway activation file"
+        GATEWAY_ACTIVATION="${activation}"
+        GATEWAY_PRECLAIM_ID="$(path_identity "${activation}")" \
+            || die "Could not bind the allocated gateway activation file"
+        cp "${gateway_source}" "${activation}" || {
+            if path_has_identity "${activation}" "${GATEWAY_PRECLAIM_ID}"; then
+                rm -f "${activation}"
+            fi
+            die "Could not stage the gateway for activation"
+        }
+        chmod +x "${activation}" || {
+            # cp may replace the mktemp inode on macOS. Until the fully staged
+            # file is claimed below, preserve an uncertain path on failure.
+            die "Could not make the staged gateway executable"
+        }
+        if [[ "${OS}" == "darwin" ]]; then
+            /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
+                "${activation}" >/dev/null 2>&1 || {
+                # codesign may also rewrite the file. Preserve uncertain
+                # pre-claim custody instead of deleting a concurrent entry.
+                die "Could not normalize the macOS gateway signature; installation was not activated"
+            }
+        fi
+        [[ -f "${activation}" && ! -L "${activation}" ]] \
+            || die "Fresh gateway activation is not a real file"
+        GATEWAY_ACTIVATION_ID="$(path_identity "${activation}")" \
+            || die "Could not bind fresh gateway activation custody"
+        if ! ln "${activation}" "${INSTALL_DIR}/defenseclaw-gateway"; then
+            if path_has_identity "${activation}" "${GATEWAY_ACTIVATION_ID}"; then
+                rm -f "${activation}"
+            fi
+            die "A DefenseClaw gateway appeared during installation; it was preserved and this installation was not activated"
+        fi
+        local observed_gateway_id
+        observed_gateway_id="$(
+            path_identity "${INSTALL_DIR}/defenseclaw-gateway"
+        )" || die "Could not bind the fresh gateway publication identity"
+        GATEWAY_PUBLISHED_ID="${observed_gateway_id}"
+        [[ "${observed_gateway_id}" == "${GATEWAY_ACTIVATION_ID}" ]] \
+            || die "Fresh gateway activation identity changed during publication"
     fi
+    [[ -z "${extraction_dir}" ]] || rm -rf "${extraction_dir}"
 
     ok "Gateway installed"
 }
@@ -443,7 +1096,10 @@ install_python_cli() {
         || die "Failed to create Python virtual environment"
 
     info "Installing from wheel..."
-    if [[ -n "${LOCAL_DIR}" ]]; then
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${WHEEL_STAGED}" \
+            || die "Failed to install CLI from protected release wheel"
+    elif [[ -n "${LOCAL_DIR}" ]]; then
         local whl
         whl="$(artifact_path "defenseclaw-*.whl")"
         uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${whl}" \
@@ -459,8 +1115,20 @@ install_python_cli() {
         rm -rf "${tmp}"
     fi
 
-    mkdir -p "${INSTALL_DIR}"
-    ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        CLI_PUBLISHED_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-symlink \
+                "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
+        )" || die "A DefenseClaw CLI appeared during installation; it was preserved and this installation was not activated"
+    else
+        mkdir -p "${INSTALL_DIR}"
+        ln -s "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw" \
+            || die "A DefenseClaw CLI appeared during installation; it was preserved and this installation was not activated"
+        CLI_PUBLISHED_ID="$(path_identity "${INSTALL_DIR}/defenseclaw")" \
+            || die "Could not bind the installed DefenseClaw CLI identity"
+    fi
+    [[ "${CLI_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+        || die "Installed DefenseClaw CLI returned an invalid identity"
 
     if "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null; then
         ok "CLI installed"
@@ -493,9 +1161,28 @@ install_plugin() {
 
     step "Installing OpenClaw plugin"
 
-    local dest="${DEFENSECLAW_HOME}/extensions/defenseclaw"
-    rm -rf "${dest}"
-    mkdir -p "${dest}"
+    local extensions="${DEFENSECLAW_HOME}/extensions"
+    local dest="${extensions}/defenseclaw"
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        EXTENSIONS_CLAIM_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-directory "${extensions}"
+        )" || die "A plugin extension directory appeared during installation; it was preserved"
+        PLUGIN_CLAIM_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-directory "${dest}"
+        )" || die "A DefenseClaw plugin directory appeared during installation; it was preserved"
+    else
+        mkdir "${extensions}" \
+            || die "A plugin extension directory appeared during installation; it was preserved"
+        EXTENSIONS_CLAIM_ID="$(path_identity "${extensions}")" \
+            || die "Could not bind the plugin extension directory identity"
+        mkdir "${dest}" \
+            || die "A DefenseClaw plugin directory appeared during installation; it was preserved"
+        PLUGIN_CLAIM_ID="$(path_identity "${dest}")" \
+            || die "Could not bind the DefenseClaw plugin directory identity"
+    fi
+    [[ "${EXTENSIONS_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ \
+        && "${PLUGIN_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+        || die "Plugin directory custody returned an invalid identity"
 
     if [[ -n "${LOCAL_DIR}" ]]; then
         local tarball
@@ -703,6 +1390,33 @@ printf "  ${DIM}Enterprise Governance for Agentic AI${NC}\n"
 
 YES_MODE=false
 LOCAL_DIR=""
+POLICY_DIR=""
+POLICY_DIR_ID=""
+MODERN_RELEASE=false
+GATEWAY_ARTIFACT=""
+WHEEL_ARTIFACT=""
+GATEWAY_STAGED=""
+GATEWAY_STAGED_BINARY=""
+WHEEL_STAGED=""
+PUBLISH_HELPER=""
+POLICY_PYTHON=""
+INSTALL_SUCCEEDED=false
+HOME_CLAIM_ID=""
+VENV_CLAIM_ID=""
+LOCAL_BIN_PARENT_CLAIM_ID=""
+INSTALL_DIR_CLAIM_ID=""
+EXTENSIONS_CLAIM_ID=""
+PLUGIN_CLAIM_ID=""
+GATEWAY_ACTIVATION=""
+GATEWAY_PRECLAIM_ID=""
+GATEWAY_ACTIVATION_ID=""
+GATEWAY_PUBLISHED_ID=""
+GATEWAY_ROLLBACK_TOKEN=""
+PICKED_CONNECTOR_ACTIVATION=""
+PICKED_CONNECTOR_ACTIVATION_ID=""
+CONNECTOR_MARKER_ROLLBACK_TOKEN=""
+CONNECTOR_MARKER_ID=""
+CLI_PUBLISHED_ID=""
 INSTALL_SANDBOX=false
 RUN_QUICKSTART=false
 QUICKSTART_MODE=""
@@ -741,7 +1455,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo ""
             echo "Usage:"
-            echo '  VERSION=0.8.3'
+            echo '  VERSION=0.8.4'
             echo '  INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"'
             echo '  curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash'
             echo "  ./scripts/install.sh --local ./dist               # from local build"
@@ -773,6 +1487,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 export YES_MODE
+trap cleanup_install_attempt EXIT
 
 # Reconcile --no-openclaw and --connector. The two flags can be combined
 # coherently (e.g. --no-openclaw --connector codex), but conflicting use
@@ -794,6 +1509,7 @@ fi
 # installed controller would bypass release-owned upgrade manifests, bridge
 # selection, migration rollback, and post-upgrade health verification.
 if has defenseclaw \
+    || has defenseclaw-gateway \
     || [[ -e "${DEFENSECLAW_HOME}" || -L "${DEFENSECLAW_HOME}" ]] \
     || [[ -e "${DEFENSECLAW_VENV}" || -L "${DEFENSECLAW_VENV}" ]] \
     || [[ -e "${INSTALL_DIR}/defenseclaw" || -L "${INSTALL_DIR}/defenseclaw" ]] \
@@ -803,10 +1519,12 @@ if has defenseclaw \
 fi
 
 detect_platform
+resolve_version
 ensure_uv
 ensure_python
-resolve_version
+load_release_policy
 pick_connector_interactive
+claim_fresh_install_home
 install_gateway
 install_python_cli
 
@@ -847,6 +1565,7 @@ fi
 
 run_quickstart
 ensure_path
+complete_install_attempt
 print_success
 
 }

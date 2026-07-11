@@ -2,15 +2,16 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-# Manifest-derived release gate. Capable published controllers must complete
-# the ordinary upgrade smoke. Older controllers and the candidate-owned updater
-# must reject an unsupported source before stop, backup, receipt, config, or
-# artifact mutation.
+# Manifest-derived release gate. Schema-aware immutable controllers must refuse
+# a schema-2 target before mutation. Earlier tagged controllers must fail on
+# the canonical gateway refusal envelope during extraction, also before backup
+# or stop. The release-owned resolver must then complete every signed source.
 
 set -euo pipefail
 umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly FIRST_SCHEMA2_RELEASE="0.8.4"
 
 # shellcheck source=scripts/test-upgrade-release.sh
 source "${ROOT}/scripts/test-upgrade-release.sh"
@@ -92,32 +93,50 @@ prepare_required_bridge_assets() {
     local bridge_dir="${RELEASE_ROOT}/${REQUIRED_BRIDGE_VERSION}"
     local previous_from="${FROM_VERSION}"
     local asset
+    local bridge_wheel="defenseclaw-${REQUIRED_BRIDGE_VERSION}-2-py3-none-any.dcwheel"
+    local bridge_gateway="defenseclaw_${REQUIRED_BRIDGE_VERSION}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
     mkdir -p "${bridge_dir}"
-    FROM_VERSION="${REQUIRED_BRIDGE_VERSION}"
     for asset in \
-        "defenseclaw-${REQUIRED_BRIDGE_VERSION}-py3-none-any.whl" \
-        "defenseclaw_${REQUIRED_BRIDGE_VERSION}_${OS_NAME}_${ARCH_NAME}.tar.gz" \
+        "${bridge_wheel}" \
+        "${bridge_gateway}" \
         checksums.txt \
         checksums.txt.sig \
         checksums.txt.pem \
         upgrade-manifest.json; do
         download_old_asset "${asset}" "${bridge_dir}/${asset}" \
+            "${REQUIRED_BRIDGE_VERSION}" \
             || die "required bridge asset is unavailable: ${REQUIRED_BRIDGE_VERSION}/${asset}"
     done
+    local cosign_path
+    cosign_path="$(command -v cosign)" \
+        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
+    python3 "${ROOT}/scripts/historical_release_auth.py" \
+        --version "${REQUIRED_BRIDGE_VERSION}" \
+        --release-dir "${bridge_dir}" \
+        --cosign "${cosign_path}" \
+        --asset "${bridge_wheel}" \
+        --asset "${bridge_gateway}" \
+        --asset upgrade-manifest.json \
+        || die "required bridge authentication failed: ${REQUIRED_BRIDGE_VERSION}"
     FROM_VERSION="${previous_from}"
-    ok "Published bridge assets staged: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
+    ok "Authenticated published bridge assets: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
 }
 
 baseline_protocol() {
     local version="$1"
-    local old_dir="${WORKDIR}/protocol-wheels/${version}"
-    local old_wheel="${old_dir}/defenseclaw-${version}-py3-none-any.whl"
-    mkdir -p "${old_dir}"
-    if [[ ! -f "${old_wheel}" ]]; then
-        FROM_VERSION="${version}"
-        download_old_asset "defenseclaw-${version}-py3-none-any.whl" "${old_wheel}" \
-            || die "published baseline wheel is unavailable: ${version}"
-    fi
+    local old_dir="${WORKDIR}/published-release/${version}"
+    local baseline_names old_wheel_name old_wheel
+    baseline_names="$(published_baseline_artifact_names "${version}")"
+    old_wheel_name="$(printf '%s\n' "${baseline_names}" | sed -n '1p')"
+    old_wheel="${old_dir}/${old_wheel_name}"
+    [[ -f "${old_wheel}" ]] \
+        || die "authenticated published baseline wheel is unavailable: ${version}"
+    local inspection_root="${WORKDIR}/protocol-inspection"
+    mkdir -p "${inspection_root}"
+    old_wheel="$(release_test_artifact_path \
+        "${old_wheel}" "${old_dir}/checksums.txt" \
+        "${inspection_root}/${version}-${OS_NAME}-${ARCH_NAME}-protocol.whl")" \
+        || die "could not materialize authenticated protocol-inspection wheel: ${version}"
     python3 - "${old_wheel}" <<'PY'
 import ast
 import sys
@@ -151,12 +170,57 @@ print(1)
 PY
 }
 
+baseline_has_schema_gate() {
+    local version="$1"
+    local old_dir="${WORKDIR}/published-release/${version}"
+    local baseline_names old_wheel_name old_wheel
+    baseline_names="$(published_baseline_artifact_names "${version}")"
+    old_wheel_name="$(printf '%s\n' "${baseline_names}" | sed -n '1p')"
+    old_wheel="${old_dir}/${old_wheel_name}"
+    [[ -f "${old_wheel}" ]] \
+        || die "baseline wheel must be staged before schema-gate inspection: ${version}"
+    local inspection_root="${WORKDIR}/protocol-inspection"
+    mkdir -p "${inspection_root}"
+    old_wheel="$(release_test_artifact_path \
+        "${old_wheel}" "${old_dir}/checksums.txt" \
+        "${inspection_root}/${version}-${OS_NAME}-${ARCH_NAME}-schema.whl")" \
+        || die "could not materialize authenticated schema-inspection wheel: ${version}"
+    python3 - "${old_wheel}" <<'PY'
+import ast
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    try:
+        source = archive.read("defenseclaw/commands/cmd_upgrade.py").decode("utf-8")
+    except KeyError:
+        print(0)
+        raise SystemExit
+
+tree = ast.parse(source, filename="defenseclaw/commands/cmd_upgrade.py")
+has_manifest_fetch = "_UPGRADE_MANIFEST_FILENAME" in source
+has_schema_refusal = any(
+    isinstance(node, ast.Compare)
+    and isinstance(node.left, ast.Name)
+    and node.left.id == "schema_version"
+    and len(node.ops) == 1
+    and isinstance(node.ops[0], ast.Gt)
+    and len(node.comparators) == 1
+    and isinstance(node.comparators[0], ast.Constant)
+    and node.comparators[0].value == 1
+    for node in ast.walk(tree)
+)
+print(1 if has_manifest_fetch and has_schema_refusal else 0)
+PY
+}
+
 version_lt() {
     ! version_lte "$2" "$1"
 }
 
 snapshot_state() {
     local output="$1"
+    local openclaw_home="${SMOKE_HOME}/.openclaw"
     local gateway="${SMOKE_HOME}/.local/bin/defenseclaw-gateway"
     local real_gateway="${gateway}.protocol-gate-real"
     local venv_python="${SMOKE_HOME}/.defenseclaw/.venv/bin/python"
@@ -170,6 +234,7 @@ PY
 )"
     python3 - \
         "${SMOKE_HOME}/.defenseclaw" \
+        "${openclaw_home}" \
         "${package_dir}" \
         "${SMOKE_HOME}/.local/bin/defenseclaw" \
         "${gateway}" \
@@ -182,7 +247,9 @@ from pathlib import Path
 import stat
 import sys
 
-data_dir, package_dir, cli_link, gateway, real_gateway, output = map(Path, sys.argv[1:])
+data_dir, openclaw_home, package_dir, cli_link, gateway, real_gateway, output = map(
+    Path, sys.argv[1:]
+)
 state = {}
 
 
@@ -209,6 +276,7 @@ def record(path: Path, key: str, *, exclude_venv: bool = False) -> None:
 
 
 record(data_dir, "data", exclude_venv=True)
+record(openclaw_home, "openclaw")
 record(data_dir / ".venv", "venv")
 record(package_dir, "installed-cli")
 for label, path in (
@@ -330,6 +398,11 @@ prepare_refusal_home() {
     mkdir -p "${SMOKE_HOME}"
     install_baseline
     seed_upgrade_fixture
+    mkdir -p "${SMOKE_HOME}/.openclaw"
+    printf '%s\n' '{"sentinel":"refusal-must-not-mutate"}' \
+        > "${SMOKE_HOME}/.openclaw/openclaw.json"
+    chmod 700 "${SMOKE_HOME}/.openclaw"
+    chmod 600 "${SMOKE_HOME}/.openclaw/openclaw.json"
 
     (
         while :; do
@@ -351,6 +424,7 @@ verify_refusal_invariants() {
     local baseline_version="$3"
     local log_file="$4"
     local status="$5"
+    local refusal_mode="${6:-schema}"
 
     [[ "${status}" -ne 0 ]] || die "unsupported upgrade unexpectedly succeeded"
     [[ ! -e "${REFUSAL_STOP_MARKER}" ]] || die "unsupported upgrade reached the service-stop boundary"
@@ -367,37 +441,71 @@ verify_refusal_invariants() {
 
     snapshot_state "${after}"
     cmp "${before}" "${after}" >/dev/null \
-        || die "refused upgrade mutated config, data, permissions, CLI, or gateway bytes"
+        || die "refused upgrade mutated config, data, OpenClaw state, permissions, CLI, or gateway bytes"
     assert_no_success_receipt
-    grep -Eiq "protocol|minimum source|required bridge|upgrade bridge|without --version|upgrade.*first|source version" "${log_file}" \
-        || die "refusal log did not explain the protocol/source bridge requirement"
+    case "${refusal_mode}" in
+        schema)
+            grep -Eiq "schema|protocol|minimum source|required bridge|upgrade bridge|without --version|upgrade.*first|source version|tested.*matrix|published-baseline" "${log_file}" \
+                || die "refusal log did not explain the protocol/source bridge requirement"
+            ;;
+        legacy-schema)
+            grep -Eiq "schema|protocol|upgrade script shipped with that release" "${log_file}" \
+                || die "legacy schema-aware refusal did not explain its forward-compatibility gate"
+            grep -Fq \
+                "curl -fsSL https://raw.githubusercontent.com/${REPO}/${TARGET_VERSION}/scripts/upgrade.sh | bash -s -- --version ${TARGET_VERSION}" \
+                "${log_file}" \
+                || die "legacy schema-aware controller hint changed; record the explicit-target handoff trap"
+            ;;
+        artifact-envelope)
+            grep -Fq "Release artifacts verified" "${log_file}" \
+                || die "legacy controller did not prove both conventional artifact HEAD requests"
+            grep -Eiq "(^|[^[:alnum:]_])(tar|gzip)([^[:alnum:]_]|$)|not (in )?gzip format|non-zero exit status|CalledProcessError" "${log_file}" \
+                || die "legacy controller did not fail at canonical gateway extraction"
+            ;;
+        *) die "unknown installed-controller refusal mode: ${refusal_mode}" ;;
+    esac
 }
 
 run_installed_controller_refusal() {
     local baseline="$1"
-    log "Proving installed ${baseline} controller refuses ${TARGET_VERSION} before mutation"
-    prepare_refusal_home "${baseline}" "installed"
-    patch_installed_upgrade_endpoint
+    local refusal_mode="${2:-schema}"
+    local invocation before after log_file status
+    local -a target_args
+    for invocation in explicit latest; do
+        log "Proving installed ${baseline} controller refuses ${TARGET_VERSION} before mutation (${refusal_mode}, ${invocation})"
+        prepare_refusal_home "${baseline}" "installed-${invocation}"
+        target_args=()
+        if [[ "${invocation}" == "explicit" ]]; then
+            patch_installed_upgrade_endpoint
+            target_args=(--version "${TARGET_VERSION}")
+        else
+            # Exercise the common `defenseclaw upgrade` path deterministically
+            # against the sealed candidate rather than whatever release GitHub
+            # happens to mark latest while this draft candidate is still gated.
+            patch_installed_upgrade_endpoint "${TARGET_VERSION}"
+        fi
 
-    local before="${WORKDIR}/${baseline}-installed.before.json"
-    local after="${WORKDIR}/${baseline}-installed.after.json"
-    local log_file="${WORKDIR}/${baseline}-installed-refusal.log"
-    snapshot_state "${before}"
+        before="${WORKDIR}/${baseline}-installed-${invocation}.before.json"
+        after="${WORKDIR}/${baseline}-installed-${invocation}.after.json"
+        log_file="${WORKDIR}/${baseline}-installed-${invocation}-refusal.log"
+        snapshot_state "${before}"
 
-    set +e
-    HOME="${SMOKE_HOME}" \
-    DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-    UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
-    UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
-    PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
-        defenseclaw upgrade --version "${TARGET_VERSION}" --yes --health-timeout "${HEALTH_TIMEOUT}" \
-        >"${log_file}" 2>&1
-    local status=$?
-    set -e
+        set +e
+        HOME="${SMOKE_HOME}" \
+        DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
+        UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
+        PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
+            defenseclaw upgrade "${target_args[@]}" --yes --health-timeout "${HEALTH_TIMEOUT}" \
+            >"${log_file}" 2>&1
+        status=$?
+        set -e
 
-    verify_refusal_invariants "${before}" "${after}" "${baseline}" "${log_file}" "${status}"
-    restore_stop_probe
-    ok "Installed ${baseline} controller refused pre-mutation"
+        verify_refusal_invariants \
+            "${before}" "${after}" "${baseline}" "${log_file}" "${status}" "${refusal_mode}"
+        restore_stop_probe
+        ok "Installed ${baseline} controller refused ${invocation} target pre-mutation"
+    done
 }
 
 run_candidate_updater_refusal() {
@@ -432,6 +540,53 @@ run_candidate_updater_refusal() {
     ok "Candidate-owned updater refused source ${baseline} pre-mutation"
 }
 
+run_candidate_explicit_bridge_refusal() {
+    local baseline="$1"
+    log "Proving the release-owned resolver repairs the immutable explicit-target hint"
+    prepare_refusal_home "${baseline}" "candidate-explicit-bridge"
+
+    local curl_shim="${SMOKE_HOME}/.upgrade-test-bin"
+    local real_curl
+    real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
+    local before="${WORKDIR}/${baseline}-candidate-explicit.before.json"
+    local after="${WORKDIR}/${baseline}-candidate-explicit.after.json"
+    local log_file="${WORKDIR}/${baseline}-candidate-explicit-refusal.log"
+    snapshot_state "${before}"
+
+    set +e
+    HOME="${SMOKE_HOME}" \
+    DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+    OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+    UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
+    UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
+    UPGRADE_GATE_REAL_CURL="${real_curl}" \
+    UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
+    PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+        bash "${ROOT}/scripts/upgrade.sh" --yes --version "${TARGET_VERSION}" \
+        >"${log_file}" 2>&1
+    local status=$?
+    set -e
+
+    verify_refusal_invariants "${before}" "${after}" "${baseline}" "${log_file}" "${status}"
+    grep -Fq "defenseclaw-upgrade.XXXXXX" "${log_file}" \
+        || die "release-owned explicit-target refusal omitted unique temporary custody"
+    grep -Fq "releases/download/${TARGET_VERSION}/" "${log_file}" \
+        || die "release-owned explicit-target refusal omitted the target release asset URL"
+    grep -Fq "cosign verify-blob" "${log_file}" \
+        || die "release-owned explicit-target refusal omitted resolver provenance verification"
+    grep -Fq "DefenseClaw upgrade resolver complete v1" "${log_file}" \
+        || die "release-owned explicit-target refusal omitted the completeness check"
+    grep -Fq 'bash "$d/defenseclaw-upgrade.sh" --yes' "${log_file}" \
+        || die "release-owned explicit-target refusal omitted the exact no-version invocation"
+    if grep -Fq "upgrade.sh | bash" "${log_file}"; then
+        die "release-owned explicit-target refusal still streams a network response into bash"
+    fi
+    grep -Fq "there is intentionally no --version argument" "${log_file}" \
+        || die "release-owned explicit-target refusal did not disambiguate the immutable hint"
+    restore_stop_probe
+    ok "Release-owned resolver converted the immutable explicit hint into the exact staged command"
+}
+
 run_candidate_updater_staged_success() {
     local baseline="$1"
     log "Proving one-command staged upgrade ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
@@ -442,6 +597,7 @@ run_candidate_updater_staged_success() {
     install_baseline
     seed_upgrade_fixture
     prepare_isolated_docker_path
+    start_source_gateway_canary
 
     local curl_shim="${SMOKE_HOME}/.upgrade-test-bin"
     local real_curl
@@ -471,6 +627,43 @@ run_candidate_updater_staged_success() {
     ok "One-command staged upgrade passed: ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
 }
 
+run_candidate_updater_direct_success() {
+    local baseline="$1"
+    log "Proving release-owned resolver upgrade ${baseline} -> ${TARGET_VERSION}"
+    FROM_VERSION="${baseline}"
+    SMOKE_HOME="${WORKDIR}/release-resolver-${baseline}"
+    rm -rf "${SMOKE_HOME}"
+    mkdir -p "${SMOKE_HOME}"
+    install_baseline
+    seed_upgrade_fixture
+    prepare_isolated_docker_path
+    start_source_gateway_canary
+
+    local curl_shim="${SMOKE_HOME}/.upgrade-test-bin"
+    local real_curl
+    local log_file="${SMOKE_HOME}/upgrade.log"
+    real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
+
+    if ! HOME="${SMOKE_HOME}" \
+        DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
+        DEFENSECLAW_UPGRADE_TEST_MODE=1 \
+        DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}" \
+        UPGRADE_GATE_REAL_CURL="${real_curl}" \
+        UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
+        UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
+        PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+            bash "${ROOT}/scripts/upgrade.sh" --yes >"${log_file}" 2>&1; then
+        tail_v8_upgrade_log_secret_safe "${log_file}"
+        die "release-owned resolver upgrade failed: ${baseline} -> ${TARGET_VERSION}"
+    fi
+
+    verify_upgrade
+    stop_smoke_gateway
+    ok "Release-owned resolver upgrade passed: ${baseline} -> ${TARGET_VERSION}"
+}
+
 run_protocol_case() {
     local baseline="$1"
     if version_lte "${TARGET_VERSION}" "${baseline}"; then
@@ -478,10 +671,25 @@ run_protocol_case() {
         return
     fi
 
+    stage_authenticated_baseline "${baseline}"
     local supported_protocol
     supported_protocol="$(baseline_protocol "${baseline}")"
     [[ "${supported_protocol}" =~ ^[1-9][0-9]*$ ]] \
         || die "baseline ${baseline} has invalid upgrade protocol: ${supported_protocol}"
+    local has_schema_gate
+    has_schema_gate="$(baseline_has_schema_gate "${baseline}")"
+    [[ "${has_schema_gate}" == "0" || "${has_schema_gate}" == "1" ]] \
+        || die "baseline ${baseline} returned invalid schema-gate capability: ${has_schema_gate}"
+    local legacy_schema_one_controller=0
+    local installed_refusal_mode="schema"
+    if version_lt "${baseline}" "${FIRST_SCHEMA2_RELEASE}"; then
+        legacy_schema_one_controller=1
+        if [[ "${has_schema_gate}" == "1" ]]; then
+            installed_refusal_mode="legacy-schema"
+        else
+            installed_refusal_mode="artifact-envelope"
+        fi
+    fi
 
     local source_too_old=0
     if [[ -n "${MINIMUM_SOURCE_VERSION}" ]] && version_lt "${baseline}" "${MINIMUM_SOURCE_VERSION}"; then
@@ -497,6 +705,53 @@ run_protocol_case() {
             || die "required bridge ${baseline} does not support candidate protocol ${CANDIDATE_MIN_PROTOCOL}"
         [[ "${source_too_old}" == "0" ]] \
             || die "required bridge ${baseline} is older than minimum source ${MINIMUM_SOURCE_VERSION}"
+    fi
+
+    if [[ "${CANDIDATE_SCHEMA_VERSION}" -eq 2 ]]; then
+        local source_is_tested=0
+        if manifest_array_contains tested_source_versions "${baseline}"; then
+            source_is_tested=1
+        fi
+        if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]; then
+            [[ "${source_is_tested}" == "1" ]] \
+                || die "success canary source ${baseline} is absent from tested_source_versions"
+            if [[ "${source_too_old}" == "1" ]]; then
+                [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
+                    || die "success canary source ${baseline} requires a bridge contract"
+                manifest_array_contains auto_bridge_from "${baseline}" \
+                    || die "success canary source ${baseline} is absent from auto_bridge_from"
+                run_candidate_updater_staged_success "${baseline}"
+            else
+                run_candidate_updater_direct_success "${baseline}"
+            fi
+            return
+        fi
+        if [[ "${source_is_tested}" -eq 0 ]]; then
+            run_installed_controller_refusal "${baseline}" "${installed_refusal_mode}"
+            run_candidate_updater_refusal "${baseline}"
+            return
+        fi
+
+        if [[ "${legacy_schema_one_controller}" -eq 1 \
+              || "${protocol_too_old}" -eq 1 \
+              || "${source_too_old}" -eq 1 ]]; then
+            run_installed_controller_refusal "${baseline}" "${installed_refusal_mode}"
+        else
+            log "Schema-2 baseline ${baseline} is capable; requiring installed-controller success"
+            run_one_upgrade_smoke "${baseline}"
+        fi
+
+        if [[ "${source_too_old}" -eq 1 ]]; then
+            [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
+                || die "tested source ${baseline} requires a bridge, but the signed bridge contract is absent"
+            manifest_array_contains auto_bridge_from "${baseline}" \
+                || die "tested pre-bridge source ${baseline} is absent from auto_bridge_from"
+            run_candidate_explicit_bridge_refusal "${baseline}"
+            run_candidate_updater_staged_success "${baseline}"
+        else
+            run_candidate_updater_direct_success "${baseline}"
+        fi
+        return
     fi
 
     if [[ "${protocol_too_old}" == "1" || "${source_too_old}" == "1" ]]; then
@@ -531,10 +786,33 @@ main_protocol_gate() {
     assert_candidate_assets
 
     CANDIDATE_MIN_PROTOCOL="$(manifest_value min_upgrade_protocol 1)"
+    CANDIDATE_SCHEMA_VERSION="$(manifest_value schema_version 1)"
+    CANDIDATE_RUNTIME_CONFIG_VERSION="$(manifest_value runtime_config_version "")"
     MINIMUM_SOURCE_VERSION="$(manifest_value minimum_source_version "")"
     REQUIRED_BRIDGE_VERSION="$(manifest_value required_bridge_version "")"
     [[ "${CANDIDATE_MIN_PROTOCOL}" =~ ^[1-9][0-9]*$ ]] \
         || die "candidate min_upgrade_protocol must be a positive integer"
+    [[ "${CANDIDATE_SCHEMA_VERSION}" =~ ^[1-9][0-9]*$ ]] \
+        || die "candidate schema_version must be a positive integer"
+    if version_lte "${FIRST_SCHEMA2_RELEASE}" "${TARGET_VERSION}"; then
+        [[ "${CANDIDATE_SCHEMA_VERSION}" -eq 2 ]] \
+            || die "0.8.4+ protocol gate requires upgrade manifest schema 2"
+        local expected_runtime_config_version=8
+        [[ "${TARGET_VERSION}" == "${FIRST_SCHEMA2_RELEASE}" ]] \
+            && expected_runtime_config_version=7
+        [[ "${CANDIDATE_RUNTIME_CONFIG_VERSION}" == "${expected_runtime_config_version}" ]] \
+            || die "schema-2 runtime_config_version must be ${expected_runtime_config_version} for ${TARGET_VERSION}"
+        [[ -n "$(manifest_array_values tested_source_versions)" ]] \
+            || die "schema-2 protocol gate requires a non-empty tested_source_versions matrix"
+    else
+        [[ "${CANDIDATE_SCHEMA_VERSION}" -eq 1 ]] \
+            || die "pre-0.8.4 protocol gate requires upgrade manifest schema 1"
+        [[ -z "${CANDIDATE_RUNTIME_CONFIG_VERSION}" ]] \
+            || die "schema-1 protocol manifest must not declare runtime_config_version"
+    fi
+    if [[ "${SUCCESS_PATH_ONLY}" == "1" && "${CANDIDATE_SCHEMA_VERSION}" -ne 2 ]]; then
+        die "--success-path-only requires a schema-2 candidate"
+    fi
     [[ -z "${MINIMUM_SOURCE_VERSION}" || "${MINIMUM_SOURCE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || die "candidate minimum_source_version must be X.Y.Z"
     [[ -z "${REQUIRED_BRIDGE_VERSION}" || "${REQUIRED_BRIDGE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \

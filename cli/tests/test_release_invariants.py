@@ -167,16 +167,36 @@ class TestReleaseInvariants(unittest.TestCase):
         expected = [version for version, _desc, _fn in MIGRATIONS if _ver_tuple(version) <= _ver_tuple(__version__)]
         self.assertEqual(manifest["release_version"], __version__)
         self.assertEqual(manifest["required_cli_migrations"], expected)
+        if _ver_tuple(__version__) >= (0, 8, 4):
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(
+                manifest["runtime_config_version"],
+                generator["expected_runtime_config_version"](__version__),
+            )
+            self.assertEqual(
+                manifest["release_artifacts"],
+                generator["protected_release_artifacts"](__version__),
+            )
 
     def test_stamped_0_8_4_manifest_is_protocol_one_reachable_protocol_two_controller(self):
         """Exercise the bridge release policy without stamping source files."""
         generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
+        baseline_policy = __import__("json").loads(
+            (_REPO_ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
+        )
+        expected_sources = baseline_policy["published_baselines"]
+        expected_windows = baseline_policy["platform_published_baselines"]["windows"]
 
         self.assertEqual(
             generator["release_upgrade_policy"]("0.8.4"),
-            {"min_upgrade_protocol": 1},
+            {
+                "min_upgrade_protocol": 1,
+                "tested_source_versions": expected_sources,
+                "platform_tested_source_versions": {"windows": expected_windows},
+            },
         )
         self.assertEqual(generator["controller_upgrade_protocol"](), 2)
+        self.assertEqual(generator["runtime_config_version"](), 7)
         self.assertNotIn(
             "required_bridge_version",
             generator["release_upgrade_policy"]("0.8.4"),

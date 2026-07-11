@@ -121,7 +121,7 @@ final class AppState {
     var runtimeReleaseChecked = false
     var availableRuntimeUpdate: ReleaseInfo?
     var runtimeUpgradeState: UpgradeState = .idle
-    /// Bundled-payload install/repair progress (RuntimeInstaller.swift).
+    /// Bundled-payload fresh-install progress (RuntimeInstaller.swift).
     var runtimeInstallState: RuntimeInstallState = .idle
     /// Current installer step's activity runID — the Cancel target.
     var runtimeInstallRunID: UUID?
@@ -734,9 +734,11 @@ final class AppState {
         return runtimeRelease
     }
 
-    /// Runs `defenseclaw upgrade --yes` — downloads release artifacts,
-    /// migrates, and restarts the gateway. Non-destructive per upstream docs.
-    /// Turn raw `defenseclaw upgrade` output into a human message. The common
+    /// Turn historical runtime-upgrade output into a human message. Runtime
+    /// mutation is no longer launched by the app because only the release-owned
+    /// latest-mode resolver can select a required bridge and hand off to a
+    /// fresh controller.
+    /// The common
     /// case today is an UPSTREAM packaging conflict (the 0.7.2 wheel pins
     /// click==8.3.1 while its own cisco-ai-mcp-scanner→litellm dep pins
     /// click==8.1.8) — unsatisfiable in any environment, so it is not an app
@@ -774,10 +776,8 @@ final class AppState {
     func performBothUpgrades() {
         Task {
             await checkForUpdates(force: true)
-            let shouldRefreshRuntimeAfterUpgrade = availableUpdate == nil
-            let runtimeUpgradeSucceeded = await runRuntimeUpgradeIfAvailable(refreshAfterSuccess: shouldRefreshRuntimeAfterUpgrade)
-            guard runtimeUpgradeSucceeded else { return }
-            performUpgrade()
+            _ = await runRuntimeUpgradeIfAvailable()
+            if availableUpdate != nil { performUpgrade() }
         }
     }
 
@@ -787,7 +787,7 @@ final class AppState {
         }
     }
 
-    private func runRuntimeUpgradeIfAvailable(refreshAfterSuccess: Bool = true) async -> Bool {
+    private func runRuntimeUpgradeIfAvailable() async -> Bool {
         switch runtimeUpgradeState {
         case .checking, .downloading, .installing:
             return false
@@ -795,32 +795,23 @@ final class AppState {
             break
         }
         // The bundled-payload installer mutates the same venv and gateway
-        // binary — never run both at once.
+        // binary — never present overlapping runtime actions.
         guard !runtimeInstallState.isRunning else { return false }
-        guard availableRuntimeUpdate != nil else { return true }
-        runtimeUpgradeState = .installing
+        guard let runtimeUpdate = availableRuntimeUpdate else { return true }
+        let resolverGuidance = Self.authenticatedRuntimeUpgradeResolverGuidance(
+            releaseTag: runtimeUpdate.tag
+        ) ?? """
+        The available release identifier is not canonical, so no copy/paste command was produced. Follow the authenticated release-asset instructions at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.
+        """
+        let guidance = """
+        Runtime upgrade was not started; no installed files or services were changed. Quit DefenseClaw, then use this authenticated release-asset path:
+
+        \(resolverGuidance)
+        """
         runtimeUpgradeLogTail = ""
-        let result = await cli.run(arguments: ["upgrade", "--yes"]) { line in
-            await MainActor.run {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty { self.runtimeUpgradeLogTail = trimmed }
-            }
-        }
-        if result.succeeded {
-            runtimeUpgradeState = .idle
-            runtimeUpgradeLogTail = ""
-            runtimeUpgradeLog = ""
-            availableRuntimeUpdate = nil
-            if refreshAfterSuccess {
-                await checkForRuntimeUpdate(force: true) // re-read installed version
-            }
-            reloadConfig()                    // gateway restarted; reconnect
-            return true
-        } else {
-            runtimeUpgradeLog = result.output // full log, for Copy in Settings
-            runtimeUpgradeState = .failed(Self.summarizeUpgradeFailure(result.output, exitCode: result.exitCode))
-            return false
-        }
+        runtimeUpgradeLog = guidance
+        runtimeUpgradeState = .failed(guidance)
+        return false
     }
 
     /// Download, install over the current bundle, and restart the app.

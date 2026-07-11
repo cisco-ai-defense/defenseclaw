@@ -27,9 +27,13 @@ FROM_VERSION="${FROM_VERSION:-0.7.2}"
 FROM_VERSIONS="${FROM_VERSIONS:-}"
 TARGET_VERSION="${TARGET_VERSION:-}"
 V8_ACTIVATION_VERSION="0.8.5"
+PROTECTED_ARTIFACT_VERSION="0.8.4"
 RELEASE_ROOT="${RELEASE_ROOT:-}"
 RELEASE_DIR="${RELEASE_DIR:-}"
 BASELINE_MODE="${BASELINE_MODE:-auto}" # auto | install | seed
+BASELINE_DEPENDENCIES="${BASELINE_DEPENDENCIES:-target}" # target | published
+START_SOURCE_GATEWAY="${START_SOURCE_GATEWAY:-0}"
+SUCCESS_PATH_ONLY="${SUCCESS_PATH_ONLY:-0}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1}"
 PORT="${PORT:-}"
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"
@@ -41,6 +45,7 @@ SERVER_PID=""
 SMOKE_HOME=""
 RELEASE_URL=""
 FROM_VERSION_LIST=()
+CANDIDATE_WHEEL_NAME=""
 
 usage() {
     cat <<'EOF'
@@ -57,6 +62,9 @@ Options:
   --release-dir DIR          Existing artifact dir, e.g. dist/ from the release workflow
   --release-root DIR         Existing local release root containing VERSION/<assets>
   --baseline-mode MODE       auto, install, or seed (default: auto)
+  --baseline-dependencies M  target (broad matrix) or published (real-dependency canary)
+  --start-source-gateway     Start and health-check the published source before upgrade
+  --success-path-only        Skip duplicate refusal cases in a dedicated success canary
   --health-timeout SECONDS   Gateway health wait passed to upgrade (default: 1)
   --port PORT                Local release server port (default: random high port)
   --platform OS/ARCH         Build platform for --prepare-only (default: current host)
@@ -109,6 +117,35 @@ stop_smoke_gateway() {
     fi
 }
 
+start_source_gateway_canary() {
+    [[ "${START_SOURCE_GATEWAY}" == "1" ]] || return 0
+    local start_log="${SMOKE_HOME}/source-gateway-start.log"
+    if ! HOME="${SMOKE_HOME}" \
+        DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
+            "${SMOKE_HOME}/.local/bin/defenseclaw-gateway" start \
+            >"${start_log}" 2>&1; then
+        tail_log "${start_log}"
+        die "could not start published source gateway ${FROM_VERSION}"
+    fi
+    local attempt
+    for attempt in $(seq 1 120); do
+        if HOME="${SMOKE_HOME}" \
+            DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+            OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+            PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
+                "${SMOKE_HOME}/.local/bin/defenseclaw-gateway" status \
+                >>"${start_log}" 2>&1; then
+            ok "Published source gateway ${FROM_VERSION} is running before resolver handoff"
+            return 0
+        fi
+        sleep 0.25
+    done
+    tail_log "${start_log}"
+    die "published source gateway ${FROM_VERSION} did not become healthy"
+}
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -130,6 +167,13 @@ parse_args() {
             --baseline-mode)
                 [[ $# -ge 2 ]] || die "--baseline-mode requires a value"
                 BASELINE_MODE="$2"; shift 2 ;;
+            --baseline-dependencies)
+                [[ $# -ge 2 ]] || die "--baseline-dependencies requires a value"
+                BASELINE_DEPENDENCIES="$2"; shift 2 ;;
+            --start-source-gateway)
+                START_SOURCE_GATEWAY=1; shift ;;
+            --success-path-only)
+                SUCCESS_PATH_ONLY=1; shift ;;
             --health-timeout)
                 [[ $# -ge 2 ]] || die "--health-timeout requires a value"
                 HEALTH_TIMEOUT="$2"; shift 2 ;;
@@ -176,12 +220,12 @@ PY
 detect_platform() {
     if [[ -n "${BUILD_PLATFORM}" ]]; then
         case "${BUILD_PLATFORM}" in
-            linux/amd64|linux/arm64|darwin/amd64|darwin/arm64)
+            linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|windows/arm64)
                 OS_NAME="${BUILD_PLATFORM%%/*}"
                 ARCH_NAME="${BUILD_PLATFORM##*/}"
                 return ;;
             *)
-                die "--platform must be one of linux/amd64, linux/arm64, darwin/amd64, darwin/arm64" ;;
+                die "--platform must be one of linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64" ;;
         esac
     fi
     case "$(uname -s)" in
@@ -235,6 +279,27 @@ target_uses_observability_v8() {
     version_lte "${V8_ACTIVATION_VERSION}" "${TARGET_VERSION}"
 }
 
+fresh_install_tool_path() {
+    # A developer may already have DefenseClaw on their ambient PATH. The
+    # production fresh installer correctly refuses that installation, but the
+    # isolated smoke HOME must not mistake it for state inside the fixture.
+    # Preserve every other tool directory and omit only entries that expose an
+    # existing DefenseClaw CLI or gateway.
+    local entry sanitized=""
+    local -a entries=()
+    IFS=: read -r -a entries <<<"${PATH}"
+    for entry in "${entries[@]}"; do
+        [[ -n "${entry}" ]] || continue
+        if [[ -e "${entry}/defenseclaw" || -L "${entry}/defenseclaw" \
+            || -e "${entry}/defenseclaw-gateway" || -L "${entry}/defenseclaw-gateway" ]]; then
+            continue
+        fi
+        sanitized="${sanitized:+${sanitized}:}${entry}"
+    done
+    [[ -n "${sanitized}" ]] || die "could not construct an isolated baseline installer PATH"
+    printf '%s\n' "${sanitized}"
+}
+
 validate_inputs() {
     normalize_baseline_versions
     [[ "${TARGET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid --target-version: ${TARGET_VERSION}"
@@ -242,6 +307,17 @@ validate_inputs() {
         auto|install|seed) ;;
         *) die "--baseline-mode must be auto, install, or seed" ;;
     esac
+    case "${BASELINE_DEPENDENCIES}" in
+        target|published) ;;
+        *) die "--baseline-dependencies must be target or published" ;;
+    esac
+    if [[ "${BASELINE_DEPENDENCIES}" == "published" && "${BASELINE_MODE}" != "seed" ]]; then
+        die "--baseline-dependencies published requires --baseline-mode seed"
+    fi
+    [[ "${START_SOURCE_GATEWAY}" == "0" || "${START_SOURCE_GATEWAY}" == "1" ]] \
+        || die "START_SOURCE_GATEWAY must be 0 or 1"
+    [[ "${SUCCESS_PATH_ONLY}" == "0" || "${SUCCESS_PATH_ONLY}" == "1" ]] \
+        || die "SUCCESS_PATH_ONLY must be 0 or 1"
     if [[ -n "${RELEASE_DIR}" && -n "${RELEASE_ROOT}" ]]; then
         die "use only one of --release-dir or --release-root"
     fi
@@ -253,24 +329,119 @@ validate_inputs() {
 build_candidate_release() {
     RELEASE_ROOT="${WORKDIR}/candidate-release"
     local out="${RELEASE_ROOT}/${TARGET_VERSION}"
+    local build_root="${ROOT}"
     mkdir -p "${out}"
 
+    # The production release workflow stamps the requested tag into an
+    # ephemeral checkout before building.  A future-version smoke must do the
+    # same: otherwise --target-version 0.8.4 would silently build the source
+    # tree's currently pinned wheel/manifest (for example 0.8.0) and would not
+    # exercise the bytes that the release job will publish.  Copying also keeps
+    # the developer's dirty worktree and generated directories untouched.
+    if [[ "$(current_version)" != "${TARGET_VERSION}" ]]; then
+        build_root="${WORKDIR}/stamped-source"
+        log "Preparing isolated source stamped as ${TARGET_VERSION}"
+        python3 - "${ROOT}" "${build_root}" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+
+source = Path(sys.argv[1]).resolve()
+destination = Path(sys.argv[2]).resolve()
+ignored_everywhere = {
+    ".git",
+    ".venv",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    "__pycache__",
+    "node_modules",
+}
+
+
+def ignore(directory: str, names: list[str]) -> list[str]:
+    at_root = Path(directory).resolve() == source
+    return [
+        name
+        for name in names
+        if name in ignored_everywhere
+        or (at_root and name in {"build", "dist"})
+        or name.endswith(".egg-info")
+    ]
+
+
+shutil.copytree(source, destination, symlinks=True, ignore=ignore)
+PY
+        "${build_root}/scripts/stamp-version.sh" "${TARGET_VERSION}" >/dev/null
+        make -C "${build_root}" check-version-sync >/dev/null
+    fi
+
     log "Building candidate CLI wheel"
-    make -C "${ROOT}" dist-cli DIST_DIR="${out}"
+    make -C "${build_root}" dist-cli DIST_DIR="${out}"
+    if version_lte "${PROTECTED_ARTIFACT_VERSION}" "${TARGET_VERSION}"; then
+        log "Building candidate plugin"
+        make -C "${build_root}" dist-plugin DIST_DIR="${out}"
+    fi
 
     log "Building candidate gateway (${OS_NAME}/${ARCH_NAME})"
-    make -C "${ROOT}" sync-openclaw-extension
-    local stage="${WORKDIR}/gateway-${OS_NAME}-${ARCH_NAME}"
-    mkdir -p "${stage}"
-    CGO_ENABLED=0 GOOS="${OS_NAME}" GOARCH="${ARCH_NAME}" \
-        go build -ldflags "-s -w -X main.version=${TARGET_VERSION}" \
-        -o "${stage}/defenseclaw" "${ROOT}/cmd/defenseclaw"
-    tar -czf "${out}/defenseclaw_${TARGET_VERSION}_${OS_NAME}_${ARCH_NAME}.tar.gz" \
-        -C "${stage}" defenseclaw
+    make -C "${build_root}" sync-openclaw-extension
+    if version_lte "${PROTECTED_ARTIFACT_VERSION}" "${TARGET_VERSION}"; then
+        # Production verification checks the native executable format and
+        # architecture inside every protected gateway. Cross-build all six
+        # payloads so prepare-only cannot report green with placeholder bytes
+        # that the release workflow's verify-runtime gate would reject.
+        local fixture_os fixture_arch fixture_stage canonical_archive
+        for fixture_os in darwin linux windows; do
+            for fixture_arch in amd64 arm64; do
+                fixture_stage="${WORKDIR}/gateway-${fixture_os}-${fixture_arch}"
+                mkdir -p "${fixture_stage}"
+                (
+                    cd "${build_root}"
+                    CGO_ENABLED=0 GOOS="${fixture_os}" GOARCH="${fixture_arch}" \
+                        go build -ldflags "-s -w -X main.version=${TARGET_VERSION}" \
+                        -o "${fixture_stage}/defenseclaw" ./cmd/defenseclaw
+                )
+                if [[ "${fixture_os}" == "windows" ]]; then
+                    canonical_archive="${out}/defenseclaw_${TARGET_VERSION}_windows_${fixture_arch}.zip"
+                    python3 - "${fixture_stage}/defenseclaw" "${canonical_archive}" <<'PY'
+import sys
+import zipfile
+
+source, destination = sys.argv[1:]
+with zipfile.ZipFile(destination, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+    archive.write(source, arcname="defenseclaw.exe")
+PY
+                else
+                    canonical_archive="${out}/defenseclaw_${TARGET_VERSION}_${fixture_os}_${fixture_arch}.tar.gz"
+                    tar -czf "${canonical_archive}" -C "${fixture_stage}" defenseclaw
+                fi
+                printf '%s\n' '{}' > "${canonical_archive}.sbom.json"
+            done
+        done
+    else
+        local stage="${WORKDIR}/gateway-${OS_NAME}-${ARCH_NAME}"
+        mkdir -p "${stage}"
+        (
+            cd "${build_root}"
+            CGO_ENABLED=0 GOOS="${OS_NAME}" GOARCH="${ARCH_NAME}" \
+                go build -ldflags "-s -w -X main.version=${TARGET_VERSION}" \
+                -o "${stage}/defenseclaw" ./cmd/defenseclaw
+        )
+        tar -czf "${out}/defenseclaw_${TARGET_VERSION}_${OS_NAME}_${ARCH_NAME}.tar.gz" \
+            -C "${stage}" defenseclaw
+    fi
 
     log "Generating candidate upgrade manifest/checksums"
-    python3 "${ROOT}/scripts/generate-upgrade-manifest.py" \
+    python3 "${build_root}/scripts/generate-upgrade-manifest.py" \
         --out "${out}/upgrade-manifest.json"
+    if version_lte "${PROTECTED_ARTIFACT_VERSION}" "${TARGET_VERSION}"; then
+        python3 "${build_root}/scripts/release_candidate.py" prepare-runtime \
+            --release-dir "${out}" \
+            --version "${TARGET_VERSION}"
+        python3 "${build_root}/scripts/release_candidate.py" verify-runtime \
+            --release-dir "${out}" \
+            --version "${TARGET_VERSION}"
+    fi
     (cd "${out}" && find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem \
         | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt)
 }
@@ -296,21 +467,72 @@ prepare_release_root() {
 
 assert_candidate_assets() {
     local dir="${RELEASE_ROOT}/${TARGET_VERSION}"
-    local wheel="${dir}/defenseclaw-${TARGET_VERSION}-py3-none-any.whl"
+    local selected schema_version wheel_name gateway_name wheel gateway
     [[ -d "${dir}" ]] || die "release root must contain ${TARGET_VERSION}/: ${RELEASE_ROOT}"
-    [[ -f "${wheel}" ]] \
-        || die "candidate wheel missing from ${dir}"
-    [[ -f "${dir}/defenseclaw_${TARGET_VERSION}_${OS_NAME}_${ARCH_NAME}.tar.gz" ]] \
-        || die "candidate gateway archive missing for ${OS_NAME}/${ARCH_NAME} in ${dir}"
     [[ -f "${dir}/upgrade-manifest.json" ]] || die "upgrade-manifest.json missing from ${dir}"
     [[ -f "${dir}/checksums.txt" ]] || die "checksums.txt missing from ${dir}"
-    python3 - "${wheel}" <<'PY'
+    selected="$(python3 - \
+        "${dir}/upgrade-manifest.json" "${TARGET_VERSION}" "${OS_NAME}" "${ARCH_NAME}" <<'PY'
+import json
+import sys
+
+path, version, os_name, arch = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+schema = manifest.get("schema_version")
+if schema == 2:
+    artifacts = manifest["release_artifacts"]
+    wheel = artifacts["wheel"]
+    gateway = artifacts["gateways"][os_name][arch]
+elif schema == 1:
+    wheel = f"defenseclaw-{version}-py3-none-any.whl"
+    extension = "zip" if os_name == "windows" else "tar.gz"
+    gateway = f"defenseclaw_{version}_{os_name}_{arch}.{extension}"
+else:
+    raise SystemExit(f"unsupported candidate manifest schema: {schema!r}")
+print(schema)
+print(wheel)
+print(gateway)
+PY
+)" || die "could not select candidate artifacts from upgrade-manifest.json"
+    schema_version="$(printf '%s\n' "${selected}" | sed -n '1p')"
+    wheel_name="$(printf '%s\n' "${selected}" | sed -n '2p')"
+    gateway_name="$(printf '%s\n' "${selected}" | sed -n '3p')"
+    wheel="${dir}/${wheel_name}"
+    gateway="${dir}/${gateway_name}"
+    [[ -f "${wheel}" ]] || die "manifest-bound candidate wheel missing from ${dir}: ${wheel_name}"
+    [[ -f "${gateway}" ]] \
+        || die "manifest-bound candidate gateway missing for ${OS_NAME}/${ARCH_NAME}: ${gateway_name}"
+    CANDIDATE_WHEEL_NAME="${wheel_name}"
+    python3 - \
+        "${wheel}" "${gateway}" "${schema_version}" "${dir}" "${TARGET_VERSION}" \
+        "${OS_NAME}" "${ARCH_NAME}" <<'PY'
+import gzip
+import io
 from pathlib import Path
 import sys
+import tarfile
 import zipfile
 
-wheel = Path(sys.argv[1])
-with zipfile.ZipFile(wheel) as archive:
+wheel, gateway = map(Path, sys.argv[1:3])
+schema = int(sys.argv[3])
+directory = Path(sys.argv[4])
+version, os_name, arch = sys.argv[5:]
+if schema == 2:
+    magic = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+    def protected_payload(path):
+        outer = path.read_bytes()
+        if not outer.startswith(magic) or len(outer) == len(magic):
+            raise SystemExit(f"protected artifact envelope is invalid: {path.name}")
+        return bytes(value ^ 0xA5 for value in outer[len(magic):])
+    if zipfile.is_zipfile(wheel):
+        raise SystemExit("protected candidate wheel remained directly package-installable")
+    wheel_source = io.BytesIO(protected_payload(wheel))
+    gateway_source = io.BytesIO(protected_payload(gateway))
+else:
+    wheel_source = wheel
+    gateway_source = gateway
+with zipfile.ZipFile(wheel_source) as archive:
     bytecode = [
         name for name in archive.namelist()
         if "/__pycache__/" in name or name.endswith((".pyc", ".pyo"))
@@ -320,6 +542,58 @@ if bytecode:
     raise SystemExit(
         f"candidate wheel contains stale Python bytecode ({len(bytecode)} file(s)): {sample}"
     )
+if os_name == "windows":
+    with zipfile.ZipFile(gateway_source) as archive:
+        members = [member for member in archive.infolist() if not member.is_dir()]
+        if any(
+            Path(member.filename.replace("\\", "/")).is_absolute()
+            or ".." in Path(member.filename.replace("\\", "/")).parts
+            for member in members
+        ):
+            raise SystemExit("manifest-bound Windows gateway archive has an unsafe member")
+        runtimes = [
+            member
+            for member in members
+            if Path(member.filename.replace("\\", "/")).name == "defenseclaw.exe"
+        ]
+        if len(runtimes) != 1:
+            raise SystemExit("manifest-bound Windows gateway archive lacks one runtime binary")
+else:
+    with tarfile.open(fileobj=gateway_source if schema == 2 else None,
+                      name=None if schema == 2 else gateway,
+                      mode="r:gz") as archive:
+        if not any(Path(member.name).name == "defenseclaw" for member in archive.getmembers()):
+            raise SystemExit("manifest-bound gateway archive lacks the runtime binary")
+if schema == 2:
+    extension = "zip" if os_name == "windows" else "tar.gz"
+    canonical_gateway = directory / f"defenseclaw_{version}_{os_name}_{arch}.{extension}"
+    canonical_wheel = directory / f"defenseclaw-{version}-py3-none-any.whl"
+    if version == "0.8.4":
+        boundary = (
+            "DefenseClaw 0.8.4 must be installed by the release-owned staged upgrade resolver.\n"
+        )
+    else:
+        boundary = f"DefenseClaw {version} requires the 0.8.4 upgrade bridge.\n"
+    expected = (
+        boundary
+        +
+        "No changes were made. Run the release-owned upgrade resolver without a version.\n"
+    ).encode()
+    if os_name == "windows":
+        if canonical_gateway.read_bytes() != expected or zipfile.is_zipfile(canonical_gateway):
+            raise SystemExit("canonical Windows gateway refusal envelope became installable")
+    else:
+        if gzip.decompress(canonical_gateway.read_bytes()) != expected:
+            raise SystemExit("canonical gateway refusal envelope changed")
+        try:
+            with tarfile.open(canonical_gateway, mode="r:gz"):
+                pass
+        except tarfile.TarError:
+            pass
+        else:
+            raise SystemExit("canonical gateway refusal envelope became installable")
+    if canonical_wheel.read_bytes() != expected or zipfile.is_zipfile(canonical_wheel):
+        raise SystemExit("canonical wheel refusal envelope became installable")
 print("wheel_bytecode=clean")
 PY
 }
@@ -377,41 +651,284 @@ print("\n".join(text.splitlines()[-80:]))
 PY
 }
 
+materialize_authenticated_artifact() {
+    local source="$1"
+    local checksums="$2"
+    local destination="$3"
+    python3 - "${source}" "${checksums}" "${destination}" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+source = Path(sys.argv[1]).absolute()
+checksums = Path(sys.argv[2]).absolute()
+destination = Path(sys.argv[3]).absolute()
+magic = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+maximum_size = 512 * 1024 * 1024 + len(magic)
+
+
+def regular_file(path: Path, *, maximum: int) -> os.stat_result:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_size <= 0
+        or info.st_size > maximum
+    ):
+        raise RuntimeError(f"release-test input is not a bounded regular file: {path}")
+    return info
+
+
+source_info = regular_file(source, maximum=maximum_size)
+regular_file(checksums, maximum=8 * 1024 * 1024)
+entries: dict[str, str] = {}
+for line_number, line in enumerate(checksums.read_text(encoding="utf-8").splitlines(), 1):
+    match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._-]+)", line)
+    if not match:
+        raise RuntimeError(f"invalid checksum line {line_number}")
+    digest, name = match.groups()
+    if name in entries:
+        raise RuntimeError(f"duplicate checksum entry: {name}")
+    entries[name] = digest
+expected = entries.get(source.name)
+if expected is None:
+    raise RuntimeError(f"authenticated checksums do not cover {source.name}")
+
+parent = destination.parent
+parent_info = parent.lstat()
+if (
+    stat.S_ISLNK(parent_info.st_mode)
+    or not stat.S_ISDIR(parent_info.st_mode)
+    or parent_info.st_uid != os.geteuid()
+    or stat.S_IMODE(parent_info.st_mode) & 0o077
+):
+    raise RuntimeError("materialization custody directory is not private")
+
+read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+write_flags = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+source_fd = os.open(source, read_flags)
+destination_fd: int | None = None
+created = False
+try:
+    opened = os.fstat(source_fd)
+    if not os.path.samestat(source_info, opened):
+        raise RuntimeError("protected artifact changed while opening")
+
+    outer_digest = hashlib.sha256()
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        outer_digest.update(chunk)
+    if outer_digest.hexdigest() != expected:
+        raise RuntimeError("protected artifact does not match authenticated checksums")
+
+    os.lseek(source_fd, 0, os.SEEK_SET)
+    if os.read(source_fd, len(magic)) != magic:
+        raise RuntimeError("protected artifact envelope magic is invalid")
+    destination_fd = os.open(destination, write_flags, 0o600)
+    created = True
+    consumed_digest = hashlib.sha256(magic)
+    decoded_bytes = 0
+    while True:
+        encoded = os.read(source_fd, 1024 * 1024)
+        if not encoded:
+            break
+        consumed_digest.update(encoded)
+        decoded = bytes(value ^ 0xA5 for value in encoded)
+        decoded_bytes += len(decoded)
+        view = memoryview(decoded)
+        while view:
+            written = os.write(destination_fd, view)
+            if written <= 0:
+                raise RuntimeError("protected artifact materialization write failed")
+            view = view[written:]
+    if decoded_bytes == 0 or consumed_digest.hexdigest() != expected:
+        raise RuntimeError("protected artifact changed during materialization")
+    os.fsync(destination_fd)
+    os.close(destination_fd)
+    destination_fd = None
+    directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    if destination_fd is not None:
+        os.close(destination_fd)
+    if created:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+    raise
+finally:
+    os.close(source_fd)
+PY
+}
+
+release_test_artifact_path() {
+    local source="$1"
+    local checksums="$2"
+    local destination="$3"
+    case "${source}" in
+        *.dcwheel|*.dcgateway)
+            materialize_authenticated_artifact "${source}" "${checksums}" "${destination}" \
+                || return 1
+            printf '%s\n' "${destination}"
+            ;;
+        *)
+            printf '%s\n' "${source}"
+            ;;
+    esac
+}
+
 download_old_asset() {
     local name="$1"
     local dest="$2"
-    local url="https://github.com/${REPO}/releases/download/${FROM_VERSION}/${name}"
-    curl -fsSL "${url}" -o "${dest}"
+    local version="${3:-${FROM_VERSION}}"
+    local url="https://github.com/${REPO}/releases/download/${version}/${name}"
+    local temporary="${dest}.download.$$"
+    local max_bytes=536870912
+    case "${name}" in
+        checksums.txt) max_bytes=8388608 ;;
+        checksums.txt.pem) max_bytes=65536 ;;
+        checksums.txt.sig) max_bytes=16384 ;;
+        upgrade-manifest.json) max_bytes=4194304 ;;
+    esac
+    if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+        --max-filesize "${max_bytes}" "${url}" -o "${temporary}"; then
+        rm -f "${temporary}"
+        return 1
+    fi
+    mv "${temporary}" "${dest}"
+}
+
+published_baseline_artifact_names() {
+    local version="$1"
+    if ! version_lte "${PROTECTED_ARTIFACT_VERSION}" "${version}"; then
+        printf '%s\n' \
+            "defenseclaw-${version}-py3-none-any.whl" \
+            "defenseclaw_${version}_${OS_NAME}_${ARCH_NAME}.tar.gz"
+        return 0
+    fi
+
+    printf '%s\n' \
+        "defenseclaw-${version}-2-py3-none-any.dcwheel" \
+        "defenseclaw_${version}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
+}
+
+stage_authenticated_baseline() {
+    local version="$1"
+    local old_dir="${WORKDIR}/published-release/${version}"
+    mkdir -p "${old_dir}"
+    local baseline_names old_wheel_name old_gateway_name name
+    baseline_names="$(published_baseline_artifact_names "${version}")"
+    old_wheel_name="$(printf '%s\n' "${baseline_names}" | sed -n '1p')"
+    old_gateway_name="$(printf '%s\n' "${baseline_names}" | sed -n '2p')"
+    local marker="${old_dir}/.authenticated-${OS_NAME}-${ARCH_NAME}"
+    if [[ -f "${marker}" ]]; then
+        return 0
+    fi
+    for name in \
+        checksums.txt \
+        checksums.txt.sig \
+        checksums.txt.pem \
+        "${old_wheel_name}" \
+        "${old_gateway_name}"; do
+        if [[ ! -f "${old_dir}/${name}" ]]; then
+            download_old_asset "${name}" "${old_dir}/${name}" "${version}" \
+                || die "published baseline asset is unavailable: ${version}/${name}"
+        fi
+    done
+    local cosign_path
+    cosign_path="$(command -v cosign)" \
+        || die "cosign is required to authenticate published baseline ${version}"
+    python3 "${ROOT}/scripts/historical_release_auth.py" \
+        --version "${version}" \
+        --release-dir "${old_dir}" \
+        --cosign "${cosign_path}" \
+        --asset "${old_wheel_name}" \
+        --asset "${old_gateway_name}" \
+        || die "published baseline authentication failed: ${version}"
+    printf '%s\n' "${version} ${old_wheel_name} ${old_gateway_name}" >"${marker}"
+    chmod 600 "${marker}"
+    ok "Authenticated published baseline ${version} (${OS_NAME}/${ARCH_NAME})"
 }
 
 seed_baseline_install() {
     log "Seeding baseline ${FROM_VERSION} install"
     mkdir -p "${SMOKE_HOME}/.local/bin" "${SMOKE_HOME}/.defenseclaw"
 
-    local old_dir="${WORKDIR}/old-release/${FROM_VERSION}"
-    mkdir -p "${old_dir}"
-    local old_wheel="${old_dir}/defenseclaw-${FROM_VERSION}-py3-none-any.whl"
-    local old_gateway="${old_dir}/defenseclaw_${FROM_VERSION}_${OS_NAME}_${ARCH_NAME}.tar.gz"
-    download_old_asset "defenseclaw-${FROM_VERSION}-py3-none-any.whl" "${old_wheel}" \
-        || die "could not download old wheel for ${FROM_VERSION}; choose a release with assets"
-    download_old_asset "defenseclaw_${FROM_VERSION}_${OS_NAME}_${ARCH_NAME}.tar.gz" "${old_gateway}" \
-        || die "could not download old gateway for ${FROM_VERSION}/${OS_NAME}/${ARCH_NAME}"
-
+    stage_authenticated_baseline "${FROM_VERSION}"
+    local old_dir="${WORKDIR}/published-release/${FROM_VERSION}"
+    local baseline_names old_wheel_name old_gateway_name old_wheel old_gateway
+    baseline_names="$(published_baseline_artifact_names "${FROM_VERSION}")"
+    old_wheel_name="$(printf '%s\n' "${baseline_names}" | sed -n '1p')"
+    old_gateway_name="$(printf '%s\n' "${baseline_names}" | sed -n '2p')"
+    old_wheel="${old_dir}/${old_wheel_name}"
+    old_gateway="${old_dir}/${old_gateway_name}"
+    local custody="${SMOKE_HOME}/.release-test-custody"
+    mkdir -p "${custody}"
+    local installed_old_wheel installed_old_gateway wheel_custody_path gateway_custody_path
+    wheel_custody_path="${custody}/${old_wheel_name}"
+    gateway_custody_path="${custody}/${old_gateway_name}"
+    if [[ "${old_wheel_name}" == *.dcwheel ]]; then
+        wheel_custody_path="${custody}/${old_wheel_name%.dcwheel}.whl"
+    fi
+    if [[ "${old_gateway_name}" == *.dcgateway ]]; then
+        gateway_custody_path="${custody}/${old_gateway_name%.dcgateway}.tar.gz"
+    fi
+    installed_old_wheel="$(release_test_artifact_path \
+        "${old_wheel}" "${old_dir}/checksums.txt" \
+        "${wheel_custody_path}")" \
+        || die "could not materialize authenticated baseline wheel ${FROM_VERSION}"
+    installed_old_gateway="$(release_test_artifact_path \
+        "${old_gateway}" "${old_dir}/checksums.txt" \
+        "${gateway_custody_path}")" \
+        || die "could not materialize authenticated baseline gateway ${FROM_VERSION}"
     uv --no-config venv "${SMOKE_HOME}/.defenseclaw/.venv" --python 3.12 --quiet
     local venv_python="${SMOKE_HOME}/.defenseclaw/.venv/bin/python"
-    uv --no-config pip install --python "${venv_python}" --quiet \
-        "${RELEASE_URL}/${TARGET_VERSION}/defenseclaw-${TARGET_VERSION}-py3-none-any.whl" \
-        >"${SMOKE_HOME}/seed-target-deps.log" 2>&1 \
-        || { tail_log "${SMOKE_HOME}/seed-target-deps.log"; die "could not seed target dependency set"; }
-    uv --no-config pip install --python "${venv_python}" --quiet --no-deps "${old_wheel}" \
-        >"${SMOKE_HOME}/seed-old-wheel.log" 2>&1 \
-        || { tail_log "${SMOKE_HOME}/seed-old-wheel.log"; die "could not install old wheel"; }
+    if [[ "${BASELINE_DEPENDENCIES}" == "published" ]]; then
+        uv --no-config pip install --python "${venv_python}" --quiet "${installed_old_wheel}" \
+            >"${SMOKE_HOME}/seed-published-dependencies.log" 2>&1 \
+            || { tail_log "${SMOKE_HOME}/seed-published-dependencies.log"; die "could not resolve published baseline dependencies"; }
+        uv --no-config pip check --python "${venv_python}" --quiet \
+            >>"${SMOKE_HOME}/seed-published-dependencies.log" 2>&1 \
+            || { tail_log "${SMOKE_HOME}/seed-published-dependencies.log"; die "published baseline dependency set is inconsistent"; }
+        ok "Resolved the published ${FROM_VERSION} wheel's own dependency graph"
+    else
+        [[ -n "${CANDIDATE_WHEEL_NAME}" ]] \
+            || die "candidate wheel name was not selected from the upgrade manifest"
+        local candidate_dir="${RELEASE_ROOT}/${TARGET_VERSION}"
+        local candidate_wheel
+        candidate_wheel="$(release_test_artifact_path \
+            "${candidate_dir}/${CANDIDATE_WHEEL_NAME}" "${candidate_dir}/checksums.txt" \
+            "${custody}/${CANDIDATE_WHEEL_NAME%.dcwheel}.whl")" \
+            || die "could not materialize authenticated target dependency wheel"
+        uv --no-config pip install --python "${venv_python}" --quiet \
+            "${candidate_wheel}" \
+            >"${SMOKE_HOME}/seed-target-deps.log" 2>&1 \
+            || { tail_log "${SMOKE_HOME}/seed-target-deps.log"; die "could not seed target dependency set"; }
+        uv --no-config pip install --python "${venv_python}" --quiet --no-deps "${installed_old_wheel}" \
+            >"${SMOKE_HOME}/seed-old-wheel.log" 2>&1 \
+            || { tail_log "${SMOKE_HOME}/seed-old-wheel.log"; die "could not install old wheel"; }
+    fi
 
     ln -sf "${SMOKE_HOME}/.defenseclaw/.venv/bin/defenseclaw" "${SMOKE_HOME}/.local/bin/defenseclaw"
 
     local gateway_stage="${WORKDIR}/old-gateway/${FROM_VERSION}"
     mkdir -p "${gateway_stage}"
-    tar -xzf "${old_gateway}" -C "${gateway_stage}"
+    tar -xzf "${installed_old_gateway}" -C "${gateway_stage}"
     cp "${gateway_stage}/defenseclaw" "${SMOKE_HOME}/.local/bin/defenseclaw-gateway"
     chmod +x "${SMOKE_HOME}/.local/bin/defenseclaw-gateway"
 }
@@ -423,8 +940,10 @@ install_baseline() {
     fi
 
     log "Installing baseline ${FROM_VERSION} with scripts/install.sh"
+    local baseline_path
+    baseline_path="$(fresh_install_tool_path)"
     if HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-        PATH="${SMOKE_HOME}/.local/bin:${PATH}" VERSION="${FROM_VERSION}" \
+        PATH="${SMOKE_HOME}/.local/bin:${baseline_path}" VERSION="${FROM_VERSION}" \
         "${ROOT}/scripts/install.sh" --yes --connector none \
         >"${SMOKE_HOME}/install-baseline.log" 2>&1; then
         return
@@ -618,23 +1137,32 @@ run_v8_source_contract_tests() {
 }
 
 patch_installed_upgrade_endpoint() {
+    local force_latest_version="${1:-}"
     local upgrade_py
     upgrade_py="$(find "${SMOKE_HOME}/.defenseclaw/.venv" \
         -path '*/site-packages/defenseclaw/commands/cmd_upgrade.py' -print -quit)"
     [[ -n "${upgrade_py}" ]] || die "installed cmd_upgrade.py not found"
 
-    python3 - "${upgrade_py}" "${RELEASE_URL}" <<'PY'
+    python3 - "${upgrade_py}" "${RELEASE_URL}" "${force_latest_version}" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
 release_url = sys.argv[2]
+force_latest_version = sys.argv[3]
 text = path.read_text(encoding="utf-8")
 old = 'GITHUB_DL = f"https://github.com/{GITHUB_REPO}/releases/download"'
 new = f'GITHUB_DL = "{release_url}"'
 if old not in text:
     raise SystemExit(f"release URL constant not found in {path}")
-path.write_text(text.replace(old, new, 1), encoding="utf-8")
+text = text.replace(old, new, 1)
+if force_latest_version:
+    old_latest = "target_version = _fetch_latest_version()"
+    new_latest = f'target_version = "{force_latest_version}"'
+    if text.count(old_latest) != 1:
+        raise SystemExit(f"latest-version resolver call not found exactly once in {path}")
+    text = text.replace(old_latest, new_latest, 1)
+path.write_text(text, encoding="utf-8")
 PY
 }
 
@@ -964,6 +1492,8 @@ activation_config = activation_dir / "config.source"
 activation_environment = activation_dir / "environment.source"
 if yaml.safe_load(activation_config.read_text(encoding="utf-8")).get("config_version") != 7:
     raise SystemExit("activation recovery config is not the exact pre-v8 source")
+if activation_config.read_bytes() != source_config.read_bytes():
+    raise SystemExit("activation recovery config is not byte-exact")
 if activation_environment.read_bytes() != source_environment.read_bytes():
     raise SystemExit("activation recovery .env is not byte-exact")
 manifest_by_role = {item["role"]: item for item in activation_manifest.get("files", [])}
@@ -1103,6 +1633,7 @@ run_one_upgrade_smoke() {
 
     install_baseline
     seed_upgrade_fixture
+    start_source_gateway_canary
     patch_installed_upgrade_endpoint
     run_upgrade
     verify_upgrade

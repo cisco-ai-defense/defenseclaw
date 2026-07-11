@@ -10,24 +10,29 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import os
+import platform
+import shutil
 import subprocess
+import sys
+import tarfile
+import zipfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
-CURRENT_RELEASE = "0.8.3"
-STALE_RELEASES = ("0.8.0", "0.8.1", "0.8.2")
+CURRENT_RELEASE = "0.8.4"
+STALE_RELEASES = ("0.8.0", "0.8.1", "0.8.2", "0.8.3")
 
 BASH_INSTALL_LINES = (
     f"VERSION={CURRENT_RELEASE}",
     'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',
     'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash',
 )
-UPGRADE_SCRIPT_LINES = (
-    f"UPGRADE_SCRIPT_VERSION={CURRENT_RELEASE}",
-    'UPGRADE_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${UPGRADE_SCRIPT_VERSION}/scripts/upgrade.sh"',
-)
-
 DOC_INSTALL_COMMANDS = {
     "README.md": BASH_INSTALL_LINES,
     "docs/QUICKSTART.md": BASH_INSTALL_LINES,
@@ -61,6 +66,288 @@ INSTALLER_FILES = (
     "scripts/install.sh",
     "scripts/install.ps1",
 )
+
+
+def _write_executable(path: Path, body: str) -> None:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_minimal_schema2_install_dist(root: Path, version: str = CURRENT_RELEASE) -> None:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "amd64"
+    gateways = {
+        os_name: {
+            platform_arch: f"defenseclaw_{version}_protocol2_{os_name}_{platform_arch}.dcgateway"
+            for platform_arch in ("amd64", "arm64")
+        }
+        for os_name in ("darwin", "linux", "windows")
+    }
+    wheel_name = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
+    gateway_name = str(gateways[system][arch])
+    manifest = {
+        "schema_version": 2,
+        "release_version": version,
+        "release_artifacts": {"wheel": wheel_name, "gateways": gateways},
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True).encode("utf-8")
+    (root / "upgrade-manifest.json").write_bytes(manifest_bytes)
+
+    envelope_magic = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+    gateway_body = b"#!/bin/sh\nexit 0\n"
+    tar_info = tarfile.TarInfo("defenseclaw")
+    tar_info.mode = 0o755
+    tar_info.size = len(gateway_body)
+    gateway_payload = io.BytesIO()
+    with tarfile.open(fileobj=gateway_payload, mode="w:gz") as archive:
+        archive.addfile(tar_info, io.BytesIO(gateway_body))
+    (root / gateway_name).write_bytes(envelope_magic + bytes(value ^ 0xA5 for value in gateway_payload.getvalue()))
+
+    wheel_payload = io.BytesIO()
+    with zipfile.ZipFile(wheel_payload, "w") as archive:
+        archive.writestr(
+            f"defenseclaw-{version}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: defenseclaw\nVersion: {version}\n",
+        )
+        archive.writestr(
+            "defenseclaw/install_publish.py",
+            (ROOT / "cli/defenseclaw/install_publish.py").read_bytes(),
+        )
+    (root / wheel_name).write_bytes(envelope_magic + bytes(value ^ 0xA5 for value in wheel_payload.getvalue()))
+
+    names = ("upgrade-manifest.json", gateway_name, wheel_name)
+    (root / "checksums.txt").write_text(
+        "".join(f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n" for name in names),
+        encoding="utf-8",
+    )
+    (root / "checksums.txt.sig").write_text("test signature\n", encoding="utf-8")
+    (root / "checksums.txt.pem").write_text("test certificate\n", encoding="utf-8")
+
+
+def test_schema2_protected_envelopes_are_not_renamed_wheels_or_archives(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    release.mkdir()
+    _write_minimal_schema2_install_dist(release)
+
+    wheel = next(release.glob("*.dcwheel"))
+    gateway = next(release.glob("*.dcgateway"))
+    magic = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+    for protected in (wheel, gateway):
+        encoded = protected.read_bytes()
+        assert encoded.startswith(magic)
+        payload = bytes(value ^ 0xA5 for value in encoded[len(magic) :])
+        assert payload
+        assert not zipfile.is_zipfile(protected)
+        with pytest.raises(tarfile.ReadError):
+            tarfile.open(protected, "r:*").close()
+
+    decoded_wheel = tmp_path / "decoded.whl"
+    decoded_wheel.write_bytes(bytes(value ^ 0xA5 for value in wheel.read_bytes()[len(magic) :]))
+    assert zipfile.is_zipfile(decoded_wheel)
+    decoded_gateway = tmp_path / "decoded.tar.gz"
+    decoded_gateway.write_bytes(bytes(value ^ 0xA5 for value in gateway.read_bytes()[len(magic) :]))
+    with tarfile.open(decoded_gateway, "r:gz") as archive:
+        assert archive.getnames() == ["defenseclaw"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="installer identity helper is POSIX-only")
+def test_posix_installer_identity_is_per_inode_not_per_filesystem(tmp_path: Path) -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    assert " -ef " not in source
+    assert 'path_has_identity "${activation}" "${GATEWAY_ACTIVATION_ID}"' in source
+    assert '"${CONNECTOR_MARKER_ID}"' in source
+    start = source.index("path_identity() {")
+    end = source.index("\n}\n\npath_has_identity()", start) + len("\n}")
+    function = source[start:end]
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.write_bytes(b"first\n")
+    second.write_bytes(b"second\n")
+    os_name = "darwin" if platform.system() == "Darwin" else "linux"
+
+    def identities() -> list[str]:
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                f'set -euo pipefail\nOS={os_name}\n{function}\npath_identity "$1"\npath_identity "$2"',
+                "bash",
+                str(first),
+                str(second),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        return completed.stdout.splitlines()
+
+    before = identities()
+    assert len(before) == 2 and before[0] != before[1]
+    first.unlink()
+    first.write_bytes(b"replacement\n")
+    after = identities()
+    assert before[0] != after[0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="legacy rollback is POSIX-only")
+def test_legacy_failure_removes_activation_links_before_claimed_parents(
+    tmp_path: Path,
+) -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    start = source.index("path_identity() {")
+    end = source.index("\nclaim_fresh_install_home()", start)
+    functions = source[start:end]
+    os_name = "darwin" if platform.system() == "Darwin" else "linux"
+    script = f"""
+set -euo pipefail
+OS={os_name}
+{functions}
+root=$1
+DEFENSECLAW_HOME=$root/.defenseclaw
+DEFENSECLAW_VENV=$DEFENSECLAW_HOME/.venv
+INSTALL_DIR=$root/.local/bin
+mkdir -p "$DEFENSECLAW_VENV" "$DEFENSECLAW_HOME/extensions/defenseclaw" "$INSTALL_DIR"
+printf 'plugin\n' > "$DEFENSECLAW_HOME/extensions/defenseclaw/index.js"
+GATEWAY_ACTIVATION="$INSTALL_DIR/.defenseclaw-gateway.install.test"
+printf 'gateway\n' > "$GATEWAY_ACTIVATION"
+GATEWAY_ACTIVATION_ID=$(path_identity "$GATEWAY_ACTIVATION")
+ln "$GATEWAY_ACTIVATION" "$INSTALL_DIR/defenseclaw-gateway"
+GATEWAY_PUBLISHED_ID=$(path_identity "$INSTALL_DIR/defenseclaw-gateway")
+PICKED_CONNECTOR_ACTIVATION="$DEFENSECLAW_HOME/.picked-connector.install.test"
+printf 'openclaw\n' > "$PICKED_CONNECTOR_ACTIVATION"
+PICKED_CONNECTOR_ACTIVATION_ID=$(path_identity "$PICKED_CONNECTOR_ACTIVATION")
+ln "$PICKED_CONNECTOR_ACTIVATION" "$DEFENSECLAW_HOME/picked_connector"
+CONNECTOR_MARKER_ID=$(path_identity "$DEFENSECLAW_HOME/picked_connector")
+VENV_CLAIM_ID=$(path_identity "$DEFENSECLAW_VENV")
+PLUGIN_CLAIM_ID=$(path_identity "$DEFENSECLAW_HOME/extensions/defenseclaw")
+EXTENSIONS_CLAIM_ID=$(path_identity "$DEFENSECLAW_HOME/extensions")
+HOME_CLAIM_ID=$(path_identity "$DEFENSECLAW_HOME")
+INSTALL_DIR_CLAIM_ID=$(path_identity "$INSTALL_DIR")
+LOCAL_BIN_PARENT_CLAIM_ID=$(path_identity "$root/.local")
+INSTALL_SUCCEEDED=false
+MODERN_RELEASE=false
+PUBLISH_HELPER=
+POLICY_PYTHON=
+GATEWAY_ROLLBACK_TOKEN=
+CONNECTOR_MARKER_ROLLBACK_TOKEN=
+CLI_PUBLISHED_ID=
+POLICY_DIR=
+POLICY_DIR_ID=
+cleanup_install_attempt
+test ! -e "$DEFENSECLAW_HOME"
+test ! -e "$root/.local"
+"""
+    completed = subprocess.run(
+        ["/bin/bash", "-c", script, "bash", str(tmp_path / "home")],
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="real codesign regression is macOS-only")
+def test_legacy_macos_installer_claims_gateway_after_copy_and_codesign(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
+    release = tmp_path / "release"
+    home.mkdir()
+    fake_bin.mkdir()
+    release.mkdir()
+
+    version = "0.8.3"
+    manifest = {"schema_version": 1, "release_version": version}
+    manifest_path = release / "upgrade-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (release / "checksums.txt").write_text(
+        f"{hashlib.sha256(manifest_path.read_bytes()).hexdigest()}  upgrade-manifest.json\n",
+        encoding="utf-8",
+    )
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "amd64"
+    gateway = release / f"defenseclaw-gateway-darwin-{arch}"
+    shutil.copyfile("/usr/bin/true", gateway)
+    gateway.chmod(0o755)
+    (release / f"defenseclaw-{version}-py3-none-any.whl").write_bytes(b"legacy wheel fixture\n")
+
+    _write_executable(
+        fake_bin / "python3",
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "import sys\n"
+        f"os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n",
+    )
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'if [ "${1:-}" = "--version" ]; then echo \'uv 0.8.0\'; exit 0; fi\n'
+        'if [ "${1:-}" = "venv" ]; then\n'
+        "  venv=$2\n"
+        '  mkdir -p "$venv/bin"\n'
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$venv/bin/python\"\n"
+        '  chmod +x "$venv/bin/python"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "${1:-}" = "pip" ] && [ "${2:-}" = "install" ]; then\n'
+        "  python=''\n"
+        "  previous=''\n"
+        '  for argument in "$@"; do\n'
+        '    if [ "$previous" = "--python" ]; then python=$argument; break; fi\n'
+        "    previous=$argument\n"
+        "  done\n"
+        "  cli=${python%/python}/defenseclaw\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
+        '  chmod +x "$cli"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 90\n",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            str(ROOT / "scripts/install.sh"),
+            "--local",
+            str(release),
+            "--yes",
+            "--connector",
+            "none",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=45,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+    installed_gateway = home / ".local/bin/defenseclaw-gateway"
+    assert installed_gateway.is_file() and not installed_gateway.is_symlink()
+    assert not list((home / ".local/bin").glob(".defenseclaw-gateway.install.*"))
+    verified = subprocess.run(
+        ["/usr/bin/codesign", "--verify", str(installed_gateway)],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert verified.returncode == 0, verified.stdout + verified.stderr
 
 
 def test_posix_installer_refuses_partial_home_and_dangling_entrypoints(tmp_path: Path) -> None:
@@ -109,6 +396,733 @@ def test_posix_installer_refuses_partial_home_and_dangling_entrypoints(tmp_path:
             assert not marker.exists()
 
 
+def test_posix_local_installer_refuses_existing_state_before_artifact_checks(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_home = home / ".defenseclaw"
+    local_dist = tmp_path / "local-dist"
+    data_home.mkdir(parents=True)
+    local_dist.mkdir()
+    marker = data_home / "partial-state"
+    marker.write_bytes(b"preserve\n")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(data_home),
+            "PATH": "/usr/bin:/bin",
+        }
+    )
+
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            str(ROOT / "scripts/install.sh"),
+            "--yes",
+            "--connector",
+            "none",
+            "--local",
+            str(local_dist),
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 1, output
+    assert "An existing DefenseClaw installation was detected" in output
+    assert "No changes were made" in output
+    assert "Detecting platform" not in output
+    assert marker.read_bytes() == b"preserve\n"
+
+
+def test_posix_installer_refuses_path_only_gateway_before_platform_or_network(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    path_bin = tmp_path / "path-bin"
+    home.mkdir()
+    path_bin.mkdir()
+    gateway = path_bin / "defenseclaw-gateway"
+    gateway.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    gateway.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+            "PATH": f"{path_bin}:/usr/bin:/bin",
+        }
+    )
+
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            str(ROOT / "scripts/install.sh"),
+            "--yes",
+            "--connector",
+            "none",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 1, output
+    assert "An existing DefenseClaw installation was detected" in output
+    assert "No changes were made" in output
+    assert "Detecting platform" not in output
+    assert "Authenticating release policy" not in output
+    assert gateway.read_text(encoding="utf-8") == "#!/bin/sh\nexit 0\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer publication uses hard links and symlinks")
+@pytest.mark.parametrize("arrival", ("gateway", "cli", "venv", "success"))
+def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
+    tmp_path: Path,
+    arrival: str,
+) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
+    release = tmp_path / "release"
+    home.mkdir()
+    fake_bin.mkdir()
+    release.mkdir()
+    _write_minimal_schema2_install_dist(release)
+
+    real_ln = shutil.which("ln", path="/usr/bin:/bin")
+    assert real_ln is not None
+    sentinel = f"concurrent-{arrival}-installation\n"
+    if arrival == "venv":
+        destination = home / ".defenseclaw/.venv/concurrent-install"
+    elif arrival == "success":
+        destination = tmp_path / "never-created"
+    else:
+        destination = home / ".local/bin" / ("defenseclaw-gateway" if arrival == "gateway" else "defenseclaw")
+    _write_executable(
+        fake_bin / "ln",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'eval last=\\"\\${$#}\\"\n'
+        'if [ "$last" = "$RACE_DESTINATION" ]; then\n'
+        '  printf \'%s\' "$RACE_SENTINEL" > "$last"\n'
+        "fi\n"
+        f'exec "{real_ln}" "$@"\n',
+    )
+    real_mkdir = shutil.which("mkdir", path="/usr/bin:/bin")
+    assert real_mkdir is not None
+    _write_executable(
+        fake_bin / "mkdir",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'eval last=\\"\\${$#}\\"\n'
+        f'"{real_mkdir}" "$@"\n'
+        'if [ "${RACE_KIND:-}" = venv ] && [ "$last" = "$RACE_HOME" ]; then\n'
+        f'  "{real_mkdir}" -p "${{RACE_DESTINATION%/*}}"\n'
+        '  printf \'%s\' "$RACE_SENTINEL" > "$RACE_DESTINATION"\n'
+        "fi\n",
+    )
+    _write_executable(fake_bin / "cosign", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        fake_bin / "python3",
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "arguments = sys.argv[1:]\n"
+        "kind = os.environ.get('RACE_KIND', '')\n"
+        "operation = arguments[1] if len(arguments) > 1 and arguments[0].endswith('install_publish.py') else ''\n"
+        "inject = (kind == 'gateway' and operation == 'fresh-regular') or (kind == 'cli' and operation == 'fresh-symlink')\n"
+        "if kind == 'venv' and operation == 'fresh-directory':\n"
+        "    inject = Path(arguments[-1]) == Path(os.environ['RACE_DESTINATION']).parent\n"
+        "if inject:\n"
+        "    destination = Path(os.environ['RACE_DESTINATION'])\n"
+        "    destination.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    destination.write_text(os.environ['RACE_SENTINEL'], encoding='utf-8')\n"
+        f"os.execv({sys.executable!r}, [{sys.executable!r}, *arguments])\n",
+    )
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'if [ "${1:-}" = "--version" ]; then echo \'uv 0.8.0\'; exit 0; fi\n'
+        'if [ "${1:-}" = "venv" ]; then\n'
+        "  venv=$2\n"
+        '  mkdir -p "$venv/bin"\n'
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$venv/bin/python\"\n"
+        '  chmod +x "$venv/bin/python"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "${1:-}" = "pip" ] && [ "${2:-}" = "install" ]; then\n'
+        "  python=''\n"
+        "  previous=''\n"
+        '  for argument in "$@"; do\n'
+        '    if [ "$previous" = "--python" ]; then python=$argument; break; fi\n'
+        "    previous=$argument\n"
+        "  done\n"
+        '  [ -n "$python" ]\n'
+        "  cli=${python%/python}/defenseclaw\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
+        '  chmod +x "$cli"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 90\n",
+    )
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "RACE_DESTINATION": str(destination),
+            "RACE_HOME": str(home / ".defenseclaw"),
+            "RACE_KIND": arrival,
+            "RACE_SENTINEL": sentinel,
+        }
+    )
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            str(ROOT / "scripts/install.sh"),
+            "--local",
+            str(release),
+            "--yes",
+            "--connector",
+            "none",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    if arrival == "success":
+        assert completed.returncode == 0, output
+        assert (home / ".defenseclaw/.venv/bin/defenseclaw").is_file()
+        assert (home / ".local/bin/defenseclaw").is_symlink()
+        assert (home / ".local/bin/defenseclaw-gateway").is_file()
+        return
+    assert completed.returncode != 0, output
+    assert "appeared during installation" in output
+    assert destination.is_file() and not destination.is_symlink()
+    assert destination.read_text(encoding="utf-8") == sentinel
+    if arrival == "venv":
+        assert not (home / ".local/bin/defenseclaw-gateway").exists()
+        assert not (home / ".local/bin/defenseclaw").exists()
+    else:
+        assert not (home / ".defenseclaw").exists()
+    if arrival == "cli":
+        assert not (home / ".local/bin/defenseclaw-gateway").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rollback uses descriptor-bound publisher")
+def test_posix_failed_install_removes_attempt_owned_plugin_marker_and_bin_dirs(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
+    release = tmp_path / "release"
+    commit_called = tmp_path / "commit-called"
+    home.mkdir()
+    fake_bin.mkdir()
+    release.mkdir()
+    _write_minimal_schema2_install_dist(release)
+
+    plugin_body = b"export const installed = true;\n"
+    plugin_info = tarfile.TarInfo("index.js")
+    plugin_info.mode = 0o600
+    plugin_info.size = len(plugin_body)
+    with tarfile.open(release / "defenseclaw-plugin-0.8.4.tar.gz", "w:gz") as archive:
+        archive.addfile(plugin_info, io.BytesIO(plugin_body))
+
+    _write_executable(fake_bin / "cosign", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        fake_bin / "python3",
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "arguments = sys.argv[1:]\n"
+        "if (\n"
+        "    len(arguments) > 1\n"
+        "    and arguments[0].endswith('install_publish.py')\n"
+        "    and arguments[1] == 'commit-token'\n"
+        "):\n"
+        "    home = Path(os.environ['HOME'])\n"
+        "    marker = home / '.defenseclaw/picked_connector'\n"
+        "    plugin = home / '.defenseclaw/extensions/defenseclaw/index.js'\n"
+        "    if marker.read_text(encoding='utf-8').strip() != 'openclaw':\n"
+        "        raise SystemExit(74)\n"
+        "    if plugin.read_bytes() != b'export const installed = true;\\n':\n"
+        "        raise SystemExit(74)\n"
+        "    Path(os.environ['COMMIT_CALLED']).write_text('called\\n', encoding='utf-8')\n"
+        "    raise SystemExit(73)\n"
+        f"os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n",
+    )
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'if [ "${1:-}" = "--version" ]; then echo \'uv 0.8.0\'; exit 0; fi\n'
+        'if [ "${1:-}" = "venv" ]; then\n'
+        "  venv=$2\n"
+        '  mkdir -p "$venv/bin"\n'
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$venv/bin/python\"\n"
+        '  chmod +x "$venv/bin/python"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "${1:-}" = "pip" ] && [ "${2:-}" = "install" ]; then\n'
+        "  python=''\n"
+        "  previous=''\n"
+        '  for argument in "$@"; do\n'
+        '    if [ "$previous" = "--python" ]; then python=$argument; break; fi\n'
+        "    previous=$argument\n"
+        "  done\n"
+        '  [ -n "$python" ]\n'
+        "  cli=${python%/python}/defenseclaw\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
+        '  chmod +x "$cli"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 90\n",
+    )
+    _write_executable(
+        fake_bin / "openclaw",
+        '#!/bin/sh\nif [ "${1:-}" = "--version" ]; then echo \'openclaw 2026.3.24\'; exit 0; fi\nexit 0\n',
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "COMMIT_CALLED": str(commit_called),
+        }
+    )
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            str(ROOT / "scripts/install.sh"),
+            "--local",
+            str(release),
+            "--yes",
+            "--connector",
+            "openclaw",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode != 0, output
+    assert commit_called.read_text(encoding="utf-8") == "called\n"
+    assert not (home / ".defenseclaw").exists()
+    assert not (home / ".local").exists()
+    assert not (home / ".local/bin/defenseclaw").exists()
+    assert not (home / ".local/bin/defenseclaw-gateway").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source-install Makefile preflight uses POSIX symlinks")
+def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_owner(
+    tmp_path: Path,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is unavailable")
+
+    def run(home: Path, install_dir: Path) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "HOME": str(home),
+                "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+                "PATH": "/usr/bin:/bin",
+            }
+        )
+        return subprocess.run(
+            [
+                make,
+                "--no-print-directory",
+                "_source-install-preflight",
+                f"INSTALL_DIR={install_dir}",
+            ],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+
+    release_home = tmp_path / "release/home"
+    release_bin = release_home / ".local/bin"
+    release_venv = release_home / ".defenseclaw/.venv/bin"
+    release_bin.mkdir(parents=True)
+    release_venv.mkdir(parents=True)
+    release_cli = release_venv / "defenseclaw"
+    release_cli.write_bytes(b"release cli\n")
+    release_link = release_bin / "defenseclaw"
+    release_link.symlink_to(release_cli)
+    release_gateway = release_bin / "defenseclaw-gateway"
+    release_gateway.write_bytes(b"release gateway\n")
+
+    refused = run(release_home, release_bin)
+    refused_output = refused.stdout + refused.stderr
+    assert refused.returncode != 0
+    assert "source install refused" in refused_output
+    assert "release-owned resolver" in refused_output
+    assert "No installed files or services were changed" in refused_output
+    assert release_link.readlink() == release_cli
+    assert release_gateway.read_bytes() == b"release gateway\n"
+    assert not (release_bin / ".defenseclaw-source-root").exists()
+
+    other_home = tmp_path / "other/home"
+    other_bin = other_home / ".local/bin"
+    other_bin.mkdir(parents=True)
+    other_cli = tmp_path / "different-checkout/.venv/bin/defenseclaw"
+    (other_bin / "defenseclaw").symlink_to(other_cli)
+
+    refused = run(other_home, other_bin)
+    refused_output = refused.stdout + refused.stderr
+    assert refused.returncode != 0
+    assert "another installation" in refused_output
+    assert "release-owned resolver" in refused_output
+    assert (other_bin / "defenseclaw").readlink() == other_cli
+
+    owner_home = tmp_path / "owner/home"
+    owner_bin = owner_home / ".local/bin"
+    owner_bin.mkdir(parents=True)
+    expected_cli = ROOT / ".venv/bin/defenseclaw"
+    (owner_bin / "defenseclaw").symlink_to(expected_cli)
+    (owner_home / ".defenseclaw").mkdir()
+
+    refused = run(owner_home, owner_bin)
+    assert refused.returncode != 0
+    assert "managed state exists beside a markerless source CLI" in (refused.stdout + refused.stderr)
+
+    owner_gateway = owner_bin / "defenseclaw-gateway"
+    owner_gateway.write_bytes(b"owned gateway\n")
+    owner_gateway.chmod(0o755)
+    gateway_digest = hashlib.sha256(owner_gateway.read_bytes()).hexdigest()
+    (owner_bin / ".defenseclaw-source-root").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "checkout_root": str(ROOT.resolve()),
+                "source_release": "0.8.4",
+                "source_install_compatibility_epoch": 1,
+                "runtime_config_version": 7,
+                "gateway_sha256": gateway_digest,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (owner_bin / "defenseclaw").unlink()
+    allowed = run(owner_home, owner_bin)
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
+def test_source_gateway_claim_allows_rebuild_but_rejects_installed_tampering(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "checkout"
+    install_dir = tmp_path / "home/.local/bin"
+    venv_bin = repo / ".venv/bin"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    (repo / "cli/defenseclaw").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "scripts/source-install-publish.py",
+        repo / "scripts/source-install-publish.py",
+    )
+    shutil.copy2(
+        ROOT / "scripts/source_release_identity.py",
+        repo / "scripts/source_release_identity.py",
+    )
+    shutil.copy2(
+        ROOT / "cli/defenseclaw/install_publish.py",
+        repo / "cli/defenseclaw/install_publish.py",
+    )
+    for relative in (
+        "pyproject.toml",
+        "Makefile",
+        "uv.lock",
+        "cli/defenseclaw/__init__.py",
+        "extensions/defenseclaw/package.json",
+        "extensions/defenseclaw/package-lock.json",
+        "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
+        "internal/config/config.go",
+        "release/source-install-identity.json",
+    ):
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, destination)
+    install_dir.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    cli = venv_bin / "defenseclaw"
+    cli.write_bytes(b"cli\n")
+    cli.chmod(0o755)
+    (install_dir / "defenseclaw").symlink_to(cli)
+    source_gateway = repo / "defenseclaw-gateway"
+    installed_gateway = install_dir / "defenseclaw-gateway"
+
+    def write_gateway(path: Path, payload: bytes) -> None:
+        path.write_bytes(payload)
+        path.chmod(0o755)
+
+    def guard(mode: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "scripts/source-install-preflight.sh"),
+                mode,
+                str(repo),
+                str(install_dir),
+                ".venv/bin",
+                "defenseclaw",
+                "defenseclaw-gateway",
+            ],
+            env={
+                **os.environ,
+                "HOME": str(tmp_path / "home"),
+                "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
+                "PATH": "/usr/bin:/bin",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+
+    write_gateway(source_gateway, b"gateway-v1\n")
+    write_gateway(installed_gateway, b"gateway-v1\n")
+    assert guard("check").returncode == 0
+    assert guard("claim").returncode == 0
+
+    write_gateway(source_gateway, b"gateway-v2\n")
+    assert guard("check").returncode == 0
+    assert guard("publish-gateway").returncode == 0
+    assert installed_gateway.read_bytes() == b"gateway-v2\n"
+    # A crash after gateway activation but before the final marker claim must
+    # be rerunnable when the new installed bytes exactly equal this checkout.
+    assert guard("check").returncode == 0
+    assert guard("claim").returncode == 0
+
+    marker = (install_dir / ".defenseclaw-source-root").read_text(encoding="utf-8")
+    assert hashlib.sha256(b"gateway-v2\n").hexdigest() in marker
+    write_gateway(installed_gateway, b"tampered\n")
+    refused = guard("check")
+    assert refused.returncode != 0
+    assert "changed since the last successful source claim" in (refused.stdout + refused.stderr)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="development installer uses Bash and POSIX symlinks")
+def test_direct_dev_installer_refuses_release_install_before_dependency_or_file_changes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    install_dir = home / ".local/bin"
+    release_venv = home / ".defenseclaw/.venv/bin"
+    plugin_dir = home / ".defenseclaw/extensions/defenseclaw"
+    install_dir.mkdir(parents=True)
+    release_venv.mkdir(parents=True)
+    plugin_dir.mkdir(parents=True)
+    release_cli = release_venv / "defenseclaw"
+    release_cli.write_bytes(b"release cli\n")
+    cli_link = install_dir / "defenseclaw"
+    cli_link.symlink_to(release_cli)
+    gateway = install_dir / "defenseclaw-gateway"
+    gateway.write_bytes(b"release gateway\n")
+    plugin = plugin_dir / "index.js"
+    plugin.write_bytes(b"release plugin\n")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+            "PATH": "/usr/bin:/bin",
+        }
+    )
+
+    completed = subprocess.run(
+        ["/bin/bash", str(ROOT / "scripts/install-dev.sh"), "--yes"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert "source install refused" in output
+    assert "release-owned resolver" in output
+    assert "Detecting Operating System" not in output
+    assert cli_link.readlink() == release_cli
+    assert gateway.read_bytes() == b"release gateway\n"
+    assert plugin.read_bytes() == b"release plugin\n"
+    assert not (install_dir / ".defenseclaw-source-root").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="parallel source install uses POSIX Make targets")
+@pytest.mark.parametrize("target", ("install", "all"))
+def test_parallel_make_install_cannot_mutate_managed_files_before_preflight(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is unavailable")
+
+    home = tmp_path / "home"
+    install_dir = home / ".local/bin"
+    release_venv = home / ".defenseclaw/.venv/bin"
+    plugin_dir = home / ".defenseclaw/extensions/defenseclaw"
+    install_dir.mkdir(parents=True)
+    release_venv.mkdir(parents=True)
+    plugin_dir.mkdir(parents=True)
+    release_cli = release_venv / "defenseclaw"
+    release_cli.write_bytes(b"release cli\n")
+    cli_link = install_dir / "defenseclaw"
+    cli_link.symlink_to(release_cli)
+    gateway = install_dir / "defenseclaw-gateway"
+    gateway.write_bytes(b"release gateway\n")
+    plugin = plugin_dir / "index.js"
+    plugin.write_bytes(b"release plugin\n")
+    shell_rc = home / ".zshrc"
+    shell_rc.write_bytes(b"preserve shell rc\n")
+    config = home / ".defenseclaw/config.yaml"
+    config.write_bytes(b"config_version: 7\npreserve: true\n")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+            "PATH": "/usr/bin:/bin",
+        }
+    )
+
+    completed = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "-j4",
+            "-o",
+            "pycli",
+            "-o",
+            "gateway",
+            "-o",
+            "plugin",
+            target,
+            "CONNECTOR=openclaw",
+            f"INSTALL_DIR={install_dir}",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert "source install refused" in output
+    assert cli_link.readlink() == release_cli
+    assert gateway.read_bytes() == b"release gateway\n"
+    assert plugin.read_bytes() == b"release plugin\n"
+    assert shell_rc.read_bytes() == b"preserve shell rc\n"
+    assert config.read_bytes() == b"config_version: 7\npreserve: true\n"
+    assert not (install_dir / ".defenseclaw-source-root").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source install ownership uses POSIX symlinks")
+def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) -> None:
+    make = shutil.which("make")
+    if make is None or not (ROOT / ".venv/bin/defenseclaw").is_file():
+        pytest.skip("make or the checkout CLI is unavailable")
+
+    home = tmp_path / "home"
+    install_dir = home / ".local/bin"
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "uv", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        fake_bin / "go",
+        "#!/bin/sh\n"
+        'if [ "${1:-}" = "env" ] && [ "${2:-}" = "GOPATH" ]; then\n'
+        f"  printf '%s\\n' '{tmp_path}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 42\n",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+    completed = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "-j4",
+            "-o",
+            "pycli",
+            "-o",
+            "gateway",
+            "install",
+            "CONNECTOR=none",
+            "GATEWAY=missing-source-gateway",
+            f"INSTALL_DIR={install_dir}",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert (install_dir / "defenseclaw").is_symlink()
+    assert not (install_dir / "missing-source-gateway").exists()
+    assert not (install_dir / ".defenseclaw-source-root").exists()
+
+
+def test_source_install_docs_are_developer_only_and_point_existing_hosts_to_resolver() -> None:
+    for rel in ("README.md", "docs/INSTALL.md"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        assert "development tooling" in text or "developer builds" in text
+        assert "not an alternate upgrade mechanism" in normalized or "not an upgrade path" in normalized
+        assert "release-owned" in text
+        assert "`scripts/upgrade.sh`" in text
+        assert "`scripts/upgrade.ps1`" in text
+
+
 def test_quickstart_docs_do_not_pipe_main_installer() -> None:
     for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
         text = (ROOT / rel).read_text()
@@ -118,21 +1132,145 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
             assert expected in text, f"{rel} is missing install snippet line: {expected}"
 
 
-def test_install_docs_do_not_pipe_main_upgrader() -> None:
-    text = (ROOT / "docs/INSTALL.md").read_text()
-    assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh" not in text
+def test_release_docs_dispatch_protected_workflow_and_never_precreate_tag() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
 
-    upgrade_start = text.index("### Upgrading from 0.2.0 to an artifact-backed release")
-    rollback_start = text.index("### Rollback")
-    troubleshooting_start = text.index("## Troubleshooting")
-    upgrade_section = text[upgrade_start:rollback_start]
-    rollback_section = text[rollback_start:troubleshooting_start]
+    for text in (makefile, install):
+        assert "gh workflow run release.yaml --ref main -f version=" in text
+        assert "git tag 0.4.0" not in text
+        assert "git push origin" not in text
+    assert "Do not create or push the tag yourself" in install
+    assert "creates the remote tag and GitHub release together" in " ".join(install.split())
 
-    for section in (upgrade_section, rollback_section):
-        for expected in UPGRADE_SCRIPT_LINES:
-            assert expected in section
-    for expected in UPGRADE_SCRIPT_LINES:
-        assert text.count(expected) == 2
+
+def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops() -> None:
+    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
+    cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
+    guardrail = (ROOT / "docs/GUARDRAIL.md").read_text(encoding="utf-8")
+
+    for text in (install, cli, guardrail):
+        assert "remain on the current version" in text.lower()
+        assert "contact support" in text.lower()
+    assert "0.7.0" in install
+    assert "0.2.x" in install
+    assert "0.3.x" in install
+    assert "native Windows matrix currently covers only" in install
+    assert "Windows source older than `0.8.0`" in install
+    assert "Windows older than `0.8.0`" in cli
+    assert "`0.8.0`–`0.8.3` only" in cli
+    assert "Explicitly upgrade to `0.8.4`" not in cli
+    assert "reach tested baseline `0.4.0`" not in cli
+    assert "Upgrading from 0.2.0 to an artifact-backed release" not in install
+    assert "--version 0.4.0" not in install
+
+
+def test_upgrade_docs_use_resolver_only_crash_recovery_without_manual_rollback() -> None:
+    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
+    upgrade_start = install.index("## Upgrading")
+    troubleshooting_start = install.index("## Troubleshooting")
+    section = install[upgrade_start:troubleshooting_start]
+
+    assert "Re-run that same resolver in latest mode, without a version override" in section
+    assert "do not manually copy a backup over live state" in section
+    assert "./scripts/upgrade.sh --yes" in section
+    assert ".\\scripts\\upgrade.ps1 -Yes" in section
+    assert "upgrade.sh --version" not in section
+    assert "VERSION=0.3.0" not in section
+    assert "curl -sSfL" not in section
+
+
+def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> None:
+    from defenseclaw.resolver_hint import authenticated_resolver_instructions
+
+    cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
+    quickstart = (ROOT / "docs/GUARDRAIL_QUICKSTART.md").read_text(encoding="utf-8")
+    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
+
+    for asset in ("defenseclaw-upgrade.sh", "defenseclaw-upgrade.ps1"):
+        assert asset in cli
+    assert "cosign verify-blob" in cli
+    assert "-UseBasicParsing" in cli
+    immutable_assets = f"releases/download/{CURRENT_RELEASE}/"
+    assert immutable_assets in cli
+    assert "releases/latest/download/" not in cli
+    assert f"releases/download/v{CURRENT_RELEASE}/" not in cli
+    documented_windows = cli.split(
+        "```powershell\n# PowerShell: download the current resolver, then run latest mode\n",
+        1,
+    )[1].split("\n```", 1)[0]
+    generated_windows = authenticated_resolver_instructions(CURRENT_RELEASE).split(
+        "Windows PowerShell:\n",
+        1,
+    )[1]
+    assert documented_windows.strip() == generated_windows.strip()
+    assert "does not require a source checkout" in quickstart
+    assert "does not require a source checkout" in site
+    expected_reference = (
+        "https://github.com/cisco-ai-defense/defenseclaw/"
+        f"blob/{CURRENT_RELEASE}/docs/CLI.md#upgrade"
+    )
+    assert expected_reference in site
+    assert "/blob/main/docs/CLI.md#upgrade" not in site
+    assert "/blob/v0.8.4/docs/CLI.md#upgrade" not in site
+
+
+def test_public_docs_never_direct_pre_bridge_clients_to_their_immutable_cli() -> None:
+    paths = (
+        "docs/INSTALL.md",
+        "docs-site/content/docs/get-started/install.mdx",
+        "docs-site/content/docs/get-started/upgrade.mdx",
+        "docs-site/content/docs/reference/cli.mdx",
+    )
+    rendered = "\n".join((ROOT / path).read_text(encoding="utf-8") for path in paths)
+
+    assert "upgrade them directly to the latest fixed release" not in rendered
+    assert "Signed releases still upgrade without local `cosign`" not in rendered
+    assert "0.8.3`-or-older" in rendered
+    assert "current release-owned resolver" in rendered
+    assert "cannot perform" in rendered or "cannot learn" in rendered
+
+
+def test_windows_install_protected_materialization_binds_exact_signed_outer_bytes() -> None:
+    installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
+
+    assert "Get-RequiredChecksumDigest" in installer
+    assert "Protected release artifact changed after checksum authentication" in installer
+    assert "-ExpectedSha256 (Get-RequiredChecksumDigest" in installer
+    assert '-cnotcontains "wheel"' in installer
+    assert "-cne $expectedWheel" in installer
+    assert "function New-PrivateDirectoryAcl" in installer
+    assert "[IO.FileSystemAclExtensions]::Create($directory, $acl)" in installer
+    assert "[void][IO.Directory]::CreateDirectory($Path, $acl)" in installer
+    assert "function New-PrivateFileStream" in installer
+    assert "GetTempFileName" not in installer
+    assert "New-Item -ItemType Directory -Force -Path $tmp" not in installer
+    assert "$tmp = New-PrivateDirectory -Path (Join-Path" in installer
+    assert "$script:WheelInnerSha256 = Copy-AuthenticatedPrivateArtifact" in installer
+    assert "$script:GatewayArchiveInnerSha256 = Copy-AuthenticatedPrivateArtifact" in installer
+    assert "Assert-ExactPrivateArtifactDigest -Path $gatewayZip" in installer
+    assert "Assert-ExactPrivateArtifactDigest -Path $script:GatewayBinary" in installer
+    assert "Assert-ExactPrivateArtifactDigest -Path $whlPath" in installer
+    main = installer[installer.index("function Main {") :]
+    policy_finally = main.index("} finally {")
+    policy_cleanup = main.index("Close-ReleasePolicyCustody")
+    transaction_commit = main.index("Complete-FreshInstallAttempt")
+    assert policy_finally < policy_cleanup < transaction_commit
+    cleanup = installer[
+        installer.index("function Close-ReleasePolicyCustody {") : installer.index("function Get-OwnerDaclSddl")
+    ]
+    assert "Remove-PrivateDirectory -Path $policyToRemove" in cleanup
+    assert "Private release-policy cleanup was incomplete" in cleanup
+    assert "Write-Warn2 $script:PolicyCleanupWarning" in cleanup
+
+
+def test_cli_docs_describe_authenticated_same_version_upgrade_as_noop() -> None:
+    cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
+    normalized = " ".join(cli.split())
+
+    assert "An authenticated same-version request is a no-op" in normalized
+    assert "it does not reinstall artifacts or run migrations" in normalized
+    assert "run automatically even during same-version upgrades" not in normalized
 
 
 def test_installer_help_does_not_pipe_main_installer() -> None:

@@ -16,10 +16,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -47,25 +52,132 @@ def test_windows_installer_refuses_existing_install_before_any_dependency_or_art
     assert 'Join-Path $InstallDir "defenseclaw.cmd"' in source
     assert 'Join-Path $InstallDir "defenseclaw-gateway.exe"' in source
     assert "$markers | Where-Object { Test-InstallMarker -Path $_ }" in source
+    assert "Get-Command defenseclaw -CommandType Application, ExternalScript" in source
+    assert "Get-Command defenseclaw-gateway -CommandType Application, ExternalScript" in source
+    assert "$existing += [string]$installedGateway.Source" in source
     assert "No changes were made" in source
     assert "upgrade.ps1" in source
     guard = main.index("\n    Assert-FreshInstall\n")
-    assert guard < main.index("\n    $arch = Get-Arch\n")
-    assert guard < main.index("\n    Install-Uv\n")
-    assert guard < main.index("\n    Ensure-Python\n")
-    assert guard < main.index("\n    $script:ReleaseVersion = Resolve-Version\n")
-    assert guard < main.index("\n    Install-Gateway -Arch $arch\n")
-    assert guard < main.index("\n    Install-Cli\n")
+    assert guard < main.index("$arch = Get-Arch", guard)
+    assert guard < main.index("Install-Uv", guard)
+    assert guard < main.index("Ensure-Python", guard)
+    assert guard < main.index("$script:ReleaseVersion = Resolve-Version", guard)
+    assert guard < main.index("Install-Gateway -Arch $arch", guard)
+    assert guard < main.index("Install-Cli", guard)
+    assert "$headerRead=0" in source
+    assert "while($headerRead -lt $magic.Length)" in source
+    assert "$sourceStream.Read($observed,$headerRead,$magic.Length-$headerRead)" in source
+    assert "if($count -eq 0){break}" in source
+
+
+def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> None:
+    source = INSTALLER.read_text(encoding="utf-8")
+    main = _main_body(source)
+
+    for contract in (
+        "FreshPathClaim",
+        "GetFileInformationByHandle",
+        "SetFileInformationByHandle",
+        "FILE_FLAG_OPEN_REPARSE_POINT",
+        "FILE_SHARE_READ | FILE_SHARE_WRITE",
+        "TransitionOpenedFileCustody",
+        "DeleteOpenedFileExact",
+        "MoveDirectoryNoReplace",
+        "MOVEFILE_WRITE_THROUGH",
+        "DeleteFileExact",
+        "DeleteTreeExact",
+        "DeleteEmptyDirectoryExact",
+        "MAX_TREE_DEPTH",
+        "MAX_TREE_NODES",
+        "MAX_TREE_BYTES",
+        "Add-FreshInstallStreamClaim",
+        "Initialize-FreshInstallAttempt",
+        "Undo-FreshInstallAttempt",
+        "Complete-FreshInstallAttempt",
+        "Close-ReleasePolicyCustody",
+        "PolicyCleanupWarning",
+        "Private release-policy cleanup was incomplete",
+        "Fresh-install payload rollback completed; retry is safe",
+        "changed or nonempty attempt path was preserved",
+    ):
+        assert contract in source
+
+    assert "FILE_SHARE_DELETE" not in source[
+        source.index("private static SafeFileHandle OpenHandle") : source.index(
+            "private static BY_HANDLE_FILE_INFORMATION Information"
+        )
+    ]
+    assert "FreshInstallDestination" in source
+    assert "$sourceStream" in source
+    assert "$checksumDigests" in source
+    assert "$input" not in source
+    assert "$matches" not in source
+    assert '".$leaf.fresh-install-"' in source
+    assert source.count("-FreshInstallDestination") == 2
+    assert "Add-FreshInstallStreamClaim -Stream $shimStream -Path $shim" in source
+    assert "Add-FreshInstallStreamClaim -Stream $stream -Path $marker" in source
+    assert main.index("Initialize-FreshInstallAttempt") < main.index(
+        "Install-Gateway -Arch $arch"
+    )
+    assert main.index("Install-Cli") < main.index("Complete-FreshInstallAttempt")
+    assert main.index("Close-ReleasePolicyCustody") < main.index(
+        "Complete-FreshInstallAttempt"
+    )
+    failure_handler = main[main.index("} catch {") : main.index("Write-Success")]
+    assert "$installFailure$cleanupDiagnostic" in failure_handler
+    cleanup = source[
+        source.index("function Close-ReleasePolicyCustody {") : source.index(
+            "function Get-OwnerDaclSddl"
+        )
+    ]
+    assert "$attemptCount = if ($InjectPolicyCleanupFailure) { 1 } else { 3 }" in cleanup
+    assert "Start-Sleep -Milliseconds (50 * $attempt)" in cleanup
+    assert "Write-Warn2 $script:PolicyCleanupWarning" in cleanup
+    assert main.index("Undo-FreshInstallAttempt") < main.index(
+        "Fresh-install payload rollback completed; retry is safe"
+    )
+    assert "Fresh-install fault injection requires -TestMode" in main
+    assert "[Parameter(DontShow = $true)][switch]$TestMode" in source
+    assert "[Parameter(DontShow = $true)][switch]$InjectFailureBeforeShim" in source
+    assert (
+        "[Parameter(DontShow = $true)][switch]$InjectConcurrentShimBeforePublish"
+        in source
+    )
+    assert (
+        "[Parameter(DontShow = $true)][switch]$InjectPolicyCleanupFailure"
+        in source
+    )
+
+    harness = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "-InjectFailureBeforeShim" in harness
+    assert "Invoke-FreshInstaller -InjectConcurrentShimBeforePublish" in harness
+    assert "InjectPolicyCleanupFailure" in harness
+    assert "Remove-InjectedPolicyResidue" in harness
+    assert "Fresh Windows install did not survive policy cleanup failure" in harness
+    assert "Policy cleanup failure or residual retirement changed installed bytes" in harness
+    assert "powershell.exe" in harness
+    assert "Windows PowerShell 5.1 could not parse/compile install.ps1" in harness
+    assert "Fresh-install payload rollback completed; retry is safe" in harness
+    assert "Concurrent unclaimed shim disappeared during rollback" in harness
+    assert "Failed fresh install left installer-created binary directories behind" in harness
 
 
 def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract() -> None:
     source = RESOLVER.read_text(encoding="utf-8")
     main = _main_body(source)
 
+    assert "$versionMatches" in source
+    assert "$gatewayProcesses" in source
+    assert "$matches" not in source
+
     for required in (
         "minimum_source_version",
         "required_bridge_version",
         "auto_bridge_from",
+        "tested_source_versions",
+        "platform_tested_source_versions",
         "controller_upgrade_protocol",
         "migration_failure_policy",
         "required_cli_migrations",
@@ -78,7 +190,34 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     ):
         assert required in source
     assert "Invoke-FreshHardCut" in source
+    assert ".dcwheel" in source
+    assert ".dcgateway" in source
+    assert "DEFENSECLAW-PROTECTED-ARTIFACT-V1" in source
+    assert "-bxor 0xA5" in source
+    assert "New-AuthenticatedMaterializedFile" in source
+    assert "ExpectedOuterSha256" in source
+    assert "changed after checksum authentication" in source
+    assert "$outerHash.TransformBlock" in source
+    assert "Authenticated protected $Label envelope has invalid magic" in source
+    assert "Assert-CanonicalRefusalEnvelope" in source
+    assert "[IO.FileMode]::CreateNew" in source
+    assert "$destinationStream.Flush($true)" in source
+    assert 'New-PrivateDirectory (Join-Path $directory "materialized")' in source
+    assert '$expectedSchema = if ((Compare-Version $ReleaseVersion "0.8.4") -ge 0) { 2 } else { 1 }' in source
+    assert "outside the tested Windows source matrix" in source
+    assert "No tested in-place path exists from this version; remain on it and contact support" in source
+    assert "Do not force $($final.Manifest.RequiredBridge)" in source
+    assert "contact DefenseClaw support for a validated state-aware recovery path" in source
+    assert "Bridge $bridgeVersion does not declare $installed in its tested Windows source matrix" in source
     assert "-I -m defenseclaw.main upgrade" in source
+
+    release_gate = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "defenseclaw-$TargetVersion-2-py3-none-any.whl" in release_gate
+    assert "defenseclaw-$BaselineVersion-2-py3-none-any.whl" in release_gate
+    assert "seed-target-dependencies.whl" not in release_gate
+    assert "seed-baseline.whl" not in release_gate
     assert "Set-PrivateDirectoryAcl" in source
     assert "AreAccessRulesProtected" in source
     assert "ReparsePoint" in source
@@ -94,14 +233,132 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     assert "phase-one-active.json" in source
     assert "Register-PhaseOneJournal" in source
     assert "Recover-InterruptedPhaseOne" in source
+    assert "New-PhaseOneStateSnapshot" in source
+    assert "Read-PhaseOneStateSnapshot" in source
+    assert "Restore-PhaseOneStateSnapshot" in source
+    assert "state_manifest_sha256" in source
+    assert "state_snapshot_ready" in source
+    assert "source_was_running" in source
+    assert "Seal-PhaseOneStateSnapshot" in source
+    assert "Stop-PhaseOneSourceForSnapshot" in source
+    assert "Get-PhaseOneSourceRunningState" in source
+    assert "Assert-PhaseOneGatewayStopped" in source
+    assert "Get-PhaseOneGatewayProcesses" in source
+    assert "Gateway stop command failed before phase-one state capture" in source
+    assert "Gateway remains live after phase-one stop" in source
+    assert 'schema_version=4;kind="defenseclaw-phase-one-recovery"' in source
+    assert "active_snapshot_ready" in source
+    assert "active_manifest_sha256" in source
+    assert "Seal-PhaseOneActiveStateSnapshot" in source
+    assert "Assert-PhaseOneStateRollbackCas" in source
+    assert "Move-PhaseOnePathNoReplace" in source
+    assert "Phase-one state diverged after migration; preserved without overwrite" in source
+    assert "Install-PhaseOneBridgeArtifacts" in source
+    assert "Invoke-FreshBridgeActivation" in source
+    assert "resolver-owned bridge venv" in source
+    assert ".defenseclaw-phase-one-owner.json" in source
+    assert "Restore-PhaseOneSourceVenv" in source
+    assert "bridge_wheel_sha256" in source
+    assert "bridge_gateway_sha256" in source
+    assert "venv_sddl" in source
+    assert "base_python" in source
+    assert "phase-one-mutator.lease" in source
+    assert "Initialize-PhaseOneMutatorLease" in source
+    assert "Enter-PhaseOneMutatorLease" in source
+    assert "Invoke-PhaseOneLeasedCommand" in source
+    assert "Sync-PhaseOneBridgeVenv" in source
+    assert "A phase-one mutation child is still active" in source
+    assert "Refusing to execute or overwrite an unrecognized phase-one gateway activation" in source
+    for runtime_field in (
+        "controller_home",
+        "data_dir",
+        "config_path",
+        "path_identities",
+        "openclaw_home_existed",
+        "ControllerHome",
+        "DataDir",
+        "ConfigPath",
+    ):
+        assert runtime_field in source
+    assert "Resolve-InstalledRuntimePaths" in source
+    assert "Get-ControllerHome" in source
+    assert "Get-PhaseOneDirectoryIdentity" in source
+    assert "Ambient DEFENSECLAW_HOME differs" in source
+    assert "Ambient DEFENSECLAW_CONFIG differs" in source
+    assert "Get-PhaseOneOpenClawIdentity" in source
+    assert "AllowCreatedOpenClaw" in source
+    assert "Remove-PhaseOneOwnedMutationTemporaries" in source
+    assert "DEFENSECLAW_UPGRADE_MUTATION_TOKEN" in source
+    assert "InjectPhaseOneOwnedMutationTemporaries" in source
+    assert "InjectPhaseOneFailureAfterFreshMutation" in source
+    assert "New-TestPhaseOneOwnedMutationTemporaries" in source
+    assert '$config+".pre-observability-migration.bak"' in source
+    assert '$config+".lock"' in source
+    assert '$config+".tmp-f3395"' in source
+    assert "$env:DEFENSECLAW_HOME=$Plan.DataDir" in source
+    assert "$env:DEFENSECLAW_CONFIG=$Plan.ConfigPath" in source
+    fresh_activation = source[
+        source.index("function Invoke-FreshBridgeActivation") : source.index(
+            "function Write-PhaseOneBridgeSuccessReceipt"
+        )
+    ]
+    assert fresh_activation.index("Seal-PhaseOneActiveStateSnapshot $Plan") < fresh_activation.index(
+        'Invoke-PhaseOneLeasedCommand -Plan $Plan -Command @((Get-Gateway),"start")'
+    )
+    assert fresh_activation.index("Remove-PhaseOneOwnedMutationTemporaries $Plan") < fresh_activation.index(
+        "Seal-PhaseOneActiveStateSnapshot $Plan"
+    )
+    restore_source = source[
+        source.index("function Restore-PhaseOneSource {") : source.index(
+            "function Recover-InterruptedPhaseOne"
+        )
+    ]
+    assert restore_source.index("Assert-PhaseOneStateRollbackCas") < restore_source.index(
+        "if(Test-Path -LiteralPath $Plan.GatewaySnapshot.Active"
+    )
+    assert restore_source.index("Assert-PhaseOneStateRollbackCas") < restore_source.index(
+        "Restore-PhaseOneSourceVenv $Plan"
+    )
+    bridge_transaction = source[source.index("function Invoke-BridgeTransaction") : source.index("function Main")]
+    assert "Invoke-Controller $Bridge.Version" not in bridge_transaction
+    assert "Install-PhaseOneBridgeArtifacts $plan" in bridge_transaction
+    assert "Invoke-FreshBridgeActivation -Plan $plan -Manifest $Bridge.Manifest" in bridge_transaction
+    assert bridge_transaction.index("Remove-PhaseOneOwnedMutationTemporaries $plan") < bridge_transaction.index(
+        "Sync-PhaseOneBridgeVenv $plan"
+    )
+    assert "Sync-PhaseOneBridgeVenv $plan" in bridge_transaction
+    assert bridge_transaction.index("Complete-PhaseOneJournal $plan") < bridge_transaction.index(
+        "Write-PhaseOneBridgeSuccessReceipt"
+    )
+    assert "if($committed)" in bridge_transaction
+    assert "release contract; installed version $installed is already current" in main
+    assert main.index('if($target -eq $installed)') < main.index("Confirm-Plan")
+    for managed in (
+        "guardrail_runtime.json",
+        "active_connector.json",
+        "connector_backups",
+        '"hooks"',
+        "observability-stack",
+        "openclaw.json.pre-0.3.0-migration",
+    ):
+        assert managed in source
+    assert 'kind -in @("symboliclink","junction")' in source
+    assert "Remove-PhaseOneManagedPath" in source
     assert "Recover-InterruptedPhaseTwo" in source
     assert "phase-two-active.json" in source
     assert "phase-two-mutator.lease" in source
     assert "Enter-PhaseTwoMutatorLease" in source
     assert "_recover_interrupted_hard_cut" in source
-    assert "pip install --python (Get-Python) --quiet --no-deps --reinstall" in source
+    assert "$stateFiles.Count -ne 7" in source
+    assert '$configPath=[IO.Path]::GetFullPath($configRaw)' in source
+    assert '$env:DEFENSECLAW_HOME=$script:RuntimePaths.ControllerHome' in source
+    assert '$env:DEFENSECLAW_CONFIG=$script:RuntimePaths.ConfigPath' in source
+    assert "Test-VersionBoundGatewayHealth" in source
+    assert "Assert-PhaseTwoGatewayStopped -DataDir $plan.DataDir -ConfigPath $plan.ConfigPath" in source
+    assert "pip install --python (Get-Python) --quiet --offline --no-deps --reinstall" in source
     assert "--force-reinstall" not in source
     assert main.index("[void](Recover-InterruptedPhaseOne)") < main.index("[void](Recover-InterruptedPhaseTwo)")
+    assert main.index("[void](Recover-InterruptedPhaseTwo)") < main.index("Resolve-InstalledRuntimePaths")
     assert main.index("[void](Recover-InterruptedPhaseTwo)") < main.index("$installed=Get-InstalledVersion")
     assert '$displaced=Join-Path $parent' in source
     assert '$createdQuarantine=Join-Path $createdParent' in source
@@ -109,21 +366,173 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     assert '[IO.Directory]::CreateDirectory($Path, $acl)' in source
 
 
+def test_windows_success_health_is_bounded_running_and_version_bound() -> None:
+    source = RESOLVER.read_text(encoding="utf-8")
+    helper = source[
+        source.index("function Test-VersionBoundGatewayHealth") : source.index(
+            "function Assert-PhaseTwoGatewayStopped"
+        )
+    ]
+
+    for required in (
+        "time.monotonic() + timeout_seconds",
+        "http.client.HTTPConnection",
+        'connection.request("GET", "/health", headers=headers)',
+        "response.read((1 << 20) + 1)",
+        'gateway.get("state") == "running"',
+        'provenance.get("binary_version") == expected_version',
+        "cfg.gateway.resolved_token() if loopback else",
+        "-I -c $probe",
+    ):
+        assert required in helper
+    assert "(Get-Gateway) status" not in helper
+
+    source_probe = source[
+        source.index("function Get-PhaseOneSourceRunningState") : source.index(
+            "function Assert-PhaseOneGatewayStopped"
+        )
+    ]
+    assert "-ExpectedVersion $ExpectedVersion" in source_probe
+
+    fresh = source[
+        source.index("function Invoke-FreshBridgeActivation") : source.index(
+            "function Write-PhaseOneBridgeSuccessReceipt"
+        )
+    ]
+    assert "-ExpectedVersion $Plan.BridgeVersion" in fresh
+    assert "(Get-Gateway) status" not in fresh
+
+    restore = source[
+        source.index("function Restore-PhaseOneSource") : source.index(
+            "function Recover-InterruptedPhaseOne"
+        )
+    ]
+    assert "-ExpectedVersion $Plan.SourceVersion" in restore
+    assert "(Get-Gateway) status" not in restore
+
+    recovery = source[
+        source.index("function Recover-InterruptedPhaseTwo") : source.index(
+            "function Confirm-Plan"
+        )
+    ]
+    assert "-ExpectedVersion $expected" in recovery
+    assert "-ExpectedVersion $plan.SourceVersion" in recovery
+
+    final_health = source[
+        source.index("function Assert-Healthy") : source.index(
+            "function Assert-RunningComponents"
+        )
+    ]
+    assert "-ExpectedVersion $Expected" in final_health
+    assert "(Get-Gateway) status" not in final_health
+
+
+def test_windows_version_bound_health_probe_rejects_false_green_and_polls() -> None:
+    source = RESOLVER.read_text(encoding="utf-8")
+    helper = source[
+        source.index("function Test-VersionBoundGatewayHealth") : source.index(
+            "function Assert-PhaseTwoGatewayStopped"
+        )
+    ]
+    marker = "$probe=@'\n"
+    probe = helper[helper.index(marker) + len(marker) : helper.index("\n'@")]
+
+    def run_probe(payloads: list[dict[str, object]]) -> subprocess.CompletedProcess[str]:
+        class Handler(BaseHTTPRequestHandler):
+            request_index = 0
+
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
+                index = min(type(self).request_index, len(payloads) - 1)
+                type(self).request_index += 1
+                body = json.dumps(payloads[index]).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with TemporaryDirectory() as root:
+                root_path = Path(root)
+                (root_path / "config.yaml").write_text(
+                    "config_version: 7\n"
+                    "gateway:\n"
+                    "  api_bind: 127.0.0.1\n"
+                    f"  api_port: {server.server_port}\n",
+                    encoding="utf-8",
+                )
+                env = os.environ.copy()
+                env["DEFENSECLAW_HOME"] = root
+                env["DEFENSECLAW_CONFIG"] = str(root_path / "config.yaml")
+                return subprocess.run(
+                    [sys.executable, "-I", "-c", probe, root, "1", "0.8.4"],
+                    cwd=ROOT,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    unhealthy = {"gateway": {"state": "error"}, "provenance": {"binary_version": "0.8.4"}}
+    wrong_version = {
+        "gateway": {"state": "running"},
+        "provenance": {"binary_version": "0.8.3"},
+    }
+    expected = {
+        "gateway": {"state": "running"},
+        "provenance": {"binary_version": "0.8.4"},
+    }
+
+    assert run_probe([unhealthy]).returncode != 0
+    assert run_probe([wrong_version]).returncode != 0
+    delayed = run_probe([unhealthy, wrong_version, expected])
+    assert delayed.returncode == 0, delayed.stdout + delayed.stderr
+
+
 def test_native_windows_release_harness_proves_refusal_bridge_and_exact_rollback() -> None:
     source = RELEASE_HARNESS.read_text(encoding="utf-8")
 
+    assert "exact schema-4 contract" in source
+    assert "[int]$payload.schema_version -ne 4" in source
+    for journal_field in (
+        "bridge_version",
+        "bridge_wheel_sha256",
+        "bridge_gateway_sha256",
+        "venv_sddl",
+        "venv_identity_sha256",
+        "base_python",
+    ):
+        assert journal_field in source
+    assert 'Join-Path $planRoot "source-venv"' in source
+    assert 'Join-Path $Case.Venv ".defenseclaw-phase-one-owner.json"' in source
+    assert "Phase-one bridge venv ownership marker does not bind the active plan" in source
     assert "--force-reinstall" not in source
     assert "[Parameter(Mandatory = $true)]\n    [ValidateNotNullOrEmpty()]\n    [string]$ReleaseDir" in source
     assert "[ValidatePattern('^(0|[1-9]\\d*)" in source
     assert "[string]$TargetVersion" in source
     assert "[string]$SourceVersion" in source
     assert "release\\upgrade-baselines.json" in source
-    assert "$values -notcontains $SourceVersion" in source
+    assert "platform_published_baselines" in source
+    assert "$script:PublishedWindowsBaselines" in source
+    assert "$windowsValues -notcontains $SourceVersion" in source
     assert "SourceVersion must be a pre-bridge release" in source
     assert '$PSBoundParameters.ContainsKey("SourceVersion")' in source
     assert "SourceVersion cannot be empty when explicitly supplied" in source
     assert "$script:PublishedPreBridgeBaselines" in source
     assert "auto_bridge_from must exactly match the reviewed pre-bridge baseline policy" in source
+    assert "Candidate tested_source_versions does not match the reviewed global matrix" in source
+    assert "Candidate platform_tested_source_versions.windows does not match" in source
     assert 'Join-Path $PSScriptRoot "upgrade.ps1"' in source
     assert 'Join-Path $PSScriptRoot "install.ps1"' in source
     assert "Explicit hard-cut refusal" in source
@@ -131,13 +540,59 @@ def test_native_windows_release_harness_proves_refusal_bridge_and_exact_rollback
     assert "post-v8-port-blocker.bound" in source
     assert "Test-PhaseOneRollback" in source
     assert "Test-PhaseOneCrashRecovery" in source
+    assert "Test-PhaseOneParentDeathLeaseRecovery" in source
+    assert "phase-one-mutator.lease" in source
+    assert "orphan phase-one mutator lease" in source
+    assert "InjectPhaseOneCrashAfterJournalClose" in source
+    assert "New-PrivateDecodedArtifact" in source
+    assert "DEFENSECLAW-PROTECTED-ARTIFACT-V1" in source
+    assert "Protected .dcwheel remained directly installable" in source
+    assert "Protected .dcgateway remained directly consumable" in source
+    assert "Test-ProtectedMaterializationCollision" in source
+    assert "InjectProtectedMaterializationCollision" in source
+    assert "Create-new refusal overwrote" in source
+    assert "split-data-default-config" in source
+    assert "split-data-external-config" in source
+    assert "no-openclaw-install" in source
+    assert "-NoOpenClaw" in source
+    assert "Preflight refusal created an absent OpenClaw home" in source
+    assert "-SplitDataDir" in source
+    assert "-ExternalConfig" in source
+    assert "Test-PhaseOneCrashRecovery -Case $splitDefault" in source
+    assert "Test-PhaseOneRollback -Case $externalConfig" in source
+    assert "Test-PhaseTwoWheelInstallCrashRecovery -Case $externalConfig" in source
+    assert "Test-PhaseOneOwnedTemporaryRollback" in source
+    assert "New-ForeignPhaseOneMutationTemporaries" in source
+    assert "Current-attempt phase-one mutation temporary survived cleanup" in source
+    assert "Foreign-token phase-one temporary was changed or removed" in source
+    assert '"config/pre-observability-migration-backup","config/lock","config/fixed-temp"' in source
     assert "InjectPhaseOneFailureAfterMutation" in source
     assert "InjectPhaseOneCrashAfterMutation" in source
     assert "InjectPhaseOneCrashDuringRecovery" in source
+    assert "InjectPhaseOneConcurrentEditAfterActiveSeal" in source
+    assert "InjectPhaseOneConcurrentFileAfterActiveSeal" in source
+    assert "Test-PhaseOneConcurrentDivergence" in source
+    assert "Concurrent edit and new managed-tree file survived" in source
+    assert "Test-PhaseOneStopFailures" in source
+    assert "InjectPhaseOneStopFailure" in source
+    assert "InjectPhaseOneNonQuiescentStop" in source
+    assert "Assert-CaseGatewayStopped" in source
     assert "phase-one-active.json" in source
+    assert "state_manifest_sha256" in source
+    assert "complete managed set" in source
+    assert 'ContainsKey("junction")' in source
+    assert 'ContainsKey("symboliclink")' in source
+    assert "Assert-ExternalPolicyTargetPreserved" in source
+    assert "removed its external target" in source
+    assert "Write-TransactionalStateSnapshot" in source
     assert "Test-PhaseTwoWheelInstallCrashRecovery" in source
     assert "target-wheel-install.blocked" in source
     assert "phase-two-active.json" in source
+    assert "exact schema-3 contract" in source
+    assert '"receipt_path","recovery_home"' in source
+    assert "different controller recovery home" in source
+    assert "exact seven-state inventory" in source
+    assert "$Case.Controller \".upgrade-recovery\"" in source
     assert 'failure_code -ne "interrupted"' in source
     assert 'status -eq "rolled_back"' in source
     assert 'failure_code -eq "health_check_failed"' in source
@@ -145,8 +600,15 @@ def test_native_windows_release_harness_proves_refusal_bridge_and_exact_rollback
     assert "owner_sid" in source
     assert "Assert-SnapshotsEqual" in source
     assert "Assert-RetainedBridgeArtifacts" in source
-    assert "--certificate-identity" in source
-    assert "/.github/workflows/release.yaml@refs/heads/main" in source
+    assert 'Join-Path $PSScriptRoot "historical_release_auth.py"' in source
+    assert "historical-artifact-digests.json" in source
+    assert '"--asset", $name' in source
+    assert "Signed release authentication failed" in source
+    assert "--certificate-identity-regexp" not in source
+    assert 'Get-Command "curl.exe"' in source
+    assert '"--proto", "=https"' in source
+    assert '"--proto-redir", "=https"' in source
+    assert '"--max-filesize", [string]$maximumBytes' in source
 
 
 @pytest.mark.skipif(
@@ -159,15 +621,19 @@ def test_windows_powershell_scripts_parse_without_errors(path: Path) -> None:
     assert executable is not None
     command = (
         "$tokens=$null; $errors=$null; "
-        "[System.Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$tokens,[ref]$errors) | Out-Null; "
+        "[System.Management.Automation.Language.Parser]::ParseFile($env:PS_PARSE_FILE,[ref]$tokens,[ref]$errors) | Out-Null; "
         "if($errors.Count){$errors | ForEach-Object {$_.ToString()}; exit 1}"
     )
     completed = subprocess.run(
-        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command, str(path)],
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
-        env={**os.environ, "POWERSHELL_TELEMETRY_OPTOUT": "1"},
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "PS_PARSE_FILE": str(path),
+        },
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr

@@ -199,12 +199,16 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes]` | Upgrade the Python CLI and Go gateway from GitHub release artifacts without a source checkout. The command verifies release provenance/checksums, backs up managed state, installs both artifacts, runs the release migration manifest, restarts services, and checks gateway health. macOS/Linux use the release tarball; Windows uses the release ZIP and installs `defenseclaw-gateway.exe`. Signed releases still upgrade without local `cosign` by warning and continuing with checksum validation only; `--allow-unverified` is an explicit unsafe override when a release manifest is missing, unsigned, incomplete, or otherwise unverifiable. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw upgrade [--version X] [--yes]` | Drive a compatible direct upgrade under the installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, restarts services, and performs version-bound health checks. A `0.8.3`-or-older built-in command safely refuses a hard-cut target because it cannot learn the two-process `0.8.4` bridge handoff retroactively; use the authenticated current release-owned shell or PowerShell resolver in latest mode for that path. Release `0.8.4` and later require `cosign`, and `--allow-unverified` cannot bypass that boundary. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
 | `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
 | `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
 | `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |
 
-`0.7.x` clients do not support `--allow-unverified`; upgrade them directly to the latest fixed release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`.
+A source listed for its platform in the published-baseline matrix can upgrade to
+latest through the authenticated current release-owned resolver, which selects
+and health-checks `0.8.4` before starting a fresh bridge controller. Sources
+outside that matrix fail closed with the exact supported path. Never force a
+hard-cut version or rerun a fresh installer over an old installation.
 
 ## Uninstall / disable
 

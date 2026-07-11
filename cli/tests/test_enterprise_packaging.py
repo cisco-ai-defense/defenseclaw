@@ -209,10 +209,41 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     missing = sorted(value for value in required if value not in text)
     assert not missing
 
+    assert "existing DefenseClaw installation detected at" in text
+    assert "no changes were made. This installer is fresh-install-only" in text
+    assert "remain on the current version" in text
+    assert 'local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"' in text
+    assert '/usr/bin/dscl . -read "/Users/${local_user}" NFSHomeDirectory' in text
+    assert '"${local_home}/.defenseclaw"' in text
+    assert '"${local_home}/.local/bin/defenseclaw"' in text
+    assert '"${local_home}/.local/bin/defenseclaw-gateway"' in text
+    assert "CURRENT_MANAGED_ROOT=/opt/cisco/secureclient/defenseclaw" in text
+    assert "CURRENT_LOG_DIR=/Library/Logs/Cisco/SecureClient/DefenseClaw" in text
+    assert "LEGACY_GATEWAY_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.gateway.plist" in text
+    assert "LEGACY_GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist" in text
+    assert "com.defenseclaw.gateway" in text
+    assert "com.defenseclaw.hook-guardian" in text
+    guard_offset = text.index("existing DefenseClaw installation detected at")
+    user_scan_offset = text.index('local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"')
+    assert guard_offset < text.index('create_directory_no_replace "$BINARY_ROOT"')
+    assert user_scan_offset < text.index('require_regular_source "$CONFIG_SOURCE"')
+    assert '/bin/mv -f -- "$temporary" "$destination"' not in text
+    assert '/bin/ln -- "$temporary" "$destination"' in text
+    assert "appeared concurrently and was preserved" in text
+    assert "stop_job_if_loaded" not in text
+    assert "/bin/launchctl enable system/com.cisco.secureclient.defenseclaw" in text
+    assert "/bin/launchctl kickstart -k system/com.cisco.secureclient.defenseclaw" in text
+    assert "system/com.defenseclaw.gateway" not in text
+    assert "system/com.defenseclaw.hook-guardian" not in text
+
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "macos-enterprise-packaging:" in workflow
     assert "./scripts/test-macos-enterprise-packaging.sh" in workflow
 
     smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
-    assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
-    assert "installer accepted a write-capable managed-root ACL" in smoke
+    assert "fresh-install-only enterprise package overwrote an existing deployment" in smoke
+    assert "enterprise package ignored a per-user DefenseClaw installation" in smoke
+    assert "per-user refusal did not name the dscl-resolved home marker" in smoke
+    assert "per-user refusal mutated managed destination" in smoke
+    assert "existing-install refusal modified managed config" in smoke
+    assert "enterprise package repaired/overwrote existing damaged metadata" in smoke

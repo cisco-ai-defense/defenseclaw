@@ -38,6 +38,7 @@ API and exercise the transaction policy without pretending to be Windows.
 from __future__ import annotations
 
 import ctypes
+import ntpath
 import os
 import secrets
 import shutil
@@ -48,7 +49,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -94,6 +95,7 @@ _FILE_APPEND_DATA = 0x00000004
 _FILE_WRITE_EA = 0x00000010
 _FILE_DELETE_CHILD = 0x00000040
 _FILE_WRITE_ATTRIBUTES = 0x00000100
+_FILE_READ_ATTRIBUTES = 0x00000080
 _WRITE_RIGHTS = (
     _FILE_WRITE_DATA
     | _FILE_APPEND_DATA
@@ -143,6 +145,10 @@ class _WindowsApi(Protocol):
 
     def open_exclusive_file(self, path: str) -> int: ...
 
+    def open_directory_no_delete(self, path: str) -> int: ...
+
+    def assert_real_directory(self, handle: int) -> None: ...
+
     def get_security(self, handle: int) -> WindowsFileSecurity: ...
 
     def set_security(self, handle: int, security: WindowsFileSecurity) -> None: ...
@@ -156,6 +162,10 @@ class _WindowsApi(Protocol):
     def replace_file(self, target: str, replacement: str, backup: str) -> None: ...
 
     def move_file_no_replace(self, source: str, target: str) -> None: ...
+
+    def replace_regular_file_by_handle(self, source: str, target: str) -> None: ...
+
+    def delete_regular_file_by_handle(self, path: str) -> None: ...
 
     def private_security(self, owner: bytes, *, ace_flags: int = 0) -> WindowsFileSecurity: ...
 
@@ -182,6 +192,38 @@ class _SecurityDescriptor(ctypes.Structure):
         ("sacl", ctypes.c_void_p),
         ("dacl", ctypes.c_void_p),
     ]
+
+
+class _FileTime(ctypes.Structure):
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("file_attributes", ctypes.c_uint32),
+        ("creation_time", _FileTime),
+        ("last_access_time", _FileTime),
+        ("last_write_time", _FileTime),
+        ("volume_serial_number", ctypes.c_uint32),
+        ("file_size_high", ctypes.c_uint32),
+        ("file_size_low", ctypes.c_uint32),
+        ("number_of_links", ctypes.c_uint32),
+        ("file_index_high", ctypes.c_uint32),
+        ("file_index_low", ctypes.c_uint32),
+    ]
+
+
+class _FileRenameInformation(ctypes.Structure):
+    _fields_ = [
+        ("replace_if_exists", ctypes.c_ubyte),
+        ("root_directory", ctypes.c_void_p),
+        ("file_name_length", ctypes.c_uint32),
+        ("file_name", ctypes.c_uint16 * 1),
+    ]
+
+
+_FILE_RENAME_INFO_CLASS = 3
+_FILE_DISPOSITION_INFO_CLASS = 4
 
 
 class _CtypesWindowsApi:
@@ -312,6 +354,17 @@ class _CtypesWindowsApi:
         self._move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
         self._move_file.restype = ctypes.c_int
 
+        self._get_file_information = self._kernel32.GetFileInformationByHandle
+        self._get_file_information.argtypes = [
+            void_p,
+            ctypes.POINTER(_ByHandleFileInformation),
+        ]
+        self._get_file_information.restype = ctypes.c_int
+
+        self._set_file_information = self._kernel32.SetFileInformationByHandle
+        self._set_file_information.argtypes = [void_p, ctypes.c_int, void_p, dword]
+        self._set_file_information.restype = ctypes.c_int
+
         self._get_current_process = self._kernel32.GetCurrentProcess
         self._get_current_process.argtypes = []
         self._get_current_process.restype = void_p
@@ -357,6 +410,35 @@ class _CtypesWindowsApi:
         if handle == _INVALID_HANDLE_VALUE:
             self._raise_last_error("CreateFileW(exclusive lease)")
         return int(handle)
+
+    def open_directory_no_delete(self, path: str) -> int:
+        """Bind a directory while denying rename/delete sharing to peers."""
+
+        handle = self._create_file(
+            path,
+            _FILE_READ_ATTRIBUTES,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle == _INVALID_HANDLE_VALUE:
+            self._raise_last_error("CreateFileW(directory lifetime lease)")
+        return int(handle)
+
+    def _file_information(self, handle: int) -> _ByHandleFileInformation:
+        information = _ByHandleFileInformation()
+        if not self._get_file_information(handle, ctypes.byref(information)):
+            self._raise_last_error("GetFileInformationByHandle")
+        return information
+
+    def assert_real_directory(self, handle: int) -> None:
+        attributes = self._file_information(handle).file_attributes
+        if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            raise WindowsAclError("Windows rollback ancestor is not a directory")
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise WindowsAclError("Windows rollback ancestor is a reparse point")
 
     def close_handle(self, handle: int) -> None:
         if not self._close_handle(handle):
@@ -496,6 +578,78 @@ class _CtypesWindowsApi:
         if not self._move_file(source, target):
             self._raise_last_error("MoveFileW")
 
+    def _open_regular_mutator(self, path: str) -> int:
+        handle = self._create_file(
+            path,
+            _DELETE | _FILE_READ_ATTRIBUTES,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if handle == _INVALID_HANDLE_VALUE:
+            self._raise_last_error("CreateFileW(regular-file mutator)")
+        try:
+            attributes = self._file_information(int(handle)).file_attributes
+            if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+                raise WindowsAclError("Windows rollback member is not a real regular file")
+            return int(handle)
+        except BaseException:
+            self.close_handle(int(handle))
+            raise
+
+    def replace_regular_file_by_handle(self, source: str, target: str) -> None:
+        """Rename the exact opened source over ``target`` atomically."""
+
+        handle = self._open_regular_mutator(source)
+        try:
+            encoded_target = os.path.abspath(target).encode("utf-16-le")
+            name_offset = _FileRenameInformation.file_name.offset
+            # FILE_RENAME_INFO is variable-length, but Win32 still requires
+            # the fixed structure (including FileName[1]/tail padding) plus
+            # the path bytes. The zeroed surplus also supplies its wide NUL.
+            buffer = ctypes.create_string_buffer(
+                ctypes.sizeof(_FileRenameInformation) + len(encoded_target),
+            )
+            information = ctypes.cast(
+                buffer,
+                ctypes.POINTER(_FileRenameInformation),
+            ).contents
+            information.replace_if_exists = 1
+            information.root_directory = None
+            information.file_name_length = len(encoded_target)
+            ctypes.memmove(
+                ctypes.addressof(buffer) + name_offset,
+                encoded_target,
+                len(encoded_target),
+            )
+            if not self._set_file_information(
+                handle,
+                _FILE_RENAME_INFO_CLASS,
+                buffer,
+                len(buffer),
+            ):
+                self._raise_last_error("SetFileInformationByHandle(FileRenameInfo)")
+        finally:
+            self.close_handle(handle)
+
+    def delete_regular_file_by_handle(self, path: str) -> None:
+        """Delete the exact opened non-reparse file, never a later path swap."""
+
+        handle = self._open_regular_mutator(path)
+        try:
+            delete = ctypes.c_ubyte(1)
+            if not self._set_file_information(
+                handle,
+                _FILE_DISPOSITION_INFO_CLASS,
+                ctypes.byref(delete),
+                ctypes.sizeof(delete),
+            ):
+                self._raise_last_error("SetFileInformationByHandle(FileDispositionInfo)")
+        finally:
+            self.close_handle(handle)
+
     def _well_known_sid(self, sid_type: int) -> bytes:
         size = ctypes.c_ulong(68)
         buffer = ctypes.create_string_buffer(size.value)
@@ -626,6 +780,73 @@ def replace_file(target: str, replacement: str, backup: str) -> None:
 
 def move_file_no_replace(source: str, target: str) -> None:
     _get_api().move_file_no_replace(source, target)
+
+
+def _windows_directory_prefixes(path: str) -> tuple[str, ...]:
+    """Return volume-rooted prefixes for one absolute Windows directory."""
+
+    absolute = ntpath.normpath(path)
+    drive, tail = ntpath.splitdrive(absolute)
+    if not drive or not tail.startswith(("\\", "/")):
+        raise WindowsAclError("Windows directory lease requires an absolute path")
+    root = drive + "\\"
+    prefixes = [root]
+    current = root
+    for part in (part for part in tail.replace("/", "\\").split("\\") if part):
+        current = ntpath.join(current, part)
+        prefixes.append(current)
+    return tuple(prefixes)
+
+
+@contextmanager
+def hold_directory(path: str) -> Iterator[None]:
+    """Hold one real directory open without ``FILE_SHARE_DELETE``."""
+
+    if os.name != "nt":
+        raise WindowsAclError("Windows directory leases require Windows")
+    api = _get_api()
+    handle = api.open_directory_no_delete(path)
+    try:
+        api.assert_real_directory(handle)
+        yield
+    finally:
+        api.close_handle(handle)
+
+
+@contextmanager
+def hold_directory_chain(path: str) -> Iterator[None]:
+    """Prevent every absolute-path ancestor from being renamed or replaced."""
+
+    with ExitStack() as held:
+        for prefix in _windows_directory_prefixes(path):
+            held.enter_context(hold_directory(prefix))
+        yield
+
+
+def replace_regular_file_by_handle(source: str, target: str) -> None:
+    """Publish the exact opened source below a bound target parent chain."""
+
+    source_parent = ntpath.normcase(ntpath.dirname(ntpath.abspath(source)))
+    target_parent = ntpath.normcase(ntpath.dirname(ntpath.abspath(target)))
+    if source_parent != target_parent:
+        raise WindowsAclError("handle publication must remain in one held directory")
+    with hold_directory_chain(target_parent):
+        _get_api().replace_regular_file_by_handle(source, target)
+
+
+def delete_regular_file_by_handle(path: str, *, missing_ok: bool = False) -> bool:
+    """Delete the exact opened regular file rather than a path-raced replacement."""
+
+    try:
+        parent = ntpath.dirname(ntpath.abspath(path))
+        with hold_directory_chain(parent):
+            _get_api().delete_regular_file_by_handle(path)
+    except WindowsAclError as exc:
+        error = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+        if missing_ok and error in {2, 3}:
+            return False
+        raise
+    return True
 
 
 def private_security_for_directory(
@@ -1036,9 +1257,13 @@ __all__ = [
     "capture_fd",
     "capture_path",
     "ensure_phase_two_mutator_lease",
+    "delete_regular_file_by_handle",
+    "hold_directory",
+    "hold_directory_chain",
     "hold_phase_two_mutator_lease",
     "move_file_no_replace",
     "private_security_for_directory",
+    "replace_regular_file_by_handle",
     "replace_file",
     "run_phase_two_mutator",
     "write_new_file",

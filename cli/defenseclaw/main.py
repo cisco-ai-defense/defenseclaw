@@ -55,6 +55,7 @@ from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
 from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
+from defenseclaw.resolver_hint import authenticated_resolver_instructions
 
 SKIP_LOAD_COMMANDS = {
     "agent", "init", "migrations", "quickstart", "sandbox", "tui",
@@ -102,32 +103,23 @@ def cli(ctx: click.Context) -> None:
 
     invoked = ctx.invoked_subcommand
     if invoked == "upgrade" and not _is_help_invocation(ctx):
-        from defenseclaw.commands.cmd_upgrade import _recover_interrupted_hard_cut
-
-        try:
-            recovered = _recover_interrupted_hard_cut()
-        except (OSError, ValueError) as exc:
-            click.echo(f"Interrupted hard-cut recovery failed: {exc}", err=True)
-            raise SystemExit(1) from exc
-        if recovered:
-            for stream in (sys.stdout, sys.stderr):
-                try:
-                    stream.flush()
-                except (OSError, ValueError):
-                    pass
-            child_env = os.environ.copy()
-            child_env.pop("PYTHONHOME", None)
-            child_env.pop("PYTHONPATH", None)
-            try:
-                os.execve(
-                    sys.executable,
-                    [sys.executable, "-I", "-m", "defenseclaw.main", *sys.argv[1:]],
-                    child_env,
-                )
-            except OSError as exc:
-                click.echo(f"Hard-cut recovery re-exec failed: {exc}", err=True)
-                raise SystemExit(1) from exc
-            raise SystemExit("hard-cut recovery re-exec unexpectedly returned")
+        recovery_home = os.path.abspath(
+            os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+        )
+        recovery_journal = os.path.join(
+            recovery_home,
+            ".upgrade-recovery",
+            "phase-two-active.json",
+        )
+        if os.path.lexists(recovery_journal):
+            click.echo(
+                "Interrupted hard-cut recovery requires the release-owned resolver. "
+                "Use the target-tag command below without --version/-Version; "
+                "no recovery mutation was attempted.\n"
+                + authenticated_resolver_instructions(__version__),
+                err=True,
+            )
+            raise SystemExit(1)
     if invoked in SKIP_LOAD_COMMANDS or _is_help_invocation(ctx):
         return
 

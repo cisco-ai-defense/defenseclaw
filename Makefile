@@ -1,6 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.8.0
+VERSION     := 0.8.4
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
@@ -9,6 +9,7 @@ PLUGIN_DIR  := extensions/defenseclaw
 DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
 OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
+SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
 
 DIST_DIR    := dist
 UPGRADE_SMOKE_FROM ?= 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
@@ -38,17 +39,19 @@ endif
         check check-audit-actions check-error-codes check-schemas check-grafana-dashboards check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix \
         set-version \
-        _bundle-data \
+        _bundle-data _source-install-preflight \
         proto proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Version stamping
 # ---------------------------------------------------------------------------
-# The git tag is the canonical source of truth on a release; the workflow
-# invokes `scripts/stamp-version.sh "$TAG"` directly. Local devs who want
-# to pre-stage a version (e.g. for a manual smoke test of `make dist`)
-# can use this target as a friendly wrapper.
+# The manually dispatched release workflow owns the candidate version and
+# creates the remote tag only after every native gate and the protected release
+# approval succeed. The reviewed main commit must already be stamped; the
+# workflow invokes `scripts/stamp-version.sh "$TAG"` only to prove it is a no-op.
+# Local devs who want to pre-stage a version (e.g. for a manual smoke test of
+# `make dist`) can use this target as a friendly wrapper.
 #
 #   make set-version VERSION=0.4.1
 #
@@ -61,28 +64,11 @@ set-version:
 	fi
 	@scripts/stamp-version.sh "$(VERSION)"
 
-# CI gate that fails when the five version sources disagree, catching
-# drift before it reaches a release artifact. Mirrors the contract
-# enforced by scripts/stamp-version.sh.
+# CI gate that fails when any checked-in version source, lockfile, gateway
+# runtime schema, or reviewed source-install identity disagrees. Mirrors the
+# contract enforced by scripts/stamp-version.sh and the protected release job.
 check-version-sync:
-	@mk_ver=$$(grep -E '^VERSION[[:space:]]*:=' Makefile | head -1 | awk -F'=' '{gsub(/[[:space:]]/,"",$$2); print $$2}'); \
-	py_ver=$$(grep -E '^version[[:space:]]*=' pyproject.toml | head -1 | awk -F'"' '{print $$2}'); \
-	init_ver=$$(grep -E '^__version__[[:space:]]*=' cli/defenseclaw/__init__.py | head -1 | awk -F'"' '{print $$2}'); \
-	pkg_ver=$$(grep -E '^  "version":' extensions/defenseclaw/package.json | head -1 | awk -F'"' '{print $$4}'); \
-	mac_ver=$$(grep -E '^[[:space:]]*MARKETING_VERSION[[:space:]]*=' macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj | head -1 | awk -F'=' '{gsub(/[;[:space:]]/,"",$$2); print $$2}'); \
-	if [ "$${mk_ver}" = "$${py_ver}" ] && [ "$${py_ver}" = "$${init_ver}" ] && [ "$${init_ver}" = "$${pkg_ver}" ] && [ "$${pkg_ver}" = "$${mac_ver}" ]; then \
-		echo "version sync OK: $${mk_ver}"; \
-	else \
-		echo "version drift detected:" >&2; \
-		echo "  Makefile                         : $${mk_ver}" >&2; \
-		echo "  pyproject.toml                   : $${py_ver}" >&2; \
-		echo "  cli/defenseclaw/__init__.py      : $${init_ver}" >&2; \
-		echo "  extensions/defenseclaw/package.json: $${pkg_ver}" >&2; \
-		echo "  macos/DefenseClawMac project     : $${mac_ver}" >&2; \
-		echo "" >&2; \
-		echo "fix with: make set-version VERSION=X.Y.Z" >&2; \
-		exit 1; \
-	fi
+	@python3 scripts/source_release_identity.py check
 
 # ---------------------------------------------------------------------------
 # `make all` — one-shot build → install → PATH → quickstart
@@ -105,7 +91,11 @@ check-version-sync:
 #
 # We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
 # CI jobs that only want the binaries.
-all: install path quickstart llm-setup
+all: _source-install-preflight
+	@$(MAKE) --no-print-directory install
+	@$(MAKE) --no-print-directory path
+	@$(MAKE) --no-print-directory quickstart
+	@$(MAKE) --no-print-directory llm-setup
 	@echo ""
 	@echo "╭────────────────────────────────────────────────────────────╮"
 	@echo "│  DefenseClaw is installed and ready.                       │"
@@ -117,7 +107,7 @@ all: install path quickstart llm-setup
 	@echo "  defenseclaw version    # CLI / gateway / plugin versions"
 	@echo ""
 
-path:
+path: _source-install-preflight
 	@if [ "$${NO_PATH:-0}" = "1" ]; then \
 		echo "NO_PATH=1 set — skipping PATH update"; \
 	else \
@@ -130,7 +120,7 @@ path:
 # Run the freshly-installed CLI binary directly so a stale shell PATH
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
-quickstart:
+quickstart: _source-install-preflight
 	@profile="$${PROFILE:-observe}"; \
 	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
 		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
@@ -179,7 +169,7 @@ quickstart:
 #   - CI=true (GitHub Actions / GitLab / most CI runners)
 # The script itself is idempotent: if both values are already present
 # it exits without prompting, so rerunning `make all` is a no-op.
-llm-setup:
+llm-setup: _source-install-preflight
 	@if [ "$${NO_LLM_SETUP:-0}" = "1" ] || [ "$${YES:-0}" = "1" ] \
 	    || [ "$${CI:-}" = "true" ] || [ ! -t 0 ] || [ ! -t 1 ]; then \
 		echo "  Skipping interactive LLM setup (non-TTY or NO_LLM_SETUP=1)."; \
@@ -227,7 +217,10 @@ build: pycli gateway plugin
 	@echo ""
 	@echo "Run 'make install' to install all components."
 
-install: cli-install gateway-install maybe-openclaw-plugin-install
+install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_INSTALL_TARGET)
+	@./scripts/source-install-preflight.sh claim \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo ""
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
@@ -255,7 +248,7 @@ install: cli-install gateway-install maybe-openclaw-plugin-install
 		echo "  openshell-sandbox standalone mode with network isolation."; \
 	fi
 
-maybe-openclaw-plugin-install:
+maybe-openclaw-plugin-install: _source-install-preflight
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		$(MAKE) plugin-install; \
 	else \
@@ -266,7 +259,7 @@ maybe-openclaw-plugin-install:
 # Individual build targets
 # ---------------------------------------------------------------------------
 
-dev-install:
+dev-install: _source-install-preflight
 	@./scripts/install-dev.sh
 
 # pycli depends on _bundle-data so every editable install (and the
@@ -419,10 +412,28 @@ plugin:
 # Individual install targets
 # ---------------------------------------------------------------------------
 
-cli-install: pycli
-	@mkdir -p $(INSTALL_DIR)
-	@ln -sf "$(CURDIR)/$(VENV_BIN)/defenseclaw$(EXE)" "$(INSTALL_DIR)/defenseclaw$(EXE)"
-	@ln -sf "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" 2>/dev/null || true
+# Source installs are developer tooling, not an alternate release upgrader.
+# Refuse any release-managed or different-checkout installation before an
+# installed entry point or gateway can be replaced.  A marker makes subsequent
+# rebuilds from this exact checkout idempotent; the legacy exact CLI symlink
+# check admits same-checkout installs made before the marker existed.
+_source-install-preflight:
+	@./scripts/source-install-preflight.sh check \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+
+cli-install: _source-install-preflight
+	@$(MAKE) --no-print-directory pycli
+	@./scripts/source-install-preflight.sh ensure-dir \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh publish-cli \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@if [ -x "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" ]; then \
+		python3 ./scripts/source-install-publish.py symlink \
+			"$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" || true; \
+	fi
 	@# Expose the scanner entry points (skill-scanner, mcp-scanner,
 	@# plus the -api / -pre-commit siblings) on PATH via the same
 	@# ~/.local/bin symlink pattern we already use for the main CLI.
@@ -436,7 +447,8 @@ cli-install: pycli
 	             mcp-scanner mcp-scanner-api; do \
 		src="$(CURDIR)/$(VENV_BIN)/$$tool$(EXE)"; \
 		if [ -x "$$src" ]; then \
-			ln -sf "$$src" "$(INSTALL_DIR)/$$tool$(EXE)"; \
+			python3 ./scripts/source-install-publish.py symlink \
+				"$$src" "$(INSTALL_DIR)/$$tool$(EXE)" || true; \
 		fi; \
 	done
 	@echo "Installed defenseclaw CLI to $(INSTALL_DIR)"
@@ -446,24 +458,17 @@ cli-install: pycli
 		echo "  export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
 	fi
 
-gateway-install: cli-install gateway
-	@mkdir -p $(INSTALL_DIR)
-	@# Atomic replace: Linux returns ETXTBSY when overwriting an executable
-	@# that is currently running (e.g. the sidecar started via `defenseclaw-
-	@# gateway start`). cp(1) opens the destination for writing, which
-	@# trips that check. rename(2) (invoked by mv) only swaps the directory
-	@# entry, so the running process keeps the old inode and upgrades work
-	@# live. We copy to a sibling temp file first so a partial write can
-	@# never clobber a working binary.
-	@gwt="$(INSTALL_DIR)/$(GATEWAY)$(EXE)"; \
-	tmp="$$gwt.new.$$$$"; \
-	trap 'rm -f "$$tmp"' EXIT INT TERM; \
-	cp $(GATEWAY)$(EXE) "$$tmp"; \
-	chmod +x "$$tmp"; \
-	mv -f "$$tmp" "$$gwt"
+gateway-install: _source-install-preflight cli-install
+	@$(MAKE) --no-print-directory gateway
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
-		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY)$(EXE) 2>/dev/null || true; \
+		/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway $(GATEWAY)$(EXE) || exit 1; \
 	fi
+	@./scripts/source-install-preflight.sh publish-gateway \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh claim \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
 	@# If a sidecar is already running it kept the old inode; tell the
 	@# operator so they know a restart is needed to pick up the new build.
@@ -481,7 +486,8 @@ gateway-install: cli-install gateway
 		echo "  export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
 	fi
 
-plugin-install: cli-install plugin
+plugin-install: _source-install-preflight gateway-install
+	@$(MAKE) --no-print-directory plugin
 	@if [ ! -f $(PLUGIN_DIR)/dist/index.js ]; then \
 		echo "Plugin not built — run 'make plugin' first"; \
 		exit 1; \
@@ -625,6 +631,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
+	macos/DefenseClawMac/script/test_runtime_install_filesystem.sh
 	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
 	$(MAKE) macos-app-build
 
@@ -803,11 +810,11 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 	@echo "Test locally:"
 	@echo "  ./scripts/install.sh --local $(DIST_DIR)"
 	@echo ""
-	@echo "Cut a release (preferred — atomic tag + assets, runs in CI):"
+	@echo "Cut a release (the protected workflow creates the tag + assets atomically):"
 	@echo "  Actions UI -> 'Release' workflow -> Run workflow -> enter $(VERSION)"
-	@echo "  Or from the CLI: git tag $(VERSION) && git push origin $(VERSION)"
+	@echo "  Or from the CLI: gh workflow run release.yaml --ref main -f version=$(VERSION)"
 	@echo ""
-	@echo "  NOTE: tag must be bare X.Y.Z, no 'v' prefix — the release"
+	@echo "  NOTE: version must be bare X.Y.Z, no 'v' prefix — the release"
 	@echo "  workflow + scripts/install.sh + 'defenseclaw upgrade' all"
 	@echo "  resolve artifacts under https://github.com/.../releases/tag/X.Y.Z"
 

@@ -56,6 +56,7 @@ import requests
 
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.resolver_hint import authenticated_resolver_instructions
 from defenseclaw.upgrade_receipt import (
     begin_upgrade_receipt,
     complete_upgrade_receipt,
@@ -72,11 +73,15 @@ GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}"
 GITHUB_DL = f"https://github.com/{GITHUB_REPO}/releases/download"
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _CANONICAL_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+_VERSION_TOKEN_RE = re.compile(
+    r"(?<![0-9A-Za-z.])((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?![0-9A-Za-z.])"
+)
 _DOTENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SHA256_HEX = set("0123456789abcdefABCDEF")
 # Controller capability, not the minimum protocol required by a particular
-# release.  The 0.8.4 bridge is intentionally reachable by protocol-1 clients
-# while installing this protocol-2 controller for the 0.8.5 hard cut.
+# release. The 0.8.4 bridge advertises a protocol-1 transition so the
+# release-owned resolver can stage it, while schema 2 and refusal envelopes
+# deliberately block immutable old built-in controllers from installing it.
 _UPGRADE_PROTOCOL_VERSION = 2
 _UPGRADE_MANIFEST_FILENAME = "upgrade-manifest.json"
 _OBSERVABILITY_V8_MIGRATION_VERSION = "0.8.5"
@@ -89,7 +94,7 @@ _UPGRADE_TEST_RELEASE_BASE_URL_ENV = "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL"
 _UPGRADE_RECOVERY_DIRECTORY = ".upgrade-recovery"
 _HARD_CUT_RECOVERY_FILENAME = "phase-two-active.json"
 _PHASE_TWO_MUTATOR_LEASE_FILENAME = "phase-two-mutator.lease"
-_HARD_CUT_RECOVERY_SCHEMA_VERSION = 1
+_HARD_CUT_RECOVERY_SCHEMA_VERSION = 3
 _MAX_HARD_CUT_RECOVERY_BYTES = 64 * 1024
 _PHASE_TWO_MUTATOR_LEASE_TIMEOUT_SECONDS = 600
 _MAX_PHASE_TWO_MUTATOR_OUTPUT_BYTES = 1024 * 1024
@@ -101,7 +106,13 @@ _TARGET_CONFIG_VERSION = 8
 _MAX_WHEEL_MIGRATIONS_BYTES = 8 * 1024 * 1024
 _MAX_WHEEL_METADATA_BYTES = 256 * 1024
 _MAX_WHEEL_MUTATOR_WRAPPER_BYTES = 256 * 1024
+_MACOS_GATEWAY_CODESIGN_IDENTIFIER = "com.cisco.defenseclaw.gateway"
+_PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+_V8_RECOVERY_ENTRY_RE = re.compile(r"^observability-v8-[0-9a-f]{32}$")
+_MAX_PREEXISTING_V8_RECOVERY_ENTRIES = 256
+_MAX_V8_RECOVERY_FILE_BYTES = 64 * 1024 * 1024
 _HELD_PHASE_TWO_MUTATOR_LEASE: object | None = None
+_PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT = False
 
 
 @dataclass(frozen=True)
@@ -123,8 +134,19 @@ class _RollbackFileSnapshot:
 
 
 @dataclass(frozen=True)
+class _RollbackDirectorySnapshot:
+    active_path: str
+    device: int
+    inode: int
+    mode: int
+    preexisting_recovery_entries: tuple[tuple[str, int, int], ...]
+    windows_security: WindowsFileSecurity | None = None
+
+
+@dataclass(frozen=True)
 class _HardCutRollbackPlan:
     source_version: str
+    source_gateway_was_running: bool
     data_dir: str
     backup_dir: str
     rollback_wheel_path: str
@@ -137,6 +159,9 @@ class _HardCutRollbackPlan:
     os_name: str
     environment_snapshot: dict[str, str] = field(repr=False, compare=False)
     source_dotenv_values: dict[str, str] = field(repr=False, compare=False)
+    recovery_home: str = ""
+    local_bundle_mutation_intent: bool = False
+    backup_root_snapshot: _RollbackDirectorySnapshot | None = None
 
 
 _INSTALLED_MIGRATION_SCRIPT = """
@@ -176,6 +201,18 @@ from defenseclaw.commands.cmd_upgrade import _poll_health
 config_module._load_dotenv_into_os(sys.argv[1])
 cfg = config_module.load()
 _poll_health(cfg, int(sys.argv[2]), expected_version=sys.argv[3])
+"""
+
+
+_INSTALLED_PACKAGE_METADATA_SCRIPT = """
+import importlib.metadata
+import json
+
+metadata = importlib.metadata.metadata("defenseclaw")
+print(json.dumps({
+    "version": importlib.metadata.version("defenseclaw"),
+    "requires_dist": sorted(metadata.get_all("Requires-Dist") or []),
+}, sort_keys=True))
 """
 
 
@@ -236,6 +273,17 @@ def upgrade(
             raise SystemExit(1)
 
     target_version = _normalize_target_version(target_version)
+    if _version_key(target_version) < _version_key(current_version):
+        ux.err(
+            f"Refusing to downgrade DefenseClaw {current_version} to {target_version} through the upgrade path.",
+            indent="  ",
+        )
+        ux.subhead(
+            "No changes were made: no network preflight ran, no services were stopped, "
+            "and no installed artifacts were changed.",
+            indent="    ",
+        )
+        raise SystemExit(1)
     requires_hard_cut_contract = _version_key(target_version) >= _version_key(
         _OBSERVABILITY_V8_MIGRATION_VERSION
     )
@@ -257,20 +305,27 @@ def upgrade(
     if target_version == current_version:
         click.echo()
         ux.subhead(
-            f"Already at version {current_version}; continuing to re-apply "
-            "release artifacts and same-version migrations.",
+            f"Already at version {current_version}; verifying the release contract "
+            "without re-installing or re-running migrations.",
         )
 
     # ── Platform detection ───────────────────────────────────────────────────
 
     os_name, arch = _detect_platform()
     ux.kv("Platform", f"{os_name}/{arch}", indent="  ", key_width=22)
+    recovery_home = _upgrade_recovery_home()
+    data_dir = _resolved_upgrade_data_dir(app.cfg, recovery_home=recovery_home)
+    active_config_path = _active_upgrade_config_path(recovery_home)
+    _preflight_installed_source_coherence(
+        current_version,
+        os_name,
+        data_dir,
+        config_path=active_config_path,
+    )
 
     # ── Pre-flight: verify artifacts exist ───────────────────────────────────
 
     ux.banner("Pre-flight Check")
-
-    _preflight_check(target_version, os_name, arch)
 
     # ── Download artifacts to temp (gateway still running) ───────────────────
 
@@ -283,18 +338,15 @@ def upgrade(
     hard_cut_recovery_journal: Path | None = None
     hard_cut_rollback_attempted = False
     hard_cut_rollback_succeeded = False
+    local_bundle_mutation_intent = False
     staged_bridge_artifact_dir: str | None = None
+    hard_cut_source_wheel: str | None = None
     try:
         # Resolve checksums.txt FIRST so any download we accept is verified
         # against a published manifest. Returns None for old releases that
         # predate goreleaser's checksum publication; in that case we proceed
         # with a clear warning rather than hard-failing operators on a
         # version they could otherwise install.
-        artifact_names = [
-            _gateway_archive_name(target_version, os_name, arch),
-            f"defenseclaw-{target_version}-py3-none-any.whl",
-            _UPGRADE_MANIFEST_FILENAME,
-        ]
         checksums = _download_checksums(
             target_version,
             staging_dir,
@@ -351,19 +403,6 @@ def upgrade(
             )
         else:
             ux.ok("Checksum manifest accepted (checksums.txt)")
-            # F-0582 (BREAKING CHANGE): do NOT silently fill missing artifact
-            # entries from unsigned GitHub asset digests. Doing so would
-            # downgrade those artifacts from signed to unsigned authentication
-            # behind the operator's back. Missing entries are only filled when
-            # --allow-unverified is set (with a per-artifact warning); otherwise
-            # the gap is left in place and _verify_sha256 fails closed on the
-            # unrecognized artifact.
-            _fill_missing_checksums_from_release_assets(
-                target_version,
-                checksums,
-                artifact_names,
-                allow_unverified=effective_allow_unverified,
-            )
 
         upgrade_manifest = _download_upgrade_manifest(
             target_version,
@@ -381,6 +420,40 @@ def upgrade(
             source_version=current_version,
             target_version=target_version,
             explicit_target=target_was_explicit,
+            os_name=os_name,
+        )
+        if _is_bridge_to_hard_cut_phase(upgrade_manifest, current_version, target_version):
+            _require_release_owned_hard_cut_handoff(
+                source_version=current_version,
+                target_version=target_version,
+            )
+        gateway_artifact, wheel_artifact = _manifest_release_artifact_names(
+            upgrade_manifest,
+            target_version,
+            os_name,
+            arch,
+        )
+        artifact_names = [
+            gateway_artifact,
+            wheel_artifact,
+            _UPGRADE_MANIFEST_FILENAME,
+        ]
+        if checksums is not None:
+            # Resolve artifact names from authenticated release policy before
+            # allowing unsigned release metadata to fill an explicitly opted-in
+            # legacy gap. Schema-2 controllers never derive protected names.
+            _fill_missing_checksums_from_release_assets(
+                target_version,
+                checksums,
+                artifact_names,
+                allow_unverified=effective_allow_unverified,
+            )
+        _preflight_check(
+            target_version,
+            os_name,
+            arch,
+            gateway_artifact=gateway_artifact,
+            wheel_artifact=wheel_artifact,
         )
         if _is_bridge_to_hard_cut_phase(upgrade_manifest, current_version, target_version):
             staged_bridge_artifact_dir = _acquire_bridge_rollback_artifacts(
@@ -389,27 +462,60 @@ def upgrade(
                 arch,
                 staging_dir,
             )
+            source_checksums, protected_source_wheel, _ = _validate_staged_bridge_artifact_set(
+                staged_bridge_artifact_dir,
+                current_version,
+                os_name,
+                arch,
+            )
+            hard_cut_source_wheel = _materialize_bridge_source_wheel_for_preflight(
+                staging_dir,
+                source_checksums,
+                protected_source_wheel,
+            )
         gw_binary_path, _gw_tarball_name = _download_gateway(
             target_version,
             os_name,
             arch,
             staging_dir,
             checksums,
+            artifact_name=gateway_artifact,
         )
         whl_path, _whl_name = _download_wheel(
             target_version,
             staging_dir,
             checksums,
+            artifact_name=wheel_artifact,
         )
         _preflight_wheel_install(
             whl_path,
             os_name,
             target_version=target_version,
             upgrade_manifest=upgrade_manifest,
+            hard_cut_source_wheel=hard_cut_source_wheel,
+            source_version=current_version if hard_cut_source_wheel is not None else None,
         )
     except BaseException:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
+
+    if target_version == current_version:
+        # Recovery and installed-source coherence have already run, and the
+        # signed release contract plus target artifacts were authenticated
+        # above.  A same-version resolver request is therefore a verified
+        # no-op, never a repair reinstall: there is no rollback transaction
+        # capable of making an in-place hard-cut reinstall safe.
+        ux.banner("Version Already Verified")
+        ux.ok(
+            f"Authenticated the {target_version} release contract; "
+            f"installed version {current_version} is already current"
+        )
+        ux.subhead(
+            "No backup, receipt, service stop, artifact install, or migration was performed.",
+            indent="  ",
+        )
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        return
 
     # ── Confirm ──────────────────────────────────────────────────────────────
 
@@ -432,7 +538,7 @@ def upgrade(
 
     ux.banner("Creating Backup")
 
-    backup_dir = _create_backup(app.cfg)
+    backup_dir = _create_backup(app.cfg, data_dir=data_dir)
     ux.ok(f"Backup saved to: {backup_dir}")
 
     if _is_bridge_to_hard_cut_phase(upgrade_manifest, current_version, target_version):
@@ -444,6 +550,9 @@ def upgrade(
                 os_name=os_name,
                 arch=arch,
                 staged_artifact_dir=staged_bridge_artifact_dir,
+                data_dir=data_dir,
+                recovery_home=recovery_home,
+                config_path=active_config_path,
             )
         except BaseException:
             ux.err(
@@ -458,7 +567,6 @@ def upgrade(
             raise
         ux.ok(f"Retained authenticated {current_version} rollback artifacts")
 
-    data_dir = app.cfg.data_dir if app.cfg and app.cfg.data_dir else os.path.expanduser("~/.defenseclaw")
     try:
         interrupted = finalize_interrupted_upgrade_receipts(data_dir, current_version=current_version)
         receipt_path = begin_upgrade_receipt(
@@ -479,6 +587,7 @@ def upgrade(
                 rollback_plan,
                 receipt_path,
                 target_version=target_version,
+                recovery_home=recovery_home,
             )
         except (OSError, ValueError):
             _record_failed_upgrade_receipt(receipt_path, "install_failed")
@@ -487,33 +596,70 @@ def upgrade(
                 "Could not persist the hard-cut recovery journal; installed state was not changed."
             )
             raise SystemExit(1) from None
-        _hold_phase_two_lease_for_command_lifetime()
+        _hold_phase_two_lease_for_command_lifetime(recovery_home)
         ux.ok("Durable hard-cut recovery journal committed before mutation")
 
     # ── Stop gateway, install, migrate, restart ──────────────────────────────
 
     ux.banner("Stopping Services")
 
+    gateway_command = (
+        rollback_plan.active_gateway_path
+        if rollback_plan is not None
+        else os.path.join(
+            os.path.expanduser("~/.local/bin"),
+            _installed_gateway_filename(os_name),
+        )
+    )
     gateway_stop_ok = _run_silent(
-        ["defenseclaw-gateway", "stop"],
+        [gateway_command, "stop"],
         "Gateway stopped",
         "Could not stop gateway",
+        env=_gateway_process_environment(data_dir),
     )
     try:
-        if not gateway_stop_ok:
-            raise OSError("gateway stop command failed")
-        _assert_gateway_quiesced(data_dir)
-    except OSError as exc:
-        if hard_cut_recovery_journal is not None:
-            _remove_hard_cut_recovery_journal(hard_cut_recovery_journal)
-        _record_failed_upgrade_receipt(receipt_path, "install_failed")
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        ux.err("Gateway shutdown could not be verified; refusing to replace installed artifacts.")
-        ux.subhead(str(exc), indent="    ")
-        ux.subhead(
-            "No installed artifacts or configuration files were changed.",
-            indent="    ",
+        quiescence_gateway = (
+            rollback_plan.active_gateway_path
+            if rollback_plan is not None
+            else os.path.join(
+                os.path.expanduser("~/.local/bin"),
+                _installed_gateway_filename(os_name),
+            )
         )
+        _assert_gateway_quiesced(data_dir, gateway_path=quiescence_gateway)
+        if not gateway_stop_ok:
+            ux.warn(
+                "Gateway stop reported failure, but independent quiescence verification "
+                "proved that no gateway process remains.",
+                indent="  ",
+            )
+    except OSError as exc:
+        if rollback_plan is not None:
+            hard_cut_rollback_attempted = True
+            hard_cut_rollback_succeeded = _execute_hard_cut_rollback(
+                rollback_plan,
+                app,
+                receipt_path,
+                failure_code="install_failed",
+                health_timeout=health_timeout,
+                retain_pending_on_failure=hard_cut_recovery_journal is not None,
+                recovery_journal_path=hard_cut_recovery_journal,
+            )
+        else:
+            _record_failed_upgrade_receipt(receipt_path, "install_failed")
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        ux.err("Gateway shutdown could not be verified; target artifacts were not installed.")
+        ux.subhead(str(exc), indent="    ")
+        if rollback_plan is not None:
+            _print_hard_cut_rollback_outcome(
+                succeeded=hard_cut_rollback_succeeded,
+                backup_dir=rollback_plan.backup_dir,
+            )
+        else:
+            ux.subhead(
+                "No installed artifacts or configuration files were changed.",
+                indent="    ",
+            )
         raise SystemExit(1) from None
 
     upgrade_phase = "install"
@@ -528,7 +674,11 @@ def upgrade(
         # incident.
         installed_gateway_path = _install_gateway(gw_binary_path, os_name, backup_dir=backup_dir)
         _verify_installed_gateway_version(installed_gateway_path, target_version)
-        _install_wheel(whl_path, os_name)
+        _install_wheel(
+            whl_path,
+            os_name,
+            exact_environment=rollback_plan is not None,
+        )
 
         ux.banner("Running Migrations")
 
@@ -547,6 +697,13 @@ def upgrade(
                 openclaw_home,
                 data_dir,
                 os_name=os_name,
+                config_path=active_config_path,
+                recovery_home=recovery_home,
+                mutation_token=(
+                    _hard_cut_mutation_token(rollback_plan)
+                    if isinstance(rollback_plan, _HardCutRollbackPlan)
+                    else None
+                ),
             )
         except subprocess.CalledProcessError:
             migration_failed = True
@@ -599,12 +756,20 @@ def upgrade(
         upgrade_phase = "local_observability"
         if rollback_plan is not None:
             try:
-                local_bundle_upgrade = _run_installed_local_observability_bundle_upgrade(
-                    data_dir,
-                    backup_dir,
-                    target_version,
-                    os_name=os_name,
-                )
+                bundle_destination = os.path.join(data_dir, "observability-stack")
+                if os.path.lexists(bundle_destination):
+                    if hard_cut_recovery_journal is None:
+                        raise OSError("hard-cut bundle refresh lacks durable recovery authority")
+                    _mark_hard_cut_bundle_mutation_intent(hard_cut_recovery_journal)
+                    local_bundle_mutation_intent = True
+                    local_bundle_upgrade = _run_installed_local_observability_bundle_upgrade(
+                        data_dir,
+                        backup_dir,
+                        target_version,
+                        os_name=os_name,
+                    )
+                else:
+                    local_bundle_upgrade = {"installed": False}
             except _LocalBundleUpgradeInvocationError as exc:
                 restart_services = False
                 ux.err("Local observability bundle refresh failed; target services remain stopped.")
@@ -637,17 +802,38 @@ def upgrade(
         failure_code = _upgrade_failure_code(upgrade_phase)
         if rollback_plan is not None:
             restart_services = False
-            hard_cut_rollback_attempted = True
-            hard_cut_rollback_succeeded = _execute_hard_cut_rollback(
-                rollback_plan,
-                app,
-                receipt_path,
-                failure_code=failure_code,
-                health_timeout=health_timeout,
-                local_bundle_upgrade=local_bundle_upgrade,
-                retain_pending_on_failure=hard_cut_recovery_journal is not None,
-                recovery_journal_path=hard_cut_recovery_journal,
-            )
+            rollback_deferred = _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT
+            if local_bundle_mutation_intent and local_bundle_upgrade is None and not rollback_deferred:
+                try:
+                    local_bundle_upgrade = _crash_bundle_rollback_result(
+                        rollback_plan.backup_dir,
+                        required=True,
+                    )
+                except OSError:
+                    rollback_deferred = True
+            if rollback_deferred:
+                ux.err(
+                    "A phase-two mutator may still be active or lacks a complete rollback descriptor; "
+                    "automatic rollback is deferred.",
+                    indent="  ",
+                )
+                ux.subhead(
+                    "The pending receipt and recovery journal were retained. The next release-owned "
+                    "upgrade invocation will wait for the mutator lease and recover before continuing.",
+                    indent="    ",
+                )
+            else:
+                hard_cut_rollback_attempted = True
+                hard_cut_rollback_succeeded = _execute_hard_cut_rollback(
+                    rollback_plan,
+                    app,
+                    receipt_path,
+                    failure_code=failure_code,
+                    health_timeout=health_timeout,
+                    local_bundle_upgrade=local_bundle_upgrade,
+                    retain_pending_on_failure=hard_cut_recovery_journal is not None,
+                    recovery_journal_path=hard_cut_recovery_journal,
+                )
         else:
             _record_failed_upgrade_receipt(receipt_path, failure_code)
         raise
@@ -663,8 +849,8 @@ def upgrade(
         elif not restart_services:
             ux.banner("Services Remain Stopped")
             ux.subhead(
-                "Fix the reported upgrade error and re-run `defenseclaw upgrade`; "
-                "required work will be retried from the recovery backup state.",
+                "Keep the recovery journal and run the release-owned resolver with no version override; "
+                "it will wait for any mutator and recover from the retained bridge state.",
                 indent="  ",
             )
         else:
@@ -677,6 +863,8 @@ def upgrade(
                     os_name=os_name,
                     expected_version=target_version,
                     rollback_plan=rollback_plan,
+                    config_path=active_config_path,
+                    recovery_home=recovery_home,
                 )
             except BaseException:
                 if rollback_plan is not None and not upgrade_body_failed:
@@ -713,12 +901,22 @@ def upgrade(
                     raise
             else:
                 if not upgrade_body_failed:
-                    if hard_cut_recovery_journal is not None:
-                        _remove_hard_cut_recovery_journal(hard_cut_recovery_journal)
                     complete_upgrade_receipt(
                         receipt_path,
                         status="partial" if migration_failed else "succeeded",
                     )
+                    # Publish the health-proven terminal fact before deleting
+                    # rollback authority. A crash in the cleanup gap leaves a
+                    # terminal receipt that recovery can safely use to remove
+                    # the stale journal without rolling back a healthy target.
+                    if hard_cut_recovery_journal is not None:
+                        try:
+                            _remove_hard_cut_recovery_journal(hard_cut_recovery_journal)
+                        except OSError:
+                            ux.warn(
+                                "Target success is durable, but stale recovery-journal cleanup was deferred.",
+                                indent="  ",
+                            )
 
     # ── Done ─────────────────────────────────────────────────────────────────
 
@@ -761,6 +959,8 @@ def _start_and_verify_services(
     os_name: str | None = None,
     expected_version: str | None = None,
     rollback_plan: _HardCutRollbackPlan | None = None,
+    config_path: str | None = None,
+    recovery_home: str | None = None,
 ) -> None:
     """Restart and verify services after every required migration succeeds."""
 
@@ -772,15 +972,33 @@ def _start_and_verify_services(
     # gateway with that environment, then let the freshly installed target
     # interpreter load and probe its own schema below.
     if rollback_plan is None:
-        post_migration_cfg = _reload_post_upgrade_config(app, data_dir)
+        post_migration_cfg = _reload_post_upgrade_config(
+            app,
+            data_dir,
+            config_path=config_path,
+        )
     else:
         _refresh_target_dotenv_environment(rollback_plan)
         post_migration_cfg = None
 
+    gateway_command = (
+        rollback_plan.active_gateway_path
+        if rollback_plan is not None
+        else "defenseclaw-gateway"
+    )
+    gateway_environment = (
+        _gateway_process_environment(
+            data_dir,
+            config_path=config_path or _hard_cut_plan_config_path(rollback_plan),
+        )
+        if rollback_plan is not None
+        else _gateway_process_environment(data_dir, config_path=config_path)
+    )
     if not _run_silent(
-        ["defenseclaw-gateway", "start"],
+        [gateway_command, "start"],
         "Gateway started",
         "Could not start gateway",
+        env=gateway_environment,
     ):
         ux.err("Gateway failed to start; the upgrade cannot be marked successful.")
         raise SystemExit(1)
@@ -807,12 +1025,12 @@ def _start_and_verify_services(
     elif expected_version is None:
         raise OSError("hard-cut health verification requires an expected version")
     else:
-        _poll_installed_health(
-            data_dir,
-            health_timeout,
-            expected_version,
-            os_name=rollback_plan.os_name,
-        )
+        health_kwargs: dict[str, str] = {"os_name": rollback_plan.os_name}
+        if config_path is not None:
+            health_kwargs["config_path"] = config_path
+        if recovery_home is not None:
+            health_kwargs["recovery_home"] = recovery_home
+        _poll_installed_health(data_dir, health_timeout, expected_version, **health_kwargs)
 
     if local_bundle_upgrade and local_bundle_upgrade.get("restart_required") is True:
         ux.banner("Restarting Local Observability")
@@ -823,6 +1041,13 @@ def _start_and_verify_services(
                 os_name=os_name,
             )
         except _LocalBundleUpgradeInvocationError as exc:
+            if rollback_plan is not None:
+                ux.err(
+                    "Hard-cut local observability readiness failed; refusing target activation.",
+                    indent="  ",
+                )
+                ux.subhead(f"failure={exc.code} phase={exc.phase}", indent="    ")
+                raise SystemExit(1) from exc
             ux.warn(
                 "Local observability restart/readiness is degraded; the gateway upgrade remains healthy.",
                 indent="  ",
@@ -837,6 +1062,13 @@ def _start_and_verify_services(
             if restart.get("restarted") is True and not errors:
                 ux.ok("Local observability restarted; services and dashboard inventory verified")
             else:
+                if rollback_plan is not None:
+                    ux.err(
+                        "Hard-cut local observability stack did not reach the target readiness contract; "
+                        "refusing target activation.",
+                        indent="  ",
+                    )
+                    raise SystemExit(1)
                 ux.warn(
                     "Local observability restart/readiness is degraded; the gateway upgrade remains healthy.",
                     indent="  ",
@@ -850,20 +1082,37 @@ def _start_and_verify_services(
                     indent="    ",
                 )
 
+    if isinstance(rollback_plan, _HardCutRollbackPlan):
+        _cleanup_hard_cut_mutation_temporaries(rollback_plan)
 
-def _reload_post_upgrade_config(app: AppContext, data_dir: str):
+
+def _reload_post_upgrade_config(
+    app: AppContext,
+    data_dir: str,
+    *,
+    config_path: str | None = None,
+):
     """Reload migrated config and newly written dotenv values before restart."""
 
     from defenseclaw import config as config_module
 
     try:
-        # ``config.load`` sources the default home before it discovers a
-        # custom ``data_dir`` in config.yaml.  Source the upgrade's explicit
-        # data directory first so custom-home installations also see secrets
-        # created or promoted by migrations.  Ambient operator overrides keep
-        # precedence because the loader never overwrites existing variables.
-        config_module._load_dotenv_into_os(data_dir)
-        fresh_cfg = config_module.load()
+        # Scope the reload to this transaction's installation.  Reading the
+        # process-default home here can import an unrelated installation's
+        # config after the target wheel and migrations have already changed
+        # state.  The loader still honors an explicit DEFENSECLAW_CONFIG and
+        # never overwrites ambient operator environment values.
+        previous_config = os.environ.get("DEFENSECLAW_CONFIG")
+        if config_path is not None:
+            os.environ["DEFENSECLAW_CONFIG"] = config_path
+        try:
+            fresh_cfg = config_module.load(data_dir=data_dir)
+        finally:
+            if config_path is not None:
+                if previous_config is None:
+                    os.environ.pop("DEFENSECLAW_CONFIG", None)
+                else:
+                    os.environ["DEFENSECLAW_CONFIG"] = previous_config
     except Exception as exc:
         ux.err(
             "Could not load the post-migration configuration; "
@@ -1034,6 +1283,44 @@ def _gateway_archive_name(version: str, os_name: str, arch: str) -> str:
     return f"defenseclaw_{version}_{os_name}_{arch}.{ext}"
 
 
+def _expected_release_artifacts(version: str) -> dict[str, object]:
+    gateways: dict[str, dict[str, str]] = {}
+    for platform_name in ("darwin", "linux", "windows"):
+        gateways[platform_name] = {
+            platform_arch: f"defenseclaw_{version}_protocol2_{platform_name}_{platform_arch}.dcgateway"
+            for platform_arch in ("amd64", "arm64")
+        }
+    return {
+        "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
+        "gateways": gateways,
+    }
+
+
+def _manifest_release_artifact_names(
+    manifest: dict[str, object] | None,
+    version: str,
+    os_name: str,
+    arch: str,
+) -> tuple[str, str]:
+    """Select only names explicitly authenticated by schema-2 policy."""
+
+    if not manifest or manifest.get("schema_version") != 2:
+        return (
+            _gateway_archive_name(version, os_name, arch),
+            f"defenseclaw-{version}-py3-none-any.whl",
+        )
+    artifacts = manifest.get("release_artifacts")
+    if not isinstance(artifacts, dict):
+        raise OSError("schema-2 release artifact policy is unavailable")
+    gateways = artifacts.get("gateways")
+    wheel = artifacts.get("wheel")
+    platform_gateways = gateways.get(os_name) if isinstance(gateways, dict) else None
+    gateway = platform_gateways.get(arch) if isinstance(platform_gateways, dict) else None
+    if not isinstance(gateway, str) or not isinstance(wheel, str):
+        raise OSError("schema-2 release artifact policy lacks this platform")
+    return gateway, wheel
+
+
 def _gateway_binary_filename(os_name: str) -> str:
     """Name of the gateway binary inside the release archive.
 
@@ -1051,10 +1338,103 @@ def _installed_gateway_filename(os_name: str) -> str:
     return "defenseclaw-gateway.exe" if os_name == "windows" else "defenseclaw-gateway"
 
 
-def _preflight_check(version: str, os_name: str, arch: str) -> None:
+def _fail_installed_source_coherence(message: str) -> NoReturn:
+    ux.err(message, indent="  ")
+    ux.subhead(
+        "The installed CLI, gateway, configuration, and migration cursor must describe one "
+        "release-owned state. Restore or reinstall the current release before upgrading; "
+        "do not copy a wheel or gateway binary over an existing installation.",
+        indent="    ",
+    )
+    ux.subhead(
+        "No changes were made: no target artifacts were downloaded, no services were stopped, "
+        "and no installed artifacts were changed.",
+        indent="    ",
+    )
+    raise SystemExit(1)
+
+
+def _preflight_installed_source_coherence(
+    current_version: str,
+    os_name: str,
+    data_dir: str,
+    *,
+    config_path: str | None = None,
+) -> None:
+    """Reject manual/partial release overwrites before target I/O or mutation."""
+
+    if _version_key(current_version) < _version_key(_STRICT_SIGSTORE_RELEASE_VERSION):
+        return
+
+    gateway_path = os.path.expanduser(
+        os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
+    )
+    try:
+        gateway_stat = os.lstat(gateway_path)
+    except OSError:
+        _fail_installed_source_coherence(
+            f"Installed DefenseClaw {current_version} has no canonical release-managed gateway."
+        )
+    if stat.S_ISLNK(gateway_stat.st_mode) or not stat.S_ISREG(gateway_stat.st_mode):
+        _fail_installed_source_coherence(
+            f"Installed DefenseClaw {current_version} gateway is not a regular release-managed file."
+        )
+    try:
+        result = subprocess.run(
+            [gateway_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _fail_installed_source_coherence(
+            f"Installed DefenseClaw {current_version} gateway version could not be verified."
+        )
+    output = (result.stdout or "") + (result.stderr or "")
+    reported = _VERSION_TOKEN_RE.findall(output)
+    if result.returncode != 0 or reported != [current_version]:
+        actual = reported[0] if len(reported) == 1 else "unverifiable"
+        _fail_installed_source_coherence(
+            f"Installed component version drift: CLI={current_version}, gateway={actual}."
+        )
+
+    if _version_key(current_version) < _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION):
+        return
+
+    from defenseclaw import migration_state
+    from defenseclaw.config import ConfigVersionError, source_config_version
+
+    try:
+        config_version = source_config_version(path=config_path or _active_upgrade_config_path())
+    except ConfigVersionError:
+        _fail_installed_source_coherence(
+            f"Installed DefenseClaw {current_version} configuration schema could not be verified."
+        )
+    if config_version != _TARGET_CONFIG_VERSION:
+        _fail_installed_source_coherence(
+            f"Installed DefenseClaw {current_version} requires config_version "
+            f"{_TARGET_CONFIG_VERSION}; found {config_version!r}."
+        )
+    state = migration_state.load(data_dir)
+    if not migration_state.is_applied(state, _OBSERVABILITY_V8_MIGRATION_VERSION):
+        _fail_installed_source_coherence(
+            f"Installed DefenseClaw {current_version} lacks the applied "
+            f"{_OBSERVABILITY_V8_MIGRATION_VERSION} migration cursor."
+        )
+
+
+def _preflight_check(
+    version: str,
+    os_name: str,
+    arch: str,
+    *,
+    gateway_artifact: str | None = None,
+    wheel_artifact: str | None = None,
+) -> None:
     """Verify release artifacts exist on GitHub before touching anything."""
-    archive = _gateway_archive_name(version, os_name, arch)
-    whl_name = f"defenseclaw-{version}-py3-none-any.whl"
+    archive = gateway_artifact or _gateway_archive_name(version, os_name, arch)
+    whl_name = wheel_artifact or f"defenseclaw-{version}-py3-none-any.whl"
     download_base = _release_download_base()
     urls = [
         f"{download_base}/{version}/{archive}",
@@ -1077,12 +1457,143 @@ def _preflight_check(version: str, os_name: str, arch: str) -> None:
     ux.ok("Release artifacts verified")
 
 
+def _materialize_protected_artifact(
+    source: str,
+    destination: str,
+    expected_outer_sha256: str,
+) -> str:
+    """Decode one authenticated custom envelope into private local staging."""
+
+    source = os.path.abspath(source)
+    destination = os.path.abspath(destination)
+    expected_outer_sha256 = expected_outer_sha256.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_outer_sha256):
+        raise OSError("protected release artifact lacks an authenticated outer digest")
+    info = os.lstat(source)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or not len(_PROTECTED_ARTIFACT_MAGIC) < info.st_size <= 2 * 1024 * 1024 * 1024
+    ):
+        raise OSError("protected release artifact is unsafe or outside its size bound")
+    parent = os.path.dirname(destination)
+    parent_info = os.lstat(parent)
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise OSError("protected artifact materialization directory is unsafe")
+    if os.path.lexists(destination):
+        raise OSError("protected artifact materialization destination already exists")
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(source, read_flags)
+    try:
+        opened = os.fstat(source_fd)
+        if not os.path.samestat(info, opened):
+            raise OSError("protected release artifact changed while opening")
+        observed_magic = os.read(source_fd, len(_PROTECTED_ARTIFACT_MAGIC))
+        if observed_magic != _PROTECTED_ARTIFACT_MAGIC:
+            raise OSError("protected release artifact magic is invalid")
+        consumed_digest = hashlib.sha256(observed_magic)
+        write_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        destination_fd = os.open(destination, write_flags, 0o600)
+        try:
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                consumed_digest.update(chunk)
+                payload = bytes(value ^ 0xA5 for value in chunk)
+                view = memoryview(payload)
+                while view:
+                    written = os.write(destination_fd, view)
+                    if written <= 0:
+                        raise OSError("protected artifact materialization write failed")
+                    view = view[written:]
+            if consumed_digest.hexdigest() != expected_outer_sha256:
+                raise OSError(
+                    "protected release artifact changed after checksum authentication"
+                )
+            os.fsync(destination_fd)
+        except BaseException:
+            os.close(destination_fd)
+            try:
+                os.unlink(destination)
+            except OSError:
+                pass
+            raise
+        else:
+            os.close(destination_fd)
+    finally:
+        os.close(source_fd)
+    if os.name == "posix":
+        os.chmod(destination, 0o600)
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    elif os.name == "nt":
+        from defenseclaw import windows_acl
+
+        windows_acl.apply_path(
+            destination,
+            windows_acl.private_security_for_directory(parent),
+        )
+    return destination
+
+
+def _materialized_gateway_archive_name(protected_name: str, os_name: str) -> str:
+    if not protected_name.endswith(".dcgateway"):
+        return protected_name
+    extension = ".zip" if os_name == "windows" else ".tar.gz"
+    return protected_name.removesuffix(".dcgateway") + extension
+
+
+def _materialized_wheel_name(protected_name: str) -> str:
+    if not protected_name.endswith(".dcwheel"):
+        return protected_name
+    return protected_name.removesuffix(".dcwheel") + ".whl"
+
+
+def _materialize_bridge_source_wheel_for_preflight(
+    staging_dir: str,
+    checksums: dict[str, str],
+    protected_wheel: str,
+) -> str:
+    """Privately decode the authenticated bridge wheel used by phase-two preflight.
+
+    Schema-2 bridge releases publish a protected ``.dcwheel`` envelope.  Wheel
+    metadata readers require the decoded ZIP bytes, so never pass the envelope
+    itself to the dependency-contract check.  Materialization binds the bytes
+    read from the already-validated source artifact to its signed outer digest.
+    """
+
+    wheel_name = os.path.basename(protected_wheel)
+    if not wheel_name.endswith(".dcwheel"):
+        raise OSError("staged bridge source wheel is not a protected schema-2 artifact")
+    expected_outer_sha256 = checksums.get(wheel_name, "")
+    if not expected_outer_sha256:
+        raise OSError("staged bridge source wheel lacks an authenticated outer digest")
+    materialized = os.path.join(staging_dir, _materialized_wheel_name(wheel_name))
+    return _materialize_protected_artifact(
+        protected_wheel,
+        materialized,
+        expected_outer_sha256,
+    )
+
+
 def _download_gateway(
     version: str,
     os_name: str,
     arch: str,
     staging_dir: str,
     checksums: dict[str, str] | None = None,
+    *,
+    artifact_name: str | None = None,
 ) -> tuple[str, str]:
     """Download the gateway tarball, verify its checksum, and extract.
 
@@ -1094,7 +1605,7 @@ def _download_gateway(
     The archive is a .zip on Windows (containing defenseclaw.exe) and a
     .tar.gz elsewhere (containing defenseclaw), matching .goreleaser.yaml.
     """
-    archive = _gateway_archive_name(version, os_name, arch)
+    archive = artifact_name or _gateway_archive_name(version, os_name, arch)
     url = f"{_release_download_base()}/{version}/{archive}"
 
     click.echo(f"  {ux.dim('→')} Downloading gateway binary ({os_name}/{arch}) ...")
@@ -1102,10 +1613,24 @@ def _download_gateway(
     _download_file(url, dest)
     if checksums is not None:
         _verify_sha256(dest, archive, checksums)
-    if os_name == "windows":
-        _extract_gateway_zip(dest, staging_dir)
+    materialized_name = _materialized_gateway_archive_name(archive, os_name)
+    materialized = os.path.join(staging_dir, materialized_name)
+    if materialized != dest:
+        try:
+            _materialize_protected_artifact(
+                dest,
+                materialized,
+                checksums.get(archive, "") if checksums is not None else "",
+            )
+        except OSError as exc:
+            ux.err(f"Protected gateway artifact could not be materialized: {exc}", indent="  ")
+            raise SystemExit(1) from exc
     else:
-        _extract_gateway_tarball(dest, staging_dir)
+        materialized = dest
+    if os_name == "windows":
+        _extract_gateway_zip(materialized, staging_dir)
+    else:
+        _extract_gateway_tarball(materialized, staging_dir)
     binary_name = _gateway_binary_filename(os_name)
     binary = os.path.join(staging_dir, binary_name)
     if not os.path.isfile(binary):
@@ -1122,9 +1647,11 @@ def _download_wheel(
     version: str,
     staging_dir: str,
     checksums: dict[str, str] | None = None,
+    *,
+    artifact_name: str | None = None,
 ) -> tuple[str, str]:
     """Download the Python CLI wheel and verify its checksum."""
-    whl_name = f"defenseclaw-{version}-py3-none-any.whl"
+    whl_name = artifact_name or f"defenseclaw-{version}-py3-none-any.whl"
     url = f"{_release_download_base()}/{version}/{whl_name}"
 
     click.echo(f"  {ux.dim('→')} Downloading Python CLI wheel ...")
@@ -1132,8 +1659,22 @@ def _download_wheel(
     _download_file(url, dest)
     if checksums is not None:
         _verify_sha256(dest, whl_name, checksums)
+    materialized_name = _materialized_wheel_name(whl_name)
+    materialized = os.path.join(staging_dir, materialized_name)
+    if materialized != dest:
+        try:
+            _materialize_protected_artifact(
+                dest,
+                materialized,
+                checksums.get(whl_name, "") if checksums is not None else "",
+            )
+        except OSError as exc:
+            ux.err(f"Protected CLI artifact could not be materialized: {exc}", indent="  ")
+            raise SystemExit(1) from exc
+    else:
+        materialized = dest
     ux.ok("Python CLI wheel downloaded")
-    return dest, whl_name
+    return materialized, whl_name
 
 
 # Filename the GitHub release exposes for the SHA-256 manifest. Mirrors
@@ -1472,10 +2013,11 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
     if not isinstance(schema_version, int) or isinstance(schema_version, bool):
         ux.err(f"{_UPGRADE_MANIFEST_FILENAME} missing integer schema_version.", indent="  ")
         raise SystemExit(1)
-    if schema_version > 1:
+    expected_schema = 2 if _version_key(version) >= _version_key(_STRICT_SIGSTORE_RELEASE_VERSION) else 1
+    if schema_version != expected_schema:
         ux.err(
             f"Release {version} uses upgrade manifest schema {schema_version}, "
-            "which this upgrader does not understand.",
+            f"but schema {expected_schema} is required at this release boundary.",
             indent="  ",
         )
         _print_new_upgrade_script_hint(version)
@@ -1541,6 +2083,83 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
         if migration_version not in seen:
             required.append(migration_version)
             seen.add(migration_version)
+
+    tested_source_versions: list[str] = []
+    platform_tested_source_versions: dict[str, list[str]] = {}
+    tested_raw = payload.get("tested_source_versions")
+    platform_tested_raw = payload.get("platform_tested_source_versions")
+    runtime_config_raw = payload.get("runtime_config_version")
+    release_artifacts_raw = payload.get("release_artifacts")
+    if expected_schema == 2:
+        tested_source_versions = _validate_manifest_source_versions(
+            tested_raw,
+            label="tested_source_versions",
+            target_version=version,
+        )
+        if not isinstance(platform_tested_raw, dict) or set(platform_tested_raw) != {"windows"}:
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} platform_tested_source_versions must contain "
+                "exactly the Windows source list.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        windows_sources = _validate_manifest_source_versions(
+            platform_tested_raw.get("windows"),
+            label="platform_tested_source_versions.windows",
+            target_version=version,
+        )
+        if any(item not in tested_source_versions for item in windows_sources):
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} Windows tested sources must be a subset of "
+                "tested_source_versions.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        platform_tested_source_versions = {"windows": windows_sources}
+        expected_runtime_config = 7 if version == _STRICT_SIGSTORE_RELEASE_VERSION else 8
+        if (
+            not isinstance(runtime_config_raw, int)
+            or isinstance(runtime_config_raw, bool)
+            or runtime_config_raw != expected_runtime_config
+        ):
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} runtime_config_version must be "
+                f"{expected_runtime_config} for release {version}.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        expected_release_artifacts = _expected_release_artifacts(version)
+        if release_artifacts_raw != expected_release_artifacts:
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} release_artifacts must explicitly name "
+                "the protected wheel and every platform gateway.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        flattened_artifacts = [expected_release_artifacts["wheel"]] + [
+            expected_release_artifacts["gateways"][platform_name][platform_arch]
+            for platform_name in ("darwin", "linux", "windows")
+            for platform_arch in ("amd64", "arm64")
+        ]
+        if len(flattened_artifacts) != len(set(flattened_artifacts)) or any(
+            os.path.basename(name) != name for name in flattened_artifacts
+        ):
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} release_artifacts names must be unique basenames.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+    elif (
+        tested_raw is not None
+        or platform_tested_raw is not None
+        or runtime_config_raw is not None
+        or release_artifacts_raw is not None
+    ):
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} schema 1 must not declare schema-2 tested-source policy.",
+            indent="  ",
+        )
+        raise SystemExit(1)
 
     bridge_keys = (
         "minimum_source_version",
@@ -1609,6 +2228,21 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
                 indent="  ",
             )
             raise SystemExit(1)
+        windows_sources = platform_tested_source_versions.get("windows", [])
+        if expected_schema == 2 and required_bridge not in tested_source_versions:
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} required bridge {required_bridge} is absent from "
+                "the signed global tested-source matrix.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        if expected_schema == 2 and required_bridge not in windows_sources:
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} required bridge {required_bridge} is absent from "
+                "the signed Windows tested-source matrix.",
+                indent="  ",
+            )
+            raise SystemExit(1)
 
     manifest = {
         "schema_version": schema_version,
@@ -1618,6 +2252,15 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
         "migration_failure_policy": policy,
         "required_cli_migrations": required,
     }
+    if expected_schema == 2:
+        manifest.update(
+            {
+                "tested_source_versions": tested_source_versions,
+                "platform_tested_source_versions": platform_tested_source_versions,
+                "runtime_config_version": runtime_config_raw,
+                "release_artifacts": release_artifacts_raw,
+            }
+        )
     if all(bridge_fields_present):
         manifest.update(
             {
@@ -1627,6 +2270,37 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
             }
         )
     return manifest
+
+
+def _validate_manifest_source_versions(
+    value: object,
+    *,
+    label: str,
+    target_version: str,
+) -> list[str]:
+    if not isinstance(value, list) or not value:
+        ux.err(f"{_UPGRADE_MANIFEST_FILENAME} {label} must be a non-empty version list.", indent="  ")
+        raise SystemExit(1)
+    sources: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or _CANONICAL_VERSION_RE.fullmatch(item) is None:
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} {label} must contain canonical X.Y.Z versions.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        sources.append(item)
+    if len(sources) != len(set(sources)):
+        ux.err(f"{_UPGRADE_MANIFEST_FILENAME} {label} contains duplicate versions.", indent="  ")
+        raise SystemExit(1)
+    expected_order = sorted(sources, key=_version_key, reverse=True)
+    if sources != expected_order or any(_version_key(item) >= _version_key(target_version) for item in sources):
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} {label} must contain only older releases in descending order.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    return sources
 
 
 def _version_key(version: str) -> tuple[int, int, int]:
@@ -1653,6 +2327,39 @@ def _is_bridge_to_hard_cut_phase(
     )
 
 
+def _require_release_owned_hard_cut_handoff(
+    *,
+    source_version: str,
+    target_version: str,
+) -> None:
+    """Refuse an in-venv hard cut that lacks resolver-owned custody."""
+
+    staged = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
+    if (
+        os.environ.get(_STAGED_UPGRADE_ENV) == "1"
+        and os.environ.get(_STAGED_BRIDGE_VERSION_ENV) == source_version
+        and staged
+    ):
+        return
+    ux.err(
+        f"DefenseClaw {target_version} requires the release-owned {source_version} "
+        "staged resolver handoff.",
+        indent="  ",
+    )
+    ux.subhead(
+        "No changes were made: no backup or receipt was created, no services were stopped, "
+        "and no installed artifacts were changed.",
+        indent="    ",
+    )
+    ux.subhead(
+        "Run the target-tag release resolver with no --version/-Version override. "
+        "It waits for recovery and re-execs the bridge:",
+        indent="    ",
+    )
+    _print_new_upgrade_script_hint(target_version)
+    raise SystemExit(1)
+
+
 def _require_hard_cut_manifest_contract(
     manifest: dict[str, object] | None,
     *,
@@ -1666,11 +2373,16 @@ def _require_hard_cut_manifest_contract(
     required_migrations = manifest.get("required_cli_migrations") if manifest else None
     valid = (
         manifest is not None
+        and manifest.get("schema_version") == 2
         and manifest.get("min_upgrade_protocol") == 2
         and manifest.get("migration_failure_policy") == "fail"
         and isinstance(manifest.get("minimum_source_version"), str)
         and isinstance(manifest.get("required_bridge_version"), str)
         and isinstance(manifest.get("auto_bridge_from"), list)
+        and isinstance(manifest.get("tested_source_versions"), list)
+        and isinstance(manifest.get("platform_tested_source_versions"), dict)
+        and manifest.get("runtime_config_version") == 8
+        and isinstance(manifest.get("release_artifacts"), dict)
         and isinstance(required_migrations, list)
         and _OBSERVABILITY_V8_MIGRATION_VERSION in required_migrations
     )
@@ -1694,6 +2406,7 @@ def _enforce_upgrade_source_contract(
     source_version: str,
     target_version: str,
     explicit_target: bool,
+    os_name: str | None = None,
 ) -> None:
     """Reject an unsafe hard-cut edge before backup, stop, or installation.
 
@@ -1704,7 +2417,42 @@ def _enforce_upgrade_source_contract(
     resolver, which installs the bridge and then executes its fresh controller.
     """
 
-    if not manifest or "minimum_source_version" not in manifest:
+    if not manifest:
+        return
+    tested_raw = manifest.get("tested_source_versions")
+    platform_tested_raw = manifest.get("platform_tested_source_versions")
+    if manifest.get("schema_version") == 2:
+        if os_name is None:
+            os_name = platform.system().lower()
+        if os_name == "windows":
+            tested_sources = (
+                platform_tested_raw.get("windows") if isinstance(platform_tested_raw, dict) else None
+            )
+        else:
+            tested_sources = tested_raw
+        if not isinstance(tested_sources, list) or not tested_sources:
+            ux.err("Upgrade manifest tested-source policy is incomplete; refusing to change state.", indent="  ")
+            raise SystemExit(1)
+        if _version_key(source_version) < _version_key(target_version) and source_version not in tested_sources:
+            platform_label = "Windows" if os_name == "windows" else "published-baseline"
+            ux.err(
+                f"Installed version {source_version} is outside the signed {platform_label} test matrix "
+                f"for {target_version}.",
+                indent="  ",
+            )
+            ux.subhead(f"Supported tested sources: {', '.join(tested_sources)}", indent="    ")
+            ux.subhead(
+                "No tested in-place upgrade path exists from this installed version. "
+                "Remain on the current version and contact support for a state-aware recovery plan; "
+                "do not overwrite it with another release artifact.",
+                indent="    ",
+            )
+            ux.subhead(
+                "No changes were made: no services were stopped and no installed artifacts were changed.",
+                indent="    ",
+            )
+            raise SystemExit(1)
+    if "minimum_source_version" not in manifest:
         return
     minimum_source = manifest.get("minimum_source_version")
     required_bridge = manifest.get("required_bridge_version")
@@ -1737,7 +2485,7 @@ def _enforce_upgrade_source_contract(
     auto_bridge_from = [item for item in auto_bridge_raw if isinstance(item, str)]
     if source_version in auto_bridge_from:
         ux.err(
-            f"Release {target_version} requires DefenseClaw {minimum_source} or newer as its source; "
+            f"DefenseClaw {target_version} requires the {required_bridge} upgrade bridge; "
             f"installed version is {source_version}.",
             indent="  ",
         )
@@ -1748,12 +2496,13 @@ def _enforce_upgrade_source_contract(
             )
         else:
             ux.subhead("The built-in latest-version path cannot install the bridge recursively.", indent="    ")
-        ux.subhead(f"Bridge first: defenseclaw upgrade --version {required_bridge}", indent="    ")
-        ux.subhead(f"Then retry:  defenseclaw upgrade --version {target_version}", indent="    ")
         ux.subhead(
-            "For a one-command old-to-latest upgrade, use the release-owned shell or PowerShell resolver.",
+            "No changes were made. Run the release-owned resolver with no version override: "
+            "`scripts/upgrade.sh` (macOS/Linux) or `scripts\\upgrade.ps1` (Windows). "
+            "It installs the bridge and re-execs its fresh controller automatically.",
             indent="    ",
         )
+        _print_new_upgrade_script_hint(target_version)
     else:
         supported = ", ".join(auto_bridge_from) if auto_bridge_from else "none declared"
         ux.err(
@@ -1763,15 +2512,8 @@ def _enforce_upgrade_source_contract(
         )
         ux.subhead(f"Supported automatic bridge sources: {supported}", indent="    ")
         ux.subhead(
-            f"Supported path (shell): scripts/upgrade.sh --version {required_bridge}",
-            indent="    ",
-        )
-        ux.subhead(
-            f"Supported path (PowerShell): .\\scripts\\upgrade.ps1 -Version {required_bridge}",
-            indent="    ",
-        )
-        ux.subhead(
-            f"Then run the release-owned upgrade resolver for latest, or explicitly request {target_version}.",
+            "No tested in-place path exists. Remain on the current version and contact support; "
+            "do not manually install an intermediate or target artifact.",
             indent="    ",
         )
     ux.subhead(
@@ -1785,11 +2527,15 @@ def _print_new_upgrade_script_hint(version: str) -> None:
     release_url = f"https://github.com/{GITHUB_REPO}/releases/tag/{version}"
     ux.subhead(
         "Use the release-owned shell or PowerShell upgrade resolver; "
-        "the installed controller made no changes:",
+        "the installed controller made no changes. Do not add --version/-Version:",
         indent="    ",
     )
     ux.subhead(
-        release_url,
+        authenticated_resolver_instructions(version, repository=GITHUB_REPO),
+        indent="      ",
+    )
+    ux.subhead(
+        f"Release: {release_url}",
         indent="    ",
     )
 
@@ -2095,9 +2841,9 @@ def _install_gateway(
             os.chmod(temporary, 0o755)
             if os_name == "darwin":
                 _run_phase_two_mutator(
-                    ["codesign", "-f", "-s", "-", temporary],
+                    _macos_gateway_codesign_command(temporary),
                     capture_output=True,
-                    check=False,
+                    check=True,
                 )
         descriptor = os.open(temporary, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
         try:
@@ -2118,6 +2864,71 @@ def _install_gateway(
             pass
     ux.ok("Gateway binary installed")
     return target
+
+
+def _macos_gateway_codesign_command(path: str) -> list[str]:
+    """Return the path-independent normalization used by every macOS installer."""
+
+    return [
+        "/usr/bin/codesign",
+        "-f",
+        "-s",
+        "-",
+        "-i",
+        _MACOS_GATEWAY_CODESIGN_IDENTIFIER,
+        path,
+    ]
+
+
+def _canonicalize_macos_gateway_for_coherence(path: str) -> None:
+    """Canonicalize one private gateway copy for same-host byte comparison.
+
+    A Developer-ID-signed native-app payload and a locally ad-hoc-signed shell
+    install can contain the same authenticated executable while reserving
+    different Mach-O code-signature layouts.  A direct force-sign does not
+    necessarily collapse that layout difference.  Establishing a signature,
+    removing it, and signing again with the fixed identifier gives both
+    private copies the same install-host representation without mutating the
+    active gateway or the exact rollback snapshot.
+    """
+
+    commands = (
+        _macos_gateway_codesign_command(path),
+        ["/usr/bin/codesign", "--remove-signature", path],
+        _macos_gateway_codesign_command(path),
+    )
+    try:
+        for command in commands:
+            subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("macOS gateway coherence copy could not be canonicalized") from exc
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise OSError("macOS gateway coherence copy is not a regular file")
+
+
+def _verify_macos_rollback_gateway_signature(path: str) -> None:
+    """Require a valid fixed-identifier signature on the exact rollback bytes."""
+
+    requirement = f'=identifier "{_MACOS_GATEWAY_CODESIGN_IDENTIFIER}"'
+    try:
+        subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", "-R", requirement, path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(
+            "installed bridge gateway signature or identifier is invalid"
+        ) from exc
 
 
 def _verify_installed_gateway_version(binary_path: str, expected: str) -> None:
@@ -2243,7 +3054,18 @@ def _check_post_upgrade_drift(target_version: str) -> None:
     )
 
 
-def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
+def _managed_venv_path() -> str:
+    """Return the installer-owned venv below the active DefenseClaw home."""
+
+    return os.path.join(_upgrade_recovery_home(), ".venv")
+
+
+def _install_wheel(
+    whl_path: str,
+    os_name: str | None = None,
+    *,
+    exact_environment: bool = False,
+) -> None:
     """Install a pre-downloaded Python CLI wheel.
 
     ``os_name`` defaults to the running platform; the upgrade flow passes the
@@ -2259,7 +3081,7 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
         ux.err("uv not found on PATH — cannot update Python CLI", indent="  ")
         raise SystemExit(1)
 
-    venv = os.path.expanduser("~/.defenseclaw/.venv")
+    venv = _managed_venv_path()
     scripts_subdir = "Scripts" if os_name == "windows" else "bin"
     python_exe = "python.exe" if os_name == "windows" else "python"
     venv_python = os.path.join(venv, scripts_subdir, python_exe)
@@ -2271,8 +3093,24 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
             check=True,
         )
 
+    install_args = [
+        uv,
+        "--no-config",
+        "pip",
+        "install",
+        "--python",
+        venv_python,
+        "--quiet",
+    ]
+    if exact_environment:
+        # The hard-cut bridge and target carry an authenticated identical
+        # Requires-Dist contract.  Keep the bridge environment byte-for-byte
+        # dependency-stable in both directions; this phase must not contact an
+        # index or rewrite shared packages.
+        install_args.extend(("--offline", "--no-deps", "--reinstall"))
+    install_args.append(whl_path)
     _run_phase_two_mutator(
-        [uv, "--no-config", "pip", "install", "--python", venv_python, "--quiet", whl_path],
+        install_args,
         check=True,
     )
 
@@ -2304,6 +3142,9 @@ def _run_installed_migrations(
     data_dir: str,
     *,
     os_name: str | None = None,
+    config_path: str | None = None,
+    recovery_home: str | None = None,
+    mutation_token: str | None = None,
 ) -> int:
     """Run migrations in the freshly installed managed venv.
 
@@ -2315,7 +3156,7 @@ def _run_installed_migrations(
     if os_name is None:
         os_name = platform.system().lower()
 
-    venv = os.path.expanduser("~/.defenseclaw/.venv")
+    venv = _managed_venv_path()
     venv_python = _venv_python_path(venv, os_name)
     if not os.path.isfile(venv_python):
         raise subprocess.CalledProcessError(1, [venv_python, "-c", "<missing managed venv>"])
@@ -2323,6 +3164,17 @@ def _run_installed_migrations(
     fd, result_path = tempfile.mkstemp(prefix="defenseclaw-migrations-", suffix=".json")
     os.close(fd)
     try:
+        child_env = _sanitized_python_child_environment()
+        child_env["DEFENSECLAW_HOME"] = os.path.abspath(
+            os.path.expanduser(recovery_home or _upgrade_recovery_home())
+        )
+        child_env["DEFENSECLAW_CONFIG"] = os.path.abspath(
+            os.path.expanduser(config_path or _active_upgrade_config_path())
+        )
+        if mutation_token is not None:
+            if re.fullmatch(r"[0-9a-f]{32}", mutation_token) is None:
+                raise ValueError("hard-cut mutation token is invalid")
+            child_env["DEFENSECLAW_UPGRADE_MUTATION_TOKEN"] = mutation_token
         _run_phase_two_mutator(
             [
                 venv_python,
@@ -2336,6 +3188,7 @@ def _run_installed_migrations(
                 result_path,
             ],
             check=True,
+            env=child_env,
         )
         with open(result_path, encoding="utf-8") as f:
             payload = json.load(f)
@@ -2398,7 +3251,7 @@ def _run_installed_local_observability_operation(
 ) -> dict[str, object]:
     if os_name is None:
         os_name = platform.system().lower()
-    venv = os.path.expanduser("~/.defenseclaw/.venv")
+    venv = _managed_venv_path()
     venv_python = _venv_python_path(venv, os_name)
     if not os.path.isfile(venv_python):
         raise _LocalBundleUpgradeInvocationError("target_cli_missing", "invoke")
@@ -2450,6 +3303,7 @@ sys.exit(0 if payload["ok"] else 1)
         completed = _run_phase_two_mutator(
             [
                 venv_python,
+                "-I",
                 "-c",
                 script,
                 operation,
@@ -2462,6 +3316,7 @@ sys.exit(0 if payload["ok"] else 1)
             text=True,
             timeout=child_timeout,
             check=False,
+            env=_sanitized_python_child_environment(),
         )
         try:
             with open(result_path, encoding="utf-8") as handle:
@@ -2496,6 +3351,15 @@ def _venv_python_path(venv: str, os_name: str) -> str:
     return os.path.join(venv, scripts_subdir, python_exe)
 
 
+def _sanitized_python_child_environment() -> dict[str, str]:
+    """Preserve operator state while removing Python import injection."""
+
+    child_env = os.environ.copy()
+    child_env.pop("PYTHONHOME", None)
+    child_env.pop("PYTHONPATH", None)
+    return child_env
+
+
 def _handoff_to_installed_upgrade(
     target_version: str,
     *,
@@ -2519,7 +3383,7 @@ def _handoff_to_installed_upgrade(
     normalized_target = _normalize_target_version(target_version)
     if os_name is None:
         os_name = platform.system().lower()
-    managed_venv = os.path.expanduser("~/.defenseclaw/.venv")
+    managed_venv = _managed_venv_path()
     venv_python = _venv_python_path(managed_venv, os_name)
     if not os.path.isfile(venv_python):
         ux.err("Fresh-process upgrade handoff could not find the managed CLI interpreter.", indent="  ")
@@ -2540,12 +3404,10 @@ def _handoff_to_installed_upgrade(
     if allow_unverified:
         argv.append("--allow-unverified")
 
-    child_env = os.environ.copy()
+    child_env = _sanitized_python_child_environment()
     # Isolated mode already ignores Python environment injection.  Removing
     # these variables as well makes that boundary explicit to wrappers and to
     # platforms whose launcher performs work before Python processes ``-I``.
-    child_env.pop("PYTHONHOME", None)
-    child_env.pop("PYTHONPATH", None)
     child_env[_UPGRADE_HANDOFF_ENV] = "1"
     try:
         completed = subprocess.run(argv, check=False, env=child_env)
@@ -2727,6 +3589,51 @@ def _target_migration_capabilities(whl_path: str) -> _TargetMigrationCapabilitie
     )
 
 
+def _wheel_dependency_contract(whl_path: str, expected_version: str) -> tuple[str, ...]:
+    """Read the authenticated wheel's exact Requires-Dist contract statically."""
+
+    try:
+        with zipfile.ZipFile(whl_path) as archive:
+            messages = []
+            for item in archive.infolist():
+                if not item.filename.endswith(".dist-info/METADATA"):
+                    continue
+                if item.file_size > _MAX_WHEEL_METADATA_BYTES:
+                    raise ValueError("wheel metadata exceeds its size limit")
+                message = email.parser.Parser().parsestr(archive.read(item).decode("utf-8"))
+                normalized_name = (message.get("Name") or "").lower().replace("_", "-")
+                if normalized_name == "defenseclaw":
+                    messages.append(message)
+            if len(messages) != 1:
+                raise ValueError("wheel must contain one DefenseClaw metadata record")
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise ValueError("wheel dependency contract is unreadable") from exc
+    if messages[0].get("Version") != expected_version:
+        raise ValueError(
+            f"wheel dependency metadata version is not {expected_version}"
+        )
+    requirements = messages[0].get_all("Requires-Dist", [])
+    if any(not isinstance(item, str) or not item.strip() for item in requirements):
+        raise ValueError("wheel contains an invalid Requires-Dist entry")
+    return tuple(sorted(item.strip() for item in requirements))
+
+
+def _require_hard_cut_dependency_contract(
+    source_wheel: str,
+    target_wheel: str,
+    *,
+    source_version: str,
+    target_version: str,
+) -> None:
+    source = _wheel_dependency_contract(source_wheel, source_version)
+    target = _wheel_dependency_contract(target_wheel, target_version)
+    if target != source:
+        raise ValueError(
+            "hard-cut target Requires-Dist differs from the authenticated bridge; "
+            "publish an explicit dependency migration instead of mutating the bridge environment"
+        )
+
+
 def _require_target_phase_two_mutator_wrapper(whl_path: str) -> None:
     """Require the crash-surviving child wrapper before a hard-cut install."""
 
@@ -2769,10 +3676,10 @@ def _validate_target_migration_capabilities(
             f"target {target_version} cannot run release-required migration(s): " + ", ".join(unreachable_required)
         )
 
-    # The protocol-1-reachable 0.8.4 bridge intentionally has no v8 config
-    # capability and no v8 migration.  Its job is to install this newer
-    # controller, restart healthy on the existing v7 configuration, and hand
-    # off from a fresh process.  Enforce v8 capability only for the actual
+    # The resolver-reachable 0.8.4 bridge intentionally remains a config-v7
+    # runtime with no v8 migration. Its job is to install this newer controller,
+    # restart healthy on the existing v7 configuration, and hand off from a
+    # fresh process. Enforce v8 capability only for the actual
     # 0.8.5+ hard cut; bridge and legacy releases still receive the generic
     # package-version and manifest-required-migration checks above.
     cutover_key = _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION)
@@ -2826,6 +3733,8 @@ def _preflight_wheel_install(
     *,
     target_version: str | None = None,
     upgrade_manifest: dict[str, object] | None = None,
+    hard_cut_source_wheel: str | None = None,
+    source_version: str | None = None,
 ) -> None:
     """Resolve the downloaded wheel before the upgrade mutates services.
 
@@ -2845,9 +3754,54 @@ def _preflight_wheel_install(
 
     click.echo(f"  {ux.dim('→')} Resolving Python CLI dependencies ...")
 
-    managed_venv = os.path.expanduser("~/.defenseclaw/.venv")
+    managed_venv = _managed_venv_path()
     venv_python = _venv_python_path(managed_venv, os_name)
     cleanup_dir: str | None = None
+
+    if hard_cut_source_wheel is not None:
+        if target_version is None or source_version is None:
+            _fail_wheel_preflight("Hard-cut dependency preflight lacks release identity.")
+        if not os.path.isfile(venv_python):
+            _fail_wheel_preflight("Hard-cut bridge managed environment is missing.")
+        try:
+            _require_hard_cut_dependency_contract(
+                hard_cut_source_wheel,
+                whl_path,
+                source_version=source_version,
+                target_version=target_version,
+            )
+            subprocess.run(
+                [uv, "--no-config", "pip", "check", "--python", venv_python],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    uv,
+                    "--no-config",
+                    "pip",
+                    "install",
+                    "--python",
+                    venv_python,
+                    "--dry-run",
+                    "--offline",
+                    "--no-deps",
+                    "--reinstall",
+                    "--quiet",
+                    whl_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (ValueError, subprocess.CalledProcessError) as exc:
+            _fail_wheel_preflight(
+                "Hard-cut target cannot preserve the authenticated bridge dependency environment.",
+                exc if isinstance(exc, subprocess.CalledProcessError) else None,
+            )
+        ux.ok("Hard-cut dependency environment verified without mutation")
+        return
 
     if not os.path.isfile(venv_python):
         cleanup_dir = tempfile.mkdtemp(prefix="defenseclaw-wheel-preflight-")
@@ -2998,8 +3952,96 @@ def _poll_health(
     raise SystemExit(1)
 
 
-def _assert_gateway_quiesced(data_dir: str) -> None:
-    """Fail closed when ``gateway.pid`` still identifies a live process.
+def _gateway_process_environment(
+    data_dir: str,
+    *,
+    config_path: str | None = None,
+) -> dict[str, str]:
+    environment = dict(os.environ)
+    # Daemon management commands intentionally skip config loading and locate
+    # gateway.pid through DEFENSECLAW_HOME. Keep that pointed at DATA_DIR while
+    # explicitly preserving the controller-owned config file.
+    environment["DEFENSECLAW_HOME"] = os.path.abspath(os.path.expanduser(data_dir))
+    resolved_config = config_path or environment.get("DEFENSECLAW_CONFIG")
+    if resolved_config:
+        environment["DEFENSECLAW_CONFIG"] = os.path.abspath(
+            os.path.expanduser(resolved_config)
+        )
+    return environment
+
+
+def _hard_cut_plan_config_path(plan: _HardCutRollbackPlan) -> str:
+    state_files = getattr(plan, "state_files", None)
+    if not isinstance(state_files, tuple):
+        # A few unit tests use a lightweight Mock as the hard-cut sentinel.
+        # Real transaction plans are frozen dataclass instances and remain
+        # fail-closed below.
+        return _active_upgrade_config_path()
+    if not state_files:
+        raise OSError("hard-cut rollback plan lacks its config snapshot")
+    return os.path.abspath(state_files[0].active_path)
+
+
+def _hard_cut_mutation_token(plan: _HardCutRollbackPlan) -> str:
+    identity = "\0".join(
+        (
+            "defenseclaw-hard-cut-mutation-v1",
+            os.path.abspath(plan.backup_dir),
+            plan.source_version,
+            plan.rollback_wheel_sha256,
+        )
+    )
+    return hashlib.sha256(identity.encode()).hexdigest()[:32]
+
+
+def _cleanup_hard_cut_mutation_temporaries(plan: _HardCutRollbackPlan) -> None:
+    """Remove only temp files cryptographically namespaced to this plan."""
+
+    token = _hard_cut_mutation_token(plan)
+    config_path = _hard_cut_plan_config_path(plan)
+    parents = {
+        os.path.dirname(config_path) or ".",
+        os.path.abspath(plan.data_dir),
+    }
+    config_basenames = {
+        os.path.basename(config_path),
+        os.path.basename(config_path + ".pre-observability-migration.bak"),
+    }
+    exact_prefixes = {
+        f".{name}.upgrade-{token}." for name in config_basenames
+    } | {
+        f".migration_state.upgrade-{token}.",
+        f".tmp.upgrade-{token}.",
+    }
+    for parent in parents:
+        info = os.lstat(parent)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise OSError("hard-cut mutation temporary parent is unsafe")
+        for entry in os.scandir(parent):
+            matching_prefixes = [
+                prefix for prefix in exact_prefixes if entry.name.startswith(prefix)
+            ]
+            if not matching_prefixes:
+                continue
+            generic = entry.name.startswith(f".tmp.upgrade-{token}.")
+            if not generic and not entry.name.endswith(".tmp"):
+                continue
+            entry_info = entry.stat(follow_symlinks=False)
+            if entry.is_symlink() or not stat.S_ISREG(entry_info.st_mode):
+                raise OSError("hard-cut mutation temporary has an unsafe type")
+            if os.name == "posix" and entry_info.st_uid != os.getuid():
+                raise OSError("hard-cut mutation temporary has a foreign owner")
+            os.unlink(entry.path)
+        if os.name == "posix":
+            descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+
+def _assert_gateway_quiesced(data_dir: str, *, gateway_path: str | None = None) -> None:
+    """Require both PID quiescence and an unreachable exact gateway status.
 
     The daemon's stop command waits for its recorded process to exit.  This
     second, independent read closes the race between a nominally successful
@@ -3014,20 +4056,73 @@ def _assert_gateway_quiesced(data_dir: str) -> None:
     try:
         info = os.lstat(pid_path)
     except FileNotFoundError:
-        return
+        info = None
     except OSError as exc:
         raise OSError("gateway PID file could not be inspected after stop") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    if info is not None and (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)):
         raise OSError("gateway PID file is not a real regular file after stop")
+    if info is not None:
+        pid = read_pid_file(pid_path)
+        if pid is None:
+            raise OSError("gateway PID file is malformed after stop")
+        if pid_alive(pid):
+            if process_is_gateway(pid):
+                raise OSError(f"gateway process {pid} is still running after stop")
+            raise OSError(f"gateway PID file points to an unverified live process {pid}")
 
-    pid = read_pid_file(pid_path)
-    if pid is None:
-        raise OSError("gateway PID file is malformed after stop")
-    if not pid_alive(pid):
-        return
-    if process_is_gateway(pid):
-        raise OSError(f"gateway process {pid} is still running after stop")
-    raise OSError(f"gateway PID file points to an unverified live process {pid}")
+    if gateway_path is None:
+        running_os = platform.system().lower()
+        gateway_path = os.path.join(
+            os.path.expanduser("~/.local/bin"),
+            _installed_gateway_filename(running_os),
+        )
+    try:
+        status_result = subprocess.run(
+            [gateway_path, "status"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=_gateway_process_environment(data_dir),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("exact gateway status could not prove shutdown") from exc
+    if status_result.returncode == 0:
+        raise OSError("exact gateway status still reports a live service after stop")
+
+
+def _capture_source_gateway_running_state(gateway_path: str, data_dir: str) -> bool:
+    """Prove whether the authenticated source gateway is running before mutation."""
+
+    try:
+        status_result = subprocess.run(
+            [gateway_path, "status"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=_gateway_process_environment(data_dir),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("could not determine the source gateway running state") from exc
+    if status_result.returncode == 0:
+        from defenseclaw.process_liveness import pid_alive, process_is_gateway, read_pid_file
+
+        pid_path = os.path.join(data_dir, "gateway.pid")
+        try:
+            info = os.lstat(pid_path)
+        except OSError as exc:
+            raise OSError("source gateway status is live but its PID identity is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("source gateway status is live but its PID file is unsafe")
+        pid = read_pid_file(pid_path)
+        if pid is None or not pid_alive(pid) or not process_is_gateway(pid):
+            raise OSError("source gateway status is live but its process identity is unverified")
+        return True
+    # A non-zero status is accepted as intentionally stopped only when the
+    # private PID state independently proves no gateway process remains.
+    _assert_gateway_quiesced(data_dir, gateway_path=gateway_path)
+    return False
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -3111,9 +4206,10 @@ def _download_file(url: str, dest: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _create_backup(cfg) -> str:
+def _create_backup(cfg, *, data_dir: str | None = None) -> str:
     """Back up ~/.defenseclaw/ config files and ~/.openclaw/openclaw.json."""
-    data_dir = cfg.data_dir if cfg else os.path.expanduser("~/.defenseclaw")
+    if data_dir is None:
+        data_dir = _resolved_upgrade_data_dir(cfg, recovery_home=_upgrade_recovery_home())
     backup_root = os.path.join(data_dir, "backups")
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     backup_dir = _create_private_backup_directory(backup_root, timestamp)
@@ -3194,14 +4290,32 @@ def _acquire_bridge_rollback_artifacts(
     checksums = _download_checksums(source_version, staged, allow_unverified=False)
     if checksums is None:
         raise OSError("installed bridge release has no trusted checksum manifest")
-    _download_upgrade_manifest(
+    source_manifest = _download_upgrade_manifest(
         source_version,
         staged,
         checksums,
         allow_unverified=False,
     )
-    _download_wheel(source_version, staged, checksums)
-    _download_gateway(source_version, os_name, arch, staged, checksums)
+    archive_name, wheel_name = _manifest_release_artifact_names(
+        source_manifest,
+        source_version,
+        os_name,
+        arch,
+    )
+    _download_wheel(
+        source_version,
+        staged,
+        checksums,
+        artifact_name=wheel_name,
+    )
+    _download_gateway(
+        source_version,
+        os_name,
+        arch,
+        staged,
+        checksums,
+        artifact_name=archive_name,
+    )
     if os.name == "posix":
         os.chmod(staged, 0o700)
         for name in os.listdir(staged):
@@ -3221,21 +4335,17 @@ def _validate_staged_bridge_artifact_set(
     """Validate one resolver/fallback bridge artifact set without mutation."""
 
     _assert_private_staged_bridge_directory(staged)
+    for entry in os.listdir(staged):
+        _assert_private_staged_bridge_file(os.path.join(staged, entry))
     checksums_path = os.path.join(staged, _CHECKSUMS_FILENAME)
     signature_path = checksums_path + ".sig"
     certificate_path = checksums_path + ".pem"
     manifest_path = os.path.join(staged, _UPGRADE_MANIFEST_FILENAME)
-    wheel_name = f"defenseclaw-{source_version}-py3-none-any.whl"
-    archive_name = _gateway_archive_name(source_version, os_name, arch)
-    wheel_path = os.path.join(staged, wheel_name)
-    archive_path = os.path.join(staged, archive_name)
     for path in (
         checksums_path,
         signature_path,
         certificate_path,
         manifest_path,
-        wheel_path,
-        archive_path,
     ):
         _assert_private_staged_bridge_file(path)
 
@@ -3246,12 +4356,7 @@ def _validate_staged_bridge_artifact_set(
         certificate_path,
     )
     checksums = _parse_staged_checksums(checksums_path)
-    for path, filename in (
-        (manifest_path, _UPGRADE_MANIFEST_FILENAME),
-        (wheel_path, wheel_name),
-        (archive_path, archive_name),
-    ):
-        _verify_sha256(path, filename, checksums)
+    _verify_sha256(manifest_path, _UPGRADE_MANIFEST_FILENAME, checksums)
     try:
         with open(manifest_path, encoding="utf-8") as stream:
             source_manifest = _validate_upgrade_manifest(json.load(stream), source_version)
@@ -3259,6 +4364,21 @@ def _validate_staged_bridge_artifact_set(
         raise OSError("staged bridge manifest is invalid") from exc
     if source_manifest.get("min_upgrade_protocol") != 1:
         raise OSError("staged bridge manifest is not protocol-1 reachable")
+    archive_name, wheel_name = _manifest_release_artifact_names(
+        source_manifest,
+        source_version,
+        os_name,
+        arch,
+    )
+    wheel_path = os.path.join(staged, wheel_name)
+    archive_path = os.path.join(staged, archive_name)
+    for path in (wheel_path, archive_path):
+        _assert_private_staged_bridge_file(path)
+    for path, filename in (
+        (wheel_path, wheel_name),
+        (archive_path, archive_name),
+    ):
+        _verify_sha256(path, filename, checksums)
     return checksums, wheel_path, archive_path
 
 
@@ -3270,6 +4390,9 @@ def _prepare_hard_cut_rollback_plan(
     os_name: str,
     arch: str,
     staged_artifact_dir: str | None = None,
+    data_dir: str | None = None,
+    recovery_home: str | None = None,
+    config_path: str | None = None,
 ) -> _HardCutRollbackPlan:
     """Retain authenticated bridge artifacts and exact mutable state.
 
@@ -3278,8 +4401,8 @@ def _prepare_hard_cut_rollback_plan(
 
     * ``checksums.txt``, ``checksums.txt.sig``, ``checksums.txt.pem``;
     * ``upgrade-manifest.json`` for ``source_version``;
-    * ``defenseclaw-<source_version>-py3-none-any.whl``;
-    * the platform gateway archive from :func:`_gateway_archive_name`.
+    * the protected wheel named by the signed source manifest;
+    * the protected platform gateway named by that same manifest.
 
     The resolver has already verified the set, but this process verifies the
     signature/checksums again before any service or installed artifact changes.
@@ -3294,37 +4417,62 @@ def _prepare_hard_cut_rollback_plan(
     )
     if not staged_artifact_dir and not os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV):
         raise OSError(f"{_STAGED_BRIDGE_ARTIFACT_DIR_ENV} is required for hard-cut rollback")
-    wheel_name = f"defenseclaw-{source_version}-py3-none-any.whl"
-    archive_name = _gateway_archive_name(source_version, os_name, arch)
     checksums, wheel_path, archive_path = _validate_staged_bridge_artifact_set(
         staged,
         source_version,
         os_name,
         arch,
     )
+    wheel_name = os.path.basename(wheel_path)
+    archive_name = os.path.basename(archive_path)
 
     rollback_root = os.path.join(backup_dir, "hard-cut-rollback")
     os.mkdir(rollback_root, 0o700)
     _protect_windows_rollback_directory(rollback_root)
-    retained_wheel = os.path.join(rollback_root, wheel_name)
-    retained_archive = os.path.join(rollback_root, archive_name)
+    retained_protected_wheel = os.path.join(rollback_root, wheel_name)
+    retained_protected_archive = os.path.join(rollback_root, archive_name)
     if os.name == "nt":
         from defenseclaw import windows_acl
 
         retained_security = windows_acl.private_security_for_directory(rollback_root)
         with open(wheel_path, "rb") as stream:
-            windows_acl.write_new_file(retained_wheel, stream.read(), retained_security)
+            windows_acl.write_new_file(
+                retained_protected_wheel,
+                stream.read(),
+                retained_security,
+            )
         with open(archive_path, "rb") as stream:
-            windows_acl.write_new_file(retained_archive, stream.read(), retained_security)
+            windows_acl.write_new_file(
+                retained_protected_archive,
+                stream.read(),
+                retained_security,
+            )
     else:
-        shutil.copy2(wheel_path, retained_wheel, follow_symlinks=False)
-        shutil.copy2(archive_path, retained_archive, follow_symlinks=False)
-        os.chmod(retained_wheel, 0o600)
-        os.chmod(retained_archive, 0o600)
-    if _sha256_file(retained_wheel) != checksums[wheel_name]:
+        shutil.copy2(wheel_path, retained_protected_wheel, follow_symlinks=False)
+        shutil.copy2(archive_path, retained_protected_archive, follow_symlinks=False)
+        os.chmod(retained_protected_wheel, 0o600)
+        os.chmod(retained_protected_archive, 0o600)
+    if _sha256_file(retained_protected_wheel) != checksums[wheel_name]:
         raise OSError("retained bridge wheel digest mismatch")
-    if _sha256_file(retained_archive) != checksums[archive_name]:
+    if _sha256_file(retained_protected_archive) != checksums[archive_name]:
         raise OSError("retained bridge gateway archive digest mismatch")
+    retained_wheel = os.path.join(rollback_root, _materialized_wheel_name(wheel_name))
+    retained_archive = os.path.join(
+        rollback_root,
+        _materialized_gateway_archive_name(archive_name, os_name),
+    )
+    if retained_wheel != retained_protected_wheel:
+        _materialize_protected_artifact(
+            retained_protected_wheel,
+            retained_wheel,
+            checksums[wheel_name],
+        )
+    if retained_archive != retained_protected_archive:
+        _materialize_protected_artifact(
+            retained_protected_archive,
+            retained_archive,
+            checksums[archive_name],
+        )
 
     extraction_root = os.path.join(rollback_root, "gateway")
     os.mkdir(extraction_root, 0o700)
@@ -3336,18 +4484,22 @@ def _prepare_hard_cut_rollback_plan(
     rollback_gateway = os.path.join(extraction_root, _gateway_binary_filename(os_name))
     if not os.path.isfile(rollback_gateway) or os.path.islink(rollback_gateway):
         raise OSError("retained bridge gateway binary is missing")
+    if os_name == "darwin":
+        _canonicalize_macos_gateway_for_coherence(rollback_gateway)
     if os.name == "nt":
         from defenseclaw import windows_acl
 
         private_gateway_security = windows_acl.private_security_for_directory(extraction_root)
         windows_acl.apply_path(rollback_gateway, private_gateway_security)
-    signed_gateway_sha256 = _sha256_file(rollback_gateway)
+    authenticated_gateway_coherence_sha256 = _sha256_file(rollback_gateway)
 
     # Preserve the exact bridge executable that is active on this host, not
-    # merely another copy reconstructed from the release archive.  Requiring
-    # its bytes to match the authenticated source release catches drift or a
-    # mismatched installed component before the target is allowed to mutate
-    # anything, while the snapshot preserves native metadata for rollback.
+    # merely another copy reconstructed from the release archive. Linux and
+    # Windows compare those exact bytes directly. macOS first validates the
+    # exact snapshot's fixed-identifier signature, then canonicalizes separate
+    # private copies on this host so Developer-ID and ad-hoc signature layouts
+    # do not hide either equivalent code or executable drift. The untouched
+    # snapshot remains the exact rollback source on every platform.
     active_gateway = os.path.join(
         os.path.expanduser("~/.local/bin"),
         _installed_gateway_filename(os_name),
@@ -3357,33 +4509,68 @@ def _prepare_hard_cut_rollback_plan(
         os.path.join(rollback_root, "active-gateway"),
         required=True,
     )
-    if gateway_snapshot.sha256 != signed_gateway_sha256:
+    active_gateway_coherence_sha256 = gateway_snapshot.sha256
+    if os_name == "darwin":
+        assert gateway_snapshot.backup_path is not None
+        _verify_macos_rollback_gateway_signature(gateway_snapshot.backup_path)
+        coherence_gateway = os.path.join(extraction_root, "active-gateway-coherence")
+        coherence_snapshot = _capture_rollback_file(
+            gateway_snapshot.backup_path,
+            coherence_gateway,
+            required=True,
+        )
+        if coherence_snapshot.sha256 != gateway_snapshot.sha256:
+            raise OSError("macOS gateway coherence copy changed during capture")
+        _canonicalize_macos_gateway_for_coherence(coherence_gateway)
+        active_gateway_coherence_sha256 = _sha256_file(coherence_gateway)
+    if active_gateway_coherence_sha256 != authenticated_gateway_coherence_sha256:
         raise OSError(
             "installed bridge gateway does not match its authenticated rollback artifact"
         )
 
-    data_dir = cfg.data_dir if cfg and cfg.data_dir else os.path.expanduser("~/.defenseclaw")
-    from defenseclaw.config import config_path_for_data_dir
-
+    recovery_home = os.path.abspath(
+        os.path.expanduser(recovery_home or _upgrade_recovery_home())
+    )
+    if data_dir is None:
+        data_dir = _resolved_upgrade_data_dir(cfg, recovery_home=recovery_home)
+    else:
+        data_dir = os.path.abspath(os.path.expanduser(data_dir))
+    source_gateway_was_running = _capture_source_gateway_running_state(
+        active_gateway,
+        data_dir,
+    )
     state_root = os.path.join(rollback_root, "state")
     os.mkdir(state_root, 0o700)
     _protect_windows_rollback_directory(state_root)
+    config_path = os.path.abspath(
+        os.path.expanduser(config_path or _active_upgrade_config_path(recovery_home))
+    )
     state_files = tuple(
         _capture_rollback_file(active, os.path.join(state_root, label), required=required)
         for label, active, required in (
-            ("config.yaml", str(config_path_for_data_dir(data_dir)), True),
+            ("config.yaml", config_path, True),
+            (
+                "config.pre-observability-migration.bak",
+                config_path + ".pre-observability-migration.bak",
+                False,
+            ),
+            ("config.lock", config_path + ".lock", False),
+            ("config.tmp-f3395", config_path + ".tmp-f3395", False),
             ("environment", os.path.join(data_dir, ".env"), False),
+            ("environment.lock", os.path.join(data_dir, ".env.lock"), False),
             ("migration-state.json", os.path.join(data_dir, ".migration_state.json"), False),
         )
     )
+    backup_root_snapshot = _capture_hard_cut_backup_root(os.path.dirname(backup_dir))
     if gateway_snapshot.backup_path is None or gateway_snapshot.sha256 is None:
         raise OSError("exact bridge gateway snapshot is unavailable")
     return _HardCutRollbackPlan(
         source_version=source_version,
+        source_gateway_was_running=source_gateway_was_running,
         data_dir=data_dir,
         backup_dir=backup_dir,
         rollback_wheel_path=retained_wheel,
-        rollback_wheel_sha256=checksums[wheel_name],
+        rollback_wheel_sha256=_sha256_file(retained_wheel),
         rollback_gateway_path=gateway_snapshot.backup_path,
         rollback_gateway_sha256=gateway_snapshot.sha256,
         active_gateway_path=active_gateway,
@@ -3392,12 +4579,35 @@ def _prepare_hard_cut_rollback_plan(
         os_name=os_name,
         environment_snapshot=dict(os.environ),
         source_dotenv_values=_read_dotenv_values(data_dir),
+        recovery_home=recovery_home,
+        backup_root_snapshot=backup_root_snapshot,
     )
 
 
 def _upgrade_recovery_home() -> str:
     return os.path.abspath(
         os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+    )
+
+
+def _resolved_upgrade_data_dir(cfg, *, recovery_home: str) -> str:
+    configured = cfg.data_dir if cfg and cfg.data_dir else recovery_home
+    return os.path.abspath(os.path.expanduser(configured))
+
+
+def _active_upgrade_config_path(recovery_home: str | None = None) -> str:
+    """Return the config file that the controller actually loaded.
+
+    ``config.data_dir`` relocates mutable state, but it does not relocate the
+    default config file itself.  Keep controller-home configuration distinct
+    from data-dir state throughout both upgrade phases.
+    """
+
+    from defenseclaw.config import config_path_for_data_dir
+
+    recovery_home = recovery_home or _upgrade_recovery_home()
+    return os.path.abspath(
+        os.path.expanduser(str(config_path_for_data_dir(recovery_home)))
     )
 
 
@@ -3515,10 +4725,10 @@ def _active_phase_two_mutator_lease() -> tuple[str, str] | None:
     return recovery_home, str(_phase_two_mutator_lease_path(recovery_home))
 
 
-def _hold_phase_two_lease_for_command_lifetime() -> None:
+def _hold_phase_two_lease_for_command_lifetime(recovery_home: str | None = None) -> None:
     """Cover direct controller mutations and every child until Click exits."""
 
-    manager = _hold_phase_two_recovery_lease(_upgrade_recovery_home())
+    manager = _hold_phase_two_recovery_lease(recovery_home or _upgrade_recovery_home())
     manager.__enter__()
     context = click.get_current_context(silent=True)
     if context is None:
@@ -3540,6 +4750,8 @@ def _hold_phase_two_lease_for_command_lifetime() -> None:
 def _run_phase_two_mutator(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Run a mutating child with a lease that survives controller death."""
 
+    global _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT
+
     active = _active_phase_two_mutator_lease()
     if active is None:
         return subprocess.run(command, **kwargs)
@@ -3549,12 +4761,16 @@ def _run_phase_two_mutator(command: list[str], **kwargs) -> subprocess.Completed
         # wrapper; Python-side Windows support is implemented in windows_acl.
         from defenseclaw import windows_acl
 
-        return windows_acl.run_phase_two_mutator(
-            command,
-            lease_path=lease_path,
-            held_lease=_HELD_PHASE_TWO_MUTATOR_LEASE,
-            **kwargs,
-        )
+        try:
+            return windows_acl.run_phase_two_mutator(
+                command,
+                lease_path=lease_path,
+                held_lease=_HELD_PHASE_TWO_MUTATOR_LEASE,
+                **kwargs,
+            )
+        except subprocess.TimeoutExpired:
+            _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT = True
+            raise
 
     inherited = _HELD_PHASE_TWO_MUTATOR_LEASE
     if inherited is not None and not isinstance(inherited, int):
@@ -3647,6 +4863,7 @@ def _run_phase_two_mutator(command: list[str], **kwargs) -> subprocess.Completed
         # keep the lease until mutation actually ends. The rollback path's
         # next lease acquisition therefore waits instead of racing an orphan.
         threading.Thread(target=process.wait, daemon=True).start()
+        _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT = True
         cleanup_spool(read=False)
         raise subprocess.TimeoutExpired(
             command,
@@ -3755,17 +4972,136 @@ def _snapshot_from_recovery_json(raw: object) -> _RollbackFileSnapshot:
     )
 
 
+def _directory_snapshot_to_recovery_json(
+    snapshot: _RollbackDirectorySnapshot,
+) -> dict[str, object]:
+    security: dict[str, object] | None = None
+    if snapshot.windows_security is not None:
+        security = {
+            "owner": base64.b64encode(snapshot.windows_security.owner).decode("ascii"),
+            "dacl": base64.b64encode(snapshot.windows_security.dacl).decode("ascii"),
+            "dacl_protected": snapshot.windows_security.dacl_protected,
+        }
+    return {
+        "active_path": snapshot.active_path,
+        "device": snapshot.device,
+        "inode": snapshot.inode,
+        "mode": snapshot.mode,
+        "preexisting_recovery_entries": [
+            {"name": name, "device": device, "inode": inode}
+            for name, device, inode in snapshot.preexisting_recovery_entries
+        ],
+        "windows_security": security,
+    }
+
+
+def _directory_snapshot_from_recovery_json(raw: object) -> _RollbackDirectorySnapshot:
+    fields = {
+        "active_path",
+        "device",
+        "inode",
+        "mode",
+        "preexisting_recovery_entries",
+        "windows_security",
+    }
+    if not isinstance(raw, dict) or set(raw) != fields:
+        raise OSError("hard-cut recovery directory snapshot has invalid fields")
+    active_path = raw["active_path"]
+    device = raw["device"]
+    inode = raw["inode"]
+    mode = raw["mode"]
+    entries_raw = raw["preexisting_recovery_entries"]
+    security_raw = raw["windows_security"]
+    if (
+        not isinstance(active_path, str)
+        or not active_path
+        or not os.path.isabs(active_path)
+        or not isinstance(device, int)
+        or isinstance(device, bool)
+        or device < 0
+        or not isinstance(inode, int)
+        or isinstance(inode, bool)
+        or inode <= 0
+        or not isinstance(mode, int)
+        or isinstance(mode, bool)
+        or not 0 <= mode <= 0o7777
+        or not isinstance(entries_raw, list)
+        or len(entries_raw) > _MAX_PREEXISTING_V8_RECOVERY_ENTRIES
+    ):
+        raise OSError("hard-cut recovery directory snapshot is invalid")
+    parsed_entries: list[tuple[str, int, int]] = []
+    for entry in entries_raw:
+        if not isinstance(entry, dict) or set(entry) != {"name", "device", "inode"}:
+            raise OSError("hard-cut recovery directory inventory is invalid")
+        name = entry["name"]
+        entry_device = entry["device"]
+        entry_inode = entry["inode"]
+        if (
+            not isinstance(name, str)
+            or _V8_RECOVERY_ENTRY_RE.fullmatch(name) is None
+            or not isinstance(entry_device, int)
+            or isinstance(entry_device, bool)
+            or entry_device < 0
+            or not isinstance(entry_inode, int)
+            or isinstance(entry_inode, bool)
+            or entry_inode <= 0
+        ):
+            raise OSError("hard-cut recovery directory inventory is invalid")
+        parsed_entries.append((name, entry_device, entry_inode))
+    if parsed_entries != sorted(set(parsed_entries)) or len({name for name, _, _ in parsed_entries}) != len(
+        parsed_entries
+    ):
+        raise OSError("hard-cut recovery directory inventory is inconsistent")
+
+    security = None
+    if security_raw is not None:
+        if not isinstance(security_raw, dict) or set(security_raw) != {
+            "owner",
+            "dacl",
+            "dacl_protected",
+        }:
+            raise OSError("hard-cut recovery directory security is invalid")
+        owner = security_raw["owner"]
+        dacl = security_raw["dacl"]
+        protected = security_raw["dacl_protected"]
+        if not isinstance(owner, str) or not isinstance(dacl, str) or not isinstance(protected, bool):
+            raise OSError("hard-cut recovery directory security is invalid")
+        try:
+            owner_bytes = base64.b64decode(owner, validate=True)
+            dacl_bytes = base64.b64decode(dacl, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise OSError("hard-cut recovery directory security is invalid") from exc
+        if not owner_bytes or not dacl_bytes:
+            raise OSError("hard-cut recovery directory security is empty")
+        from defenseclaw.windows_acl import WindowsFileSecurity
+
+        security = WindowsFileSecurity(owner_bytes, dacl_bytes, protected)
+    return _RollbackDirectorySnapshot(
+        active_path=active_path,
+        device=device,
+        inode=inode,
+        mode=mode,
+        preexisting_recovery_entries=tuple(parsed_entries),
+        windows_security=security,
+    )
+
+
 def _hard_cut_recovery_payload(
     plan: _HardCutRollbackPlan,
     receipt_path: Path,
     *,
     target_version: str,
 ) -> dict[str, object]:
+    if plan.backup_root_snapshot is None:
+        raise OSError("hard-cut rollback plan lacks its backup-root snapshot")
     return {
         "schema_version": _HARD_CUT_RECOVERY_SCHEMA_VERSION,
         "source_version": plan.source_version,
+        "source_gateway_was_running": plan.source_gateway_was_running,
+        "local_bundle_mutation_intent": plan.local_bundle_mutation_intent,
         "target_version": target_version,
         "os_name": plan.os_name,
+        "recovery_home": plan.recovery_home or _upgrade_recovery_home(),
         "data_dir": plan.data_dir,
         "backup_dir": plan.backup_dir,
         "receipt_path": str(receipt_path),
@@ -3776,6 +5112,9 @@ def _hard_cut_recovery_payload(
         "active_gateway_path": plan.active_gateway_path,
         "gateway_snapshot": _snapshot_to_recovery_json(plan.gateway_snapshot),
         "state_files": [_snapshot_to_recovery_json(snapshot) for snapshot in plan.state_files],
+        "backup_root_snapshot": _directory_snapshot_to_recovery_json(
+            plan.backup_root_snapshot
+        ),
     }
 
 
@@ -3802,7 +5141,29 @@ def _fsync_hard_cut_recovery_custody(plan: _HardCutRollbackPlan) -> None:
             os.close(descriptor)
         directories.add(os.path.dirname(path) or ".")
     if os.name == "posix":
-        for directory in directories:
+        rollback_root = os.path.join(plan.backup_dir, "hard-cut-rollback")
+        state_root = os.path.join(rollback_root, "state")
+        backup_root = os.path.dirname(plan.backup_dir)
+        # A durable file is insufficient when the directory entries leading
+        # to it can still vanish after power loss. Flush deepest-first through
+        # the managed data root before publishing recovery authority.
+        directories.update(
+            {
+                state_root,
+                rollback_root,
+                plan.backup_dir,
+                backup_root,
+                plan.data_dir,
+            }
+        )
+        for directory in sorted(
+            directories,
+            key=lambda item: (item.count(os.sep), len(item)),
+            reverse=True,
+        ):
+            info = os.lstat(directory)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise OSError("hard-cut recovery custody contains a non-directory parent")
             descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(descriptor)
@@ -3841,11 +5202,16 @@ def _write_hard_cut_recovery_journal(
     receipt_path: Path,
     *,
     target_version: str,
+    recovery_home: str | None = None,
 ) -> Path:
     """Durably publish a secret-free rollback plan before target mutation."""
 
     _fsync_hard_cut_recovery_custody(plan)
-    recovery_home = _upgrade_recovery_home()
+    recovery_home = os.path.abspath(
+        os.path.expanduser(recovery_home or plan.recovery_home or _upgrade_recovery_home())
+    )
+    if plan.recovery_home and os.path.abspath(plan.recovery_home) != recovery_home:
+        raise OSError("hard-cut rollback plan targets a different controller home")
     directory = _ensure_private_upgrade_recovery_directory(recovery_home)
     _ensure_phase_two_mutator_lease(recovery_home)
     path = directory / _HARD_CUT_RECOVERY_FILENAME
@@ -3895,6 +5261,70 @@ def _write_hard_cut_recovery_journal(
             pass
         raise
     return path
+
+
+def _mark_hard_cut_bundle_mutation_intent(path: Path) -> None:
+    """Durably declare bundle mutation before the target child may write."""
+
+    raw = _read_bounded_private_json(path)
+    if (
+        not isinstance(raw, dict)
+        or raw.get("schema_version") != _HARD_CUT_RECOVERY_SCHEMA_VERSION
+        or raw.get("local_bundle_mutation_intent") is not False
+    ):
+        raise OSError("hard-cut recovery journal cannot accept bundle mutation intent")
+    raw["local_bundle_mutation_intent"] = True
+    encoded = (json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if len(encoded) > _MAX_HARD_CUT_RECOVERY_BYTES:
+        raise OSError("hard-cut recovery journal exceeds its size bound")
+
+    temporary = path.with_name(f".{path.name}.intent-{secrets.token_hex(16)}")
+    try:
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            security = windows_acl.private_security_for_directory(str(path.parent))
+            windows_acl.write_new_file(str(temporary), encoded, security)
+        else:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                view = memoryview(encoded)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written == 0:
+                        raise OSError("short write while recording bundle mutation intent")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.replace(temporary, path)
+        if os.name == "posix":
+            directory = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+    loaded = _load_hard_cut_recovery_journal(_upgrade_recovery_home())
+    if loaded is None or loaded[1].local_bundle_mutation_intent is not True:
+        raise OSError("hard-cut bundle mutation intent was not durably committed")
 
 
 def _read_bounded_private_json(path: Path) -> object:
@@ -3994,8 +5424,11 @@ def _load_hard_cut_recovery_journal(
     fields = {
         "schema_version",
         "source_version",
+        "source_gateway_was_running",
+        "local_bundle_mutation_intent",
         "target_version",
         "os_name",
+        "recovery_home",
         "data_dir",
         "backup_dir",
         "receipt_path",
@@ -4006,14 +5439,18 @@ def _load_hard_cut_recovery_journal(
         "active_gateway_path",
         "gateway_snapshot",
         "state_files",
+        "backup_root_snapshot",
     }
     if not isinstance(raw, dict) or set(raw) != fields:
         raise OSError("hard-cut recovery journal has invalid fields")
     if raw["schema_version"] != _HARD_CUT_RECOVERY_SCHEMA_VERSION:
         raise OSError("hard-cut recovery journal has an unsupported schema")
     source_version = raw["source_version"]
+    source_gateway_was_running = raw["source_gateway_was_running"]
+    local_bundle_mutation_intent = raw["local_bundle_mutation_intent"]
     target_version = raw["target_version"]
     os_name = raw["os_name"]
+    recorded_recovery_home = raw["recovery_home"]
     recorded_data_dir = raw["data_dir"]
     backup_dir = raw["backup_dir"]
     receipt_path_raw = raw["receipt_path"]
@@ -4025,6 +5462,8 @@ def _load_hard_cut_recovery_journal(
     if (
         not isinstance(source_version, str)
         or not _CANONICAL_VERSION_RE.fullmatch(source_version)
+        or not isinstance(source_gateway_was_running, bool)
+        or not isinstance(local_bundle_mutation_intent, bool)
         or not isinstance(target_version, str)
         or not _CANONICAL_VERSION_RE.fullmatch(target_version)
         or _version_key(source_version) >= _version_key(target_version)
@@ -4032,6 +5471,7 @@ def _load_hard_cut_recovery_journal(
     ):
         raise OSError("hard-cut recovery journal has invalid release identity")
     path_values = (
+        recorded_recovery_home,
         recorded_data_dir,
         backup_dir,
         receipt_path_raw,
@@ -4041,6 +5481,10 @@ def _load_hard_cut_recovery_journal(
     )
     if any(not isinstance(value, str) or not value or not os.path.isabs(value) for value in path_values):
         raise OSError("hard-cut recovery journal has invalid paths")
+    expected_recovery_home = os.path.abspath(os.path.expanduser(recorded_recovery_home))
+    requested_recovery_home = os.path.abspath(os.path.expanduser(recovery_home))
+    if expected_recovery_home != requested_recovery_home:
+        raise OSError("hard-cut recovery journal targets a different controller home")
     expected_data_dir = os.path.abspath(os.path.expanduser(recorded_data_dir))
     backup_root = os.path.join(expected_data_dir, "backups")
     if os.path.dirname(os.path.abspath(backup_dir)) != os.path.abspath(backup_root):
@@ -4059,8 +5503,13 @@ def _load_hard_cut_recovery_journal(
     ):
         raise OSError("hard-cut recovery journal has invalid artifact digests")
     gateway_snapshot = _snapshot_from_recovery_json(raw["gateway_snapshot"])
+    backup_root_snapshot = _directory_snapshot_from_recovery_json(
+        raw["backup_root_snapshot"]
+    )
+    if os.path.abspath(backup_root_snapshot.active_path) != os.path.abspath(backup_root):
+        raise OSError("hard-cut recovery backup-root snapshot is inconsistent")
     state_raw = raw["state_files"]
-    if not isinstance(state_raw, list) or len(state_raw) != 3:
+    if not isinstance(state_raw, list) or len(state_raw) != 7:
         raise OSError("hard-cut recovery journal has invalid state inventory")
     state_files = tuple(_snapshot_from_recovery_json(item) for item in state_raw)
     retained_backups = [
@@ -4083,14 +5532,21 @@ def _load_hard_cut_recovery_journal(
     )
     if os.path.abspath(active_gateway) != os.path.abspath(expected_gateway):
         raise OSError("hard-cut recovery journal targets a different gateway")
-    from defenseclaw.config import config_path_for_data_dir
-
+    # The config path belongs to the original transaction and may be an
+    # explicit path outside DEFENSECLAW_HOME. Never recompute it from the
+    # recovery process's ambient DEFENSECLAW_CONFIG override.
+    recorded_state_paths = tuple(os.path.abspath(item.active_path) for item in state_files)
+    recorded_config_path = recorded_state_paths[0]
     expected_state_paths = (
-        os.path.abspath(str(config_path_for_data_dir(expected_data_dir))),
+        recorded_config_path,
+        recorded_config_path + ".pre-observability-migration.bak",
+        recorded_config_path + ".lock",
+        recorded_config_path + ".tmp-f3395",
         os.path.abspath(os.path.join(expected_data_dir, ".env")),
+        os.path.abspath(os.path.join(expected_data_dir, ".env.lock")),
         os.path.abspath(os.path.join(expected_data_dir, ".migration_state.json")),
     )
-    if tuple(os.path.abspath(item.active_path) for item in state_files) != expected_state_paths:
+    if recorded_state_paths != expected_state_paths:
         raise OSError("hard-cut recovery state inventory is inconsistent")
 
     _assert_private_hard_cut_directory(os.path.abspath(backup_dir), label="recovery backup")
@@ -4118,12 +5574,18 @@ def _load_hard_cut_recovery_journal(
         if any(
             snapshot.existed and snapshot.windows_security is None
             for snapshot in (gateway_snapshot, *state_files)
-        ):
+        ) or backup_root_snapshot.windows_security is None:
             raise OSError("hard-cut recovery lacks Windows security metadata")
-    elif any(snapshot.windows_security is not None for snapshot in (gateway_snapshot, *state_files)):
+    elif any(snapshot.windows_security is not None for snapshot in (gateway_snapshot, *state_files)) or (
+        backup_root_snapshot.windows_security is not None
+    ):
         raise OSError("hard-cut recovery carries unexpected Windows security metadata")
+    recovery_environment = dict(os.environ)
+    recovery_environment["DEFENSECLAW_HOME"] = expected_recovery_home
+    recovery_environment["DEFENSECLAW_CONFIG"] = recorded_config_path
     plan = _HardCutRollbackPlan(
         source_version=source_version,
+        source_gateway_was_running=source_gateway_was_running,
         data_dir=expected_data_dir,
         backup_dir=os.path.abspath(backup_dir),
         rollback_wheel_path=os.path.abspath(wheel_path),
@@ -4134,8 +5596,11 @@ def _load_hard_cut_recovery_journal(
         gateway_snapshot=gateway_snapshot,
         state_files=state_files,
         os_name=os_name,
-        environment_snapshot=dict(os.environ),
+        environment_snapshot=recovery_environment,
         source_dotenv_values={},
+        recovery_home=expected_recovery_home,
+        local_bundle_mutation_intent=local_bundle_mutation_intent,
+        backup_root_snapshot=backup_root_snapshot,
     )
     return path, plan, Path(receipt_path_raw), target_version
 
@@ -4150,20 +5615,32 @@ def _remove_hard_cut_recovery_journal(path: Path) -> None:
             os.close(descriptor)
 
 
-def _crash_bundle_rollback_result(backup_dir: str) -> dict[str, object] | None:
+def _crash_bundle_rollback_result(
+    backup_dir: str,
+    *,
+    required: bool = False,
+) -> dict[str, object] | None:
     metadata_path = Path(backup_dir) / "local-observability-stack" / "refresh-backup.json"
     if not metadata_path.exists() and not metadata_path.is_symlink():
+        if required:
+            # The authenticated target transaction commits this descriptor
+            # before its first bundle write. Once its mutator lease is no
+            # longer active, intent-without-metadata therefore proves the
+            # child stopped before mutation and needs no bundle replay.
+            return {"installed": False}
         return None
     raw = _read_bounded_private_json(metadata_path)
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise OSError("local observability crash rollback metadata is invalid")
     managed = raw.get("managed_paths")
-    if not isinstance(managed, list):
+    restart_required = raw.get("restart_required")
+    if not isinstance(managed, list) or not isinstance(restart_required, bool):
         raise OSError("local observability crash rollback lacks its managed path inventory")
     return {
         "installed": True,
         "managed_paths": managed,
         "changed_paths": [],
+        "restart_required": restart_required,
     }
 
 
@@ -4191,7 +5668,14 @@ def _recover_interrupted_hard_cut(data_dir: str | None = None) -> bool:
             raise OSError("hard-cut recovery receipt is terminal without a recoverable outcome")
 
         ux.banner("Recovering Interrupted Hard-Cut Upgrade")
-        local_bundle_upgrade = _crash_bundle_rollback_result(plan.backup_dir)
+        from defenseclaw import __version__ as recovery_controller_version
+
+        if recovery_controller_version != plan.source_version:
+            _handoff_hard_cut_recovery_to_source_controller(plan)
+        local_bundle_upgrade = _crash_bundle_rollback_result(
+            plan.backup_dir,
+            required=plan.local_bundle_mutation_intent,
+        )
         recovered = _execute_hard_cut_rollback(
             plan,
             AppContext(),
@@ -4206,6 +5690,51 @@ def _recover_interrupted_hard_cut(data_dir: str | None = None) -> bool:
             raise OSError("interrupted hard-cut rollback remains incomplete")
         ux.ok(f"Recovered DefenseClaw {plan.source_version}; restarting the requested upgrade")
         return True
+
+
+def _handoff_hard_cut_recovery_to_source_controller(plan: _HardCutRollbackPlan) -> NoReturn:
+    """Reinstall and exec the bridge before any crash-recovery restore logic."""
+
+    plan_config_path = _hard_cut_plan_config_path(plan)
+    _run_silent(
+        [plan.active_gateway_path, "stop"],
+        "Target gateway stopped for bridge recovery",
+        "Could not stop target gateway for bridge recovery",
+        env=_gateway_process_environment(
+            plan.data_dir,
+            config_path=plan_config_path,
+        ),
+    )
+    _assert_gateway_quiesced(
+        plan.data_dir,
+        gateway_path=plan.active_gateway_path,
+    )
+    if _sha256_file(plan.rollback_wheel_path) != plan.rollback_wheel_sha256:
+        raise OSError("retained bridge wheel changed before recovery handoff")
+    _install_wheel(
+        plan.rollback_wheel_path,
+        plan.os_name,
+        exact_environment=True,
+    )
+    controller_home = plan.recovery_home or _upgrade_recovery_home()
+    venv_python = _venv_python_path(os.path.join(controller_home, ".venv"), plan.os_name)
+    child_env = dict(plan.environment_snapshot)
+    child_env.pop("PYTHONHOME", None)
+    child_env.pop("PYTHONPATH", None)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+    try:
+        os.execve(
+            venv_python,
+            [venv_python, "-I", "-m", "defenseclaw.main", *sys.argv[1:]],
+            child_env,
+        )
+    except OSError as exc:
+        raise OSError("bridge recovery controller re-exec failed") from exc
+    raise OSError("bridge recovery controller re-exec unexpectedly returned")
 
 
 def _assert_private_staged_bridge_directory(path: str) -> None:
@@ -4332,7 +5861,284 @@ def _verify_staged_checksums_signature(
         raise OSError("staged bridge checksum signature verification failed")
 
 
+def _rollback_capture_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _v8_recovery_entries(
+    path: str,
+    descriptor: int | None,
+) -> tuple[tuple[str, int, int], ...]:
+    entries: list[tuple[str, int, int]] = []
+    raw_names = os.listdir(descriptor) if descriptor is not None else os.listdir(path)
+    for name in raw_names:
+        if _V8_RECOVERY_ENTRY_RE.fullmatch(name) is None:
+            continue
+        if descriptor is not None:
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        else:
+            info = os.lstat(os.path.join(path, name))
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & 0x00000400
+            or not stat.S_ISDIR(info.st_mode)
+        ):
+            raise OSError("observability-v8 recovery entry is not a real directory")
+        entries.append((name, info.st_dev, info.st_ino))
+    entries.sort()
+    if len(entries) > _MAX_PREEXISTING_V8_RECOVERY_ENTRIES:
+        raise OSError("too many observability-v8 recovery entries to bind safely")
+    return tuple(entries)
+
+
+def _capture_hard_cut_backup_root(path: str) -> _RollbackDirectorySnapshot:
+    """Bind the recovery root before target migration can add v8 artifacts."""
+
+    active_path = os.path.abspath(path)
+    try:
+        named = os.lstat(active_path)
+    except OSError as exc:
+        raise OSError("hard-cut backup root could not be inspected") from exc
+    if (
+        stat.S_ISLNK(named.st_mode)
+        or getattr(named, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISDIR(named.st_mode)
+    ):
+        raise OSError("hard-cut backup root must be a real directory")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(active_path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or not os.path.samestat(named, opened):
+            raise OSError("hard-cut backup root changed while being captured")
+        if os.name == "posix":
+            if opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o700:
+                raise OSError("hard-cut backup root must be owner-only")
+            entries = _v8_recovery_entries(active_path, descriptor)
+            if entries != _v8_recovery_entries(active_path, descriptor):
+                raise OSError("hard-cut backup root changed while being captured")
+            security = None
+        else:
+            entries = _v8_recovery_entries(active_path, None)
+            if entries != _v8_recovery_entries(active_path, None):
+                raise OSError("hard-cut backup root changed while being captured")
+            security = None
+            if os.name == "nt":
+                from defenseclaw import windows_acl
+
+                security = windows_acl.capture_path(active_path, directory=True)
+                windows_acl.assert_trusted_owner(security)
+                windows_acl.assert_not_broadly_writable(security)
+                if not security.dacl_protected:
+                    raise OSError("hard-cut backup root DACL must be protected")
+        public = os.lstat(active_path)
+        after = os.fstat(descriptor)
+        if not os.path.samestat(opened, after) or not os.path.samestat(opened, public):
+            raise OSError("hard-cut backup root changed while being captured")
+        return _RollbackDirectorySnapshot(
+            active_path=active_path,
+            device=opened.st_dev,
+            inode=opened.st_ino,
+            mode=stat.S_IMODE(opened.st_mode),
+            preexisting_recovery_entries=entries,
+            windows_security=security,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _read_bounded_v8_recovery_manifest(
+    directory_descriptor: int,
+    directory_path: str,
+) -> None:
+    name = "manifest.json"
+    try:
+        info = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > 256 * 1024:
+        raise OSError("observability-v8 recovery manifest is unsafe")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_descriptor,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(info, opened):
+            raise OSError("observability-v8 recovery manifest changed")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > 256 * 1024:
+                raise OSError("observability-v8 recovery manifest is too large")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if not os.path.samestat(opened, after) or after.st_size != size:
+            raise OSError("observability-v8 recovery manifest changed")
+        payload = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    try:
+        document = json.loads(payload)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise OSError(f"observability-v8 recovery manifest is invalid: {directory_path}") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != 1
+        or document.get("kind") != "observability-v8-activation"
+    ):
+        raise OSError("observability-v8 recovery manifest has the wrong contract")
+
+
+def _validate_retained_v8_recovery_entry(
+    root_descriptor: int,
+    root_path: str,
+    name: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    """Accept only the target migration's bounded private recovery shape."""
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_descriptor = os.open(name, flags, dir_fd=root_descriptor)
+    try:
+        info = os.fstat(directory_descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or (info.st_dev, info.st_ino) != expected_identity
+            or (os.name == "posix" and info.st_uid != os.getuid())
+            or stat.S_IMODE(info.st_mode) & 0o077
+        ):
+            raise OSError("observability-v8 recovery directory is not private")
+        entries = os.listdir(directory_descriptor)
+        allowed = {"config.source", "environment.source", "manifest.json"}
+        if len(entries) > len(allowed) or any(entry not in allowed for entry in entries):
+            raise OSError("observability-v8 recovery directory has unexpected entries")
+        for entry in entries:
+            entry_info = os.stat(entry, dir_fd=directory_descriptor, follow_symlinks=False)
+            if (
+                stat.S_ISLNK(entry_info.st_mode)
+                or not stat.S_ISREG(entry_info.st_mode)
+                or entry_info.st_size > _MAX_V8_RECOVERY_FILE_BYTES
+            ):
+                raise OSError("observability-v8 recovery file is unsafe")
+        _read_bounded_v8_recovery_manifest(
+            directory_descriptor,
+            os.path.join(root_path, name),
+        )
+        after = os.fstat(directory_descriptor)
+        public = os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+        if not os.path.samestat(info, after) or not os.path.samestat(info, public):
+            raise OSError("observability-v8 recovery directory changed")
+    finally:
+        os.close(directory_descriptor)
+
+
+def _restore_hard_cut_backup_root_contract(plan: _HardCutRollbackPlan) -> None:
+    """Restore root metadata and retain only bounded target recovery artifacts."""
+
+    snapshot = plan.backup_root_snapshot
+    if snapshot is None:
+        raise OSError("hard-cut rollback plan lacks its backup-root snapshot")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(snapshot.active_path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        public = os.lstat(snapshot.active_path)
+        if (
+            stat.S_ISLNK(public.st_mode)
+            or not stat.S_ISDIR(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (snapshot.device, snapshot.inode)
+            or not os.path.samestat(opened, public)
+        ):
+            raise OSError("hard-cut backup root changed before rollback")
+        if os.name == "posix":
+            if opened.st_uid != os.getuid():
+                raise OSError("hard-cut backup root owner changed before rollback")
+            os.fchmod(descriptor, snapshot.mode)
+            os.fsync(descriptor)
+            entries = _v8_recovery_entries(snapshot.active_path, descriptor)
+        else:
+            if os.name == "nt":
+                if snapshot.windows_security is None:
+                    raise OSError("hard-cut backup root security snapshot is unavailable")
+                from defenseclaw import windows_acl
+
+                windows_acl.apply_path(
+                    snapshot.active_path,
+                    snapshot.windows_security,
+                    directory=True,
+                )
+                if windows_acl.capture_path(snapshot.active_path, directory=True) != snapshot.windows_security:
+                    raise OSError("hard-cut backup root security could not be restored")
+            entries = _v8_recovery_entries(snapshot.active_path, None)
+        baseline = {
+            name: (device, inode)
+            for name, device, inode in snapshot.preexisting_recovery_entries
+        }
+        current = {name: (device, inode) for name, device, inode in entries}
+        if any(current.get(name) != identity for name, identity in baseline.items()):
+            raise OSError("pre-existing observability-v8 recovery entry disappeared")
+        for name in sorted(set(current) - set(baseline)):
+            if os.name == "posix":
+                _validate_retained_v8_recovery_entry(
+                    descriptor,
+                    snapshot.active_path,
+                    name,
+                    current[name],
+                )
+            else:
+                # The v8 activation hard cut is currently POSIX-only. Refuse to
+                # claim exact Windows rollback if an unexpected target recovery
+                # directory nevertheless appears.
+                raise OSError("unexpected observability-v8 recovery entry on this platform")
+        final_entries = (
+            _v8_recovery_entries(snapshot.active_path, descriptor)
+            if os.name == "posix"
+            else _v8_recovery_entries(snapshot.active_path, None)
+        )
+        final = os.fstat(descriptor)
+        final_public = os.lstat(snapshot.active_path)
+        if (
+            final_entries != entries
+            or not os.path.samestat(opened, final)
+            or not os.path.samestat(opened, final_public)
+            or stat.S_IMODE(final.st_mode) != snapshot.mode
+        ):
+            raise OSError("hard-cut backup root mode could not be restored")
+    finally:
+        os.close(descriptor)
+
+
 def _capture_rollback_file(active_path: str, backup_path: str, *, required: bool) -> _RollbackFileSnapshot:
+    """Descriptor-pin one rollback source and publish an owner-only copy.
+
+    POSIX rollback exactness intentionally covers file bytes and permission
+    bits. Ownership, timestamps, and extended attributes are not activation
+    inputs and are not replayed. Windows separately captures the exact native
+    owner/DACL descriptor.
+    """
+
     try:
         info = os.lstat(active_path)
     except FileNotFoundError:
@@ -4341,33 +6147,131 @@ def _capture_rollback_file(active_path: str, backup_path: str, *, required: bool
         return _RollbackFileSnapshot(active_path, None, False, None, None)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise OSError(f"rollback source must be a regular file: {active_path}")
-    windows_security = None
-    if os.name == "nt":
-        from defenseclaw import windows_acl
+    if getattr(info, "st_file_attributes", 0) & 0x00000400:
+        raise OSError(f"rollback source must not be a reparse point: {active_path}")
 
-        if getattr(info, "st_file_attributes", 0) & 0x00000400:
-            raise OSError(f"rollback source must not be a reparse point: {active_path}")
-        descriptor = os.open(active_path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    source_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        source_descriptor = os.open(active_path, source_flags)
+    except OSError as exc:
+        raise OSError(f"rollback source could not be opened safely: {active_path}") from exc
+    backup_created = False
+    backup_identity: os.stat_result | None = None
+    windows_security = None
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(source_descriptor)
+        opened_identity = _rollback_capture_identity(opened)
+        if not stat.S_ISREG(opened.st_mode) or opened_identity != _rollback_capture_identity(info):
+            raise OSError(f"rollback source changed while opening: {active_path}")
+
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            windows_security = windows_acl.capture_fd(source_descriptor)
+            payload = bytearray()
+            while True:
+                block = os.read(source_descriptor, 1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                payload.extend(block)
+        else:
+            destination_flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            destination_descriptor = os.open(backup_path, destination_flags, 0o600)
+            backup_created = True
+            try:
+                os.fchmod(destination_descriptor, 0o600)
+                while True:
+                    block = os.read(source_descriptor, 1024 * 1024)
+                    if not block:
+                        break
+                    digest.update(block)
+                    view = memoryview(block)
+                    while view:
+                        written = os.write(destination_descriptor, view)
+                        if written == 0:
+                            raise OSError("short write while capturing rollback source")
+                        view = view[written:]
+                os.fsync(destination_descriptor)
+                backup_identity = os.fstat(destination_descriptor)
+            finally:
+                os.close(destination_descriptor)
+
+        after = os.fstat(source_descriptor)
         try:
-            opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-                raise OSError(f"rollback source changed while opening: {active_path}")
-            windows_security = windows_acl.capture_fd(descriptor)
-            with os.fdopen(os.dup(descriptor), "rb") as stream:
-                payload = stream.read()
-        finally:
-            os.close(descriptor)
-        private_security = windows_acl.private_security_for_directory(os.path.dirname(backup_path))
-        windows_acl.write_new_file(backup_path, payload, private_security)
-    else:
-        shutil.copy2(active_path, backup_path, follow_symlinks=False)
-        os.chmod(backup_path, 0o600)
-    digest = _sha256_file(backup_path)
+            named = os.lstat(active_path)
+        except OSError as exc:
+            raise OSError(f"rollback source changed while being read: {active_path}") from exc
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or _rollback_capture_identity(after) != opened_identity
+            or stat.S_ISLNK(named.st_mode)
+            or getattr(named, "st_file_attributes", 0) & 0x00000400
+            or not stat.S_ISREG(named.st_mode)
+            or _rollback_capture_identity(named) != opened_identity
+        ):
+            raise OSError(f"rollback source changed while being read: {active_path}")
+
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            private_security = windows_acl.private_security_for_directory(os.path.dirname(backup_path))
+            windows_acl.write_new_file(backup_path, bytes(payload), private_security)
+            backup_created = True
+            backup_identity = os.lstat(backup_path)
+        else:
+            assert backup_identity is not None
+            named_backup = os.lstat(backup_path)
+            if (
+                stat.S_ISLNK(named_backup.st_mode)
+                or not stat.S_ISREG(named_backup.st_mode)
+                or not os.path.samestat(named_backup, backup_identity)
+                or stat.S_IMODE(named_backup.st_mode) != 0o600
+            ):
+                raise OSError("rollback backup changed while being published")
+    except BaseException:
+        if backup_created:
+            try:
+                named_backup = os.lstat(backup_path)
+                if backup_identity is None or os.path.samestat(named_backup, backup_identity):
+                    os.unlink(backup_path)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(source_descriptor)
+
+    captured_digest = digest.hexdigest()
+    try:
+        with _open_real_rollback_backup(backup_path) as stream:
+            verified = hashlib.sha256()
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                verified.update(block)
+            if verified.hexdigest() != captured_digest:
+                raise OSError("rollback backup digest changed after capture")
+    except BaseException:
+        try:
+            os.unlink(backup_path)
+        except OSError:
+            pass
+        raise
     return _RollbackFileSnapshot(
         active_path=active_path,
         backup_path=backup_path,
         existed=True,
-        sha256=digest,
+        sha256=captured_digest,
         mode=stat.S_IMODE(info.st_mode),
         windows_security=windows_security,
     )
@@ -4427,16 +6331,22 @@ def _poll_installed_health(
     expected_version: str,
     *,
     os_name: str,
+    config_path: str | None = None,
+    recovery_home: str | None = None,
 ) -> None:
     """Load configuration and verify health in the freshly installed wheel."""
 
-    managed_venv = os.path.expanduser("~/.defenseclaw/.venv")
+    managed_venv = _managed_venv_path()
     venv_python = _venv_python_path(managed_venv, os_name)
     if not os.path.isfile(venv_python):
         raise OSError("fresh-process health check cannot find the managed CLI interpreter")
-    child_env = os.environ.copy()
-    child_env.pop("PYTHONHOME", None)
-    child_env.pop("PYTHONPATH", None)
+    child_env = _sanitized_python_child_environment()
+    child_env["DEFENSECLAW_HOME"] = os.path.abspath(
+        os.path.expanduser(recovery_home or _upgrade_recovery_home())
+    )
+    child_env["DEFENSECLAW_CONFIG"] = os.path.abspath(
+        os.path.expanduser(config_path or _active_upgrade_config_path())
+    )
     try:
         completed = subprocess.run(
             [
@@ -4485,7 +6395,7 @@ def _execute_hard_cut_rollback(
     retain_pending_on_failure: bool = False,
     recovery_journal_path: Path | None = None,
 ) -> bool:
-    """Restore the retained bridge state and prove its gateway is healthy.
+    """Restore retained bridge bytes and its exact running/stopped state.
 
     The receipt must still be pending when this function is called.  A
     successful rollback records ``status=rolled_back`` while retaining the
@@ -4495,45 +6405,75 @@ def _execute_hard_cut_rollback(
 
     ux.banner("Rolling Back Hard-Cut Upgrade")
     try:
-        if not _run_silent(
-            ["defenseclaw-gateway", "stop"],
+        plan_config_path = _hard_cut_plan_config_path(plan)
+        stop_reported_success = _run_silent(
+            [plan.active_gateway_path, "stop"],
             "Target gateway stopped",
             "Could not stop target gateway",
-        ):
-            raise OSError("target gateway stop command failed during rollback")
-        _assert_gateway_quiesced(plan.data_dir)
+            env=_gateway_process_environment(
+                plan.data_dir,
+                config_path=plan_config_path,
+            ),
+        )
+        try:
+            _assert_gateway_quiesced(
+                plan.data_dir,
+                gateway_path=plan.active_gateway_path,
+            )
+        except OSError:
+            if not stop_reported_success:
+                raise OSError("target gateway stop command failed during rollback") from None
+            raise
+        _cleanup_hard_cut_mutation_temporaries(plan)
         _restore_rollback_environment(plan.environment_snapshot)
         for snapshot in plan.state_files:
             _restore_rollback_file(snapshot)
+        _restore_rollback_gateway(plan)
+        if _sha256_file(plan.rollback_wheel_path) != plan.rollback_wheel_sha256:
+            raise OSError("retained bridge wheel changed before rollback")
+        _install_wheel(
+            plan.rollback_wheel_path,
+            plan.os_name,
+            exact_environment=True,
+        )
+        _verify_restored_bridge_artifacts(plan)
+        # Import bundle rollback only after the authenticated bridge wheel is
+        # back on disk. The failed target must never supply recovery code.
         _restore_local_observability_upgrade_backup(
             plan.data_dir,
             plan.backup_dir,
             local_bundle_upgrade,
         )
-        _restore_rollback_gateway(plan)
-        if _sha256_file(plan.rollback_wheel_path) != plan.rollback_wheel_sha256:
-            raise OSError("retained bridge wheel changed before rollback")
-        _install_wheel(plan.rollback_wheel_path, plan.os_name)
-        _verify_restored_bridge_artifacts(plan)
+        _restore_hard_cut_backup_root_contract(plan)
 
-        if not _run_silent(
-            ["defenseclaw-gateway", "start"],
-            "Restored bridge gateway started",
-            "Could not start restored bridge gateway",
-        ):
-            raise OSError("restored bridge gateway failed to start")
-        _poll_installed_health(
-            plan.data_dir,
-            health_timeout,
-            plan.source_version,
-            os_name=plan.os_name,
-        )
+        if plan.source_gateway_was_running:
+            if not _run_silent(
+                [plan.active_gateway_path, "start"],
+                "Restored bridge gateway started",
+                "Could not start restored bridge gateway",
+                env=_gateway_process_environment(
+                    plan.data_dir,
+                    config_path=plan_config_path,
+                ),
+            ):
+                raise OSError("restored bridge gateway failed to start")
+            _poll_installed_health(
+                plan.data_dir,
+                health_timeout,
+                plan.source_version,
+                os_name=plan.os_name,
+            )
+
+        else:
+            _assert_gateway_quiesced(
+                plan.data_dir,
+                gateway_path=plan.active_gateway_path,
+            )
 
         if local_bundle_upgrade and local_bundle_upgrade.get("restart_required") is True:
-            restored_bundle = _run_installed_local_observability_bundle_restart(
+            restored_bundle = _restart_restored_local_observability_stack(
                 plan.data_dir,
                 health_timeout=max(health_timeout, 1),
-                os_name=plan.os_name,
             )
             errors = restored_bundle.get("degraded_errors", [])
             if restored_bundle.get("restarted") is not True or errors:
@@ -4549,30 +6489,93 @@ def _execute_hard_cut_rollback(
         return False
 
     try:
-        # Health is now proven and no target mutator remains. Remove recovery
-        # authority before publishing a terminal receipt, so the v8 consumer
-        # can never acknowledge/delete the receipt while a stale journal still
-        # tells native resolvers that rollback is pending.
-        if recovery_journal_path is not None:
-            _remove_hard_cut_recovery_journal(recovery_journal_path)
         complete_upgrade_receipt(
             receipt_path,
             status="rolled_back",
             failure_code=failure_code,
         )
     except (OSError, ValueError):
-        if recovery_journal_path is None or recovery_journal_path.exists():
-            if not retain_pending_on_failure:
-                _record_failed_upgrade_receipt(receipt_path, failure_code)
-        else:
-            # Rollback itself is healthy and recovery authority is gone. A
-            # terminal failed receipt is safer than leaving an unprovable
-            # pending record with no journal to replay.
+        if not retain_pending_on_failure:
             _record_failed_upgrade_receipt(receipt_path, failure_code)
         ux.err("Rollback succeeded, but its durable receipt could not be finalized.", indent="  ")
         return False
-    ux.ok(f"Restored DefenseClaw {plan.source_version}; gateway health verified")
+    # As with target success, terminal state is committed before recovery
+    # authority is removed. A crash now is idempotently resolved from the
+    # terminal receipt on the next invocation.
+    if recovery_journal_path is not None:
+        try:
+            _remove_hard_cut_recovery_journal(recovery_journal_path)
+        except OSError:
+            ux.warn(
+                "Rollback is durable, but stale recovery-journal cleanup was deferred.",
+                indent="  ",
+            )
+    if plan.source_gateway_was_running:
+        ux.ok(f"Restored DefenseClaw {plan.source_version}; gateway health verified")
+    else:
+        ux.ok(f"Restored DefenseClaw {plan.source_version}; original stopped state verified")
     return True
+
+
+def _restart_restored_local_observability_stack(
+    data_dir: str,
+    *,
+    health_timeout: int,
+) -> dict[str, object]:
+    """Restart the restored stack without importing code from either wheel."""
+
+    destination = Path(data_dir) / "observability-stack"
+    bridge = destination / "bin" / "openclaw-observability-bridge"
+    try:
+        destination_info = destination.lstat()
+        bridge_info = bridge.lstat()
+    except OSError as exc:
+        raise OSError("restored local observability bridge is unavailable") from exc
+    if (
+        stat.S_ISLNK(destination_info.st_mode)
+        or not stat.S_ISDIR(destination_info.st_mode)
+        or stat.S_ISLNK(bridge_info.st_mode)
+        or not stat.S_ISREG(bridge_info.st_mode)
+    ):
+        raise OSError("restored local observability bridge path is unsafe")
+    try:
+        completed = _run_phase_two_mutator(
+            [
+                str(bridge),
+                "up",
+                "--output",
+                "json",
+                "--timeout",
+                str(health_timeout),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(health_timeout + 30, 60),
+            check=False,
+            env=_gateway_process_environment(data_dir),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("restored local observability stack failed readiness") from exc
+    contract = None
+    for line in (completed.stdout or "").splitlines():
+        if not line.lstrip().startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            contract = candidate
+    required = ("otlp_endpoint", "grafana_url", "prometheus_url", "tempo_url", "loki_url")
+    ready = (
+        completed.returncode == 0
+        and isinstance(contract, dict)
+        and all(isinstance(contract.get(name), str) and contract[name] for name in required)
+    )
+    return {
+        "restarted": ready,
+        "degraded_errors": [] if ready else ["stack_restart_failed"],
+    }
 
 
 def _restore_rollback_file(snapshot: _RollbackFileSnapshot) -> None:
@@ -4587,30 +6590,109 @@ def _restore_rollback_file(snapshot: _RollbackFileSnapshot) -> None:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise OSError("rollback-created path is not a regular file")
         os.unlink(snapshot.active_path)
+        _fsync_posix_directory(os.path.dirname(snapshot.active_path) or ".")
         return
     if (
         snapshot.backup_path is None
         or snapshot.sha256 is None
         or snapshot.mode is None
-        or _sha256_file(snapshot.backup_path) != snapshot.sha256
     ):
         raise OSError("rollback state backup is missing or changed")
     parent = os.path.dirname(snapshot.active_path) or "."
     fd, temporary = tempfile.mkstemp(prefix=".defenseclaw-rollback-", dir=parent)
-    os.close(fd)
     try:
-        shutil.copy2(snapshot.backup_path, temporary, follow_symlinks=False)
-        os.chmod(temporary, snapshot.mode)
+        with _open_real_rollback_backup(snapshot.backup_path) as source:
+            with os.fdopen(os.dup(fd), "wb") as destination:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    destination.write(chunk)
+        if digest.hexdigest() != snapshot.sha256:
+            raise OSError("rollback state backup is missing or changed")
+        os.fchmod(fd, snapshot.mode)
         if _sha256_file(temporary) != snapshot.sha256:
             raise OSError("staged rollback state digest mismatch")
+        os.fsync(fd)
         os.replace(temporary, snapshot.active_path)
         if _sha256_file(snapshot.active_path) != snapshot.sha256:
             raise OSError("restored rollback state digest mismatch")
+        _fsync_posix_directory(parent)
     finally:
+        os.close(fd)
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+@contextmanager
+def _open_real_rollback_backup(path: str):
+    """Open one regular, non-reparse rollback object without following links."""
+
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise OSError("rollback state backup is missing or changed") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or getattr(before, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise OSError("rollback state backup is not a real regular file")
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise OSError("rollback state backup could not be opened safely") from exc
+    try:
+        opened = os.fstat(descriptor)
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        opened_identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        if not stat.S_ISREG(opened.st_mode) or opened_identity != before_identity:
+            raise OSError("rollback state backup changed while opening")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            try:
+                yield stream
+            finally:
+                after = os.fstat(descriptor)
+                after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                if not stat.S_ISREG(after.st_mode) or after_identity != opened_identity:
+                    raise OSError("rollback state backup changed while being read")
+                try:
+                    named = os.lstat(path)
+                except OSError as exc:
+                    raise OSError("rollback state backup changed while being read") from exc
+                named_identity = (named.st_dev, named.st_ino, named.st_size, named.st_mtime_ns)
+                if (
+                    stat.S_ISLNK(named.st_mode)
+                    or getattr(named, "st_file_attributes", 0) & 0x00000400
+                    or not stat.S_ISREG(named.st_mode)
+                    or named_identity != opened_identity
+                ):
+                    raise OSError("rollback state backup changed while being read")
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_posix_directory(path: str) -> None:
+    """Durably publish a preceding POSIX directory-entry mutation."""
+
+    if os.name != "posix":
+        return
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _restore_windows_rollback_file(snapshot: _RollbackFileSnapshot) -> None:
@@ -4650,11 +6732,12 @@ def _restore_windows_rollback_file(snapshot: _RollbackFileSnapshot) -> None:
         snapshot.backup_path is None
         or snapshot.sha256 is None
         or snapshot.windows_security is None
-        or _sha256_file(snapshot.backup_path) != snapshot.sha256
     ):
         raise OSError("Windows rollback state backup or owner/DACL is missing or changed")
-    with open(snapshot.backup_path, "rb") as stream:
+    with _open_real_rollback_backup(snapshot.backup_path) as stream:
         payload = stream.read()
+    if hashlib.sha256(payload).hexdigest() != snapshot.sha256:
+        raise OSError("Windows rollback state backup or owner/DACL is missing or changed")
     temporary = os.path.join(parent, f".{basename}.hard-cut-restore-{secrets.token_hex(16)}")
     failed_publish = os.path.join(parent, f".{basename}.hard-cut-failed-{secrets.token_hex(16)}")
     _stage_windows_rollback_file(temporary, payload, snapshot.windows_security)
@@ -4757,7 +6840,6 @@ def _restore_rollback_gateway(plan: _HardCutRollbackPlan) -> None:
         or snapshot.sha256 != plan.rollback_gateway_sha256
         or snapshot.backup_path is None
         or snapshot.sha256 is None
-        or _sha256_file(snapshot.backup_path) != snapshot.sha256
     ):
         raise OSError("retained bridge gateway changed before rollback")
     _restore_rollback_file(snapshot)
@@ -4777,16 +6859,28 @@ def _verify_restored_bridge_artifacts(plan: _HardCutRollbackPlan) -> None:
     if gateway.returncode != 0 or plan.source_version not in gateway_output:
         raise OSError("restored gateway version verification failed")
 
-    managed_venv = os.path.expanduser("~/.defenseclaw/.venv")
+    managed_venv = _managed_venv_path()
     venv_python = _venv_python_path(managed_venv, plan.os_name)
     cli = subprocess.run(
-        [venv_python, "-I", "-c", "from defenseclaw import __version__; print(__version__)"],
+        [venv_python, "-I", "-c", _INSTALLED_PACKAGE_METADATA_SCRIPT],
         capture_output=True,
         text=True,
         timeout=10,
         check=False,
     )
-    if cli.returncode != 0 or (cli.stdout or "").strip() != plan.source_version:
+    try:
+        installed_metadata = json.loads((cli.stdout or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        installed_metadata = None
+    expected_requires_dist = list(
+        _wheel_dependency_contract(plan.rollback_wheel_path, plan.source_version)
+    )
+    if (
+        cli.returncode != 0
+        or not isinstance(installed_metadata, dict)
+        or installed_metadata.get("version") != plan.source_version
+        or installed_metadata.get("requires_dist") != expected_requires_dist
+    ):
         raise OSError("restored CLI version verification failed")
 
 
@@ -5009,7 +7103,13 @@ def _create_private_windows_backup_directory(backup_root: str, timestamp: str) -
     raise OSError("unable to allocate a unique Windows upgrade backup")
 
 
-def _run_silent(cmd: list[str], ok_msg: str, fail_msg: str) -> bool:
+def _run_silent(
+    cmd: list[str],
+    ok_msg: str,
+    fail_msg: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> bool:
     """Run a command, printing ok_msg on success and fail_msg on failure.
 
     On non-zero exit, surface the first few stderr/stdout lines so an
@@ -5019,13 +7119,15 @@ def _run_silent(cmd: list[str], ok_msg: str, fail_msg: str) -> bool:
     flow never raises mid-restart.
     """
     try:
-        result = _run_phase_two_mutator(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        kwargs: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 30,
+            "check": False,
+        }
+        if env is not None:
+            kwargs["env"] = env
+        result = _run_phase_two_mutator(cmd, **kwargs)
         if result.returncode == 0:
             ux.ok(ok_msg)
             return True

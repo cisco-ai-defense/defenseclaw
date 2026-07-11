@@ -42,6 +42,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       commit: ${{ steps.provenance.outputs.commit }}
       baselines: ${{ steps.baselines.outputs.baselines }}
+      windows_baselines: ${{ steps.baselines.outputs.windows_baselines }}
       previous_baseline: ${{ steps.baselines.outputs.previous_baseline }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -83,8 +84,27 @@ jobs:
           if not isinstance(rules, list):
               raise SystemExit("release environment protection_rules are unavailable")
           reviewer_rules = [rule for rule in rules if rule.get("type") == "required_reviewers"]
-          if len(reviewer_rules) != 1 or not reviewer_rules[0].get("reviewers"):
-              raise SystemExit("release environment must require at least one reviewer")
+          if len(reviewer_rules) != 1:
+              raise SystemExit("release environment must define exactly one reviewer rule")
+          reviewers = reviewer_rules[0].get("reviewers")
+          if not isinstance(reviewers, list) or len(reviewers) != 1:
+              raise SystemExit(
+                  "release environment must require exactly the defenseclaw-reviewers team"
+              )
+          reviewer = reviewers[0]
+          team = reviewer.get("reviewer") if isinstance(reviewer, dict) else None
+          if (
+              not isinstance(reviewer, dict)
+              or reviewer.get("type") != "Team"
+              or not isinstance(team, dict)
+              or team.get("id") != 16849702
+              or team.get("slug") != "defenseclaw-reviewers"
+          ):
+              raise SystemExit(
+                  "release environment reviewer must be cisco-ai-defense/defenseclaw-reviewers"
+              )
+          if reviewer_rules[0].get("prevent_self_review") is not True:
+              raise SystemExit("release environment must prevent initiator self-review")
           policy = environment.get("deployment_branch_policy")
           if not isinstance(policy, dict) or policy.get("protected_branches") is not True:
               raise SystemExit("release environment must permit only protected branches")
@@ -117,7 +137,45 @@ jobs:
             echo "::error title=Release already exists::A draft or published release for '$TAG' already exists."
             exit 1
           fi
+          gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > published-releases.json
+          python3 scripts/release_candidate.py validate-version \
+            --target "$TAG" \
+            --releases-json published-releases.json
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Require reviewed source release identity
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json >/dev/null
+          python3 scripts/source_release_identity.py check \
+            --expected-release "$RELEASE_TAG"
+          # The remote tag will point at this exact reviewed main commit. A
+          # workflow-only version rewrite would make GitHub source archives
+          # disagree with the signed wheel/gateway release, so prove the
+          # legacy stamp helper is already a byte-for-byte no-op.
+          scripts/stamp-version.sh "$RELEASE_TAG"
+          git diff --exit-code -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json
 
       - name: Verify release commit is reviewed and branch-owned
         id: provenance
@@ -165,11 +223,61 @@ jobs:
           key = lambda value: tuple(map(int, value.split(".")))
           if baselines != sorted(baselines, key=key, reverse=True):
               raise SystemExit("published baselines must be in descending semver order")
+          platforms = document.get("platform_published_baselines")
+          if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
+              raise SystemExit("platform_published_baselines must contain exactly windows")
+          windows = platforms["windows"]
+          if not isinstance(windows, list) or not windows:
+              raise SystemExit("the reviewed Windows baseline matrix must be non-empty")
+          if any(not isinstance(item, str) or not semver.fullmatch(item) for item in windows):
+              raise SystemExit("every Windows baseline must be canonical X.Y.Z")
+          if len(windows) != len(set(windows)) or windows != sorted(windows, key=key, reverse=True):
+              raise SystemExit("Windows baselines must be unique descending semver")
+          if any(item not in baselines for item in windows):
+              raise SystemExit("Windows baselines must be a subset of published_baselines")
+          digest_policy_path = Path("release/historical-artifact-digests.json")
+          digest_policy = json.loads(digest_policy_path.read_text(encoding="utf-8"))
+          if set(digest_policy) != {
+              "schema_version",
+              "signed_wheel_coverage_starts_at",
+              "signed_checksum_exceptions",
+          } or digest_policy.get("schema_version") != 1:
+              raise SystemExit("historical artifact digest policy schema is invalid")
+          signed_wheel_start = digest_policy.get("signed_wheel_coverage_starts_at")
+          exceptions = digest_policy.get("signed_checksum_exceptions")
+          if not isinstance(signed_wheel_start, str) or not semver.fullmatch(signed_wheel_start):
+              raise SystemExit("historical signed-wheel coverage boundary is invalid")
+          if not isinstance(exceptions, dict):
+              raise SystemExit("historical artifact digest exceptions must be an object")
+          expected_exception_versions = {
+              item for item in baselines if key(item) < key(signed_wheel_start)
+          }
+          if set(exceptions) != expected_exception_versions:
+              raise SystemExit(
+                  "historical wheel digest exceptions do not exactly cover the unsigned baseline suffix"
+              )
+          for version, artifacts in exceptions.items():
+              expected_name = f"defenseclaw-{version}-py3-none-any.whl"
+              if not isinstance(artifacts, dict) or set(artifacts) != {expected_name}:
+                  raise SystemExit(
+                      f"historical digest exception for {version} must cover only {expected_name}"
+                  )
+              digest = artifacts[expected_name]
+              if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                  raise SystemExit(f"historical digest exception for {version} is invalid")
           older = [item for item in baselines if key(item) < key(target)]
+          windows_older = [item for item in windows if key(item) < key(target)]
           if not older:
               raise SystemExit(f"no configured published baseline is older than target {target}")
+          if not windows_older:
+              raise SystemExit(f"no reviewed Windows baseline is older than target {target}")
           with open(output_path, "a", encoding="utf-8") as output:
               output.write("baselines=" + json.dumps(older, separators=(",", ":")) + "\n")
+              output.write(
+                  "windows_baselines="
+                  + json.dumps(windows_older, separators=(",", ":"))
+                  + "\n"
+              )
               output.write(f"previous_baseline={older[0]}\n")
           PY
 
@@ -243,10 +351,33 @@ jobs:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
         run: |
           set -euo pipefail
+          git ls-files --error-unmatch -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json >/dev/null
           scripts/stamp-version.sh "$RELEASE_TAG"
+          git diff --exit-code -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json
+          python3 scripts/source_release_identity.py check \
+            --expected-release "$RELEASE_TAG"
           make dist-cli
           make dist-plugin
           make dist-upgrade-manifest
+          python3 scripts/release_candidate.py prepare-runtime \
+            --release-dir dist \
+            --version "$RELEASE_TAG"
 
       - name: Validate and stage publishable runtime bytes
         env:
@@ -351,6 +482,7 @@ jobs:
       min_upgrade_protocol: ${{ steps.policy.outputs.min_upgrade_protocol }}
       required_bridge_version: ${{ steps.policy.outputs.required_bridge_version }}
       windows_baselines: ${{ steps.policy.outputs.windows_baselines }}
+      windows_prebridge_baselines: ${{ steps.policy.outputs.windows_prebridge_baselines }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -412,24 +544,85 @@ jobs:
           python3 - \
             release-candidate/dist/upgrade-manifest.json \
             "$GITHUB_OUTPUT" \
-            '${{ needs.release-preflight.outputs.baselines }}' <<'PY'
+            '${{ needs.release-preflight.outputs.baselines }}' \
+            '${{ needs.release-preflight.outputs.windows_baselines }}' <<'PY'
           import json
           import re
           import sys
 
-          manifest_path, output_path, reviewed_json = sys.argv[1:]
+          manifest_path, output_path, reviewed_json, reviewed_windows_json = sys.argv[1:]
           with open(manifest_path, encoding="utf-8") as handle:
               manifest = json.load(handle)
           reviewed = json.loads(reviewed_json)
+          reviewed_windows = json.loads(reviewed_windows_json)
+          schema = manifest.get("schema_version")
           protocol = manifest.get("min_upgrade_protocol", 1)
           bridge = manifest.get("required_bridge_version", "")
           automatic = manifest.get("auto_bridge_from")
+          tested = manifest.get("tested_source_versions")
+          platform_tested = manifest.get("platform_tested_source_versions")
+          runtime_config = manifest.get("runtime_config_version")
+          release_artifacts = manifest.get("release_artifacts")
+          if schema != 2:
+              raise SystemExit("modern release candidate must use upgrade manifest schema 2")
           if not isinstance(protocol, int) or isinstance(protocol, bool) or protocol < 1:
               raise SystemExit("invalid min_upgrade_protocol")
           if bridge and (not isinstance(bridge, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", bridge)):
               raise SystemExit("invalid required_bridge_version")
           if not isinstance(reviewed, list) or not reviewed:
               raise SystemExit("reviewed release baseline matrix is empty or invalid")
+          if not isinstance(reviewed_windows, list) or not reviewed_windows:
+              raise SystemExit("reviewed Windows release baseline matrix is empty or invalid")
+          if tested != reviewed:
+              raise SystemExit("tested_source_versions does not match the reviewed release matrix")
+          if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
+              raise SystemExit("signed platform tested-source policy must contain exactly windows")
+          if platform_tested["windows"] != reviewed_windows:
+              raise SystemExit(
+                  "platform_tested_source_versions.windows does not match the reviewed Windows matrix"
+              )
+          with open("internal/config/config.go", encoding="utf-8") as handle:
+              runtime_source = handle.read()
+          runtime_matches = re.findall(
+              r"^const[ \t]+CurrentConfigVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$",
+              runtime_source,
+              re.MULTILINE,
+          )
+          if len(runtime_matches) != 1:
+              raise SystemExit("gateway source must declare one literal CurrentConfigVersion")
+          source_runtime = int(runtime_matches[0])
+          expected_runtime = 8 if bridge else 7
+          if source_runtime != expected_runtime or runtime_config != expected_runtime:
+              raise SystemExit(
+                  "runtime_config_version does not attest the expected bridge/hard-cut runtime"
+              )
+          release_version = manifest.get("release_version")
+          expected_gateways = {}
+          for os_name in ("darwin", "linux", "windows"):
+              expected_gateways[os_name] = {
+                  arch: f"defenseclaw_{release_version}_protocol2_{os_name}_{arch}.dcgateway"
+                  for arch in ("amd64", "arm64")
+              }
+          expected_artifacts = {
+              "wheel": f"defenseclaw-{release_version}-2-py3-none-any.dcwheel",
+              "gateways": expected_gateways,
+          }
+          if release_artifacts != expected_artifacts:
+              raise SystemExit(
+                  "release_artifacts does not bind the exact protected candidate payload"
+              )
+          if bridge and bridge not in platform_tested["windows"]:
+              raise SystemExit("required bridge is absent from the signed Windows matrix")
+          windows_prebridge = list(platform_tested["windows"])
+          if bridge:
+              bridge_key = tuple(map(int, bridge.split(".")))
+              windows_prebridge = [
+                  item
+                  for item in windows_prebridge
+                  if tuple(map(int, item.split("."))) < bridge_key
+              ]
+              if not windows_prebridge:
+                  raise SystemExit("signed Windows matrix has no pre-bridge source")
           if automatic is not None:
               if not isinstance(automatic, list) or not automatic:
                   raise SystemExit("hard-cut auto_bridge_from must be a non-empty list")
@@ -443,15 +636,17 @@ jobs:
                   raise SystemExit(
                       "hard-cut auto_bridge_from does not match the reviewed pre-bridge matrix"
                   )
-              windows_baselines = expected_automatic
-          else:
-              windows_baselines = reviewed
           with open(output_path, "a", encoding="utf-8") as output:
               output.write(f"min_upgrade_protocol={protocol}\n")
               output.write(f"required_bridge_version={bridge}\n")
               output.write(
                   "windows_baselines="
-                  + json.dumps(windows_baselines, separators=(",", ":"))
+                  + json.dumps(platform_tested["windows"], separators=(",", ":"))
+                  + "\n"
+              )
+              output.write(
+                  "windows_prebridge_baselines="
+                  + json.dumps(windows_prebridge, separators=(",", ":"))
                   + "\n"
               )
           PY
@@ -498,6 +693,90 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+  posix-fresh-install:
+    name: Fresh install sealed candidate (${{ matrix.runner }})
+    needs: [release-preflight, assemble-release-candidate]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-15]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          path: release-candidate
+
+      - name: Verify and install the exact sealed candidate on a fresh host
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          cosign verify-blob \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          bash scripts/test-fresh-install-release.sh \
+            "$GITHUB_WORKSPACE/release-candidate/dist" "$RELEASE_TAG"
+
+  windows-fresh-install:
+    name: Fresh install sealed candidate (Windows)
+    needs: [release-preflight, assemble-release-candidate]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          path: release-candidate
+
+      - name: Verify and install the exact sealed candidate on a fresh host
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          python scripts/release_candidate.py verify `
+            --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cosign verify-blob `
+            --certificate release-candidate/dist/checksums.txt.pem `
+            --signature release-candidate/dist/checksums.txt.sig `
+            --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" `
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
+            release-candidate/dist/checksums.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File scripts/test-fresh-install-release-windows.ps1 `
+            -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
+            -TargetVersion "$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   linux-upgrade:
     name: Linux upgrade policy ${{ matrix.baseline }} → ${{ needs.release-preflight.outputs.tag }}
@@ -606,6 +885,66 @@ jobs:
             --baseline-mode seed \
             --health-timeout 60
 
+  historical-baseline-canary:
+    name: Real historical dependency canary ${{ matrix.baseline }} → ${{ needs.release-preflight.outputs.tag }}
+    needs: [release-preflight, assemble-release-candidate]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - baseline: "0.8.3"
+            start_source_gateway: true
+          - baseline: "0.4.0"
+            start_source_gateway: false
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          path: release-candidate
+
+      - name: Verify candidate and exercise authentic baseline dependencies
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+          BASELINE: ${{ matrix.baseline }}
+          CANARY_START_SOURCE: ${{ matrix.start_source_gateway }}
+          UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          cosign verify-blob \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          source_gateway_args=()
+          if [[ "$CANARY_START_SOURCE" == "true" ]]; then
+            source_gateway_args+=(--start-source-gateway)
+          fi
+          scripts/test-upgrade-protocol-release.sh \
+            --from-version "$BASELINE" \
+            --target-version "$RELEASE_TAG" \
+            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
+            --baseline-mode seed \
+            --baseline-dependencies published \
+            --success-path-only \
+            --health-timeout 60 \
+            "${source_gateway_args[@]}"
+
   windows-upgrade:
     name: Windows upgrade policy ${{ matrix.baseline }} → ${{ needs.release-preflight.outputs.tag }}
     needs: [release-preflight, assemble-release-candidate]
@@ -614,7 +953,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        baseline: ${{ fromJSON(needs.assemble-release-candidate.outputs.windows_baselines) }}
+        baseline: ${{ fromJSON(needs.assemble-release-candidate.outputs.windows_prebridge_baselines) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -749,8 +1088,11 @@ jobs:
     needs:
       - release-preflight
       - assemble-release-candidate
+      - posix-fresh-install
+      - windows-fresh-install
       - linux-upgrade
       - macos-upgrade
+      - historical-baseline-canary
       - windows-upgrade
       - live-continuity
     runs-on: ubuntu-latest
