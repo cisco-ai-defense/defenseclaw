@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -330,6 +331,60 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
     assert "force_latest_version" in smoke
     assert 'target_version = "{force_latest_version}"' in smoke
+
+
+def test_historical_endpoint_patch_does_not_mutate_a_hardlinked_cache(
+    tmp_path: Path,
+) -> None:
+    smoke_home = tmp_path / "home"
+    installed = (
+        smoke_home
+        / ".defenseclaw/.venv/lib/python3.13/site-packages/defenseclaw/commands/cmd_upgrade.py"
+    )
+    installed.parent.mkdir(parents=True)
+    original = (
+        'GITHUB_DL = f"https://github.com/{GITHUB_REPO}/releases/download"\n'
+        "target_version = _fetch_latest_version()\n"
+    )
+    installed.write_text(original, encoding="utf-8")
+    installed.chmod(0o640)
+    cached = tmp_path / "uv-cache-cmd_upgrade.py"
+    os.link(installed, cached)
+    shared_identity = (installed.stat().st_dev, installed.stat().st_ino)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"; SMOKE_HOME="$2"; RELEASE_URL="$3"; '
+                'patch_installed_upgrade_endpoint "$4"'
+            ),
+            "historical-endpoint-patch-test",
+            str(ROOT / "scripts/test-upgrade-release.sh"),
+            str(smoke_home),
+            "http://127.0.0.1:43123/releases/download",
+            "0.8.5",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert cached.read_text(encoding="utf-8") == original
+    assert (cached.stat().st_dev, cached.stat().st_ino) == shared_identity
+    assert cached.stat().st_nlink == 1
+    assert installed.read_text(encoding="utf-8") == (
+        'GITHUB_DL = "http://127.0.0.1:43123/releases/download"\n'
+        'target_version = "0.8.5"\n'
+    )
+    assert (installed.stat().st_dev, installed.stat().st_ino) != shared_identity
+    assert installed.stat().st_nlink == 1
+    assert installed.stat().st_mode & 0o777 == 0o640
+    assert not list(installed.parent.glob(".cmd_upgrade.py.protocol-endpoint-*"))
 
 
 def test_windows_success_receipt_gate_matches_posix_terminal_invariants() -> None:

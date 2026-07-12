@@ -1149,12 +1149,18 @@ patch_installed_upgrade_endpoint() {
     [[ -n "${upgrade_py}" ]] || die "installed cmd_upgrade.py not found"
 
     python3 - "${upgrade_py}" "${RELEASE_URL}" "${force_latest_version}" <<'PY'
+import os
 from pathlib import Path
+import stat
 import sys
+import tempfile
 
 path = Path(sys.argv[1])
 release_url = sys.argv[2]
 force_latest_version = sys.argv[3]
+metadata = path.lstat()
+if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit(f"installed upgrade module is not a real regular file: {path}")
 text = path.read_text(encoding="utf-8")
 old = 'GITHUB_DL = f"https://github.com/{GITHUB_REPO}/releases/download"'
 new = f'GITHUB_DL = "{release_url}"'
@@ -1167,7 +1173,32 @@ if force_latest_version:
     if text.count(old_latest) != 1:
         raise SystemExit(f"latest-version resolver call not found exactly once in {path}")
     text = text.replace(old_latest, new_latest, 1)
-path.write_text(text, encoding="utf-8")
+
+# uv may hardlink installed package files from a shared cache on Linux. Never
+# rewrite that inode in place: doing so would contaminate the next independently
+# seeded historical fixture. Publish a fully flushed same-directory inode and
+# atomically replace only this throwaway installation's directory entry.
+descriptor, staged_name = tempfile.mkstemp(
+    prefix=f".{path.name}.protocol-endpoint-",
+    dir=path.parent,
+)
+staged = Path(staged_name)
+with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+    os.fchmod(handle.fileno(), stat.S_IMODE(metadata.st_mode))
+    handle.write(text)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(staged, path)
+parent_fd = os.open(
+    path.parent,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+)
+try:
+    os.fsync(parent_fd)
+finally:
+    os.close(parent_fd)
+if path.read_text(encoding="utf-8") != text or path.lstat().st_nlink != 1:
+    raise SystemExit(f"installed upgrade endpoint patch was not isolated: {path}")
 PY
 }
 
