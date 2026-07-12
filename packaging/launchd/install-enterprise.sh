@@ -6,15 +6,14 @@ umask 077
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
-SERVICE_USER=defenseclaw
-SERVICE_GROUP=defenseclaw
 BINARY_ROOT=/opt/cisco/secureclient/defenseclaw
 BIN_DIR="${BINARY_ROOT}/bin"
-MANAGED_ROOT="/opt/cisco/secureclient/defenseclaw"
 ETC_DIR="/opt/cisco/secureclient/defenseclaw/etc"
 RUNTIME_DIR="/opt/cisco/secureclient/defenseclaw/runtime"
 GUARDIAN_DIR="/opt/cisco/secureclient/defenseclaw/hook-guardian"
 AUTH_DIR="/opt/cisco/secureclient/defenseclaw/hook-guardian-state"
+LOG_VENDOR_DIR=/Library/Logs/Cisco
+LOG_PRODUCT_DIR=/Library/Logs/Cisco/SecureClient
 LOG_DIR=/Library/Logs/Cisco/SecureClient/DefenseClaw
 CONFIG_DEST="/opt/cisco/secureclient/defenseclaw/etc/config.yaml"
 MANIFEST_DEST="/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml"
@@ -28,6 +27,10 @@ die() {
     exit 1
 }
 
+warn() {
+    printf 'defenseclaw enterprise install: warning: %s\n' "$*" >&2
+}
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -37,11 +40,11 @@ Usage:
     [--binary /path/to/defenseclaw] [--no-start]
 
 Installs the macOS managed-enterprise gateway and guardian. The managed
-config is atomically installed as root:defenseclaw with mode 0640 and is
+config is atomically installed as root:wheel with mode 0640 and is
 verified before either LaunchDaemon can start.
 
-An existing defenseclaw service user/group is required; this installer does
-not create it.
+Both LaunchDaemons run as root. No dedicated service user or group is created
+or required.
 
 Options:
   --config PATH    Administrator-approved managed config (required)
@@ -101,17 +104,6 @@ assert_trusted_system_dir() {
     [ $((8#$mode & 8#022)) -eq 0 ] || die "system directory is group/other writable: $path ($mode)"
 }
 
-assert_existing_acl_safe_dir_or_absent() {
-    local path="$1"
-    [ -e "$path" ] || {
-        refuse_symlink "$path"
-        return
-    }
-    refuse_symlink "$path"
-    [ -d "$path" ] || die "required directory path is not a directory: $path"
-    assert_no_write_acl "$path"
-}
-
 assert_existing_secure_dir_or_absent() {
     local path="$1"
     [ -e "$path" ] || {
@@ -144,13 +136,104 @@ assert_path_metadata() {
 }
 
 TEMP_FILES=()
+ROLLBACK_DESTINATIONS=()
+ROLLBACK_BACKUPS=()
+ROLLBACK_EXISTED=()
+ROLLBACK_DIR=
+ROLLBACK_ARMED=false
+GATEWAY_WAS_LOADED=false
+GUARDIAN_WAS_LOADED=false
+
+snapshot_file() {
+    local destination="$1"
+    local index="${#ROLLBACK_DESTINATIONS[@]}"
+    local backup="${ROLLBACK_DIR}/${index}"
+    ROLLBACK_DESTINATIONS+=("$destination")
+    if [ -e "$destination" ]; then
+        refuse_symlink "$destination"
+        [ -f "$destination" ] || die "existing destination is not a regular file: $destination"
+        ROLLBACK_BACKUPS+=("$backup")
+        ROLLBACK_EXISTED+=(true)
+        /bin/cp -p "$destination" "$backup"
+    else
+        ROLLBACK_BACKUPS+=("")
+        ROLLBACK_EXISTED+=(false)
+    fi
+}
+
+restore_snapshots() {
+    local index destination backup temporary
+    local failed=false
+    for ((index = ${#ROLLBACK_DESTINATIONS[@]} - 1; index >= 0; index--)); do
+        destination="${ROLLBACK_DESTINATIONS[$index]}"
+        if [ "${ROLLBACK_EXISTED[$index]}" = true ]; then
+            backup="${ROLLBACK_BACKUPS[$index]}"
+            temporary="${destination}.rollback.$$"
+            if [ -e "$temporary" ] || [ -L "$temporary" ]; then
+                warn "cannot restore $destination: rollback temporary path exists"
+                failed=true
+                continue
+            fi
+            if ! /bin/cp -p "$backup" "$temporary" || ! /bin/mv -f -- "$temporary" "$destination"; then
+                warn "failed to restore $destination"
+                /bin/rm -f -- "$temporary" || true
+                failed=true
+            fi
+        elif ! /bin/rm -f -- "$destination"; then
+            warn "failed to remove newly installed file: $destination"
+            failed=true
+        fi
+    done
+    [ "$failed" = false ]
+}
+
+rebootstrap_previously_loaded_job() {
+    local was_loaded="$1"
+    local label="$2"
+    local plist="$3"
+    [ "$was_loaded" = true ] || return 0
+    if [ ! -f "$plist" ]; then
+        warn "cannot restore loaded job ${label}: plist was not restored"
+        return 1
+    fi
+    if ! /bin/launchctl bootstrap system "$plist"; then
+        warn "failed to restore loaded job ${label}"
+        return 1
+    fi
+    if ! /bin/launchctl kickstart -k "system/${label}"; then
+        warn "restored but could not restart job ${label}"
+        return 1
+    fi
+}
+
+rollback_install() {
+    local failed=false
+    ROLLBACK_ARMED=false
+    /bin/launchctl bootout "system/${GUARDIAN_LABEL}" >/dev/null 2>&1 || true
+    /bin/launchctl bootout "system/${GATEWAY_LABEL}" >/dev/null 2>&1 || true
+    restore_snapshots || failed=true
+    rebootstrap_previously_loaded_job "$GATEWAY_WAS_LOADED" "$GATEWAY_LABEL" "$GATEWAY_PLIST_DEST" || failed=true
+    rebootstrap_previously_loaded_job "$GUARDIAN_WAS_LOADED" "$GUARDIAN_LABEL" "$GUARDIAN_PLIST_DEST" || failed=true
+    if [ "$failed" = true ]; then
+        warn "rollback was incomplete; inspect the installation before retrying"
+    fi
+}
 
 cleanup() {
+    local status=$?
     local path
-    for path in "${TEMP_FILES[@]-}"; do
+    trap - EXIT
+    if [ "$status" -ne 0 ] && [ "$ROLLBACK_ARMED" = true ]; then
+        rollback_install
+    fi
+    for path in "${TEMP_FILES[@]-}" "${ROLLBACK_BACKUPS[@]-}"; do
         [ -n "$path" ] || continue
-        /bin/rm -f -- "$path"
+        /bin/rm -f -- "$path" || true
     done
+    if [ -n "$ROLLBACK_DIR" ]; then
+        /bin/rmdir "$ROLLBACK_DIR" >/dev/null 2>&1 || true
+    fi
+    exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
@@ -240,76 +323,94 @@ require_regular_source "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-gu
 plist_pins_managed_mode "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" || die "gateway plist does not pin managed_enterprise"
 plist_pins_managed_mode "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" || die "guardian plist does not pin managed_enterprise"
 
-SERVICE_UID="$(/usr/bin/id -u "$SERVICE_USER" 2>/dev/null)" || die "service user does not exist: $SERVICE_USER"
-SERVICE_GID="$(/usr/bin/id -g "$SERVICE_USER" 2>/dev/null)" || die "service group does not exist: $SERVICE_GROUP"
-[ "$(/usr/bin/id -gn "$SERVICE_USER")" = "$SERVICE_GROUP" ] || die "service user primary group must be $SERVICE_GROUP"
 WHEEL_GID="$(/usr/bin/stat -f '%g' /Library)"
 
 assert_trusted_system_dir /Library
 assert_trusted_system_dir /Library/LaunchDaemons
 assert_trusted_system_dir /Library/Logs
+assert_existing_secure_dir_or_absent "$LOG_VENDOR_DIR"
+assert_existing_secure_dir_or_absent "$LOG_PRODUCT_DIR"
 assert_existing_secure_dir_or_absent /opt
 assert_existing_secure_dir_or_absent /opt/cisco
 assert_existing_secure_dir_or_absent /opt/cisco/secureclient
 assert_existing_secure_dir_or_absent "$BINARY_ROOT"
 assert_existing_secure_dir_or_absent "$BIN_DIR"
 assert_existing_secure_dir_or_absent "$ETC_DIR"
-assert_existing_secure_dir_or_absent "$MANAGED_ROOT"
+assert_existing_secure_dir_or_absent "$RUNTIME_DIR"
 assert_existing_secure_dir_or_absent "$GUARDIAN_DIR"
 assert_existing_secure_dir_or_absent "$AUTH_DIR"
-assert_existing_acl_safe_dir_or_absent "$RUNTIME_DIR"
-assert_existing_acl_safe_dir_or_absent "$LOG_DIR"
+assert_existing_secure_dir_or_absent "$LOG_DIR"
 refuse_symlink "$CONFIG_DEST"
 
-for destination in \
-    "${BIN_DIR}/defenseclaw-gateway" \
-    "$CONFIG_DEST" \
-    "$MANIFEST_DEST" \
-    "$GATEWAY_PLIST_DEST" \
-    "$GUARDIAN_PLIST_DEST"; do
+INSTALL_DESTINATIONS=(
+    "${BIN_DIR}/defenseclaw-gateway"
+    "$CONFIG_DEST"
+    "$MANIFEST_DEST"
+    "$GATEWAY_PLIST_DEST"
+    "$GUARDIAN_PLIST_DEST"
+)
+for destination in "${INSTALL_DESTINATIONS[@]}"; do
     refuse_symlink "$destination"
     if [ -e "$destination" ]; then
         assert_no_write_acl "$destination"
     fi
 done
 
-stop_job_if_loaded com.cisco.secureclient.defenseclaw.hook-guardian
-stop_job_if_loaded com.cisco.secureclient.defenseclaw
+if /bin/launchctl print "system/${GATEWAY_LABEL}" >/dev/null 2>&1; then
+    GATEWAY_WAS_LOADED=true
+    [ -f "$GATEWAY_PLIST_DEST" ] || die "loaded gateway job has no restorable plist"
+fi
+if /bin/launchctl print "system/${GUARDIAN_LABEL}" >/dev/null 2>&1; then
+    GUARDIAN_WAS_LOADED=true
+    [ -f "$GUARDIAN_PLIST_DEST" ] || die "loaded hook guardian job has no restorable plist"
+fi
 
-/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR"
-/usr/bin/install -d -o root -g "$SERVICE_GROUP" -m 0750 "$ETC_DIR" "$GUARDIAN_DIR" "$AUTH_DIR"
-/usr/bin/install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$RUNTIME_DIR" "$LOG_DIR"
+ROLLBACK_DIR="$(/usr/bin/mktemp -d "/private/tmp/defenseclaw-enterprise-rollback.XXXXXX")"
+/bin/chmod 0700 "$ROLLBACK_DIR"
+for destination in "${INSTALL_DESTINATIONS[@]}"; do
+    snapshot_file "$destination"
+done
+ROLLBACK_ARMED=true
+
+stop_job_if_loaded "$GUARDIAN_LABEL"
+stop_job_if_loaded "$GATEWAY_LABEL"
+
+for parent in "$LOG_VENDOR_DIR" "$LOG_PRODUCT_DIR"; do
+    if [ ! -d "$parent" ]; then
+        /usr/bin/install -d -o root -g wheel -m 0755 "$parent"
+    fi
+    assert_trusted_system_dir "$parent"
+done
+/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"
+/usr/bin/install -d -o root -g wheel -m 0750 "$RUNTIME_DIR" "$GUARDIAN_DIR" "$AUTH_DIR" "$LOG_DIR"
 
 install_file_atomic "$BINARY_SOURCE" "${BIN_DIR}/defenseclaw-gateway" root wheel 0755
-install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root "$SERVICE_GROUP" 0640
-install_file_atomic "$MANIFEST_SOURCE" "$MANIFEST_DEST" root "$SERVICE_GROUP" 0640
+install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root wheel 0640
+install_file_atomic "$MANIFEST_SOURCE" "$MANIFEST_DEST" root wheel 0640
 install_file_atomic "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" "$GATEWAY_PLIST_DEST" root wheel 0644
 install_file_atomic "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" "$GUARDIAN_PLIST_DEST" root wheel 0644
 
 assert_path_metadata "$BINARY_ROOT" dir 0 "$WHEEL_GID" 755
 assert_path_metadata "$BIN_DIR" dir 0 "$WHEEL_GID" 755
-assert_path_metadata "$ETC_DIR" dir 0 "$SERVICE_GID" 750
-assert_path_metadata "$RUNTIME_DIR" dir "$SERVICE_UID" "$SERVICE_GID" 750
-assert_path_metadata "$GUARDIAN_DIR" dir 0 "$SERVICE_GID" 750
-assert_path_metadata "$AUTH_DIR" dir 0 "$SERVICE_GID" 750
-assert_path_metadata "$LOG_DIR" dir "$SERVICE_UID" "$SERVICE_GID" 750
+assert_path_metadata "$ETC_DIR" dir 0 "$WHEEL_GID" 755
+assert_path_metadata "$RUNTIME_DIR" dir 0 "$WHEEL_GID" 750
+assert_path_metadata "$GUARDIAN_DIR" dir 0 "$WHEEL_GID" 750
+assert_path_metadata "$AUTH_DIR" dir 0 "$WHEEL_GID" 750
+assert_path_metadata "$LOG_DIR" dir 0 "$WHEEL_GID" 750
 assert_path_metadata "${BIN_DIR}/defenseclaw-gateway" file 0 "$WHEEL_GID" 755
-assert_path_metadata "$CONFIG_DEST" file 0 "$SERVICE_GID" 640
-assert_path_metadata "$MANIFEST_DEST" file 0 "$SERVICE_GID" 640
+assert_path_metadata "$CONFIG_DEST" file 0 "$WHEEL_GID" 640
+assert_path_metadata "$MANIFEST_DEST" file 0 "$WHEEL_GID" 640
 assert_path_metadata "$GATEWAY_PLIST_DEST" file 0 "$WHEEL_GID" 644
 assert_path_metadata "$GUARDIAN_PLIST_DEST" file 0 "$WHEEL_GID" 644
 
 if [ "$START_JOBS" = true ]; then
     /bin/launchctl bootstrap system "$GATEWAY_PLIST_DEST" || die "failed to bootstrap gateway LaunchDaemon"
-    if ! /bin/launchctl bootstrap system "$GUARDIAN_PLIST_DEST"; then
-        /bin/launchctl bootout "system/${GATEWAY_LABEL}" >/dev/null 2>&1 || true
-        /bin/rm -f "$GATEWAY_PLIST_DEST" "$GUARDIAN_PLIST_DEST"
-        die "failed to bootstrap hook guardian LaunchDaemon"
-    fi
-    /bin/launchctl enable "system/${GATEWAY_LABEL}"
-    /bin/launchctl enable "system/${GUARDIAN_LABEL}"
-    /bin/launchctl kickstart -k "system/${GATEWAY_LABEL}"
-    /bin/launchctl kickstart -k "system/${GUARDIAN_LABEL}"
+    /bin/launchctl bootstrap system "$GUARDIAN_PLIST_DEST" || die "failed to bootstrap hook guardian LaunchDaemon"
+    /bin/launchctl enable "system/${GATEWAY_LABEL}" || die "failed to enable gateway LaunchDaemon"
+    /bin/launchctl enable "system/${GUARDIAN_LABEL}" || die "failed to enable hook guardian LaunchDaemon"
+    /bin/launchctl kickstart -k "system/${GATEWAY_LABEL}" || die "failed to start gateway LaunchDaemon"
+    /bin/launchctl kickstart -k "system/${GUARDIAN_LABEL}" || die "failed to start hook guardian LaunchDaemon"
 fi
 
+ROLLBACK_ARMED=false
 printf 'DefenseClaw managed enterprise installation verified.\n'

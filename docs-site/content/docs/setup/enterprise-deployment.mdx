@@ -446,12 +446,18 @@ The installer refuses symlinked sources or managed destinations, verifies the ro
 
 | Path | Owner | Mode |
 | --- | --- | --- |
-| `/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway` | `root:wheel` | `0755` |
 | `/opt/cisco/secureclient/defenseclaw` | `root:wheel` | `0755` |
+| `/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway` | `root:wheel` | `0755` |
+| `/opt/cisco/secureclient/defenseclaw/etc` | `root:wheel` | `0755` |
 | `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` | `root:wheel` | `0640` |
-| `/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml` | `root:wheel` | `0640` |
 | `/opt/cisco/secureclient/defenseclaw/runtime` | `root:wheel` | `0750` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian` | `root:wheel` | `0750` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml` | `root:wheel` | `0640` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` | `root:wheel` | `0750` |
+| `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` | `0750` |
 | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw*.plist` | `root:wheel` | `0644` |
+
+Before replacing files, the installer snapshots the existing deployment and records which LaunchDaemons are loaded. A failure after jobs are stopped restores the previous binary, config, manifest, and plists, then re-bootstrap only the jobs that were loaded before the attempt. A failed fresh install removes files created by that attempt instead of leaving persistent LaunchDaemon plists.
 
 Use `--no-start` when MDM or a package transaction must install and verify the files before a separate orchestration step loads the jobs. Even in that mode, an already loaded DefenseClaw job is unloaded before replacement and remains stopped until the administrator starts it.
 
