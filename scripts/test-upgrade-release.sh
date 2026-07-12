@@ -124,6 +124,7 @@ stop_smoke_gateway() {
 start_source_gateway_canary() {
     [[ "${START_SOURCE_GATEWAY}" == "1" ]] || return 0
     local start_log="${SMOKE_HOME}/source-gateway-start.log"
+    local health_response="${SMOKE_HOME}/source-gateway-health.json"
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
         OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
@@ -140,14 +141,34 @@ start_source_gateway_canary() {
             OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
             PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
                 "${SMOKE_HOME}/.local/bin/defenseclaw-gateway" status \
-                >>"${start_log}" 2>&1; then
+                >>"${start_log}" 2>&1 \
+            && curl -fsS --max-time 1 http://127.0.0.1:18970/health \
+                >"${health_response}" 2>>"${start_log}" \
+            && python3 - "${health_response}" "${FROM_VERSION}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+gateway = payload.get("gateway") if isinstance(payload, dict) else None
+provenance = payload.get("provenance") if isinstance(payload, dict) else None
+if (
+    not isinstance(gateway, dict)
+    or gateway.get("state") != "running"
+    or not isinstance(provenance, dict)
+    or provenance.get("binary_version") != sys.argv[2]
+):
+    raise SystemExit(1)
+PY
+        then
             ok "Published source gateway ${FROM_VERSION} is running before resolver handoff"
             return 0
         fi
         sleep 0.25
     done
     tail_log "${start_log}"
-    die "published source gateway ${FROM_VERSION} did not become healthy"
+    [[ ! -s "${health_response}" ]] || cat "${health_response}" >&2
+    die "published source gateway ${FROM_VERSION} did not reach version-bound health"
 }
 
 parse_args() {

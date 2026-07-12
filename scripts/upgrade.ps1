@@ -1808,11 +1808,15 @@ function New-PhaseOneRollbackPlan {
 
         $sourceWheelPath=Join-Path $SourceRelease.Directory $SourceRelease.Wheel
         Assert-RealFile $sourceWheelPath "Authenticated source wheel"
-        $wheel=Join-Path $root "source.whl";Write-SecuredRestoreCandidate -Source $sourceWheelPath -Destination $wheel -FinalSddl (Get-PrivateFileSddl)
+        $sourceWheelName=[IO.Path]::GetFileName($sourceWheelPath)
+        if($sourceWheelName -cne "defenseclaw-$SourceVersion-py3-none-any.whl"){Fail "Authenticated source wheel has a noncanonical materialized filename; no state changed."}
+        $wheel=Join-Path $root $sourceWheelName;Write-SecuredRestoreCandidate -Source $sourceWheelPath -Destination $wheel -FinalSddl (Get-PrivateFileSddl)
         $wheelSha=(Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
         $bridgeWheelPath=Join-Path $Bridge.Directory $Bridge.Wheel
         Assert-RealFile $bridgeWheelPath "Authenticated bridge wheel"
-        $bridgeWheel=Join-Path $root "bridge.whl";Write-SecuredRestoreCandidate -Source $bridgeWheelPath -Destination $bridgeWheel -FinalSddl (Get-PrivateFileSddl)
+        $bridgeWheelName=[IO.Path]::GetFileName($bridgeWheelPath)
+        if($bridgeWheelName -cne "defenseclaw-$($Bridge.Version)-py3-none-any.whl"){Fail "Authenticated bridge wheel has a noncanonical materialized filename; no state changed."}
+        $bridgeWheel=Join-Path $root $bridgeWheelName;Write-SecuredRestoreCandidate -Source $bridgeWheelPath -Destination $bridgeWheel -FinalSddl (Get-PrivateFileSddl)
         $bridgeWheelSha=(Get-FileHash -LiteralPath $bridgeWheel -Algorithm SHA256).Hash.ToLowerInvariant()
         $gateway=Get-Gateway;Assert-RealFile $gateway "Installed source gateway"
         $gatewayStage=New-PrivateDirectory (Join-Path $root "gateway")
@@ -1903,7 +1907,7 @@ function Read-PhaseOneJournal {
     if(-not $controllerHome.Equals((Get-ControllerHome),[StringComparison]::OrdinalIgnoreCase) -or -not $recoveryRoot.Equals((Join-Path $controllerHome ".upgrade-recovery"),[StringComparison]::OrdinalIgnoreCase)){Fail "Phase-one recovery journal targets a different controller home."}
     $root=Join-Path $recoveryRoot $planId
     Assert-PrivateDirectoryAcl -Path $root -Expected (New-PrivateDirectoryAcl)
-    $wheel=Join-Path $root "source.whl";$sourceGateway=Join-Path $root "source-gateway.exe";$bridgeWheel=Join-Path $root "bridge.whl";$bridgeGateway=Join-Path $root "bridge-gateway.exe"
+    $wheel=Join-Path $root "defenseclaw-$sourceVersion-py3-none-any.whl";$sourceGateway=Join-Path $root "source-gateway.exe";$bridgeWheel=Join-Path $root "defenseclaw-$bridgeVersion-py3-none-any.whl";$bridgeGateway=Join-Path $root "bridge-gateway.exe"
     foreach($custody in @(@($wheel,$wheelSha),@($sourceGateway,$gatewaySha),@($bridgeWheel,$bridgeWheelSha),@($bridgeGateway,$bridgeGatewaySha))){
         Assert-PrivateFileAcl $custody[0]
         if((Get-FileHash -LiteralPath $custody[0] -Algorithm SHA256).Hash.ToLowerInvariant() -ne $custody[1]){Fail "Phase-one recovery custody digest changed: $($custody[0])"}

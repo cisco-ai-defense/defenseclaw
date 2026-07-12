@@ -452,6 +452,15 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     concurrent_divergence: bool,
     post_quarantine_write: bool,
 ) -> None:
+    bridge_install_failure = (
+        crash_point is None
+        and source_running
+        and not unrelated_pid
+        and not orphan_health
+        and openclaw_present
+        and not concurrent_divergence
+        and not post_quarantine_write
+    )
     fixtures = tmp_path / "fixtures"
     fake_bin = tmp_path / "fake-bin"
     home = tmp_path / "home"
@@ -479,7 +488,14 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     _write_executable(
         source_cli,
         "#!/usr/bin/env bash\n"
-        "if [[ \"${1:-}\" == \"--version\" ]]; then printf '%s\\n' 'DefenseClaw 0.8.3'; exit 0; fi\n"
+        "if [[ \"${1:-}\" == \"--version\" ]]; then\n"
+        "  if [[ \"${MUTATE_SOURCE_CLI_ON_VERSION:-0}\" == '1' "
+        "&& \"${PYTHONDONTWRITEBYTECODE:-}\" != '1' ]]; then\n"
+        f"    printf '%s\\n' probe >> {str(source_venv / 'version-probe-cache')!r}\n"
+        "  fi\n"
+        "  printf '%s\\n' 'DefenseClaw 0.8.3'\n"
+        "  exit 0\n"
+        "fi\n"
         "exit 91\n",
     )
     _write_executable(
@@ -586,6 +602,17 @@ for arg in "$@"; do
   if [[ "${previous}" == 'venv' ]]; then venv="${arg}"; break; fi
   previous="${arg}"
 done
+if [[ "$*" == *"pip install"* ]]; then
+  wheel="${!#}"
+  wheel_name="${wheel##*/}"
+  if [[ ! "${wheel_name}" =~ ^defenseclaw-[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9]+)?-py3-none-any\\.whl$ ]]; then
+    printf 'invalid wheel filename: %s\n' "${wheel_name}" >&2
+    exit 88
+  fi
+  if [[ "${FAIL_BRIDGE_WHEEL_INSTALL:-0}" == '1' && "${wheel}" == */backups/* ]]; then
+    exit 89
+  fi
+fi
 if [[ -n "${venv}" ]]; then
   mkdir -p "${venv}/bin"
   cp "${TARGET_PYTHON_TEMPLATE}" "${venv}/bin/python"
@@ -676,6 +703,9 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         env["INJECT_CONCURRENT_PHASE1_STATE"] = "1"
     if post_quarantine_write:
         env["INJECT_POST_QUARANTINE_WRITE"] = "1"
+    if bridge_install_failure:
+        env["FAIL_BRIDGE_WHEEL_INSTALL"] = "1"
+        env["MUTATE_SOURCE_CLI_ON_VERSION"] = "1"
     if crash_point == "migration-after-config":
         env["ALLOW_TARGET_GATEWAY_START"] = "1"
         env["TARGET_HEALTH_URL"] = "http://127.0.0.1:18971/health"
@@ -898,6 +928,22 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
     try:
         output = result.stdout + result.stderr
         assert result.returncode == 1, output
+        if bridge_install_failure:
+            assert "Failed to install the bridge CLI wheel" in output
+            assert "Source 0.8.3 artifacts and state restored" in output
+            assert "restored source venv identity changed" not in output
+            assert not (
+                controller_home / ".upgrade-recovery" / "phase-one-active.json"
+            ).exists()
+            assert (install_dir / "defenseclaw-gateway").read_bytes() == source_gateway_bytes
+            assert config_path.read_bytes() == config_original
+            events = event_log.read_text(encoding="utf-8")
+            assert "source-stop" in events
+            assert "source-start" in events
+            assert "target-start" not in events
+            assert restored_pid is not None
+            os.kill(restored_pid, 0)
+            return
         if crash_point is not None:
             assert "Recovering Interrupted Bridge Upgrade" in output
             assert "before detecting installed versions" in output
@@ -1037,6 +1083,12 @@ def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe()
     assert "refusing to execute or overwrite an unrecognized phase-one gateway activation" in script
     assert "shutil.rmtree(active_venv)" not in script
     assert 'rm -rf "${DEFENSECLAW_VENV}"' not in script
+    assert "phase1-bridge-wheel.whl" not in script
+    assert 'f"defenseclaw-{bridge_version}-2-py3-none-any.whl"' in script
+    assert 'f"defenseclaw-{payload[\'bridge_version\']}-2-py3-none-any.whl"' in script
+    assert 'BRIDGE_WHEEL_CUSTODY_PATH="${BACKUP_DIR}/${whl_name}"' in script
+    assert 'PYTHONDONTWRITEBYTECODE=1 "${DEFENSECLAW_VENV}/bin/defenseclaw"' in script
+    assert 'probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"' in script
 
 
 def test_gateway_pid_parser_accepts_legacy_integer_with_live_binary_identity(tmp_path: Path) -> None:

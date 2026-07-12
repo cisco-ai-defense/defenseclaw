@@ -51,6 +51,18 @@ def test_posix_install_upgrade_and_smoke_pin_private_umask() -> None:
         assert re.search(r"^set -euo pipefail\n(?:.*\n){0,8}umask 077$", text, re.MULTILINE), path
 
 
+def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    canary = source[
+        source.index("start_source_gateway_canary()") : source.index("parse_args()")
+    ]
+
+    assert "http://127.0.0.1:18970/health" in canary
+    assert 'gateway.get("state") != "running"' in canary
+    assert 'provenance.get("binary_version") != sys.argv[2]' in canary
+    assert "did not reach version-bound health" in canary
+
+
 def test_protected_release_test_artifact_is_authenticated_before_private_decode(
     tmp_path: Path,
 ) -> None:

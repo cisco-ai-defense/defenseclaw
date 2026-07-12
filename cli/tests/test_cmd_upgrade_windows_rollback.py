@@ -192,9 +192,26 @@ def test_windows_capture_uses_exact_handle_and_private_backup_before_return(
     active.write_bytes(b"SECRET=source\n")
     captured_descriptors: list[int] = []
     backup_security: dict[str, WindowsFileSecurity] = {}
+    timestamp_skew_observed = False
 
     class _WindowsOsProxy:
         name = "nt"
+
+        def lstat(self, path: str | os.PathLike[str]):
+            nonlocal timestamp_skew_observed
+            info = os.lstat(path)
+            if os.path.abspath(path) != os.path.abspath(active):
+                return info
+            timestamp_skew_observed = True
+
+            class _TimestampSkewedStat:
+                st_mtime_ns = info.st_mtime_ns + 1
+                st_ctime_ns = info.st_ctime_ns + 1
+
+                def __getattr__(self, name: str):
+                    return getattr(info, name)
+
+            return _TimestampSkewedStat()
 
         def __getattr__(self, name: str):
             return getattr(os, name)
@@ -218,6 +235,7 @@ def test_windows_capture_uses_exact_handle_and_private_backup_before_return(
 
     snapshot = cmd_upgrade._capture_rollback_file(str(active), str(backup), required=True)
 
+    assert timestamp_skew_observed
     assert captured_descriptors
     assert snapshot.windows_security == ORIGINAL
     assert snapshot.sha256 == hashlib.sha256(b"SECRET=source\n").hexdigest()

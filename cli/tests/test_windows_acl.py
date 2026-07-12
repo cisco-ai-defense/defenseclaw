@@ -79,10 +79,10 @@ class _FakeApi:
         self.events.append(("open", (path, access, directory)))
         return self.paths[path]
 
-    def open_directory_no_delete(self, path: str) -> int:
+    def open_directory_no_delete(self, path: str, *, protect_name: bool = True) -> int:
         handle = self.next_handle
         self.next_handle += 1
-        self.events.append(("lease-open", path))
+        self.events.append(("lease-open", (path, protect_name)))
         return handle
 
     def assert_real_directory(self, handle: int) -> None:
@@ -259,17 +259,16 @@ def test_windows_directory_chain_stays_held_across_handle_mutations(
 
     opened = [value for event, value in api.events if event == "lease-open"]
     assert opened[:4] == [
-        "C:\\",
-        r"C:\Users",
-        r"C:\Users\operator",
-        r"C:\Users\operator\.defenseclaw",
+        ("C:\\", False),
+        (r"C:\Users", False),
+        (r"C:\Users\operator", False),
+        (r"C:\Users\operator\.defenseclaw", True),
     ]
-    assert tuple(map(ntpath.normcase, opened[4:8])) == tuple(
-        map(ntpath.normcase, opened[:4]),
-    )
-    assert tuple(map(ntpath.normcase, opened[8:12])) == tuple(
-        map(ntpath.normcase, opened[:4]),
-    )
+    for nested_ancestors in (opened[4:7], opened[7:10]):
+        assert tuple(ntpath.normcase(path) for path, _protect_name in nested_ancestors) == tuple(
+            ntpath.normcase(path) for path, _protect_name in opened[:3]
+        )
+        assert all(not protect_name for _path, protect_name in nested_ancestors)
     replace_index = next(index for index, event in enumerate(api.events) if event[0] == "handle-replace")
     delete_index = next(index for index, event in enumerate(api.events) if event[0] == "handle-delete")
     outer_close_indexes = [
@@ -368,6 +367,42 @@ def test_native_exclusive_mutator_denies_write_and_delete_sharing() -> None:
         None,
     )
     api.close_handle.assert_not_called()
+
+
+def test_native_directory_name_lease_requests_delete_without_delete_sharing() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    create_file = Mock(return_value=87)
+    api._create_file = create_file
+
+    assert api.open_directory_no_delete(r"C:\state", protect_name=True) == 87
+
+    create_file.assert_called_once_with(
+        r"C:\state",
+        windows_acl._FILE_READ_ATTRIBUTES | windows_acl._DELETE,
+        windows_acl._FILE_SHARE_READ | windows_acl._FILE_SHARE_WRITE,
+        None,
+        windows_acl._OPEN_EXISTING,
+        windows_acl._FILE_FLAG_OPEN_REPARSE_POINT | windows_acl._FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+
+
+def test_native_directory_ancestor_lease_avoids_delete_access() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    create_file = Mock(return_value=89)
+    api._create_file = create_file
+
+    assert api.open_directory_no_delete("C:\\", protect_name=False) == 89
+
+    create_file.assert_called_once_with(
+        "C:\\",
+        windows_acl._FILE_READ_ATTRIBUTES,
+        windows_acl._FILE_SHARE_READ | windows_acl._FILE_SHARE_WRITE,
+        None,
+        windows_acl._OPEN_EXISTING,
+        windows_acl._FILE_FLAG_OPEN_REPARSE_POINT | windows_acl._FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
 
 
 def test_native_handle_move_never_replaces_a_later_target() -> None:
@@ -503,6 +538,32 @@ def test_native_windows_directory_lease_and_handle_mutators(tmp_path) -> None:
     assert not source.exists()
     assert not retired.exists()
     parent.rename(moved)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
+def test_native_windows_directory_name_lease_blocks_empty_directory_deletion(tmp_path) -> None:
+    held = tmp_path / "empty-held"
+    held.mkdir()
+
+    with windows_acl.hold_directory_chain(str(held)):
+        with pytest.raises(OSError):
+            held.rmdir()
+
+    held.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
+def test_native_windows_descendant_name_lease_blocks_ancestor_rename(tmp_path) -> None:
+    ancestor = tmp_path / "ancestor"
+    held = ancestor / "held"
+    moved = tmp_path / "moved-ancestor"
+    held.mkdir(parents=True)
+
+    with windows_acl.hold_directory_chain(str(held)):
+        with pytest.raises(OSError):
+            ancestor.rename(moved)
+
+    ancestor.rename(moved)
 
 
 @pytest.mark.parametrize(

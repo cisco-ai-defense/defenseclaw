@@ -30,6 +30,7 @@ for command_name in uv cosign python3; do
 done
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-fresh-release.XXXXXX")"
+WORKDIR="$(cd "${WORKDIR}" && pwd -P)"
 cleanup() {
     local status=$?
     chmod -R u+w "${WORKDIR}" 2>/dev/null || true
@@ -95,11 +96,16 @@ if versions != [expected]:
 PY
 }
 
-VERSION="${VERSION}" bash "${ROOT}/scripts/install.sh" \
+if ! VERSION="${VERSION}" bash "${ROOT}/scripts/install.sh" \
     --local "${RELEASE_DIR}" \
     --yes \
     --connector none \
     >"${WORKDIR}/install.log" 2>&1
+then
+    echo "fresh installer failed; captured output follows:" >&2
+    cat "${WORKDIR}/install.log" >&2
+    exit 1
+fi
 
 assert_exact_version "${HOME}/.local/bin/defenseclaw"
 assert_exact_version "${HOME}/.local/bin/defenseclaw-gateway"

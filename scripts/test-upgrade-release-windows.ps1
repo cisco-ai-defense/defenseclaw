@@ -1567,9 +1567,9 @@ function Assert-PhaseOneJournalCustody {
     $planRoot=Join-Path $recoveryRoot ([string]$payload.plan_id)
     Assert-PrivateDirectoryAcl -Path $planRoot
     foreach($custody in @(
-        @((Join-Path $planRoot "source.whl"),[string]$payload.wheel_sha256),
+        @((Join-Path $planRoot "defenseclaw-$([string]$payload.source_version)-py3-none-any.whl"),[string]$payload.wheel_sha256),
         @((Join-Path $planRoot "source-gateway.exe"),[string]$payload.gateway_sha256),
-        @((Join-Path $planRoot "bridge.whl"),[string]$payload.bridge_wheel_sha256),
+        @((Join-Path $planRoot "defenseclaw-$([string]$payload.bridge_version)-py3-none-any.whl"),[string]$payload.bridge_wheel_sha256),
         @((Join-Path $planRoot "bridge-gateway.exe"),[string]$payload.bridge_gateway_sha256)
     )){
         Assert-PrivateFileAcl -Path $custody[0]
