@@ -39,6 +39,7 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import yaml
 from click.testing import CliRunner
 from defenseclaw import config
 from defenseclaw.context import AppContext
@@ -73,9 +74,12 @@ def _read_dotenv(path: str) -> dict[str, str]:
 
 
 def _configured_destinations(data_dir: str) -> list[dict[str, object]]:
-    """Return authored destinations from the exact-v8 fixture after setup."""
+    """Return raw authored destinations after separately validating the fixture."""
     path = os.path.join(data_dir, "config.yaml")
-    source = load_validate_v8(open(path, "rb").read(), source_name=path).source
+    with open(path, "rb") as stream:
+        raw = stream.read()
+    load_validate_v8(raw, source_name=path)
+    source = yaml.safe_load(raw)
     observability = source.get("observability", {})
     assert isinstance(observability, dict)
     destinations = observability.get("destinations", [])

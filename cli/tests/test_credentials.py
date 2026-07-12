@@ -314,8 +314,39 @@ class RequirementPredicateTests(unittest.TestCase):
                 self.assertEqual(spec.resolve_env_name(cfg), "MY_GALILEO_KEY")
                 self.assertEqual(
                     spec.resolve_bound_endpoint(cfg),
-                    "https://api.galileo.ai/otel/traces",
+                    "https://api.galileo.ai",
                 )
+
+    def test_v8_bound_endpoint_never_exposes_path_query_or_fragment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, path = _make_v8_cfg(
+                tmp,
+                [
+                    {
+                        "name": "galileo-secret-path",
+                        "kind": "otlp",
+                        "preset": "galileo",
+                        "protocol": "http/protobuf",
+                        "endpoint": (
+                            "https://api.galileo.ai/tenant/path-secret-canary"
+                            "?access_token=query-secret#fragment-secret"
+                        ),
+                        "headers": {
+                            "Galileo-API-Key": {"env": "MY_GALILEO_KEY"},
+                            "project": "defenseclaw",
+                            "logstream": "production",
+                        },
+                    }
+                ],
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
+                self.assertEqual(C._galileo_key(cfg), C.Requirement.REQUIRED)
+                spec = C.lookup("GALILEO_API_KEY")
+                self.assertIsNotNone(spec)
+                bound = spec.resolve_bound_endpoint(cfg)
+                self.assertEqual(bound, "https://api.galileo.ai")
+                for secret in ("path-secret-canary", "query-secret", "fragment-secret"):
+                    self.assertNotIn(secret, bound)
 
     def test_defenseclaw_llm_key_not_used_when_nothing_uses_llm(self):
         cfg = _make_cfg("/tmp/dc-test")
