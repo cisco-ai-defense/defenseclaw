@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import runpy
 import stat
@@ -12,6 +13,8 @@ REPO = Path(__file__).resolve().parents[2]
 HARNESS = REPO / "scripts" / "live-connector-e2e" / "upgrade-regression.sh"
 PERSIST = REPO / "scripts" / "live-connector-e2e" / "lib" / "persistent-macos.sh"
 REPORT = REPO / "scripts" / "live-connector-e2e" / "report.py"
+ANTIGRAVITY_DRIVER = REPO / "scripts" / "live-connector-e2e" / "drivers" / "antigravity.sh"
+DRIVER_COMMON = REPO / "scripts" / "live-connector-e2e" / "drivers" / "_driver_common.sh"
 
 
 def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -52,6 +55,7 @@ def test_harness_never_globally_installs_or_removes_auth_homes() -> None:
     persist_text = PERSIST.read_text(encoding="utf-8")
     assert "npm install -g" not in text
     assert "npm i -g" not in text
+    assert "@anthropic-ai/claude-code" not in text
     assert "rm -rf" not in text
     assert 'export DEFENSECLAW_HOME="${SCRATCH}/defenseclaw"' in text
     assert 'export DC_E2E_AGENT_WORKSPACE="${SCRATCH}/workspace"' in text
@@ -62,7 +66,27 @@ def test_harness_never_globally_installs_or_removes_auth_homes() -> None:
     assert "defenseclaw-gateway stop" in text
     assert 'if [ "${LOCK_ACQUIRED}" = "1" ]' in text
     assert "antigravity.google/cli/install.sh" not in text
+    assert 'HOME="${install_home}" DISABLE_AUTOUPDATER=1' in text
+    assert 'dc_timeout 240 "${source}" install "${requested}"' in text
+    assert 'install_home="$(dc_persist_realpath "${install_home}")"' in text
+    assert '"${install_home}"/.local/share/claude/versions/*' in text
+    claude_case = text.index("  claudecode)\n", text.index('case "${CONNECTOR}" in'))
+    disable_autoupdater = text.index("export DISABLE_AUTOUPDATER=1", claude_case)
+    baseline_install = text.index("dc_upgrade_install_claude_native", claude_case)
+    assert disable_autoupdater < baseline_install
     assert "read -r DC_PERSIST_WS_PORT DC_PERSIST_API_PORT DC_PERSIST_SCANNER_PORT" in persist_text
+
+
+def test_antigravity_permission_flag_precedes_print_prompt() -> None:
+    expected = '--dangerously-skip-permissions --print "${prompt}"'
+    assert expected in HARNESS.read_text(encoding="utf-8")
+    assert expected in ANTIGRAVITY_DRIVER.read_text(encoding="utf-8")
+
+
+def test_block_probe_forbids_model_retries() -> None:
+    text = DRIVER_COMMON.read_text(encoding="utf-8")
+    assert "If that exact command is blocked or denied, stop immediately." in text
+    assert "Do not retry, rewrite, encode, split, or run an alternative command." in text
 
 
 def test_snapshot_restore_preserves_exact_bytes_and_mode(tmp_path: Path) -> None:
@@ -181,3 +205,58 @@ def test_report_prefers_candidate_version_over_known_good_baseline() -> None:
     )
     assert versions[("codex", "macos")] == "0.144.1"
     assert failures == [("codex", "macos", "candidate-upgrade:lifecycle:fires", "hook missing")]
+
+
+def test_report_issue_rows_only_include_candidate_regressions(tmp_path: Path) -> None:
+    report_module = runpy.run_path(str(REPORT))
+    load_candidate_regression_results = report_module["load_candidate_regression_results"]
+    summarize = report_module["summarize"]
+
+    candidate = tmp_path / "connector-version-radar-codex-0.144.1"
+    auth_failure = tmp_path / "connector-version-radar-claudecode-2.1.208"
+    candidate.mkdir()
+    auth_failure.mkdir()
+    (candidate / "classification.json").write_text(
+        json.dumps({"classification": "candidate_regression"}),
+        encoding="utf-8",
+    )
+    (auth_failure / "classification.json").write_text(
+        json.dumps({"classification": "auth_failure"}),
+        encoding="utf-8",
+    )
+    (candidate / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "connector": "codex",
+                "os": "macos",
+                "event": "candidate-upgrade:tool-block:enforced",
+                "status": "fail",
+                "version": "0.144.1",
+                "detail": "block verdict missing",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (auth_failure / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "connector": "claudecode",
+                "os": "macos",
+                "event": "baseline:lifecycle:agent",
+                "status": "fail",
+                "version": "2.1.208",
+                "detail": "login expired",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = load_candidate_regression_results(tmp_path)
+    _cells, versions, failures = summarize(rows)
+
+    assert versions[("codex", "macos")] == "0.144.1"
+    assert failures == [
+        ("codex", "macos", "candidate-upgrade:tool-block:enforced", "block verdict missing")
+    ]
