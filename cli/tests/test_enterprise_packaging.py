@@ -213,6 +213,9 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
         'assert_existing_secure_dir_or_absent "$LOG_DIR"',
         'assert_existing_secure_dir_or_absent "$LOG_VENDOR_DIR"',
         'assert_existing_secure_dir_or_absent "$LOG_PRODUCT_DIR"',
+        "assert_trusted_system_dir /opt",
+        "assert_trusted_system_dir /opt/cisco",
+        "assert_trusted_system_dir /opt/cisco/secureclient",
         'refuse_symlink "$CONFIG_DEST"',
         "assert_no_write_acl()",
         'assert_no_write_acl "$path"',
@@ -222,6 +225,11 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     }
     missing = sorted(value for value in required if value not in text)
     assert not missing
+    directory_creation = (
+        '/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"'
+    )
+    for ancestor in ("/opt", "/opt/cisco", "/opt/cisco/secureclient"):
+        assert text.index(directory_creation) < text.index(f"assert_trusted_system_dir {ancestor}")
     stale_service_identity_contract = {
         "SERVICE_USER",
         "SERVICE_GROUP",

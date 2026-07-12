@@ -383,6 +383,9 @@ for parent in "$LOG_VENDOR_DIR" "$LOG_PRODUCT_DIR"; do
 done
 /usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"
 /usr/bin/install -d -o root -g wheel -m 0750 "$RUNTIME_DIR" "$GUARDIAN_DIR" "$AUTH_DIR" "$LOG_DIR"
+assert_trusted_system_dir /opt
+assert_trusted_system_dir /opt/cisco
+assert_trusted_system_dir /opt/cisco/secureclient
 
 install_file_atomic "$BINARY_SOURCE" "${BIN_DIR}/defenseclaw-gateway" root wheel 0755
 install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root wheel 0640
