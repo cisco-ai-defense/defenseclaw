@@ -155,7 +155,7 @@ with a warning. Action mode fails closed unless
 | OpenClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
 | ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
 | Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v7` | prompt, tool_call, tool_result, event_content |
 | Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
@@ -229,7 +229,7 @@ non-CodeGuard paths require `--replace`.
 
 | Connector | Native telemetry | DefenseClaw auth | Hook telemetry |
 | --------- | ---------------- | ---------------- | -------------- |
-| Codex | native OTLP HTTP from config.toml | header token | notify/hook telemetry |
+| Codex | native logs/metrics/traces via OTLP HTTP from config.toml | connector-scoped loopback path token | notify/hook telemetry |
 | Claude Code | native OTLP env in settings.json | header token | hook telemetry |
 | Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
@@ -257,8 +257,10 @@ blocking the OpenClaw stack gate. The harness lives under
 
 Layer A targets `~/.defenseclaw/hooks/<connector>-hook.sh` on Linux/macOS and
 the native `defenseclaw-gateway hook --connector <c> --event <e>` subcommand on
-Windows. Both forward the payload to the local gateway, so every assertion
-works against `~/.defenseclaw/gateway.jsonl` + `audit.db` regardless of OS.
+Windows. Both forward the payload to the local gateway, so every assertion uses
+canonical SQLite event history regardless of OS. An explicit JSONL destination
+may be tested separately, but it is not an implicit mirror or the lifecycle
+contract authority.
 
 Hooks are **harness-driven**, not LLM-driven: the agent fires
 `SessionStart` / `PreToolUse` / etc. as a function of its lifecycle, so Layer B

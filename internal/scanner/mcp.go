@@ -208,13 +208,9 @@ func (s *MCPScanner) buildArgs(target string) []string {
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
-	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
 	exitCode := 0
 	var scanErr error
 	var result *ScanResult
-	defer func() {
-		FinishScanSpan(sp, result, exitCode, scanErr)
-	}()
 
 	// ("MCP scan target is passed to a remote-
 	// capable scanner without URL guarding"): mcp-scanner accepts
@@ -273,11 +269,8 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw (the mcpscanner SDK is provided by cisco-ai-mcp-scanner)", s.Name(), s.Config.Binary)
 			return nil, scanErr
 		}
-		if exitCode != 0 {
-			EmitSubprocessExitFromContext(ctx, s.Config.Binary, exitCode, stderrStr)
-		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s failed: %s", s.Name(), stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
 			return nil, scanErr
 		}
 	}

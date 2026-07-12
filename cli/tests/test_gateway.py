@@ -191,6 +191,46 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
         # application/json automatically; we don't pass headers ourselves.
         self.assertNotIn("Content-Type", req.headers)
 
+    def test_cli_observability_uses_canonical_json_ingress_and_requires_204(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        client, captured = self._client_with_capturing_session()
+        response = MagicMock()
+        response.status_code = 204
+        response.raise_for_status = MagicMock()
+
+        def post(url, **kwargs):
+            captured.append(
+                SimpleNamespace(
+                    method="POST",
+                    url=url,
+                    headers={**kwargs.get("headers", {})},
+                    json=kwargs.get("json"),
+                    data=kwargs.get("data"),
+                    params=kwargs.get("params"),
+                    allow_redirects=kwargs.get("allow_redirects"),
+                )
+            )
+            return response
+
+        client._session.post = post
+        payload = {
+            "kind": "action",
+            "run_id": "run-1",
+            "action": {"name": "policy-reload", "target": "default", "details": "raw"},
+        }
+        client.emit_cli_observability(payload)
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].url.endswith("/api/v1/observability/cli"))
+        self.assertEqual(captured[0].json, payload)
+        self.assertEqual(captured[0].method, "POST")
+        self.assertFalse(captured[0].allow_redirects)
+
+        response.status_code = 200
+        with self.assertRaisesRegex(Exception, "admission was not acknowledged"):
+            client.emit_cli_observability(payload)
+
     def test_locations_url_encodes_ecosystem_and_name(self):
         client, captured = self._client_with_capturing_session()
         client.ai_usage_component_locations("npm", "@org/foo bar")

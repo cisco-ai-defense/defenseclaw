@@ -22,6 +22,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -38,6 +39,20 @@ from defenseclaw.enforce import PolicyEngine
 from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
 from tests.helpers import cleanup_app, make_app_context
+
+
+def _seed_scan(store, result) -> None:
+    """Seed a forensic read-model fixture without a telemetry runtime."""
+    store.insert_scan_result(
+        str(uuid.uuid4()),
+        result.scanner,
+        result.target,
+        result.timestamp,
+        int(result.duration.total_seconds() * 1000),
+        len(result.findings),
+        result.max_severity(),
+        result.to_json(),
+    )
 
 
 class PluginConnectorFlagTest(unittest.TestCase):
@@ -329,18 +344,25 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
             "hermes": [hermes_dir],
         }.get(connector or "opencode", [])
         now = datetime.now(timezone.utc)
-        self.app.logger.log_scan(
+        _seed_scan(
+            self.app.store,
             ScanResult(
-                scanner="plugin-scanner", target=opencode_path,
-                timestamp=now, findings=[], duration=timedelta(seconds=0.1),
-            )
+                scanner="plugin-scanner",
+                target=opencode_path,
+                timestamp=now,
+                findings=[],
+                duration=timedelta(seconds=0.1),
+            ),
         )
-        self.app.logger.log_scan(
+        _seed_scan(
+            self.app.store,
             ScanResult(
-                scanner="plugin-scanner", target=hermes_path,
+                scanner="plugin-scanner",
+                target=hermes_path,
                 timestamp=now + timedelta(seconds=1),
-                findings=[], duration=timedelta(seconds=0.1),
-            )
+                findings=[],
+                duration=timedelta(seconds=0.1),
+            ),
         )
 
         scoped = self.invoke(["list", "--connector", "hermes", "--json"])
@@ -1080,8 +1102,8 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
     def test_info_shows_real_cards_scoped_actions_and_scans(self):
         codex_path = self._seed_connector_plugin("codex", "shared")
         hermes_path = self._seed_connector_plugin("hermes", "shared")
-        self.app.logger.log_scan(self._clean_scan_result(codex_path))
-        self.app.logger.log_scan(self._clean_scan_result(hermes_path))
+        _seed_scan(self.app.store, self._clean_scan_result(codex_path))
+        _seed_scan(self.app.store, self._clean_scan_result(hermes_path))
         PolicyEngine(self.app.store).block_for_connector(
             "plugin", "shared", "hermes", "manual",
         )

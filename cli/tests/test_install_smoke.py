@@ -148,9 +148,10 @@ class InstallSmokeMatrixTests(unittest.TestCase):
 
             with open(cfg_path) as fh:
                 cfg_doc = yaml.safe_load(fh)
-            guardrail = cfg_doc.get("guardrail", {})
-            for key in ("mode", "scanner_mode", "block_message"):
-                self.assertIn(key, guardrail, f"{connector_name}: guardrail config missing {key}")
+            self.assertEqual(cfg_doc.get("config_version"), 8)
+            self.assertIsInstance(cfg_doc.get("observability"), dict)
+            for removed in ("audit_sinks", "otel", "privacy", "splunk"):
+                self.assertNotIn(removed, cfg_doc)
 
             # 2. Reload config from disk and assert the connector
             #    selection persisted. config.load() reads from

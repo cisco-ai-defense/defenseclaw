@@ -188,6 +188,26 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	}
 }
 
+func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	configPath := filepath.Join(DefaultDataPath(), DefaultConfigName)
+	if err := os.WriteFile(configPath, []byte("config_version: 3\nsplunk:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error=nil, want legacy Splunk migration guidance")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "defenseclaw upgrade --yes") || !strings.Contains(message, "config v8") {
+		t.Fatalf("Load() error=%q, want release-upgrade config-v8 guidance", message)
+	}
+	if strings.Contains(message, "migrate-splunk") || strings.Contains(message, "--apply") {
+		t.Fatalf("Load() error=%q still advertises the removed migration command", message)
+	}
+}
+
 func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
 	dir := t.TempDir()
 	if runtime.GOOS != "windows" {

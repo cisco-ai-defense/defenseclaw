@@ -1,5 +1,14 @@
 # DefenseClaw v7 — Observability Contract
 
+> [!WARNING]
+> **Historical v7 contract.** The JSONL writer, direct audit-sink/OTel topology,
+> schemas, gates, and runbooks below are retained for migration and compatibility
+> archaeology. They are not authoritative for `config_version: 8`. Use
+> [DefenseClaw Observability v8](OBSERVABILITY.md) for current operator policy and
+> alert runbooks, and the [v8 design index](design/observability-v8/README.md) plus
+> [`schemas/telemetry/v8/`](../schemas/telemetry/v8/) for current telemetry
+> contracts.
+
 Downstream-facing contract for SIEM, analytics, and integration tests. **Schema version** for JSON envelopes is **7** (`internal/version.SchemaVersion`, `schema_version` on every stamped event). **Generation** is a monotonic counter bumped on config/policy save (`version.BumpGeneration()`); **content_hash** is SHA-256 of canonical JSON config/policy; **binary_version** is the running DefenseClaw semver.
 
 | Source of truth (Go) | Parity (Python / CI) |

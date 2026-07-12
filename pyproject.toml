@@ -1,6 +1,6 @@
 [project]
 name = "defenseclaw"
-version = "0.8.4"
+version = "0.8.5"
 description = "Enterprise governance layer for OpenClaw — secures agentic AI deployments"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,9 @@ dependencies = [
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
+    # Runtime validation of config_version: 8 uses the schema bundled in the
+    # wheel. Keep this direct even though scanner dependencies also install it.
+    "jsonschema>=4.23.0,<5",
     # Used by `defenseclaw setup galileo test` to emit a real, minimal OTLP
     # protobuf canary span without starting the gateway.
     "opentelemetry-proto>=1.28.0,<2",
@@ -104,6 +107,15 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
     "_data/scripts/*.sh",
     "_data/llm/*.json",
+    "_data/config/v8/*.json",
+    "_data/config/v8/*.yaml",
+    "_data/config/v8/*.md",
+    "_data/telemetry/v8/telemetry.schema.json",
+    "_data/telemetry/v8/catalog.json",
+    "_data/telemetry/v8/v7-exporter-selection.json",
+    "_data/telemetry/v8/galileo-rich-v2.json",
+    "_data/telemetry/v8/local-observability-v1.json",
+    "_data/telemetry/v8/openinference-v1.json",
     "inventory/ai_signatures.json",
     "inventory/hook_contracts.json",
     "_data/policies/openshell/*.rego",

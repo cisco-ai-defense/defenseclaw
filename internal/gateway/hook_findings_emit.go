@@ -21,9 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -38,17 +36,17 @@ type hookEvaluationContext struct {
 	// and the matching audit row. Empty when no findings were
 	// emitted (so audit detail stays unchanged).
 	EvaluationID string
+	// ScanID joins the evaluation summary to its per-finding rows.
+	ScanID string
 	// RuleIDs are the top detection rule_ids that drove this
 	// evaluation, capped so SIEM queries don't explode.
 	RuleIDs []string
 }
 
-// emitHookRuleFindings fans the verdict's DetailedFindings through
-// scanner.EmitInspectFindings so the per-rule matches are
-// observable via gateway.jsonl (EventScan + EventScanFinding),
-// scan_findings DB rows, defenseclaw_scan_findings_by_rule_total,
-// and the sliding-window correlator — without rebuilding the
-// audit/telemetry plumbing for each hook surface.
+// emitHookRuleFindings fans the verdict's DetailedFindings through the audit
+// logger's canonical v8 scan boundary so the per-rule matches are observable
+// through routed logs, forensic scan rows, generated dashboard metrics, and
+// the sliding-window correlator without per-surface fanout.
 //
 // Returns the empty struct when verdict has no detailed findings,
 // so callers can use the result unconditionally:
@@ -77,13 +75,13 @@ func (a *APIServer) emitHookRuleFindings(
 // runtime finding emitter on the gateway side (hook handlers,
 // /api/v1/inspect/* HTTP endpoints, proxy mid-stream / tool-call
 // inspect). It fans verdict.DetailedFindings through
-// scanner.EmitInspectFindings under the supplied scanner enum,
+// the canonical generated scan pipeline under the supplied scanner enum,
 // stamps correlation IDs from the request context, and returns
 // the evaluation_id + top rule_ids for the caller to surface in
 // audit details + response payloads.
 //
-// Best-effort: emission errors are recorded via the otel error
-// counter (errorReason as the bucket label) and the function
+// Best-effort: emission errors are recorded via the generated scan-error
+// metric (errorReason as the bounded error label) and the function
 // returns an empty hookEvaluationContext so the upstream code
 // path is never aborted by a telemetry hiccup.
 func (a *APIServer) emitInspectVerdictFindings(
@@ -107,27 +105,18 @@ func (a *APIServer) emitInspectVerdictFindings(
 		Findings:   inspectFindings,
 	}
 
-	agent := hookAgentIdentityFromContext(ctx)
-
-	var pers scanner.ScanPersistence
-	if a.store != nil {
-		pers = a.store
+	if a.logger == nil {
+		return hookEvaluationContext{}
 	}
-	var tel scanner.ScanTelemetry
-	if a.otel != nil {
-		tel = a.otel
-	}
-	w := a.gatewayLogWriter()
-
-	evalID, _, err := scanner.EmitInspectFindings(ctx, w, pers, tel, src, agent)
+	evalID, scanID, err := a.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordAuditDBError(ctx, errorReason)
-		}
+		metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
+		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)
 		return hookEvaluationContext{}
 	}
 	return hookEvaluationContext{
 		EvaluationID: evalID,
+		ScanID:       scanID,
 		RuleIDs:      scanner.TopRuleIDs(inspectFindings, 8),
 	}
 }
@@ -135,10 +124,9 @@ func (a *APIServer) emitInspectVerdictFindings(
 // emitGuardrailScanVerdictFindings is the proxy-side companion of
 // emitInspectVerdictFindings: it fans a *ScanVerdict (which carries
 // only stringy Findings, not structured DetailedFindings) through
-// the same scanner.EmitInspectFindings pipeline so per-rule
-// runtime detections from the guardrail proxy (prompt + completion
-// + mid-stream + tool-call inspect) land on every observability
-// surface.
+// the same canonical pipeline so per-rule runtime detections from the
+// guardrail proxy (prompt + completion + mid-stream + tool-call inspect) land
+// on every configured observability destination.
 //
 // Synthesis path: NormalizeScanVerdict already maps raw finding
 // strings to a stable canonical_id + category + severity + title
@@ -167,49 +155,29 @@ func (p *GuardrailProxy) emitGuardrailScanVerdictFindings(
 	}
 	inspectFindings := normalizedFindingsToInspect(normalized, verdict.Severity)
 	src := scanner.InspectFindingSource{
-		Scanner:    scannerEnum,
-		Target:     target,
-		TargetType: targetType,
-		Verdict:    verdict.Action,
-		DurationMs: latency.Milliseconds(),
-		Findings:   inspectFindings,
+		ScanID:       verdict.ScanID,
+		Scanner:      scannerEnum,
+		Target:       target,
+		TargetType:   targetType,
+		Verdict:      verdict.Action,
+		DurationMs:   latency.Milliseconds(),
+		EvaluationID: verdict.EvaluationID,
+		Findings:     inspectFindings,
 	}
-	agent := hookAgentIdentityFromContext(ctx)
-
-	var pers scanner.ScanPersistence
-	if p.store != nil {
-		pers = p.store
+	if p.logger == nil {
+		return hookEvaluationContext{}
 	}
-	var tel scanner.ScanTelemetry
-	if p.otel != nil {
-		tel = p.otel
-	}
-	w := p.gatewayLogWriterFromLogger()
-
-	evalID, _, err := scanner.EmitInspectFindings(ctx, w, pers, tel, src, agent)
+	evalID, scanID, err := p.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
 	if err != nil {
-		if p.otel != nil {
-			p.otel.RecordAuditDBError(ctx, errorReason)
-		}
+		metricRuntime, _ := p.observabilityV8TraceRuntime().(hookLifecycleMetricV8Runtime)
+		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)
 		return hookEvaluationContext{}
 	}
 	return hookEvaluationContext{
 		EvaluationID: evalID,
+		ScanID:       scanID,
 		RuleIDs:      scanner.TopRuleIDs(inspectFindings, 8),
 	}
-}
-
-// gatewayLogWriterFromLogger returns the JSONL writer wired into
-// the proxy's audit logger, or nil when the writer hasn't been
-// installed yet (test harnesses, early sidecar boot). Mirrors the
-// APIServer.gatewayLogWriter() accessor — the proxy carries its
-// own *audit.Logger reference so it cannot reuse that method
-// directly.
-func (p *GuardrailProxy) gatewayLogWriterFromLogger() *gatewaylog.Writer {
-	if p == nil || p.logger == nil {
-		return nil
-	}
-	return p.logger.GatewayLogWriter()
 }
 
 // normalizedFindingsToInspect adapts NormalizedFinding records
@@ -269,9 +237,8 @@ func normalizedFindingsToInspect(nfs []NormalizedFinding, fallbackSeverity strin
 // labels (asset_policy.skill.registry-required,
 // asset_policy.mcp.admin-deny, etc.).
 //
-// Returns an empty hookEvaluationContext when no notifier /
-// scanner-emit plumbing is wired or the decision is not a real
-// asset-policy match (callers already pre-filter to
+// Returns an empty hookEvaluationContext when no canonical logger is wired or
+// the decision is not a real asset-policy match (callers already pre-filter to
 // RawAction==block, but the guard keeps the helper defensive
 // against future call sites).
 func (a *APIServer) emitAssetPolicyDecisionFindings(
@@ -297,27 +264,18 @@ func (a *APIServer) emitAssetPolicyDecisionFindings(
 		Verdict:    decision.Action,
 		Findings:   []scanner.InspectFinding{finding},
 	}
-	agent := hookAgentIdentityFromContext(ctx)
-
-	var pers scanner.ScanPersistence
-	if a.store != nil {
-		pers = a.store
+	if a.logger == nil {
+		return hookEvaluationContext{}
 	}
-	var tel scanner.ScanTelemetry
-	if a.otel != nil {
-		tel = a.otel
-	}
-	w := a.gatewayLogWriter()
-
-	evalID, _, err := scanner.EmitInspectFindings(ctx, w, pers, tel, src, agent)
+	evalID, scanID, err := a.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordAuditDBError(ctx, "emit_asset_policy")
-		}
+		metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
+		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, "emit_asset_policy")
 		return hookEvaluationContext{}
 	}
 	return hookEvaluationContext{
 		EvaluationID: evalID,
+		ScanID:       scanID,
 		RuleIDs:      []string{ruleID},
 	}
 }
@@ -391,8 +349,8 @@ func assetPolicyDecisionTags(decision config.AssetPolicyDecision) []string {
 	return tags
 }
 
-// emitToolCallInspectFindings runs the structured RuleFinding[]
-// from inspectToolCalls through scanner.EmitInspectFindings under
+// emitToolCallInspectFindings runs the structured RuleFinding[] from
+// inspectToolCalls through the canonical v8 scan boundary under
 // scanner="tool-call-inspect". The proxy already has the full
 // per-rule structure (RuleID, Severity, Confidence, Evidence,
 // Tags), so we adapt directly via ruleFindingsToInspect instead of
@@ -400,7 +358,7 @@ func assetPolicyDecisionTags(decision config.AssetPolicyDecision) []string {
 //
 // Returns the resulting evaluation_id + top rule_ids so the
 // caller can stamp them on its audit row + ScanVerdict. Errors are
-// recorded via the otel error counter under
+// recorded via the generated scan-error metric under
 // "emit_tool_call_inspect" and result in an empty
 // hookEvaluationContext so the upstream code path is unaffected.
 func (p *GuardrailProxy) emitToolCallInspectFindings(
@@ -419,27 +377,18 @@ func (p *GuardrailProxy) emitToolCallInspectFindings(
 		Verdict:    action,
 		Findings:   inspectFindings,
 	}
-	agent := hookAgentIdentityFromContext(ctx)
-
-	var pers scanner.ScanPersistence
-	if p.store != nil {
-		pers = p.store
+	if p.logger == nil {
+		return hookEvaluationContext{}
 	}
-	var tel scanner.ScanTelemetry
-	if p.otel != nil {
-		tel = p.otel
-	}
-	w := p.gatewayLogWriterFromLogger()
-
-	evalID, _, err := scanner.EmitInspectFindings(ctx, w, pers, tel, src, agent)
+	evalID, scanID, err := p.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
 	if err != nil {
-		if p.otel != nil {
-			p.otel.RecordAuditDBError(ctx, "emit_tool_call_inspect")
-		}
+		metricRuntime, _ := p.observabilityV8TraceRuntime().(hookLifecycleMetricV8Runtime)
+		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, "emit_tool_call_inspect")
 		return hookEvaluationContext{}
 	}
 	return hookEvaluationContext{
 		EvaluationID: evalID,
+		ScanID:       scanID,
 		RuleIDs:      scanner.TopRuleIDs(inspectFindings, 8),
 	}
 }
@@ -555,39 +504,6 @@ func hookEvaluationTarget(connector, hookEvent string) string {
 		hookEvent = "unknown"
 	}
 	return connector + ":" + hookEvent
-}
-
-// hookAgentIdentityFromContext lifts the v7 correlation envelope
-// off the request context (set by the gateway correlation
-// middleware) and copies it into a scanner.AgentIdentity so
-// EmitInspectFindings stamps run_id / session_id / agent_id on
-// every emitted row. Returns the zero value when no envelope is
-// present — that's the documented fallback in
-// scanner.EmitScanResult and downstream queries already treat
-// NULL columns as "unknown for this event".
-func hookAgentIdentityFromContext(ctx context.Context) scanner.AgentIdentity {
-	env := audit.EnvelopeFromContext(ctx)
-	return scanner.AgentIdentity{
-		AgentID:           env.AgentID,
-		AgentName:         env.AgentName,
-		AgentInstanceID:   env.AgentInstanceID,
-		SidecarInstanceID: env.SidecarInstanceID,
-		RunID:             env.RunID,
-		RequestID:         env.RequestID,
-		SessionID:         env.SessionID,
-		TraceID:           env.TraceID,
-		Connector:         env.Connector,
-	}
-}
-
-// gatewayLogWriter returns the JSONL writer wired into the audit
-// logger, or nil when the writer hasn't been installed yet
-// (test harnesses and the early phase of sidecar boot).
-func (a *APIServer) gatewayLogWriter() *gatewaylog.Writer {
-	if a == nil || a.logger == nil {
-		return nil
-	}
-	return a.logger.GatewayLogWriter()
 }
 
 // ruleFindingsToInspect adapts gateway.RuleFinding into the

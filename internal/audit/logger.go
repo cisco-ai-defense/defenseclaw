@@ -20,44 +20,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
-
-// sanitizeEvent rewrites free-form, PII-bearing fields on a copy of the
-// supplied event so the version that reaches SQLite, audit sinks, and
-// OTel exporters never carries raw user content.
-//
-// Intentionally applied once at the Logger choke point rather than at
-// every call site: a single invariant ("persistent sinks get
-// redacted events") is easier to audit and impossible to bypass by
-// forgetting a helper. The Reveal flag is not honored here — persistent
-// storage must never unmask.
-//
-// Target (the resource identifier) is preserved because it is usually
-// a stable, non-PII id (skill name, model name, package coordinates).
-// If a caller puts PII there (a user email as the actor, say) it
-// flows through unchanged; the action/details/reason surfaces are
-// where free-form user content historically leaks.
-func sanitizeEvent(e Event) Event {
-	// Honor the cloud-controlled per-inspection redaction directive
-	// carried on the audit event. nil (the common case) yields
-	// SinkPolicyDefault and preserves the historical ForSinkReason
-	// behavior; a managed_enterprise directive forces raw (cloud=false)
-	// or redaction (cloud=true) for this event's details surface.
-	e.Details = redaction.ReasonForSink(e.Details, redaction.SinkPolicyForDirective(e.RedactionEnabled))
-	return e
-}
 
 func cloneStructuredPayload(in map[string]any) map[string]any {
 	if len(in) == 0 {
@@ -77,11 +49,9 @@ func cloneStructuredPayload(in map[string]any) map[string]any {
 	return out
 }
 
-// stampAuditEventEnvelope fills the envelope fields that must be identical
-// across SQLite, audit sinks, OTel, and the structured gateway bridge.
-// Store.LogEvent also stamps these fields before INSERT, but it receives
-// events by value; stamping here keeps the fan-out copy in lockstep with the
-// persisted row.
+// stampAuditEventEnvelope fills the source envelope before the generated v8
+// runtime performs collection, projection, persistence, and destination
+// routing. Store.LogEvent also stamps historical direct inserts by value.
 func stampAuditEventEnvelope(e *Event) {
 	if e == nil {
 		return
@@ -116,332 +86,83 @@ func stampAuditEventEnvelope(e *Event) {
 	}
 }
 
-// StructuredEmitter receives every audit Event that flows through the
-// Logger *after* it has been sanitized and persisted. It is intended for
-// translating audit events into the structured gateway.jsonl envelope
-// (see internal/gatewaylog) so non-gateway lifecycle signals (scans,
-// watcher start/stop, enforcement actions) land alongside guardrail
-// verdicts in a single correlated stream.
-//
-// Implementations must be safe for concurrent use and non-blocking; the
-// Logger invokes Emit on the hot path and will not retry on failure.
-type StructuredEmitter interface {
-	EmitAudit(event Event)
-	// EmitGatewayEvent writes a fully-formed gatewaylog event (activity,
-	// structured errors) to gateway.jsonl. Optional — no-op when nil
-	// emitter or bridge stub.
-	EmitGatewayEvent(ev gatewaylog.Event)
-}
-
-// Logger is the audit choke point: every caller routes through
-// LogEvent / LogAction* / LogScan*, which persist to SQLite and then
-// fan out to OTel, audit sinks, and the structured gateway.jsonl
-// bridge. The downstream collaborators (sinks.Manager,
-// telemetry.Provider, StructuredEmitter) are installed via setters
-// so sidecar startup can wire everything up after NewLogger without
-// refactoring call sites every time a new sink is added.
-//
-// mu guards those three collaborator fields. Before it existed, a
-// goroutine calling LogEvent while the shutdown path called
-// SetStructuredEmitter(nil) had a classic data race on an interface
-// value — interface writes are two-word stores on most
-// architectures and are not atomic. The lock is acquired only to
-// snapshot the current collaborator pointers into local variables;
-// the fan-out itself runs *without* the lock held so a slow sink
-// cannot block an unrelated setter from swapping.
+// Logger is the audit choke point for generated v8 records and metrics.
+// SQLite persistence and destination fanout are owned by the bound v8 runtime;
+// the removed v7 sink, gateway.jsonl, and structured-emitter bridges cannot be
+// re-enabled by configuration or by temporarily detaching the runtime.
 type Logger struct {
 	store *Store
 
 	mu sync.RWMutex
-	// sinks is the v4 generic fan-out manager. nil is a safe no-op
-	// (matches the legacy nil-splunk behavior).
-	sinks      *sinks.Manager
-	otel       *telemetry.Provider
-	structured StructuredEmitter
-	// gwWriter is optional: when set, scan completions emit EventScan /
-	// EventScanFinding rows through the gateway JSONL choke point.
-	gwWriter *gatewaylog.Writer
+	// runtimeV8 is an optional cycle-free adapter to the unified v8
+	// runtime. The runtime package imports audit for event-history persistence,
+	// so audit owns this narrow interface rather than importing runtime back.
+	runtimeV8 RuntimeV8Emitter
 }
-
-const gatewaySplunkHECEventsKey = "_splunk_hec_events"
 
 func NewLogger(store *Store) *Logger {
-	return &Logger{store: store}
+	logger := &Logger{store: store}
+	if store != nil {
+		store.BindSQLiteBusyObservabilityV8(logger)
+	}
+	return logger
 }
 
-// SetSinks installs the audit-sink fan-out manager. Pass nil to disable
-// downstream forwarding (events still hit SQLite + OTel when those are
-// configured).
-func (l *Logger) SetSinks(m *sinks.Manager) {
-	l.configureSinks(m)
+// SetRuntimeV8Emitter binds generated audit-action producers to the unified v8
+// runtime. A nil emitter detaches the runtime during shutdown; it never enables
+// a fallback path because v8 is the Logger's unconditional authority.
+func (l *Logger) SetRuntimeV8Emitter(emitter RuntimeV8Emitter) {
+	if l == nil {
+		return
+	}
 	l.mu.Lock()
-	l.sinks = m
+	l.runtimeV8 = emitter
 	l.mu.Unlock()
 }
 
-// SwapSinks installs a new audit-sink manager and returns the previous manager
-// so callers that own a runtime reload can close it after the swap.
-func (l *Logger) SwapSinks(m *sinks.Manager) *sinks.Manager {
+func (l *Logger) runtimeV8Snapshot() RuntimeV8Emitter {
 	if l == nil {
 		return nil
 	}
-	l.configureSinks(m)
-	l.mu.Lock()
-	old := l.sinks
-	l.sinks = m
-	l.mu.Unlock()
-	return old
-}
-
-func (l *Logger) configureSinks(m *sinks.Manager) {
-	if m != nil {
-		m.SetDeliveryHook(l.sinkDeliveryHook)
-		m.SetCircuitCallbacks(l.onCircuitTripActivity, l.onCircuitRecoverActivity)
-	}
-}
-
-func (l *Logger) SetOTelProvider(p *telemetry.Provider) {
-	l.mu.Lock()
-	l.otel = p
-	l.mu.Unlock()
-}
-
-// SetStructuredEmitter installs a bridge that forwards sanitized audit
-// Events to the structured gateway.jsonl writer (or any other
-// structured sink). Pass nil to detach.
-func (l *Logger) SetStructuredEmitter(e StructuredEmitter) {
-	l.mu.Lock()
-	l.structured = e
-	l.mu.Unlock()
-}
-
-// SetGatewayLogWriter installs the gateway JSONL writer used for v7
-// EventScan / EventScanFinding emissions. Pass nil to disable.
-func (l *Logger) SetGatewayLogWriter(w *gatewaylog.Writer) {
-	l.mu.Lock()
-	l.gwWriter = w
-	l.mu.Unlock()
-}
-
-// GatewayLogWriter returns the installed gateway JSONL writer (may
-// be nil when none is wired). Callers outside the audit package
-// use this to fan EventScan / EventScanFinding events from
-// runtime finding emitters (hook handlers, /api/v1/inspect/*,
-// proxy guardrail, mid-stream, tool-call-inspect) through the
-// same choke point as scanner.EmitScanResult, so gateway.jsonl
-// stays the single source of truth.
-func (l *Logger) GatewayLogWriter() *gatewaylog.Writer {
-	return l.gatewayWriterSnapshot()
-}
-
-func (l *Logger) gatewayWriterSnapshot() *gatewaylog.Writer {
 	l.mu.RLock()
-	w := l.gwWriter
+	emitter := l.runtimeV8
 	l.mu.RUnlock()
-	return w
+	return emitter
 }
 
-// snapshot returns a consistent view of the collaborator pointers
-// at a single instant. The caller uses these snapshots to drive the
-// fan-out without holding the lock — so a misbehaving sink cannot
-// stall setters, and a concurrent Set* swap does not tear an
-// in-flight interface field read.
-func (l *Logger) snapshot() (*sinks.Manager, *telemetry.Provider, StructuredEmitter) {
+type runtimeV8Binding struct {
+	emitter        RuntimeV8Emitter
+	logBatch       RuntimeV8LogBatchEmitter
+	metricEmitter  RuntimeV8MetricEmitter
+	metricBatch    RuntimeV8MetricBatchEmitter
+	assetScanTrace RuntimeV8AssetScanTraceEmitter
+}
+
+// runtimeV8BindingSnapshot returns the log and generated-metric capabilities
+// from one mutex snapshot. A producer must use this single binding for the
+// complete occurrence so a concurrent reload/detach cannot split it between
+// v7 and v8 paths.
+func (l *Logger) runtimeV8BindingSnapshot() runtimeV8Binding {
+	if l == nil {
+		return runtimeV8Binding{}
+	}
 	l.mu.RLock()
-	s, o, e := l.sinks, l.otel, l.structured
+	emitter := l.runtimeV8
+	binding := runtimeV8Binding{emitter: emitter}
+	if metricEmitter, ok := emitter.(RuntimeV8MetricEmitter); ok {
+		binding.metricEmitter = metricEmitter
+	}
+	if logBatch, ok := emitter.(RuntimeV8LogBatchEmitter); ok {
+		binding.logBatch = logBatch
+	}
+	if metricBatch, ok := emitter.(RuntimeV8MetricBatchEmitter); ok {
+		binding.metricBatch = metricBatch
+	}
+	if assetScanTrace, ok := emitter.(RuntimeV8AssetScanTraceEmitter); ok {
+		binding.assetScanTrace = assetScanTrace
+	}
 	l.mu.RUnlock()
-	return s, o, e
-}
-
-// emitStructuredSnapshot fans the event out to an explicit snapshot
-// of the structured emitter. Used by code paths that have already
-// taken a single snapshot() for the whole fan-out so concurrent
-// Set*/Close calls can't observe a torn interface field mid-pipe.
-func (l *Logger) emitStructuredSnapshot(emitter StructuredEmitter, e Event) {
-	if emitter == nil {
-		return
-	}
-	emitter.EmitAudit(e)
-}
-
-func (l *Logger) emitGatewaySnapshot(emitter StructuredEmitter, ev gatewaylog.Event) {
-	if emitter == nil {
-		return
-	}
-	emitter.EmitGatewayEvent(ev)
-}
-
-// gatewayLogSinkActionNamespace prefixes the sink-only action key for
-// mirrored gatewaylog events ("gatewaylog.<event-type>"). This is a
-// sink-telemetry namespace, not an audit.Action registry member: the
-// concrete suffix is the dynamic gatewaylog event type, so it cannot be
-// a single curated enum value. Kept as a named constant so the call
-// site carries no raw audit-action string literal.
-const gatewayLogSinkActionNamespace = "gatewaylog."
-
-// ForwardGatewayEventToSinks mirrors native gatewaylog events that are
-// semantically useful to SIEM consumers into the audit sink fan-out. The
-// gatewaylog writer is the source of truth for these events; this method only
-// packages the already-redacted event as a first-class HEC row so the Splunk
-// local bridge exports canonical `defenseclaw:json` records with top-level
-// `event_type` values.
-func (l *Logger) ForwardGatewayEventToSinks(ctx context.Context, ev gatewaylog.Event) {
-	if l == nil || !gatewayEventForwardedToSinks(ev.EventType) {
-		return
-	}
-	sinksMgr, _, _ := l.snapshot()
-	if sinksMgr == nil {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ev.Timestamp.IsZero() {
-		ev.Timestamp = time.Now().UTC()
-	}
-	if ev.Severity == "" {
-		ev.Severity = gatewaylog.SeverityInfo
-	}
-	stampGatewayEnvelope(&ev)
-	ev = sanitizeGatewayLogEvent(ev)
-
-	event, err := gatewayLogEventMap(ev)
-	if err != nil {
-		return
-	}
-
-	sinkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	l.forwardSinkEventCtx(sinkCtx, sinksMgr, sinks.Event{
-		ID:                uuid.NewString(),
-		Timestamp:         ev.Timestamp,
-		Action:            gatewayLogSinkActionNamespace + string(ev.EventType),
-		Target:            "gatewaylog",
-		Actor:             "defenseclaw",
-		Details:           fmt.Sprintf("event_type=%s", ev.EventType),
-		Severity:          string(ev.Severity),
-		RunID:             ev.RunID,
-		TraceID:           ev.TraceID,
-		RequestID:         ev.RequestID,
-		SessionID:         ev.SessionID,
-		TurnID:            ev.TurnID,
-		AgentName:         ev.AgentName,
-		AgentID:           ev.AgentID,
-		AgentInstanceID:   ev.AgentInstanceID,
-		SidecarInstanceID: ev.SidecarInstanceID,
-		PolicyID:          ev.PolicyID,
-		DestinationApp:    ev.DestinationApp,
-		ToolName:          ev.ToolName,
-		ToolID:            ev.ToolID,
-		Connector:         ev.Connector,
-		Structured: map[string]any{
-			gatewaySplunkHECEventsKey: []map[string]any{
-				{
-					"time":       float64(ev.Timestamp.Unix()) + float64(ev.Timestamp.Nanosecond())/1e9,
-					"source":     "defenseclaw",
-					"sourcetype": "defenseclaw:json",
-					"event":      event,
-				},
-			},
-		},
-	})
-}
-
-func gatewayEventForwardedToSinks(eventType gatewaylog.EventType) bool {
-	switch eventType {
-	case gatewaylog.EventVerdict,
-		gatewaylog.EventLLMPrompt,
-		gatewaylog.EventLLMResponse,
-		gatewaylog.EventToolInvocation:
-		return true
-	default:
-		return false
-	}
-}
-
-func sanitizeGatewayLogEvent(ev gatewaylog.Event) gatewaylog.Event {
-	// Honor the cloud-controlled per-inspection redaction directive
-	// carried on the event (this audit-mirror path does not share the
-	// originating request context). A non-nil RedactionEnabled only
-	// ever comes from a managed Cisco AI Defense inspect response, so
-	// the SinkPolicyForDirective mapping is inherently
-	// managed_enterprise-scoped; nil yields SinkPolicyDefault and
-	// preserves today's behavior. Honoring it here means the mirror
-	// path won't re-redact content the emit choke point deliberately
-	// left raw (cloud=false) and force-redacts when cloud=true.
-	policy := redaction.SinkPolicyForDirective(ev.RedactionEnabled)
-	if v := ev.Verdict; v != nil {
-		cp := *v
-		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
-		ev.Verdict = &cp
-	}
-	if p := ev.LLMPrompt; p != nil {
-		cp := *p
-		cp.Prompt = redaction.MessageContentForSink(cp.Prompt, policy)
-		cp.RawRequestBody = redaction.MessageContentForSink(cp.RawRequestBody, policy)
-		ev.LLMPrompt = &cp
-	}
-	if r := ev.LLMResponse; r != nil {
-		cp := *r
-		cp.Response = redaction.MessageContentForSink(cp.Response, policy)
-		cp.RawResponseBody = redaction.MessageContentForSink(cp.RawResponseBody, policy)
-		ev.LLMResponse = &cp
-	}
-	if t := ev.Tool; t != nil {
-		cp := *t
-		cp.ToolInput = redaction.MessageContentForSink(cp.ToolInput, policy)
-		cp.ToolOutput = redaction.MessageContentForSink(cp.ToolOutput, policy)
-		ev.Tool = &cp
-	}
-	return ev
-}
-
-func gatewayLogEventMap(ev gatewaylog.Event) (map[string]any, error) {
-	raw, err := json.Marshal(ev)
-	if err != nil {
-		return nil, err
-	}
-	var event map[string]any
-	if err := json.Unmarshal(raw, &event); err != nil {
-		return nil, err
-	}
-	return event, nil
-}
-
-// stampGatewayEnvelope fills the v7 correlation + identity envelope
-// on a gatewaylog.Event that does NOT flow through Writer.Emit — i.e.
-// events the audit Logger hands directly to otel.RecordGatewayEvent
-// or the structured emitter bridge. Writer.Emit auto-stamps
-// sidecar_instance_id and provenance at its choke point, but these
-// two side channels (OTel logs + bridge) bypass it entirely, so we
-// re-implement the minimum contract here:
-//
-//   - sidecar_instance_id: per-process UUID, never overwrites
-//   - provenance quartet: from version.Current(), never overwrites
-//   - run_id: from DEFENSECLAW_RUN_ID if the caller didn't set one
-//
-// Never overwrites caller-supplied values so tests pinning a
-// specific generation or trace id keep their pin. This is the
-// single helper responsible for keeping log-tier and JSONL-tier
-// envelopes in lockstep — if you add a field to the Writer choke,
-// add it here too.
-func stampGatewayEnvelope(ev *gatewaylog.Event) {
-	if ev == nil {
-		return
-	}
-	if ev.SidecarInstanceID == "" {
-		ev.SidecarInstanceID = ProcessAgentInstanceID()
-	}
-	if ev.RunID == "" {
-		ev.RunID = currentRunID()
-	}
-	// StampProvenance is idempotent-ish: only fills zero fields when
-	// the writer choke point is not the first stamper. We keep the
-	// same contract here so a caller that pre-stamped (test harness)
-	// wins over version.Current().
-	if ev.SchemaVersion == 0 {
-		ev.StampProvenance()
-	}
+	return binding
 }
 
 // ScanCorrelation threads per-request correlation identifiers and
@@ -458,6 +179,12 @@ type ScanCorrelation struct {
 	RequestID string
 	SessionID string
 	TraceID   string
+	SpanID    string
+
+	// EvaluationID joins a runtime inspection to its scan summary, findings,
+	// guardrail decision, trace, and generated metric records. Classic file and
+	// inventory scans leave it empty.
+	EvaluationID string
 
 	AgentID         string
 	AgentName       string
@@ -469,8 +196,8 @@ type ScanCorrelation struct {
 	Connector string
 }
 
-// LogScan persists a scan result to SQLite, forwards to Splunk HEC,
-// and emits OTel log/metric signals.
+// LogScan persists the forensic scan rows and emits the canonical v8 finding,
+// summary, and metric families through the bound observability runtime.
 func (l *Logger) LogScan(result *scanner.ScanResult) error {
 	return l.LogScanWithVerdict(result, "")
 }
@@ -480,11 +207,11 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	return l.LogScanWithCorrelation(context.Background(), result, verdict, ScanCorrelation{})
 }
 
-// LogScanWithCorrelation is the v7 entry point for scan emission
-// with explicit correlation + identity. Threads run_id / request_id
-// / session_id / trace_id and the three-tier agent identity onto
-// EventScan, EventScanFinding, the scan_results / scan_findings
-// rows, and the matching audit.Event so every surface agrees.
+// LogScanWithCorrelation is the canonical scan emission entry point with
+// explicit correlation + identity. It threads run_id / request_id /
+// session_id / trace_id and the three-tier agent identity onto the forensic
+// scan_results / scan_findings rows and generated v8 records so every surface
+// agrees.
 //
 // ctx is passed through to scanner.EmitScanResult for tracing
 // attachments; correlation IDs are taken from the corr parameter
@@ -495,7 +222,13 @@ func (l *Logger) LogScanWithCorrelation(
 	verdict string,
 	corr ScanCorrelation,
 ) error {
-	sinksMgr, otel, structured := l.snapshot()
+	binding := l.runtimeV8BindingSnapshot()
+	if binding.logBatch == nil {
+		return fmt.Errorf("audit: v8 scan log batch runtime is unavailable")
+	}
+	if result == nil {
+		return fmt.Errorf("audit: cannot log a nil scan result")
+	}
 
 	if verdict != "" {
 		result.Verdict = verdict
@@ -504,18 +237,27 @@ func (l *Logger) LogScanWithCorrelation(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var tel scanner.ScanTelemetry
-	if otel != nil {
-		tel = otel
+	// Persist the same deterministic source-backed evidence that the generated
+	// finding family emits. This runs before scanner.EmitScanResult so the
+	// forensic scan_findings row and every destination projection agree without
+	// inventing a workflow status or invoking a secondary model.
+	for index := range result.Findings {
+		finding := &result.Findings[index]
+		if finding.EvidenceSummary != "" {
+			continue
+		}
+		if summary, present := scanFindingV8EvidenceSummary(*finding, result).Get(); present {
+			finding.EvidenceSummary = summary
+		}
 	}
 	runID := corr.RunID
 	if runID == "" {
 		runID = currentRunID()
 	}
-	// v7 clean break: AgentInstanceID is per-session (empty when no
+	// AgentInstanceID is per-session (empty when no
 	// session context is known, e.g. watcher admission); the process
 	// UUID goes on SidecarInstanceID only. Consumers must not group
-	// sessions by sidecar identity — that was the v6 pitfall.
+	// sessions by sidecar identity.
 	agent := scanner.AgentIdentity{
 		AgentID:           corr.AgentID,
 		AgentName:         corr.AgentName,
@@ -526,66 +268,44 @@ func (l *Logger) LogScanWithCorrelation(
 		SessionID:         corr.SessionID,
 		TraceID:           corr.TraceID,
 		Connector:         corr.Connector,
+		EvaluationID:      corr.EvaluationID,
 	}
-	scanID, err := scanner.EmitScanResult(ctx, l.gatewayWriterSnapshot(), l.store, tel, result, agent)
+	// EmitScanResult remains the single forensic persistence/enrichment
+	// boundary, but all signal fanout is owned by the generated v8 runtime.
+	// Passing nil legacy collaborators prevents a second JSONL/OTel path from
+	// being revived by configuration or a concurrent reload.
+	scanID, err := scanner.EmitScanResult(ctx, l.store, result, agent)
 	if err != nil {
-		if otel != nil {
-			otel.RecordAuditDBError(ctx, "emit_scan_result")
-		}
 		return err
 	}
-
-	event := sanitizeEvent(Event{
-		ID:        uuid.New().String(),
-		Timestamp: time.Now().UTC(),
-		Action:    string(ActionScan),
-		Target:    result.Target,
-		Actor:     "defenseclaw",
-		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
-			result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration),
-		Severity:          string(result.MaxSeverity()),
-		RunID:             runID,
-		RequestID:         corr.RequestID,
-		SessionID:         corr.SessionID,
-		TraceID:           corr.TraceID,
-		AgentID:           corr.AgentID,
-		AgentName:         corr.AgentName,
-		AgentInstanceID:   corr.AgentInstanceID,
-		SidecarInstanceID: ProcessAgentInstanceID(),
-	})
-	stampAuditEventEnvelope(&event)
-
-	if err := l.store.LogEvent(event); err != nil {
-		if otel != nil {
-			otel.RecordAuditDBError(context.Background(), "insert_event")
-		}
-		return err
-	}
-	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
-	}
-	l.forwardToSinksSnapshot(sinksMgr, event)
-	l.emitStructuredSnapshot(structured, event)
-
-	if otel != nil {
-		targetType := inferTargetType(result.Scanner)
-		otel.EmitScanResult(result, scanID, targetType, verdict, agent.Connector)
-	}
-
-	return nil
+	return l.emitScanV8(ctx, binding, result, scanID, verdict, corr)
 }
 
-// LogAction persists an action event and emits OTel lifecycle signals.
+// LogInspectFindingsWithCorrelation is the canonical live runtime-inspection
+// entry point. It adapts the detector-neutral finding source once, persists the
+// forensic rows, and emits generated v8 finding/summary logs and metrics on the
+// same runtime generation. No gateway JSONL or legacy Provider fanout occurs.
+func (l *Logger) LogInspectFindingsWithCorrelation(
+	ctx context.Context,
+	source scanner.InspectFindingSource,
+	corr ScanCorrelation,
+) (evaluationID, scanID string, err error) {
+	evaluationID, result := scanner.BuildInspectScanResult(source)
+	corr.EvaluationID = evaluationID
+	if err := l.LogScanWithCorrelation(ctx, result, source.Verdict, corr); err != nil {
+		return evaluationID, result.ScanID, err
+	}
+	return evaluationID, result.ScanID, nil
+}
+
+// LogAction emits one registered audit action through the v8 runtime.
 func (l *Logger) LogAction(action, target, details string) error {
 	return l.LogActionWithTrace(action, target, details, "")
 }
 
-// LogActionCtx is the context-aware shortcut for HTTP-driven call sites.
-// It pulls the v7 correlation envelope from ctx (stamped by the gateway
-// CorrelationMiddleware) so downstream audit rows, sinks, and OTel
-// signals all carry the same trace/session/agent/policy identity as
-// the matching gateway.jsonl row — without each call site plumbing
-// seven strings by hand.
+// LogActionCtx is the context-aware shortcut for HTTP-driven call sites. It
+// pulls the canonical correlation envelope stamped by gateway middleware so
+// every routed v8 signal carries the same trace/session/agent/policy identity.
 //
 // Use this from every proxy / router / api handler that already has a
 // *http.Request in scope. Non-HTTP callers (watcher, CLI commands)
@@ -593,7 +313,17 @@ func (l *Logger) LogAction(action, target, details string) error {
 // their ctx will not carry an envelope (EnvelopeFromContext returns
 // the zero value, which the auto-fill treats as "no override").
 func (l *Logger) LogActionCtx(ctx context.Context, action, target, details string) error {
-	return l.logActionWithEnvelope(EnvelopeFromContext(ctx), action, target, details)
+	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, "INFO")
+}
+
+// LogCLIAction is the canonical Python/operator CLI ingress. It retains the
+// caller's raw source facts for central per-destination projection while
+// stamping actor/origin as CLI instead of misclassifying the authenticated
+// loopback HTTP handoff as an operator API action.
+func (l *Logger) LogCLIAction(ctx context.Context, action, target, details string) error {
+	return l.logActionWithEnvelopeContextActor(
+		ctx, EnvelopeFromContext(ctx), action, target, details, "INFO", "cli",
+	)
 }
 
 // LogActionWithTrace persists an action event with an OTel trace ID for
@@ -602,13 +332,12 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 	return l.LogActionWithCorrelation(action, target, details, traceID, "")
 }
 
-// LogActionWithCorrelation persists an action event with both an OTel
-// trace ID and a gateway request ID. Kept for non-HTTP callers that
+// LogActionWithCorrelation emits an action event with both an OTel trace ID
+// and a gateway request ID. Kept for non-HTTP callers that
 // resolved the ids out-of-band (watcher rescans, CLI orchestration).
 // HTTP-driven call sites should use LogActionCtx instead so every
 // envelope dimension (session_id, agent_id, agent_name,
-// agent_instance_id, policy_id, destination_app, tool_*) stays in
-// lockstep with the request's gateway.jsonl row.
+// agent_instance_id, policy_id, destination_app, tool_*) stays in lockstep.
 //
 // An empty requestID is legal (pre-proxy subsystems like the watcher
 // have no HTTP correlation context); the SQLite column is nullable
@@ -648,12 +377,9 @@ func (l *Logger) LogActionSeverityConnector(action, target, details, severity, c
 }
 
 // logActionWithEnvelope is the shared implementation for every LogAction*
-// variant. Centralizing here guarantees that LogAction, LogActionCtx, and
-// LogActionWithCorrelation all thread the same audit-event shape onto
-// SQLite, sinks, and OTel — a regression in one surface can no longer
-// diverge from the others.
+// variant. Centralizing here keeps every correlation dimension identical.
 func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, details string) error {
-	return l.logActionWithEnvelopeSeverity(env, action, target, details, "INFO")
+	return l.logActionWithEnvelopeContext(context.Background(), env, action, target, details, "INFO")
 }
 
 // logActionWithEnvelopeSeverity is logActionWithEnvelope with a caller-chosen
@@ -661,16 +387,56 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 // path is unchanged; only call sites that explicitly need a non-INFO row
 // (via LogActionSeverityConnector) reach this with a different value.
 func (l *Logger) logActionWithEnvelopeSeverity(env CorrelationEnvelope, action, target, details, severity string) error {
+	return l.logActionWithEnvelopeContext(context.Background(), env, action, target, details, severity)
+}
+
+func (l *Logger) logActionWithEnvelopeContext(
+	ctx context.Context,
+	env CorrelationEnvelope,
+	action, target, details, severity string,
+) error {
+	return l.logActionWithEnvelopeContextActor(ctx, env, action, target, details, severity, "defenseclaw")
+}
+
+func (l *Logger) logActionWithEnvelopeContextActor(
+	ctx context.Context,
+	env CorrelationEnvelope,
+	action, target, details, severity, actor string,
+) error {
+	return l.logActionWithEnvelopeContextAndAssetActor(
+		ctx, env, action, target, details, severity, actor, nil,
+	)
+}
+
+func (l *Logger) logActionWithEnvelopeContextAndAsset(
+	ctx context.Context,
+	env CorrelationEnvelope,
+	action, target, details, severity string,
+	assetInput *AssetLifecycleInput,
+) error {
+	return l.logActionWithEnvelopeContextAndAssetActor(
+		ctx, env, action, target, details, severity, "defenseclaw", assetInput,
+	)
+}
+
+func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
+	ctx context.Context,
+	env CorrelationEnvelope,
+	action, target, details, severity, actor string,
+	assetInput *AssetLifecycleInput,
+) error {
 	if severity == "" {
 		severity = "INFO"
 	}
-	sinksMgr, otel, structured := l.snapshot()
+	if actor == "" {
+		actor = "defenseclaw"
+	}
 	event := Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    action,
 		Target:    target,
-		Actor:     "defenseclaw",
+		Actor:     actor,
 		Details:   details,
 		Severity:  severity,
 		RunID:     currentRunID(),
@@ -680,72 +446,58 @@ func (l *Logger) logActionWithEnvelopeSeverity(env CorrelationEnvelope, action, 
 	}
 	applyEnvelope(&event, env)
 	stampAuditEventEnvelope(&event)
-	event = sanitizeEvent(event)
-	storeErr := l.store.LogEvent(event)
-	if storeErr != nil {
-		if otel != nil {
-			otel.RecordAuditDBError(context.Background(), "insert_event")
+	disposition, emitErr := l.emitControlPlaneV8(ctx, event)
+	if emitErr != nil {
+		return emitErr
+	}
+	if disposition != auditV8Unhandled {
+		return nil
+	}
+	disposition, emitErr = l.emitAuditPlatformHealthV8(ctx, event)
+	if emitErr != nil {
+		return emitErr
+	}
+	if disposition != auditV8Unhandled {
+		return nil
+	}
+	if mapping, mapped := telemetry.AssetLifecycleAction(action); mapped && mapping.CanonicalEvent != "" {
+		input := AssetLifecycleInput{
+			AssetID: target, AssetType: inferAssetTypeFromAction(action, ""),
+			TargetRef: target,
 		}
-		// v7 contract: lifecycle/alert/block signals must surface on
-		// every observability surface (gateway.jsonl + audit_sinks +
-		// OTel) even when the local SQLite audit row fails to persist.
-		// Dropping the event entirely would produce silent blind spots
-		// in Splunk dashboards and in the TUI — which is exactly what
-		// #127 uncovered for the `sidecar-connected` transition. When
-		// we can tolerate a missing DB row, we still fan out so the
-		// operator receives the signal, and we record the failure
-		// explicitly on stderr + OTel for correlation.
-		if !mustPersistAction(event.Action) {
-			fmt.Fprintf(os.Stderr,
-				"[audit] WARN: LogEvent failed for action=%s (forwarding to sinks anyway): %v\n",
-				event.Action, storeErr)
-			l.forwardToSinksSnapshot(sinksMgr, event)
-			l.emitStructuredSnapshot(structured, event)
-			if otel != nil {
-				assetType := inferAssetTypeFromAction(action, details)
-				otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, nil)
-			}
+		if assetInput != nil {
+			input = *assetInput
 		}
-		return storeErr
+		binding := l.runtimeV8BindingSnapshot()
+		if binding.emitter == nil {
+			return fmt.Errorf("audit: asset lifecycle v8 runtime is unavailable")
+		}
+		disposition, emitErr = l.emitAssetLifecycleV8(ctx, event, input, mapping, binding.emitter)
+		if emitErr != nil {
+			return emitErr
+		}
+		if disposition != auditV8Unhandled {
+			return nil
+		}
 	}
-	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
+	disposition, emitErr = l.emitCompatibilityAuditV8(ctx, event, compatibilityAuditV8Options{})
+	if emitErr != nil {
+		return emitErr
 	}
-	l.forwardToSinksSnapshot(sinksMgr, event)
-	l.emitStructuredSnapshot(structured, event)
-
-	if otel != nil {
-		assetType := inferAssetTypeFromAction(action, details)
-		otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, nil)
+	if disposition != auditV8Unhandled {
+		return nil
 	}
-
-	return nil
+	return fmt.Errorf("audit: no generated v8 family handled action %q", event.Action)
 }
 
-// mustPersistAction returns true for a small set of high-integrity
-// audit actions where a SQLite write failure must NOT be masked by
-// forwarding the event to external sinks. For those actions the
-// canonical source of truth is the local database (block/allow list
-// decisions, quarantine journal entries) and leaking a partial signal
-// to Splunk without the on-disk twin would produce inconsistent state
-// across the admission gate. For all other actions we prefer "at least
-// one surface received the event" over strict atomicity — see
-// LogActionWithCorrelation for the rationale.
-func mustPersistAction(action string) bool {
-	switch action {
-	case "block", "allow", "quarantine",
-		"block-add", "block-remove",
-		"allow-add", "allow-remove":
-		return true
-	}
-	return false
-}
-
-// LogActionWithEnforcement persists an action event with enforcement metadata
-// for OTel lifecycle signals. The enforcement map may contain keys:
+// LogActionWithEnforcement persists an action event with enforcement metadata.
+// The enforcement map may contain keys:
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
-	sinksMgr, otel, structured := l.snapshot()
+	structured := make(map[string]any, len(enforcement))
+	for key, value := range enforcement {
+		structured[key] = value
+	}
 	event := Event{
 		ID:                uuid.New().String(),
 		Timestamp:         time.Now().UTC(),
@@ -756,37 +508,27 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		Severity:          "INFO",
 		RunID:             currentRunID(),
 		SidecarInstanceID: ProcessAgentInstanceID(),
+		Structured:        structured,
 	}
-	stampAuditEventEnvelope(&event)
-	event = sanitizeEvent(event)
-	if err := l.store.LogEvent(event); err != nil {
-		if otel != nil {
-			otel.RecordAuditDBError(context.Background(), "insert_event")
-		}
-		return err
-	}
-	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
-	}
-	l.forwardToSinksSnapshot(sinksMgr, event)
-	l.emitStructuredSnapshot(structured, event)
-
-	if otel != nil {
-		assetType := inferAssetTypeFromAction(action, details)
-		otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, enforcement)
-	}
-
-	return nil
+	return l.logEventWithV8(context.Background(), event, func(ctx context.Context, stamped Event) (auditV8Disposition, error) {
+		return l.emitCompatibilityAuditV8(ctx, stamped, compatibilityAuditV8Options{
+			classification: observability.ClassificationContext{
+				MandatoryFacts: observability.MandatoryFacts{EnforcedOutcome: true},
+				Enforced:       true,
+			},
+			source: observability.SourceWatcher, phase: "apply", outcome: observability.OutcomeBlocked,
+		})
+	})
 }
 
 // LogEventCtx is the context-aware variant of LogEvent. It pulls the
-// v7 correlation envelope (run_id, trace_id, request_id, session_id,
+// correlation envelope (run_id, trace_id, request_id, session_id,
 // agent_*, policy_id, destination_app, tool_*) from ctx via the
 // gateway correlation middleware and auto-fills any empty field on
 // event before handing off to LogEvent. This is the preferred entry
-// point for any HTTP-driven code path so every audit row carries
-// the same envelope as the matching gateway.jsonl row without each
-// call site having to plumb seven strings manually.
+// point for any HTTP-driven code path so every canonical record and
+// local-history row carries the same envelope without each call site
+// having to plumb seven strings manually.
 //
 // Non-empty fields on event always win over the ctx envelope —
 // callers that already resolved a specific identity (e.g. a
@@ -794,14 +536,17 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 // the request) keep their pin.
 func (l *Logger) LogEventCtx(ctx context.Context, event Event) error {
 	applyEnvelope(&event, EnvelopeFromContext(ctx))
-	return l.LogEvent(event)
+	return l.logEventWithV8(ctx, event, l.emitControlPlaneV8)
 }
 
-// LogEvent persists a pre-built event through the full audit pipeline
-// (SQLite + audit sinks + OTel). Use this when the caller needs to
-// control severity or other fields that LogAction hardcodes.
+// LogEvent emits a pre-built event through the registered v8 audit pipeline.
 func (l *Logger) LogEvent(event Event) error {
-	sinksMgr, otel, structured := l.snapshot()
+	return l.logEventWithV8(context.Background(), event, l.emitControlPlaneV8)
+}
+
+type auditV8EventEmitter func(context.Context, Event) (auditV8Disposition, error)
+
+func (l *Logger) logEventWithV8(ctx context.Context, event Event, emit auditV8EventEmitter) error {
 	// v7 clean break: AgentInstanceID is per-SESSION. Callers that
 	// carry a session context (the router, proxy session resolver)
 	// stamp it explicitly. Absence is meaningful — "no session
@@ -810,86 +555,37 @@ func (l *Logger) LogEvent(event Event) error {
 	// we auto-fill that one so every row has a stable sidecar
 	// identity without burdening callers.
 	stampAuditEventEnvelope(&event)
-	event = sanitizeEvent(event)
-	if err := l.store.LogEvent(event); err != nil {
-		if otel != nil {
-			otel.RecordAuditDBError(context.Background(), "insert_event")
+	disposition := auditV8Unhandled
+	if emit != nil {
+		var emitErr error
+		disposition, emitErr = emit(ctx, event)
+		if emitErr != nil {
+			return emitErr
 		}
-		return err
 	}
-	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
+	if disposition != auditV8Unhandled {
+		return nil
 	}
-	l.forwardToSinksSnapshot(sinksMgr, event)
-	l.emitStructuredSnapshot(structured, event)
-	return nil
+	disposition, emitErr := l.emitAuditPlatformHealthV8(ctx, event)
+	if emitErr != nil {
+		return emitErr
+	}
+	if disposition != auditV8Unhandled {
+		return nil
+	}
+	disposition, emitErr = l.emitCompatibilityAuditV8(ctx, event, compatibilityAuditV8Options{})
+	if emitErr != nil {
+		return emitErr
+	}
+	if disposition != auditV8Unhandled {
+		return nil
+	}
+	return fmt.Errorf("audit: no generated v8 family handled action %q", event.Action)
 }
 
-// forwardToSinksSnapshot fans the event out to the provided sink
-// manager snapshot. Kept separate from the field reader so a single
-// Log* call observes exactly one snapshot of the collaborator graph
-// — a concurrent SetSinks/SetStructuredEmitter cannot tear
-// mid-pipeline.
-//
-// We use a short context here because the sinks are best-effort
-// downstream forwarders; a stalled remote endpoint must not block the
-// hot path. Sinks that need longer-lived connections own their own
-// background goroutines.
-func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
-	if mgr == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	l.forwardSinkEventCtx(ctx, mgr, sinks.Event{
-		ID:                e.ID,
-		Timestamp:         e.Timestamp,
-		Action:            e.Action,
-		Target:            e.Target,
-		Actor:             e.Actor,
-		Details:           e.Details,
-		Severity:          e.Severity,
-		RunID:             e.RunID,
-		TraceID:           e.TraceID,
-		RequestID:         e.RequestID,
-		SessionID:         e.SessionID,
-		TurnID:            e.TurnID,
-		AgentName:         e.AgentName,
-		AgentID:           e.AgentID,
-		AgentInstanceID:   e.AgentInstanceID,
-		SidecarInstanceID: e.SidecarInstanceID,
-		PolicyID:          e.PolicyID,
-		DestinationApp:    e.DestinationApp,
-		ToolName:          e.ToolName,
-		ToolID:            e.ToolID,
-		Connector:         e.Connector,
-		SchemaVersion:     e.SchemaVersion,
-		ContentHash:       e.ContentHash,
-		Generation:        e.Generation,
-		BinaryVersion:     e.BinaryVersion,
-		Structured:        cloneStructuredPayload(e.Structured),
-	})
-}
-
-func (l *Logger) forwardSinkEventCtx(ctx context.Context, mgr *sinks.Manager, se sinks.Event) {
-	_ = mgr.Forward(ctx, se)
-}
-
-// LogActivity [v7, Track 0 stub] records an operator-facing
-// mutation — config save, policy reload, block/allow change,
-// skill approval, sink change. The activity is persisted to
-// activity_events (migration #8) and mirrored onto structured
-// emitters as an EventActivity.
-//
-// This is the Track 0 stub: it accepts the full ActivityInput and
-// delegates to LogEvent for the audit_events row. The native
-// activity_events write + diff computation land in Track 6 and
-// will override this implementation. Parallel tracks may call
-// LogActivity today — the audit_events row is still produced, so
-// historical queries keep working across the transition.
-//
-// Callers populate every field; Actor defaults to "system" if
-// empty and TargetType / TargetID default to "unknown".
+// ActivityInput is the source-fact contract for an operator-facing mutation.
+// The generated v8 runtime owns its projection and persistence; activity_events
+// remains readable only for historical database compatibility.
 type ActivityInput struct {
 	Actor       string
 	Action      Action
@@ -905,21 +601,17 @@ type ActivityInput struct {
 	RunID       string
 	RequestID   string
 	TraceID     string
-	// SkipSinkFanout avoids re-entrant audit→sink delivery (e.g. circuit-breaker callbacks).
-	SkipSinkFanout bool
 }
 
-// ActivityDiffEntry mirrors gatewaylog.DiffEntry — kept here so
-// audit callers can record diffs without depending on gatewaylog.
+// ActivityDiffEntry records one canonical control-plane mutation delta.
 type ActivityDiffEntry struct {
-	Path   string
-	Op     string // add | remove | replace
-	Before any
-	After  any
+	Path   string `json:"path"`
+	Op     string `json:"op"` // add | remove | replace
+	Before any    `json:"before,omitempty"`
+	After  any    `json:"after,omitempty"`
 }
 
-// LogActivity persists an operator mutation to activity_events (full
-// snapshot) and a redacted audit_events summary sharing activity_id.
+// LogActivity emits an operator mutation through the generated v8 runtime.
 func (l *Logger) LogActivity(in ActivityInput) error {
 	if l == nil {
 		return nil
@@ -927,11 +619,7 @@ func (l *Logger) LogActivity(in ActivityInput) error {
 	return l.logActivityImpl(in)
 }
 
-// LogAlert [v7, Track 0 stub] records a runtime alert. Alerts are
-// the operator-facing signal for "something requires human
-// attention" — block lists triggered, scanner crashes, sink
-// circuit breaker trips. Backed by audit_events today; parallel
-// tracks will tee to OTel event logs and the TUI Alerts panel.
+// LogAlert records a runtime alert through canonical platform-health signals.
 //
 // Severity should be one of INFO / WARN / HIGH / CRITICAL. Source
 // is a short subsystem name ("admission", "scanner", "sink", etc).
@@ -942,10 +630,8 @@ func (l *Logger) LogAlert(source, severity, summary string, details map[string]a
 }
 
 // LogAlertCtx is the context-aware variant of LogAlert. It lifts the
-// v7 correlation envelope out of ctx so the resulting gateway.jsonl
-// row, OTel log record, and audit_events row all carry the same
-// trace / session / agent / policy identity as the request that
-// triggered the alert.
+// correlation envelope out of ctx so every admitted signal carries the same
+// trace/session/agent/policy identity as the request that triggered the alert.
 //
 // Non-HTTP callers (watcher, CLI) can continue calling LogAlert; the
 // ctx-less path leaves the envelope empty, which round-trips as NULL
@@ -955,12 +641,8 @@ func (l *Logger) LogAlertCtx(ctx context.Context, source, severity, summary stri
 	return l.logAlertWithEnvelope(EnvelopeFromContext(ctx), source, severity, summary, details)
 }
 
-// logAlertWithEnvelope is the shared implementation for LogAlert /
-// LogAlertCtx. The envelope drives both the gateway event (trace_id,
-// agent_*, policy_id on the JSONL row + OTel log attrs) and the
-// audit_events row (same dimensions persisted to SQLite + sinks), so
-// a ctx-scoped alert produced inside an HTTP handler shows up as one
-// consistent record across every tier.
+// logAlertWithEnvelope is the shared implementation for LogAlert and
+// LogAlertCtx.
 func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity, summary string, details map[string]any) error {
 	if l == nil {
 		return nil
@@ -977,43 +659,6 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 	}
 	blob, _ := json.Marshal(payload)
 
-	_, otel, emitter := l.snapshot()
-	if otel != nil {
-		// Runtime alerts are process-global (not tied to a single
-		// connector); pass "" so the metric records connector="unknown".
-		otel.RecordAlert(context.Background(), "runtime", severity, source, "")
-	}
-	gwEv := gatewaylog.Event{
-		Timestamp: time.Now().UTC(),
-		EventType: gatewaylog.EventLifecycle,
-		Severity:  parseGatewaySeverity(severity),
-		Lifecycle: &gatewaylog.LifecyclePayload{
-			Subsystem:  source,
-			Transition: "alert",
-			Details:    map[string]string{"summary": redaction.ForSinkReason(summary)},
-		},
-		// Stamp every envelope dimension gatewaylog.Event carries —
-		// stampGatewayEnvelope still runs below to fill
-		// sidecar_instance_id + provenance if empty.
-		RunID:           env.RunID,
-		TraceID:         env.TraceID,
-		RequestID:       env.RequestID,
-		SessionID:       env.SessionID,
-		TurnID:          env.TurnID,
-		AgentID:         env.AgentID,
-		AgentName:       env.AgentName,
-		AgentInstanceID: env.AgentInstanceID,
-		PolicyID:        env.PolicyID,
-		DestinationApp:  env.DestinationApp,
-		ToolName:        env.ToolName,
-		ToolID:          env.ToolID,
-	}
-	stampGatewayEnvelope(&gwEv)
-	if otel != nil {
-		otel.RecordGatewayEvent(gwEv)
-	}
-	l.emitGatewaySnapshot(emitter, gwEv)
-
 	ev := Event{
 		Action:   string(ActionAlert),
 		Target:   source,
@@ -1022,26 +667,17 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 		Severity: severity,
 	}
 	applyEnvelope(&ev, env)
-	return l.LogEvent(ev)
+	errorCode := runtimeAlertErrorCode(ev.Details)
+	return l.logEventWithV8(context.Background(), ev, func(ctx context.Context, stamped Event) (auditV8Disposition, error) {
+		return l.emitRuntimeAlertV8(ctx, stamped, source, errorCode)
+	})
 }
 
-// Close flushes and closes every audit sink. Safe to call when no
-// sinks are configured. Reads l.sinks under the same lock used by
-// setters so Close does not race against SetSinks on a late-stage
-// reload. Callers MUST ensure the Logger is drained of in-flight
-// LogEvent goroutines before calling Close — this function closes
-// the underlying sink manager, which may make subsequent Forward
-// calls return errors. That ordering is enforced by sidecar
-// shutdown (HTTP listener drained first, then Close).
+// Close detaches the cycle-free runtime adapter after the owner has drained
+// and shut down the canonical observability runtime. Logger owns no exporter or
+// sink resources in v8.
 func (l *Logger) Close() {
-	l.mu.RLock()
-	mgr := l.sinks
-	l.mu.RUnlock()
-	if mgr != nil {
-		if err := mgr.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: audit sinks close: %v\n", err)
-		}
-	}
+	l.SetRuntimeV8Emitter(nil)
 }
 
 func inferTargetType(scannerName string) string {
@@ -1063,10 +699,12 @@ func inferAssetTypeFromAction(action, details string) string {
 	switch {
 	case contains(action, "mcp") || contains(details, "type=mcp"):
 		return "mcp"
+	case contains(action, "plugin") || contains(details, "type=plugin"):
+		return "plugin"
 	case contains(action, "skill") || contains(details, "type=skill"):
 		return "skill"
 	default:
-		return "skill"
+		return ""
 	}
 }
 

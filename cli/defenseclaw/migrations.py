@@ -42,9 +42,11 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 import click
@@ -52,6 +54,54 @@ import yaml
 
 from defenseclaw import migration_state as migration_state_helpers
 from defenseclaw import ux
+from defenseclaw.file_lock import locked_file_update
+
+
+# These target-wheel dependencies are resolved lazily. Older upgrade clients
+# can import the newly installed migrations module into a process that still
+# has pre-v8 ``defenseclaw.config`` modules cached; importing the v8 activation
+# graph at module load would fail before the installed migration runner can
+# enter its clean target interpreter.
+def convert_v7_observability_to_v8(*args, **kwargs):
+    from defenseclaw.observability.v8_migration import convert_v7_observability_to_v8 as convert
+
+    return convert(*args, **kwargs)
+
+
+def activate_v8_migration(*args, **kwargs):
+    from defenseclaw.observability.v8_activation import activate_v8_migration as activate
+
+    return activate(*args, **kwargs)
+
+
+def inspect_v8_config(*args, **kwargs):
+    from defenseclaw.config_inspect import inspect_v8_config as inspect
+
+    return inspect(*args, **kwargs)
+
+
+def read_pid_file(path: str):
+    from defenseclaw.process_liveness import read_pid_file as read
+
+    return read(path)
+
+
+def pid_alive(pid: int) -> bool:
+    from defenseclaw.process_liveness import pid_alive as alive
+
+    return alive(pid)
+
+
+def process_argv0_basename(pid: int) -> str | None:
+    from defenseclaw.process_liveness import process_argv0_basename as basename
+
+    return basename(pid)
+
+
+def gateway_process_names() -> tuple[str, ...]:
+    from defenseclaw.process_liveness import GATEWAY_PROCESS_NAMES
+
+    return GATEWAY_PROCESS_NAMES
 
 
 def _ver_tuple(v: str) -> tuple[int, ...]:
@@ -135,6 +185,7 @@ class MigrationContext:
     from_version: str = ""
     to_version: str = ""
     config_path: str = ""
+    upgrade_handles_local_bundle: bool = False
     # changes accumulates a one-line summary per applied step. The
     # upgrade command surfaces these so an operator can audit what the
     # no-touch migration actually changed under their HOME.
@@ -147,6 +198,394 @@ class MigrationContext:
         if override:
             return override
         return os.path.join(self.data_dir, "config.yaml")
+
+
+class ObservabilityV8UpgradeMigrationError(RuntimeError):
+    """Bounded, value-safe failure at the upgrade orchestration boundary."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f"observability v8 upgrade migration failed ({code})")
+
+
+def _migrate_observability_v8(ctx: MigrationContext) -> None:
+    """Convert, target-validate, and transactionally activate config v8.
+
+    ``defenseclaw upgrade`` invokes the installed migration registry only
+    after stopping the gateway and installing the target wheel and binary.
+    This callable preserves that ordering and independently rejects a live
+    gateway identified by the active data directory's PID file. The PID check
+    is the enforceable precondition available to the current architecture;
+    the activation transaction's locks and CAS checks protect participating
+    writers after that point.
+
+    The release registry entry is intentionally added only when the shipping
+    version is selected. Reusing an already-published version would cause
+    existing cursors to skip this breaking schema migration.
+    """
+
+    data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    environment_path = os.path.join(data_dir, ".env")
+    _assert_observability_v8_upgrade_quiesced(data_dir)
+
+    try:
+        with open(config_path, "rb") as source_file:
+            source = source_file.read()
+    except FileNotFoundError:
+        # An unconfigured installation has no schema to convert. This is a
+        # deliberate no-op rather than a post-install migration failure; a
+        # later setup command will create a native v8 document.
+        return
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("source_read_failed") from None
+
+    environment = _observability_v8_upgrade_environment(environment_path)
+    migration = convert_v7_observability_to_v8(
+        source,
+        environment,
+        source_name=config_path,
+        effective_data_dir=data_dir,
+    )
+
+    def validate_candidate(candidate: bytes, protected_overrides: Mapping[str, str]) -> None:
+        validation_environment = dict(environment)
+        validation_environment.update(protected_overrides)
+        _validate_observability_v8_candidate(
+            candidate,
+            validation_environment,
+            data_dir=data_dir,
+        )
+
+    activation = activate_v8_migration(
+        migration,
+        validator=validate_candidate,
+        data_dir=data_dir,
+        config_path=config_path,
+        environment_path=environment_path,
+        tighten_legacy_backup_root=True,
+        environment=environment,
+    )
+    _refresh_observability_v8_bundle_for_legacy_upgrader(ctx, data_dir, activation)
+    if activation.activated:
+        ctx.changes.append("activated observability configuration schema v8")
+
+
+def _refresh_observability_v8_bundle_for_legacy_upgrader(
+    ctx: MigrationContext,
+    data_dir: str,
+    activation,
+) -> None:
+    """Bridge released upgrade clients to the target bundle transaction.
+
+    Upgrade commands released before 0.8.4 know how to invoke target-wheel
+    migrations but do not know about the later local-observability refresh
+    phase.  Run that phase from the required migration in a clean target
+    interpreter.  Current upgrade clients declare that they own the phase and
+    execute it after all required migrations, avoiding a duplicate restart.
+    """
+
+    if ctx.upgrade_handles_local_bundle:
+        return
+    destination = os.path.join(data_dir, "observability-stack")
+    if not os.path.lexists(destination):
+        return
+    backup_directory = getattr(activation, "backup_directory", None)
+    if not isinstance(backup_directory, str) or not backup_directory:
+        backup_directory = _allocate_observability_v8_bundle_backup(data_dir)
+    result = _run_observability_v8_bundle_upgrade_in_target(
+        data_dir,
+        backup_directory,
+        ctx.to_version,
+    )
+    if result.get("installed") is True:
+        ctx.changes.append("refreshed local observability bundle for the target release")
+    degraded = result.get("degraded_errors")
+    if isinstance(degraded, list) and degraded:
+        ux.warn(
+            "local observability bundle refreshed but restart/readiness is degraded; "
+            "run 'defenseclaw setup local-observability status' after upgrade",
+            indent="    ",
+        )
+
+
+def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
+    """Create one descriptor-pinned private bundle recovery directory."""
+
+    if os.name != "posix":
+        raise ObservabilityV8UpgradeMigrationError("local_bundle_backup_unsupported")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    data_descriptor = -1
+    root_descriptor = -1
+    directory_name = ""
+    try:
+        data_descriptor = os.open(data_dir, flags)
+        try:
+            os.mkdir("backups", 0o700, dir_fd=data_descriptor)
+            os.fsync(data_descriptor)
+        except FileExistsError:
+            pass
+        root_descriptor = os.open("backups", flags, dir_fd=data_descriptor)
+        root_info = os.fstat(root_descriptor)
+        current_uid = getattr(os, "geteuid", os.getuid)()
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or getattr(root_info, "st_uid", current_uid) not in {0, current_uid}
+            or stat.S_IMODE(root_info.st_mode) != 0o700
+        ):
+            raise OSError("bundle backup root is not private and trusted")
+        for _ in range(128):
+            directory_name = f"observability-v8-bundle-{secrets.token_hex(16)}"
+            try:
+                os.mkdir(directory_name, 0o700, dir_fd=root_descriptor)
+                os.fsync(root_descriptor)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError("unable to allocate bundle backup directory")
+        directory = os.path.join(data_dir, "backups", directory_name)
+        public = os.lstat(directory)
+        if stat.S_ISLNK(public.st_mode) or stat.S_IMODE(public.st_mode) != 0o700:
+            raise OSError("bundle backup directory is not private")
+        return directory
+    except ObservabilityV8UpgradeMigrationError:
+        raise
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("local_bundle_backup_failed") from None
+    finally:
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        if data_descriptor >= 0:
+            os.close(data_descriptor)
+
+
+def _run_observability_v8_bundle_upgrade_in_target(
+    data_dir: str,
+    backup_directory: str,
+    target_version: str,
+) -> dict[str, object]:
+    """Refresh/restart through a clean interpreter from the installed wheel."""
+
+    fd, result_path = tempfile.mkstemp(prefix="defenseclaw-v8-bundle-", suffix=".json")
+    os.close(fd)
+    script = """
+import json
+import sys
+
+from defenseclaw.bundle_refresh import (
+    LocalObservabilityUpgradeError,
+    restart_upgraded_local_observability_stack,
+    upgrade_local_observability_stack,
+)
+
+try:
+    result = upgrade_local_observability_stack(
+        sys.argv[1],
+        sys.argv[2],
+        bundle_version=sys.argv[3],
+    )
+    payload = result.to_dict()
+    payload["ok"] = True
+    if result.restart_required:
+        try:
+            restarted = restart_upgraded_local_observability_stack(sys.argv[1])
+            payload["restarted"] = restarted.restarted
+            payload["degraded_errors"] = list(restarted.degraded_errors)
+        except LocalObservabilityUpgradeError as exc:
+            payload["degraded_errors"] = [f"{exc.code}:{exc.phase}"]
+except LocalObservabilityUpgradeError as exc:
+    payload = {"ok": False, "code": exc.code, "phase": exc.phase}
+except Exception:
+    payload = {"ok": False, "code": "unexpected_failure", "phase": "invoke"}
+
+with open(sys.argv[4], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True)
+sys.exit(0 if payload["ok"] else 1)
+"""
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                data_dir,
+                backup_directory,
+                target_version,
+                result_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=360,
+            check=False,
+        )
+        try:
+            with open(result_path, encoding="utf-8") as result_file:
+                payload = json.load(result_file)
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise ObservabilityV8UpgradeMigrationError("local_bundle_refresh_failed")
+        return payload
+    except subprocess.TimeoutExpired:
+        raise ObservabilityV8UpgradeMigrationError("local_bundle_refresh_timeout") from None
+    finally:
+        try:
+            os.remove(result_path)
+        except OSError:
+            pass
+
+
+def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
+    """Allow only absent/dead or positively identified foreign PID state."""
+
+    pid_path = os.path.join(data_dir, "gateway.pid")
+    if not os.path.lexists(pid_path):
+        return
+    try:
+        pid_metadata = os.lstat(pid_path)
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("gateway_quiescence_unknown") from None
+    if stat.S_ISLNK(pid_metadata.st_mode) or not stat.S_ISREG(pid_metadata.st_mode):
+        raise ObservabilityV8UpgradeMigrationError("gateway_quiescence_unknown")
+    try:
+        pid = read_pid_file(pid_path)
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("gateway_quiescence_unknown") from None
+    if pid is None:
+        raise ObservabilityV8UpgradeMigrationError("gateway_quiescence_unknown")
+    try:
+        alive = pid_alive(pid)
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("gateway_quiescence_unknown") from None
+    if not alive:
+        return
+    try:
+        basename = process_argv0_basename(pid)
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError("gateway_quiescence_unknown") from None
+    if not basename:
+        raise ObservabilityV8UpgradeMigrationError("gateway_quiescence_unknown")
+    if basename in gateway_process_names():
+        raise ObservabilityV8UpgradeMigrationError("gateway_not_quiesced")
+
+
+def _observability_v8_upgrade_environment(environment_path: str) -> dict[str, str]:
+    """Return the active dotenv plus ambient overrides without mutation."""
+
+    snapshot = _read_observability_v8_upgrade_dotenv(environment_path)
+    snapshot.update(os.environ)
+    return snapshot
+
+
+def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, str]:
+    """Read the exact active dotenv without the legacy parser's silent loss."""
+
+    if not os.path.lexists(environment_path):
+        return {}
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        metadata = os.lstat(environment_path)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
+        descriptor = os.open(environment_path, flags)
+        opened_metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_metadata.st_mode):
+            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
+        if (metadata.st_dev, metadata.st_ino) != (opened_metadata.st_dev, opened_metadata.st_ino):
+            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
+        with os.fdopen(descriptor, "rb") as environment_file:
+            descriptor = -1
+            payload = environment_file.read(4 * 1024 * 1024 + 1)
+        if len(payload) > 4 * 1024 * 1024:
+            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
+        lines = payload.decode("utf-8").splitlines(keepends=True)
+    except ObservabilityV8UpgradeMigrationError:
+        raise
+    except (OSError, UnicodeError):
+        raise ObservabilityV8UpgradeMigrationError("environment_read_failed") from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    snapshot: dict[str, str] = {}
+    for raw in lines:
+        line = raw.rstrip("\n").rstrip("\r")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _DOTENV_LINE.match(stripped)
+        if match is None:
+            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
+        key = match.group("key")
+        value = match.group("value")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        snapshot[key] = value
+    return snapshot
+
+
+def _validate_observability_v8_candidate(
+    candidate: bytes,
+    protected_environment: dict[str, str],
+    *,
+    data_dir: str,
+) -> None:
+    """Compile exact candidate bytes with the installed target Go binary.
+
+    Candidate content is held in an owner-only file under the active data
+    directory. Only the path is placed on argv; protected values are supplied
+    through ``inspect_v8_config``'s validated child environment. The file is
+    removed on every success and failure path.
+    """
+
+    descriptor = -1
+    candidate_path = ""
+    close_failed = False
+    try:
+        descriptor, candidate_path = tempfile.mkstemp(
+            prefix=".observability-v8-candidate-",
+            suffix=".yaml",
+            dir=data_dir,
+        )
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as candidate_file:
+            descriptor = -1
+            candidate_file.write(candidate)
+            candidate_file.flush()
+            os.fsync(candidate_file.fileno())
+        inspected = inspect_v8_config(
+            "validate",
+            config_path=candidate_path,
+            data_dir=data_dir,
+            environment_overrides=protected_environment,
+        )
+        if inspected.valid is not True or inspected.config_version != 8:
+            raise ObservabilityV8UpgradeMigrationError("target_validation_invalid")
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                close_failed = True
+        if candidate_path:
+            try:
+                os.remove(candidate_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise ObservabilityV8UpgradeMigrationError("candidate_cleanup_failed") from None
+        if close_failed:
+            raise ObservabilityV8UpgradeMigrationError("candidate_cleanup_failed")
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +1305,16 @@ def _atomic_write_dotenv(path: str, kv: dict[str, str]) -> bool:
 
 
 def _dotenv_update_keys(
+    path: str,
+    *,
+    updates: dict[str, str] | None = None,
+    removes: tuple[str, ...] = (),
+) -> bool:
+    with locked_file_update(path):
+        return _dotenv_update_keys_locked(path, updates=updates, removes=removes)
+
+
+def _dotenv_update_keys_locked(
     path: str,
     *,
     updates: dict[str, str] | None = None,
@@ -1775,78 +2224,6 @@ def _migrate_0_8_0(ctx: MigrationContext) -> None:
     _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx)
 
 
-def _migrate_config_v7_named_otel_destinations(ctx: MigrationContext) -> bool:
-    """Persist the v6 flat OTel exporter as one v7 named destination.
-
-    ``internal/config.Load`` deliberately performs a write-free, in-memory
-    conversion so the gateway can always start, including when a release
-    migration was interrupted. This migration is keyed to the configuration
-    shape rather than the release cursor: 0.8.x releases already exist, so a
-    host may have marked the 0.8.0 release migration before named destinations
-    shipped. Checking the idempotent config shape on every compatible upgrade
-    covers those hosts without replaying any release-owned migration.
-
-    Upgrade is the correct write boundary: it has already snapshotted the data
-    directory, and the shared observability writer adds its own one-time config
-    backup before atomically replacing the file. Reusing that writer keeps
-    explicit ``migrate-otel --apply``, setup commands, and release upgrades on
-    exactly the same lossless conversion.
-    """
-    # Pre-0.8 upgraders install the target wheel while the old CLI process is
-    # still running, then import the new migrations module in-process. Their
-    # ``sys.modules`` can therefore contain old transitive dependencies even
-    # though this function came from the new wheel. In particular, 0.6.6 keeps
-    # ``defenseclaw.config`` cached without ``locked_config_yaml``.
-    #
-    # Do not repair that mixed graph with importlib.reload(): reloading shared
-    # modules replaces exception classes and function globals underneath the
-    # still-running legacy CLI. That can make an exception raised by the new
-    # safety module impossible for callers holding the old class object to
-    # catch, and can invalidate connector-path monkeypatches. Instead, perform
-    # the atomic writer operation in an isolated child interpreter. ``-I``
-    # prevents the current directory or PYTHONPATH from shadowing the wheel
-    # that was just installed, while the normal process environment (including
-    # documented OTel endpoint variables) remains available to the writer.
-    script = (
-        "import json, sys\n"
-        "from defenseclaw.observability.writer import migrate_flat_otel\n"
-        "result = migrate_flat_otel(sys.argv[1], dry_run=False)\n"
-        "print(json.dumps({'name': result.name, "
-        "'yaml_changes': result.yaml_changes}))\n"
-    )
-    proc = subprocess.run(  # noqa: S603 - trusted interpreter and static script
-        [sys.executable, "-I", "-c", script, ctx.data_dir],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-    if proc.returncode != 0:
-        detail = next(
-            (line.strip() for line in reversed(proc.stderr.splitlines()) if line.strip()),
-            f"child interpreter exited {proc.returncode}",
-        )
-        raise RuntimeError(f"isolated observability migration failed: {detail}")
-
-    payload_line = next(
-        (line.strip() for line in reversed(proc.stdout.splitlines()) if line.strip()),
-        "",
-    )
-    try:
-        payload = json.loads(payload_line)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("isolated observability migration returned an invalid result") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("yaml_changes"), list):
-        raise RuntimeError("isolated observability migration returned an invalid result")
-    if not payload["yaml_changes"]:
-        return False
-    name = str(payload.get("name") or "generic-otlp")
-    ctx.changes.append(
-        f"migrated the legacy flat OTel exporter to named otel.destinations[{name}] and saved a pre-migration backup"
-    )
-    return True
-
-
 def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
     """Fold the removed guardrail_runtime.json overlay into config.yaml."""
     cfg_path = ctx.active_config_path()
@@ -2248,6 +2625,11 @@ def _line_ending(line: str) -> str:
 # Migration registry
 # ---------------------------------------------------------------------------
 
+# Target-wheel compatibility contract read by the old upgrader before it
+# replaces any installed artifact. Keep this literal so a verified wheel can
+# be inspected without importing or executing its code.
+SUPPORTED_CONFIG_VERSIONS: tuple[int, ...] = (8,)
+
 # Ordered list of (version, description, callable). Each callable
 # takes a :class:`MigrationContext` and mutates it (appending to
 # ctx.changes) on a successful step.
@@ -2289,6 +2671,19 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         "insecure_skip_verify=true",
         _migrate_0_8_0,
     ),
+    (
+        # Forward-keyed to the hard-cut release after the 0.8.4 controller
+        # bridge.  The bridge must ship first so every supported platform runs
+        # this mandatory conversion under a controller that treats migration,
+        # service-start, and health failures as fatal.  The upgrade manifest
+        # deliberately omits this row until the release workflow stamps the
+        # checkout to 0.8.5.
+        "0.8.5",
+        "Convert the active observability configuration to schema v8, "
+        "validate it with the installed target gateway, and activate it "
+        "transactionally during defenseclaw upgrade",
+        _migrate_observability_v8,
+    ),
 ]
 
 
@@ -2297,6 +2692,8 @@ def run_migrations(
     to_version: str,
     openclaw_home: str,
     data_dir: str | None = None,
+    *,
+    upgrade_handles_local_bundle: bool = False,
 ) -> int:
     """Run all applicable migrations up to ``to_version``.
 
@@ -2416,36 +2813,6 @@ def run_migrations(
         except OSError as exc:
             ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
 
-    # Configuration-schema migrations are intentionally separate from the
-    # release cursor. A host may already carry an applied 0.8.0 cursor from a
-    # published build that predates named OTel destinations. The flat/v6
-    # shape itself is the durable applicability check, and the shared writer
-    # is atomic + idempotent. This runs only after validating the cursor so a
-    # downgrade facing newer cursor state refuses before mutating config.
-    # Gate on the target so tests/downgrades to older releases never receive a
-    # schema they do not understand.
-    if to_t >= _ver_tuple("0.8.0"):
-        schema_ctx = MigrationContext(
-            openclaw_home=openclaw_home,
-            data_dir=data_dir,
-            from_version=from_version,
-            to_version=to_version,
-        )
-        try:
-            if _migrate_config_v7_named_otel_destinations(schema_ctx):
-                ux.ok("Configuration schema v7 OTel migration applied.", indent="    ")
-                applied_count += 1
-        except Exception as exc:  # noqa: BLE001 - runtime fallback keeps startup safe
-            ux.warn(
-                f"configuration schema v7 OTel migration deferred: {exc}",
-                indent="    ",
-            )
-            ux.subhead(
-                "the gateway will use its in-memory compatibility route; "
-                "repair with 'defenseclaw setup observability migrate-otel --apply'",
-                indent="    ",
-            )
-
     for ver, desc, fn in MIGRATIONS:
         ver_t = _ver_tuple(ver)
 
@@ -2483,6 +2850,7 @@ def run_migrations(
             data_dir=data_dir,
             from_version=from_version,
             to_version=to_version,
+            upgrade_handles_local_bundle=upgrade_handles_local_bundle,
         )
         try:
             fn(ctx)

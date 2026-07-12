@@ -14,35 +14,21 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
-from defenseclaw.logger import Logger
-from defenseclaw.models import Event, Finding, ScanResult, compare_severity
+from defenseclaw.models import Event, compare_severity
 
 
 class ModelsDbTests(unittest.TestCase):
-    class _FakeSplunkCfg:
-        enabled = True
-        hec_endpoint = "http://127.0.0.1:8088"
-        index = "defenseclaw_local"
-        source = "defenseclaw"
-        sourcetype = "defenseclaw:json"
-        verify_tls = False
-
-        def resolved_hec_token(self) -> str:
-            return "test-hec-token"
-
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
@@ -91,34 +77,6 @@ class ModelsDbTests(unittest.TestCase):
         if action is not None:
             self.assertEqual(action.actions.runtime, "")
 
-    def test_logger_writes_scan_and_alerts(self):
-        logger = Logger(self.store)
-        result = ScanResult(
-            scanner="skill-scanner",
-            target="/tmp/skill",
-            timestamp=datetime.now(timezone.utc),
-            findings=[
-                Finding(
-                    id="f1",
-                    severity="HIGH",
-                    title="Test finding",
-                    description="desc",
-                    scanner="skill-scanner",
-                )
-            ],
-            duration=timedelta(milliseconds=1200),
-        )
-
-        logger.log_scan(result)
-
-        counts = self.store.get_counts()
-        self.assertEqual(counts.total_scans, 1)
-        self.assertEqual(counts.alerts, 1)
-
-        alerts = self.store.list_alerts(10)
-        self.assertEqual(len(alerts), 1)
-        self.assertEqual(alerts[0].severity, "HIGH")
-
     def test_get_enforcement_counts_skips_alert_count(self):
         pe = PolicyEngine(self.store)
         pe.block("skill", "blocked-skill", "test")
@@ -126,19 +84,24 @@ class ModelsDbTests(unittest.TestCase):
         pe.block("mcp", "blocked-mcp", "test")
         pe.allow("mcp", "allowed-mcp", "test")
 
-        logger = Logger(self.store)
-        logger.log_scan(
-            ScanResult(
-                scanner="skill-scanner",
-                target="/tmp/skill",
-                timestamp=datetime.now(timezone.utc),
-                findings=[],
-                duration=timedelta(milliseconds=50),
-            )
+        self.store.insert_scan_result(
+            "scan-1",
+            "skill-scanner",
+            "/tmp/skill",
+            datetime.now(timezone.utc),
+            50,
+            0,
+            "INFO",
+            "{}",
         )
         self.store.log_event(Event(action="scan", target="/tmp/skill", severity="HIGH"))
 
-        counts = self.store.get_enforcement_counts()
+        statements = []
+        self.store.db.set_trace_callback(statements.append)
+        try:
+            counts = self.store.get_enforcement_counts()
+        finally:
+            self.store.db.set_trace_callback(None)
 
         self.assertEqual(counts.blocked_skills, 1)
         self.assertEqual(counts.allowed_skills, 1)
@@ -146,13 +109,140 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(counts.allowed_mcps, 1)
         self.assertEqual(counts.total_scans, 1)
         self.assertEqual(counts.alerts, 0)
+        select_statements = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("SELECT")
+        ]
+        action_selects = [
+            statement for statement in select_statements if "FROM actions" in statement
+        ]
+        self.assertEqual(len(select_statements), 3)
+        self.assertEqual(len(action_selects), 1)
+        self.assertEqual(action_selects[0].count("SUM(CASE"), 4)
+
+    def test_count_scan_results_since_falls_back_for_legacy_schema(self):
+        self.store.insert_scan_result(
+            "scan-before",
+            "skill-scanner",
+            "/tmp/before",
+            datetime(2025, 12, 31, tzinfo=timezone.utc),
+            1,
+            0,
+            "INFO",
+            "{}",
+        )
+        self.store.insert_scan_result(
+            "scan-after",
+            "skill-scanner",
+            "/tmp/after",
+            datetime(2026, 1, 2, tzinfo=timezone.utc),
+            1,
+            0,
+            "INFO",
+            "{}",
+        )
+
+        statements = []
+        self.store.db.set_trace_callback(statements.append)
+        try:
+            count = self.store.count_scan_results_since(
+                datetime(2026, 1, 1, tzinfo=timezone.utc)
+            )
+        finally:
+            self.store.db.set_trace_callback(None)
+
+        self.assertEqual(count, 1)
+        count_queries = [statement for statement in statements if "COUNT(*)" in statement]
+        self.assertEqual(len(count_queries), 1)
+        self.assertNotIn("retention_timestamp_unix_nano", count_queries[0])
+
+    def test_count_scan_results_since_uses_indexed_retention_timestamp(self):
+        self.store.db.execute(
+            "ALTER TABLE scan_results ADD COLUMN retention_timestamp_unix_nano INTEGER"
+        )
+        self.store.db.execute(
+            "CREATE INDEX idx_retention_scan_results_timestamp "
+            "ON scan_results(retention_timestamp_unix_nano, id)"
+        )
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cutoff = int(since.timestamp()) * 1_000_000_000
+        self.store.db.executemany(
+            """INSERT INTO scan_results
+                   (id, scanner, target, timestamp, retention_timestamp_unix_nano)
+               VALUES (?, 'skill-scanner', '/tmp/skill', ?, ?)""",
+            [
+                # The textual timestamps intentionally disagree with the
+                # numeric values so this proves the indexed field is primary.
+                ("numeric-new", "2000-01-01T00:00:00+00:00", cutoff + 1),
+                ("numeric-old", "2099-01-01T00:00:00+00:00", cutoff - 1),
+                # NULL rows model an additive v8 backfill in progress.
+                ("backfill-new", "2026-01-02T00:00:00+00:00", None),
+                ("backfill-old", "2025-12-31T00:00:00+00:00", None),
+            ],
+        )
+        self.store.db.commit()
+
+        statements = []
+        self.store.db.set_trace_callback(statements.append)
+        try:
+            count = self.store.count_scan_results_since(since)
+        finally:
+            self.store.db.set_trace_callback(None)
+
+        self.assertEqual(count, 2)
+        count_queries = [statement for statement in statements if "COUNT(*)" in statement]
+        self.assertEqual(len(count_queries), 1)
+        self.assertIn("retention_timestamp_unix_nano >=", count_queries[0])
+        plan = self.store.db.execute(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM scan_results "
+            "WHERE retention_timestamp_unix_nano >= ?",
+            (cutoff,),
+        ).fetchall()
+        self.assertTrue(
+            any("idx_retention_scan_results_timestamp" in row[3] for row in plan)
+        )
+
+    def test_open_read_only_uses_ro_query_only_and_short_timeout(self):
+        self.store.close()
+        with sqlite3.connect(self.tmp.name) as db:
+            journal_mode = db.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        self.assertEqual(journal_mode, "delete")
+        os.chmod(self.tmp.name, 0o644)
+
+        reader = Store.open_read_only(self.tmp.name, timeout=0.05)
+        try:
+            self.assertTrue(reader.read_only)
+            self.assertEqual(reader.db.execute("PRAGMA query_only").fetchone()[0], 1)
+            self.assertEqual(reader.db.execute("PRAGMA busy_timeout").fetchone()[0], 50)
+            self.assertEqual(reader.db.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+            self.assertEqual(os.stat(self.tmp.name).st_mode & 0o777, 0o644)
+            self.assertGreater(
+                reader.db.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0],
+                0,
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                reader.init()
+
+            # Turning off query_only proves URI mode=ro independently prevents
+            # a write; the connection was not merely opened normally.
+            reader.db.execute("PRAGMA query_only=OFF")
+            with self.assertRaises(sqlite3.OperationalError):
+                reader.db.execute("CREATE TABLE must_not_exist (id INTEGER)")
+        finally:
+            reader.close()
+
+    def test_open_read_only_does_not_create_a_missing_database(self):
+        missing = self.tmp.name + ".missing"
+
+        with self.assertRaises(sqlite3.OperationalError):
+            Store.open_read_only(missing)
+
+        self.assertFalse(os.path.exists(missing))
 
     def test_store_init_creates_network_egress_schema_and_counts(self):
         tables = {
-            row[0]
-            for row in self.store.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            row[0] for row in self.store.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         self.assertIn("network_egress_events", tables)
 
@@ -209,12 +299,8 @@ class ModelsDbTests(unittest.TestCase):
         self.store = Store(self.tmp.name)
         self.store.init()
 
-        audit_cols = {
-            row[1] for row in self.store.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
-        scan_cols = {
-            row[1] for row in self.store.db.execute("PRAGMA table_info(scan_results)").fetchall()
-        }
+        audit_cols = {row[1] for row in self.store.db.execute("PRAGMA table_info(audit_events)").fetchall()}
+        scan_cols = {row[1] for row in self.store.db.execute("PRAGMA table_info(scan_results)").fetchall()}
 
         self.assertIn("run_id", audit_cols)
         self.assertIn("structured_json", audit_cols)
@@ -339,66 +425,43 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(audit_ids, ["failure", "high", "hook-high"])
         self.assertEqual(alert_ids, ["failure", "high", "hook-high"])
 
-    def test_logger_uses_run_id_from_env(self):
-        old = os.environ.get("DEFENSECLAW_RUN_ID")
-        os.environ["DEFENSECLAW_RUN_ID"] = "python-run-id"
-        try:
-            logger = Logger(self.store)
-            result = ScanResult(
-                scanner="skill-scanner",
-                target="/tmp/skill",
-                timestamp=datetime.now(timezone.utc),
-                findings=[],
-                duration=timedelta(milliseconds=50),
-            )
+    def test_alert_readers_include_v8_findings_and_exclude_other_v8_buckets(self):
+        now = datetime.now(timezone.utc).isoformat()
+        self.store.db.executemany(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket, event_name
+               ) VALUES (?, ?, ?, 'defenseclaw', ?, 'HIGH', ?, ?)""",
+            [
+                (
+                    "v8-finding",
+                    now,
+                    "scan-finding",
+                    "source-backed finding",
+                    "security.finding",
+                    "finding.observed",
+                ),
+                (
+                    "v8-platform-health",
+                    now,
+                    "sink-failure",
+                    "exporter degraded",
+                    "platform.health",
+                    "subsystem.degraded",
+                ),
+            ],
+        )
+        self.store.db.commit()
 
-            logger.log_scan(result)
-            logger.log_action("skill-block", "bad-skill", "reason=test")
+        alert_ids = [event.id for event in self.store.list_alerts(10)]
+        summary_ids = [event.id for event in self.store.list_alert_summaries(10)]
+        actionable_ids = [event.id for event in self.store.list_actionable_alert_summaries(10)]
 
-            events = self.store.list_events(10)
-            self.assertGreaterEqual(len(events), 2)
-            self.assertTrue(all(evt.run_id == "python-run-id" for evt in events[:2]))
-
-            run_id = self.store.db.execute(
-                "SELECT run_id FROM scan_results ORDER BY timestamp DESC LIMIT 1"
-            ).fetchone()[0]
-            self.assertEqual(run_id, "python-run-id")
-        finally:
-            if old is None:
-                os.environ.pop("DEFENSECLAW_RUN_ID", None)
-            else:
-                os.environ["DEFENSECLAW_RUN_ID"] = old
-
-    @patch("defenseclaw.logger._build_hec_opener")
-    def test_logger_forwards_run_id_to_splunk(self, mock_build_opener):
-        # F-0808: the forwarder now sends through a redirect-refusing
-        # opener instead of urllib.request.urlopen, so the test patches
-        # the opener factory and inspects the request handed to open().
-        old = os.environ.get("DEFENSECLAW_RUN_ID")
-        os.environ["DEFENSECLAW_RUN_ID"] = "python-splunk-run"
-        try:
-            response = MagicMock()
-            response.status = 200
-            cm = MagicMock()
-            cm.__enter__.return_value = response
-            cm.__exit__.return_value = False
-            opener = MagicMock()
-            opener.open.return_value = cm
-            mock_build_opener.return_value = opener
-
-            logger = Logger(self.store, self._FakeSplunkCfg())
-            logger.log_action("skill-block", "bad-skill", "reason=test")
-
-            req = opener.open.call_args[0][0]
-            self.assertTrue(req.full_url.endswith("/services/collector/event"))
-            payload = json.loads(req.data.decode("utf-8"))
-            self.assertEqual(payload["event"]["run_id"], "python-splunk-run")
-            self.assertEqual(payload["event"]["action"], "skill-block")
-        finally:
-            if old is None:
-                os.environ.pop("DEFENSECLAW_RUN_ID", None)
-            else:
-                os.environ["DEFENSECLAW_RUN_ID"] = old
+        self.assertIn("v8-finding", alert_ids)
+        self.assertIn("v8-finding", summary_ids)
+        self.assertIn("v8-finding", actionable_ids)
+        self.assertNotIn("v8-platform-health", alert_ids)
+        self.assertNotIn("v8-platform-health", summary_ids)
+        self.assertNotIn("v8-platform-health", actionable_ids)
 
     # -- SK-4: per-connector actions column migration --
 
@@ -445,15 +508,11 @@ class ModelsDbTests(unittest.TestCase):
         self.store.init()
 
         # Column added.
-        cols = {
-            row[1] for row in self.store.db.execute("PRAGMA table_info(actions)").fetchall()
-        }
+        cols = {row[1] for row in self.store.db.execute("PRAGMA table_info(actions)").fetchall()}
         self.assertIn("connector", cols)
 
         # Index swapped: legacy 2-col gone, connector-aware 3-col present.
-        index_names = {
-            row[1] for row in self.store.db.execute("PRAGMA index_list(actions)").fetchall()
-        }
+        index_names = {row[1] for row in self.store.db.execute("PRAGMA index_list(actions)").fetchall()}
         self.assertNotIn("idx_actions_type_name", index_names)
         self.assertIn("idx_actions_type_name_conn", index_names)
 
@@ -472,27 +531,19 @@ class ModelsDbTests(unittest.TestCase):
 
         # A per-connector row for the SAME (type, name) now coexists with the
         # global one — proving the uniqueness index is connector-aware.
-        self.store.set_action_field(
-            "skill", "legacy-skill", "install", "allow", "hermes ok", connector="hermes"
-        )
-        self.assertTrue(
-            self.store.has_action("skill", "legacy-skill", "install", "allow", connector="hermes")
-        )
+        self.store.set_action_field("skill", "legacy-skill", "install", "allow", "hermes ok", connector="hermes")
+        self.assertTrue(self.store.has_action("skill", "legacy-skill", "install", "allow", connector="hermes"))
         # Global entry untouched and still a block; the per-connector lookup
         # does not see the global block (exact-match).
         self.assertTrue(self.store.has_action("skill", "legacy-skill", "install", "block"))
-        self.assertFalse(
-            self.store.has_action("skill", "legacy-skill", "install", "block", connector="hermes")
-        )
+        self.assertFalse(self.store.has_action("skill", "legacy-skill", "install", "block", connector="hermes"))
 
     def test_connector_scoped_actions_isolation(self):
         """Per-connector and global entries on the same target are isolated for
         exact-match reads/writes, and list_actions_by_type filters by
         connector."""
         self.store.set_action_field("skill", "x", "install", "block", "global block")
-        self.store.set_action_field(
-            "skill", "x", "install", "allow", "hermes allow", connector="hermes"
-        )
+        self.store.set_action_field("skill", "x", "install", "allow", "hermes allow", connector="hermes")
 
         # Exact-match reads are scoped to their connector.
         self.assertTrue(self.store.has_action("skill", "x", "install", "block"))
@@ -524,19 +575,13 @@ class ModelsDbTests(unittest.TestCase):
         """Re-running init() on an already-migrated DB is a no-op: it must not
         recreate the legacy 2-col index (which would reject per-connector rows)
         nor drop existing per-connector data."""
-        self.store.set_action_field(
-            "skill", "y", "install", "block", "codex block", connector="codex"
-        )
+        self.store.set_action_field("skill", "y", "install", "block", "codex block", connector="codex")
         self.store.init()  # second init on an already-migrated DB
 
-        index_names = {
-            row[1] for row in self.store.db.execute("PRAGMA index_list(actions)").fetchall()
-        }
+        index_names = {row[1] for row in self.store.db.execute("PRAGMA index_list(actions)").fetchall()}
         self.assertIn("idx_actions_type_name_conn", index_names)
         self.assertNotIn("idx_actions_type_name", index_names)
-        self.assertTrue(
-            self.store.has_action("skill", "y", "install", "block", connector="codex")
-        )
+        self.assertTrue(self.store.has_action("skill", "y", "install", "block", connector="codex"))
 
 
 if __name__ == "__main__":

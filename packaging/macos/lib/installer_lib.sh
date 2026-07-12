@@ -298,7 +298,7 @@ resolve_aid_endpoint() {
   aid_endpoint_for_env "${env}"
 }
 
-# render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
+# render_config MODE PRIMARY API_PORT SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
 # Renders the full config.yaml. Pure stdout, no file writes.
 # Extra args after AID_ENDPOINT are the full connector list (primary + others).
 #
@@ -319,31 +319,37 @@ render_config() {
   local mode="$1"
   local primary="$2"
   local api_port="$3"
-  local disable_redaction="$4"
-  local support_dir="$5"
-  local aid_endpoint="$6"
-  shift 6
+  local support_dir="$4"
+  local aid_endpoint="$5"
+  shift 5
   local -a connectors=("$@")
   local runtime_dir="${support_dir}/runtime"
 
   cat <<EOF
-config_version: 6
+config_version: 8
 deployment_mode: managed_enterprise
 
 data_dir: "${runtime_dir}"
-audit_db: "${runtime_dir}/audit.db"
-judge_bodies_db: "${runtime_dir}/judge_bodies.db"
+
+observability:
+  local:
+    path: "${runtime_dir}/audit.db"
+    judge_bodies_path: "${runtime_dir}/judge_bodies.db"
+  # Managed installs retain the previous secure-by-default behavior. To
+  # change redaction, edit this profile (or add per-bucket overrides) and
+  # validate the complete v8 source before restarting the daemon.
+  defaults:
+    redaction_profile: sensitive
 
 gateway:
   api_bind: 127.0.0.1
   api_port: ${api_port}
-  # Pin device_key_file into RUNTIME_DIR (service-user writable) rather
+  # Pin device_key_file into RUNTIME_DIR rather
   # than letting the Go defaults compute it from DEFENSECLAW_HOME. The
   # plist sets DEFENSECLAW_HOME to SUPPORT_DIR so managed_enterprise
-  # trust checks accept every ancestor of config.yaml, but SUPPORT_DIR
-  # itself is root:defenseclaw 0750 (no group write) — leaving the
-  # default would send the daemon's first-boot write to
-  # \${SUPPORT_DIR}/device.key and crash it with "permission denied".
+  # trust checks accept every ancestor of config.yaml. Keeping mutable
+  # runtime state below the dedicated runtime directory also preserves
+  # the root-owned managed-install layout.
   device_key_file: "${runtime_dir}/device.key"
   # The skill/plugin/MCP watcher periodically re-scans agent component
   # directories and invokes the 'defenseclaw' python scanner binary.
@@ -355,9 +361,6 @@ gateway:
   # the enforced action path we're building. Turn it off.
   watcher:
     enabled: false
-
-privacy:
-  disable_redaction: ${disable_redaction}
 
 guardrail:
   enabled: true
@@ -395,27 +398,13 @@ EOF
 cisco_ai_defense:
   endpoint: "${aid_endpoint}"
 
-# OpenTelemetry. In managed_enterprise the gateway auto-provisions a Cisco AI
-# Defense event-ingest LOG sink from cisco_ai_defense.endpoint above: it POSTs
-# DefenseClaw's own events to ${aid_endpoint}/api/v1/defenseclaw/events/ingest with
-# a CMID bearer token (see internal/telemetry/cisco_aid_log_exporter.go). That
-# sink is independent of otel.destinations[] and needs no user collector.
-# otel.enabled is turned on so the telemetry provider (and that managed sink)
-# are active; the "enabled requires a destination" rule is waived when the
-# managed sink is present (see config.hasManagedAIDLogSink). Add entries under
-# otel.destinations[] only if you also want to fan out to your own OTLP backend.
-# Set DEFENSECLAW_DEBUG=1 for a stderr line confirming each successful send.
-otel:
-  enabled: true
-
 # Continuous AI discovery (endpoint inventory). Enabled in managed_enterprise
 # so the sidecar scans for supported connectors and broader "shadow AI" usage
-# signals and ships the inventory to AI Defense as discovery events over the
-# managed AID log sink above (see internal/inventory/ai_discovery.go and
-# internal/telemetry/cisco_aid_log_exporter.go). emit_otel defaults on, which is
-# what carries the inventory to that sink; other ai_discovery.* keys keep their
-# built-in defaults (mode enhanced, scan intervals). The scanner is a no-op
-# unless enabled, so this block is required for endpoint inventory to flow.
+# signals. Observability v8 sends those observations through its canonical
+# runtime and configured destinations; the removed v7 emit_otel switch is not
+# restored. Other ai_discovery.* keys keep their built-in defaults (mode
+# enhanced, scan intervals). The scanner is a no-op unless enabled, so this
+# block is required for endpoint inventory to flow.
 ai_discovery:
   enabled: true
 

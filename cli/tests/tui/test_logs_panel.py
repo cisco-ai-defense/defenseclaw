@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from datetime import datetime, timezone
 
 from defenseclaw.tui.panels import logs as logs_module
 from defenseclaw.tui.panels.logs import (
@@ -25,33 +25,75 @@ from defenseclaw.tui.panels.logs import (
     FILTER_TYPE_PRESET,
     FILTER_TYPE_SEVERITY,
     LogsPanelModel,
-    log_redaction_state,
-    redaction_disabled_for_logs_badge,
 )
 from defenseclaw.tui.services.gateway_log_views import (
     EVENT_TYPE_FILTERS,
     GatewayLogRow,
-    GatewayLogViews,
     detail_pairs,
-    load_gateway_log_views,
-    parse_gateway_log_row,
+    project_v8_log_views,
     render_details_inline,
     render_gateway_log_line,
+    render_otel_line,
     severity_rank,
     trim_categories,
 )
+from defenseclaw.tui.services.v8_event_history import V8EventHistoryRow
 
 
-def test_parse_gateway_log_row_verdict_schema_fields_and_detail_pairs() -> None:
-    row = parse_gateway_log_row(
-        '{"ts":"2026-04-16T12:34:56Z","event_type":"verdict","severity":"HIGH",'
-        '"request_id":"req-123","run_id":"run-abc","session_id":"sess-xyz",'
-        '"provider":"bedrock","model":"claude","direction":"prompt",'
-        '"verdict":{"stage":"final","action":"block","reason":"pii",'
-        '"categories":["pii.email","injection.system","policy.custom"],"latency_ms":37}}'
+def _v8_row(
+    *,
+    bucket: str,
+    event_name: str,
+    source: str = "gateway",
+    severity: str = "INFO",
+    action: str = "",
+    details: str = "",
+    payload: dict[str, object] | None = None,
+    request_id: str = "",
+    run_id: str = "",
+    session_id: str = "",
+) -> GatewayLogRow:
+    history = V8EventHistoryRow(
+        id="record-1",
+        timestamp=datetime(2026, 4, 16, 12, 34, 56, tzinfo=timezone.utc),
+        bucket=bucket,
+        event_name=event_name,
+        source=source,
+        severity=severity,
+        action=action,
+        actor="defenseclaw",
+        details=details,
+        connector="codex",
+        redaction_profile="strict",
+        request_id=request_id,
+        run_id=run_id,
+        session_id=session_id,
+        payload=payload or {},
+    )
+    return project_v8_log_views((history,)).otel_rows[0]
+
+
+def test_v8_history_verdict_fields_and_detail_pairs() -> None:
+    row = _v8_row(
+        bucket="guardrail.evaluation",
+        event_name="guardrail.evaluation.completed",
+        source="bedrock",
+        severity="HIGH",
+        action="block",
+        details="pii",
+        request_id="req-123",
+        run_id="run-abc",
+        session_id="sess-xyz",
+        payload={
+            "gen_ai.request.model": "claude",
+            "gen_ai.operation.name": "prompt",
+            "defenseclaw.guardrail.decision": "block",
+            "defenseclaw.guardrail.reason": "pii",
+            "defenseclaw.guardrail.rule_ids": ["pii.email", "injection.system", "policy.custom"],
+            "defenseclaw.guardrail.latency_ms": 37,
+        },
     )
 
-    assert row is not None
     assert row.event_type == "verdict"
     assert row.action == "block"
     assert row.request_id == "req-123"
@@ -78,82 +120,56 @@ def test_parse_gateway_log_row_verdict_schema_fields_and_detail_pairs() -> None:
     assert detail["Raw JSON"]
 
 
-def test_parse_gateway_log_row_judge_lifecycle_error_and_diagnostic_fields() -> None:
-    judge = parse_gateway_log_row(
-        '{"ts":"2026-04-16T12:00:00Z","event_type":"judge","severity":"HIGH",'
-        '"model":"gpt-4","judge":{"kind":"pii","action":"block","severity":"CRITICAL",'
-        '"input_bytes":512,"latency_ms":90,'
-        '"findings":[{"category":"pii.email","severity":"HIGH","rule":"R1",'
-        '"source":"regex","confidence":0.95}],"raw_response":"{\\"action\\":\\"block\\"}"}}'
+def test_v8_history_judge_lifecycle_error_and_diagnostic_fields() -> None:
+    judge = _v8_row(
+        bucket="guardrail.evaluation",
+        event_name="guardrail.judge.completed",
+        severity="CRITICAL",
+        payload={
+            "gen_ai.request.model": "gpt-4",
+            "defenseclaw.judge.kind": "pii",
+            "defenseclaw.judge.action": "block",
+            "defenseclaw.judge.input_bytes": 512,
+            "defenseclaw.guardrail.latency_ms": 90,
+            "defenseclaw.judge.parse_error": "",
+        },
     )
-    assert judge is not None
     assert judge.kind == "pii"
     assert judge.action == "block"
     assert judge.judge_severity == "CRITICAL"
     assert judge.judge_input_bytes == 512
     assert judge.latency_ms == 90
-    assert judge.judge_findings[0].category == "pii.email"
-    assert judge.judge_findings[0].confidence == 0.95
-    assert "Judge raw response" in dict(detail_pairs(judge))
 
-    lifecycle = parse_gateway_log_row(
-        '{"ts":"2026-04-16T12:00:00Z","event_type":"lifecycle","severity":"INFO",'
-        '"lifecycle":{"subsystem":"gateway","transition":"ready",'
-        '"details":{"port":"8081","host":"localhost"}}}'
+    lifecycle = _v8_row(
+        bucket="agent.lifecycle",
+        event_name="agent.lifecycle.ready",
+        payload={"defenseclaw.gateway.port": "8081", "defenseclaw.gateway.host": "localhost"},
     )
-    assert lifecycle is not None
-    assert lifecycle.lifecycle_subsystem == "gateway"
-    assert lifecycle.lifecycle_details == {"port": "8081", "host": "localhost"}
+    assert lifecycle.lifecycle_subsystem == "agent.lifecycle"
+    assert lifecycle.lifecycle_details["port"] == "8081"
+    assert lifecycle.lifecycle_details["host"] == "localhost"
     assert render_details_inline({"z": "1", "a": "2", "m": "3"}, 2) == "a=2 m=3"
 
-    error = parse_gateway_log_row(
-        '{"ts":"2026-04-16T12:00:00Z","event_type":"error","severity":"HIGH",'
-        '"error":{"subsystem":"opa","code":"compile_failed","message":"bad rego","cause":"syntax"}}'
+    error = _v8_row(
+        bucket="platform.health",
+        event_name="platform.health.check.failed",
+        source="opa",
+        severity="HIGH",
+        payload={
+            "defenseclaw.error.code": "compile_failed",
+            "defenseclaw.error.summary": "bad rego",
+        },
     )
-    diagnostic = parse_gateway_log_row(
-        '{"ts":"2026-04-16T12:00:00Z","event_type":"diagnostic","severity":"INFO",'
-        '"diagnostic":{"component":"sinks","message":"pipeline initialised"}}'
+    diagnostic = _v8_row(
+        bucket="diagnostic",
+        event_name="diagnostic.pipeline.initialized",
+        source="destinations",
+        details="pipeline initialized",
     )
-    assert error is not None
-    assert diagnostic is not None
     detail = dict(detail_pairs(error))
     assert detail["Error code"] == "compile_failed"
-    assert detail["Error cause"] == "syntax"
-    assert dict(detail_pairs(diagnostic))["Diagnostic component"] == "sinks"
-
-
-def test_gateway_log_views_filter_action_type_severity_and_route_otel(tmp_path) -> None:
-    path = tmp_path / "gateway.jsonl"
-    path.write_text(
-        "\n".join(
-            [
-                '{"ts":"2026-04-16T12:00:00Z","event_type":"verdict","severity":"HIGH",'
-                '"verdict":{"stage":"final","action":"block","reason":"pii"}}',
-                '{"ts":"2026-04-16T12:00:01Z","event_type":"judge","severity":"HIGH",'
-                '"judge":{"kind":"pii","action":"block"}}',
-                '{"ts":"2026-04-16T12:00:02Z","event_type":"judge","severity":"LOW",'
-                '"judge":{"kind":"injection","action":"allow"}}',
-                '{"ts":"2026-04-16T12:00:03Z","event_type":"lifecycle","severity":"INFO",'
-                '"lifecycle":{"subsystem":"telemetry","transition":"sent",'
-                '"details":{"action":"otel.ingest.logs","records":"2"}}}',
-                '{"ts":"2026-04-16T12:00:04Z","event_type":"activity","severity":"INFO",'
-                '"activity":{"actor":"codex","action":"codex.notify.agent-turn-complete",'
-                '"target_type":"session","target_id":"abc"}}',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    views = load_gateway_log_views(path, event_type_filter="judge", action_filter="block", severity_filter="HIGH+")
-
-    assert [row.event_type for row in views.verdict_rows] == ["judge"]
-    assert views.verdict_rows[0].action == "block"
-    assert len(views.otel_rows) == 2
-    assert "OTEL" in views.otel_lines[0]
-    assert "CODEX" in views.otel_lines[1]
-    assert "otel.ingest" not in "\n".join(views.verdict_lines)
-    assert "codex.notify" not in "\n".join(views.verdict_lines)
+    assert detail["Error message"] == "bad rego"
+    assert dict(detail_pairs(diagnostic))["Diagnostic component"] == "destinations"
 
 
 def test_logs_selected_structured_row_respects_search_and_preset_filters() -> None:
@@ -205,8 +221,8 @@ def test_logs_error_empty_and_cursor_scrolling_states(tmp_path) -> None:
     panel.refresh()
     panel.source = "verdicts"
 
-    assert panel.error_messages["verdicts"].startswith("Cannot open:")
-    assert "Cannot open:" in panel.render_text()
+    assert panel.error_messages["verdicts"] == ""
+    assert "Log file is empty or not yet created" in panel.render_text()
 
     panel.source = "gateway"
     panel.filter_mode = FILTER_NONE
@@ -227,9 +243,8 @@ def test_logs_error_empty_and_cursor_scrolling_states(tmp_path) -> None:
     assert "Log file is empty or not yet created" in panel.render_text()
 
 
-def test_logs_refresh_retries_transient_raw_and_structured_reads(tmp_path, monkeypatch) -> None:
+def test_logs_refresh_retries_transient_process_log_reads(tmp_path, monkeypatch) -> None:
     (tmp_path / "gateway.log").write_text("gateway ready\n", encoding="utf-8")
-    (tmp_path / "gateway.jsonl").write_text("{}\n", encoding="utf-8")
     panel = LogsPanelModel(tmp_path)
 
     raw_reader = logs_module._tail_text_file
@@ -243,30 +258,51 @@ def test_logs_refresh_retries_transient_raw_and_structured_reads(tmp_path, monke
                 raise OSError("transient raw read")
         return raw_reader(*args, **kwargs)
 
-    view_loader = logs_module.load_gateway_log_views
-    view_calls = 0
-
-    def flaky_view_loader(*args, **kwargs):
-        nonlocal view_calls
-        view_calls += 1
-        if view_calls == 1:
-            return GatewayLogViews(error="transient structured read")
-        return view_loader(*args, **kwargs)
-
     monkeypatch.setattr(logs_module, "_tail_text_file", flaky_raw_reader)
-    monkeypatch.setattr(logs_module, "load_gateway_log_views", flaky_view_loader)
 
     panel.refresh()
     assert panel.lines["gateway"] == []
     assert panel.error_messages["gateway"].startswith("Cannot open:")
-    assert panel.error_messages["verdicts"] == "transient structured read"
+    assert panel.error_messages["verdicts"] == ""
 
     panel.refresh()
     assert panel.lines["gateway"] == ["gateway ready"]
     assert panel.error_messages["gateway"] == ""
     assert panel.error_messages["verdicts"] == ""
     assert raw_calls == 2
-    assert view_calls == 2
+
+
+def test_process_log_snapshot_is_read_without_mutating_model_until_applied(tmp_path) -> None:
+    (tmp_path / "gateway.log").write_text("ready\nserving\n", encoding="utf-8")
+    panel = LogsPanelModel(tmp_path)
+
+    request = panel.pending_file_refresh("gateway")
+    assert request is not None
+    snapshot = panel.read_file_request(request)
+    assert panel.lines["gateway"] == []
+
+    assert panel.apply_file_snapshot(snapshot) is True
+    assert panel.lines["gateway"] == ["ready", "serving"]
+    assert panel.pending_file_refresh("gateway") is None
+
+
+def test_refresh_files_can_limit_io_to_active_raw_source(tmp_path, monkeypatch) -> None:
+    (tmp_path / "gateway.log").write_text("gateway\n", encoding="utf-8")
+    (tmp_path / "watchdog.log").write_text("watchdog\n", encoding="utf-8")
+    reads: list[str] = []
+    raw_reader = logs_module._tail_text_file
+
+    def tracked_reader(path, **kwargs):
+        reads.append(path.name)
+        return raw_reader(path, **kwargs)
+
+    monkeypatch.setattr(logs_module, "_tail_text_file", tracked_reader)
+    panel = LogsPanelModel(tmp_path)
+
+    assert panel.refresh_files(("gateway",)) == {"gateway"}
+    assert reads == ["gateway.log"]
+    assert panel.lines["gateway"] == ["gateway"]
+    assert panel.lines["watchdog"] == []
 
 
 def test_logs_set_data_dir_none_clears_loaded_state(tmp_path) -> None:
@@ -414,30 +450,13 @@ def test_logs_row_style_and_detail_title_metadata_for_other_sources() -> None:
     assert panel.selected_detail_title() == "OTEL event - ACTIVITY"
 
 
-def test_logs_redaction_state_uses_config_and_env_override() -> None:
-    cfg = SimpleNamespace(privacy=SimpleNamespace(disable_redaction=False))
-    assert redaction_disabled_for_logs_badge(config=cfg, env={}) is False
-    assert log_redaction_state(config=cfg, env={}).visible is False
-
-    cfg.privacy.disable_redaction = True
-    state = log_redaction_state(config=cfg, env={})
-    assert state.visible is True
-    assert state.badge_label == "RAW"
-    assert state.style_key == "raw"
-    assert "defenseclaw setup redaction on" in state.hint
-    assert state.source == "privacy.disable_redaction=true"
-
-    env_state = log_redaction_state(config=SimpleNamespace(privacy=SimpleNamespace(disable_redaction=False)), env={
-        "DEFENSECLAW_DISABLE_REDACTION": "yes",
-    })
-    assert env_state.visible is True
-    assert "DEFENSECLAW_DISABLE_REDACTION=yes" in env_state.source
-
-    panel = LogsPanelModel(config=cfg, env={})
+def test_logs_has_no_retired_global_redaction_state() -> None:
+    panel = LogsPanelModel()
     panel.filter_mode = FILTER_NONE
     panel.lines["gateway"] = ["line one"]
-    assert panel.header_state().redaction.badge_label == "RAW"
-    assert "RAW redaction off" in panel.render_text()
+    assert panel.header_state().redaction.visible is False
+    assert "RAW redaction off" not in panel.render_text()
+    assert panel.handle_key("R").modal is None
 
 
 def test_logs_filter_change_metadata_and_modal_hooks() -> None:
@@ -462,7 +481,7 @@ def test_logs_filter_change_metadata_and_modal_hooks() -> None:
     assert panel.search_text == "s"
 
     panel.searching = False
-    assert panel.handle_key("R").modal == "redaction"
+    assert panel.handle_key("R").modal is None
     assert panel.handle_key("N").modal == "notifications"
     assert panel.handle_key("J").modal == "judge-history"
 
@@ -578,17 +597,18 @@ def test_render_otel_line_collapses_connector_hook_lifecycle_to_summary() -> Non
     so users can scroll the OTEL/HOOK tab and read it.
     """
 
-    raw = (
-        '{"ts":"2026-05-11T21:02:05.822747Z","event_type":"lifecycle","severity":"INFO",'
-        '"lifecycle":{"subsystem":"gateway","transition":"completed",'
-        '"details":{"action":"connector-hook","actor":"defenseclaw",'
-        '"audit_id":"43be998a","target":"SessionStart",'
-        '"details":"connector=codex action=allow severity=NONE mode=action would_block=false elapsed=22ms"}}}'
+    row = _v8_row(
+        bucket="agent.lifecycle",
+        event_name="agent.lifecycle.hook.completed",
+        payload={
+            "defenseclaw.hook.action": "connector-hook",
+            "defenseclaw.hook.target": "SessionStart",
+            "defenseclaw.hook.details": (
+                "connector=codex action=allow severity=NONE mode=action "
+                "would_block=false elapsed=22ms"
+            ),
+        },
     )
-    row = parse_gateway_log_row(raw)
-    assert row is not None
-
-    from defenseclaw.tui.services.gateway_log_views import render_otel_line
 
     line = render_otel_line(row)
     # Stream stays HOOK so the existing tab routing keeps working.
@@ -610,17 +630,19 @@ def test_detail_pairs_expands_connector_hook_inner_kv_into_labelled_rows() -> No
     so users don't have to read ``Detail: details=connector=…`` blobs.
     """
 
-    raw = (
-        '{"ts":"2026-05-11T21:02:05.822747Z","event_type":"lifecycle","severity":"INFO",'
-        '"lifecycle":{"subsystem":"gateway","transition":"completed",'
-        '"details":{"action":"connector-hook","actor":"defenseclaw",'
-        '"audit_id":"abc","target":"PreToolUse",'
-        '"details":"connector=cursor tool=Bash action=block severity=HIGH '
-        'mode=enforce would_block=true elapsed=412ms reason=secret-detected '
-        'raw_payload=<redacted len=8 sha=84ed0c96>"}}}'
+    row = _v8_row(
+        bucket="agent.lifecycle",
+        event_name="agent.lifecycle.hook.completed",
+        payload={
+            "defenseclaw.hook.action": "connector-hook",
+            "defenseclaw.hook.target": "PreToolUse",
+            "defenseclaw.hook.details": (
+                "connector=cursor tool=Bash action=block severity=HIGH "
+                "mode=enforce would_block=true elapsed=412ms reason=secret-detected "
+                "raw_payload=<redacted len=8 sha=84ed0c96>"
+            ),
+        },
     )
-    row = parse_gateway_log_row(raw)
-    assert row is not None
 
     pairs = dict(detail_pairs(row))
     assert pairs["Connector"] == "cursor"
@@ -639,17 +661,18 @@ def test_detail_pairs_expands_connector_hook_inner_kv_into_labelled_rows() -> No
     assert "Detail: target" not in pairs
 
 
-def test_detail_pairs_preserves_legacy_lifecycle_rendering_for_non_hook_rows() -> None:
+def test_detail_pairs_preserves_lifecycle_rendering_for_non_hook_rows() -> None:
     """Non-hook lifecycle rows (config reloads, server transitions)
     keep the ``Detail: <key>`` rendering they relied on before."""
 
-    raw = (
-        '{"ts":"2026-05-11T21:02:05.822747Z","event_type":"lifecycle","severity":"INFO",'
-        '"lifecycle":{"subsystem":"config","transition":"reloaded",'
-        '"details":{"path":"/etc/defenseclaw/config.yaml","generation":"7"}}}'
+    row = _v8_row(
+        bucket="agent.lifecycle",
+        event_name="config.reloaded",
+        payload={
+            "defenseclaw.config.path": "/etc/defenseclaw/config.yaml",
+            "defenseclaw.config.generation": "7",
+        },
     )
-    row = parse_gateway_log_row(raw)
-    assert row is not None
     pairs = dict(detail_pairs(row))
     assert pairs["Detail: path"] == "/etc/defenseclaw/config.yaml"
     assert pairs["Detail: generation"] == "7"

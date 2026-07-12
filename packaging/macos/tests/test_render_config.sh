@@ -9,15 +9,18 @@ TEST_AID_ENDPOINT_PREVIEW="https://preview.api.inspect.aidefense.aiteam.cisco.co
 
 t_single_connector() {
   local out
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
 
-  assert_contains "${out}" "config_version: 6"                  "config_version present"
+  assert_contains "${out}" "config_version: 8"                  "config_version present"
   assert_contains "${out}" "deployment_mode: managed_enterprise" "managed_enterprise mode"
   assert_contains "${out}" "data_dir: \"/opt/cisco/secureclient/defenseclaw/runtime\"" "data_dir points at runtime subdir (matches docs-site/setup/enterprise-deployment.mdx)"
-  assert_contains "${out}" "audit_db: \"/opt/cisco/secureclient/defenseclaw/runtime/audit.db\"" "audit_db under runtime"
-  assert_contains "${out}" "judge_bodies_db: \"/opt/cisco/secureclient/defenseclaw/runtime/judge_bodies.db\"" "judge_bodies_db under runtime"
+  assert_contains "${out}" "path: \"/opt/cisco/secureclient/defenseclaw/runtime/audit.db\"" "v8 local history under runtime"
+  assert_contains "${out}" "judge_bodies_path: \"/opt/cisco/secureclient/defenseclaw/runtime/judge_bodies.db\"" "v8 judge bodies under runtime"
   assert_contains "${out}" "api_port: 18970"                    "api_port"
-  assert_contains "${out}" "disable_redaction: false"           "redaction disabled flag"
+  assert_contains "${out}" "redaction_profile: sensitive"       "managed redaction profile"
+  assert_not_contains "${out}" "disable_redaction"               "removed global redaction bypass"
+  assert_not_contains "${out}" $'\naudit_db:'                     "removed top-level audit DB field"
+  assert_not_contains "${out}" $'\njudge_bodies_db:'              "removed top-level judge DB field"
   assert_contains "${out}" "mode: action"                       "guardrail mode"
   assert_contains "${out}" "scanner_mode: both"                 "scanner_mode"
   assert_contains "${out}" "connector: cursor"                  "primary connector"
@@ -38,14 +41,14 @@ t_single_connector() {
 
 t_multi_connector() {
   local out
-  out="$(render_config observe cursor 18970 true "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor claudecode codex)"
+  out="$(render_config observe cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor claudecode codex)"
 
   assert_contains "${out}" "connector: cursor"        "primary is first arg"
   assert_contains "${out}" "  connectors:"            "multi-connector map present"
   assert_contains "${out}" "    cursor:"              "cursor entry under connectors"
   assert_contains "${out}" "    claudecode:"          "claudecode entry under connectors"
   assert_contains "${out}" "    codex:"               "codex entry under connectors"
-  assert_contains "${out}" "disable_redaction: true"  "redaction explicit opt-out"
+  assert_contains "${out}" "redaction_profile: sensitive" "managed redaction profile"
   assert_contains "${out}" "mode: observe"            "observe mode"
 }
 
@@ -59,7 +62,7 @@ t_runtime_paths_disjoint_from_config_parent() {
   local out support runtime
   support="/opt/cisco/secureclient/defenseclaw"
   runtime="${support}/runtime"
-  out="$(render_config observe cursor 18970 false "${support}" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  out="$(render_config observe cursor 18970 "${support}" "${TEST_AID_ENDPOINT_PROD}" cursor)"
   assert_contains     "${out}" "data_dir: \"${runtime}\"" "data_dir under support"
   assert_not_contains "${out}" "data_dir: \"${support}\"" "data_dir MUST NOT equal support dir (trust check fails)"
 }
@@ -78,26 +81,16 @@ t_device_key_file_under_runtime_dir() {
   local out support runtime
   support="/opt/cisco/secureclient/defenseclaw"
   runtime="${support}/runtime"
-  out="$(render_config observe cursor 18970 false "${support}" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  out="$(render_config observe cursor 18970 "${support}" "${TEST_AID_ENDPOINT_PROD}" cursor)"
   assert_contains     "${out}" "device_key_file: \"${runtime}/device.key\"" "device_key_file under runtime dir"
   assert_not_contains "${out}" "device_key_file: \"${support}/device.key\"" "device_key_file MUST NOT land in SUPPORT_DIR (no group-write there)"
 }
 
-t_redaction_pass_through_on() {
-  # Pure rendering check: given "false", the block emits redaction on.
-  # This proves the rendering layer respects the caller's choice; the
-  # install.sh default-arg-parsing contract is asserted in
-  # test_arg_parsing.sh::t_install_default_redaction_is_on so we don't
-  # duplicate the "what's the default" check at two layers.
+t_managed_redaction_is_sensitive() {
   local out
-  out="$(render_config observe codex 18970 false "/var/lib/dc" "${TEST_AID_ENDPOINT_PROD}" codex)"
-  assert_contains "${out}" "disable_redaction: false" "renderer emits redaction ON when false is passed"
-}
-
-t_redaction_pass_through_off() {
-  local out
-  out="$(render_config action codex 18970 true "/var/lib/dc" "${TEST_AID_ENDPOINT_PROD}" codex)"
-  assert_contains "${out}" "disable_redaction: true" "renderer emits redaction OFF when true is passed"
+  out="$(render_config observe codex 18970 "/var/lib/dc" "${TEST_AID_ENDPOINT_PROD}" codex)"
+  assert_contains "${out}" "redaction_profile: sensitive" "renderer emits the secure managed profile"
+  assert_not_contains "${out}" "privacy:" "renderer does not emit the retired v7 privacy block"
 }
 
 t_yaml_parses() {
@@ -112,7 +105,7 @@ t_yaml_parses() {
     return 0
   fi
   local out parsed
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor claudecode)"
+  out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor claudecode)"
   parsed="$(printf '%s\n' "${out}" | /usr/bin/python3 -c 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin)))' 2>&1)" || {
     _fail "rendered YAML did not parse: ${parsed}"
     return 1
@@ -127,7 +120,7 @@ t_cisco_ai_defense_block_emitted() {
   # cisco_ai_defense.endpoint is empty. Guard the invariant that
   # render_config emits the block with a non-empty endpoint.
   local out
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PREVIEW}" cursor)"
+  out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PREVIEW}" cursor)"
   assert_contains "${out}" "cisco_ai_defense:"                             "cisco_ai_defense: block present"
   assert_contains "${out}" "endpoint: \"${TEST_AID_ENDPOINT_PREVIEW}\""    "endpoint value threaded through"
 }
@@ -238,7 +231,7 @@ t_preview_env_endpoint_ends_up_in_config() {
   # points at the preview host. This is the whole point of --env.
   local endpoint out
   endpoint="$(aid_endpoint_for_env preview)"
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${endpoint}" cursor)"
+  out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${endpoint}" cursor)"
   assert_contains "${out}" "endpoint: \"${TEST_AID_ENDPOINT_PREVIEW}\"" "preview host lands in rendered config"
 }
 
@@ -257,7 +250,7 @@ t_managed_enterprise_verdict_sources_locked() {
   # that would produce independent block verdicts.
   local endpoint out
   endpoint="$(aid_endpoint_for_env prod)"
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${endpoint}" cursor)"
+  out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${endpoint}" cursor)"
 
   # Cloud enforcement source: the cisco_ai_defense block must be
   # emitted with a non-empty endpoint (see NewCiscoDefenseClawInspectClient
@@ -287,8 +280,7 @@ run_case "multi-connector config"   t_multi_connector
 run_case "runtime paths under support (trust-check invariant)" t_runtime_paths_disjoint_from_config_parent
 run_case "device_key_file pinned under runtime dir (SUPPORT_DIR is not writable by service user)" \
   t_device_key_file_under_runtime_dir
-run_case "renderer pass-through: redaction on"  t_redaction_pass_through_on
-run_case "renderer pass-through: redaction off" t_redaction_pass_through_off
+run_case "managed redaction profile" t_managed_redaction_is_sensitive
 run_case "cisco_ai_defense block emitted with installer endpoint" t_cisco_ai_defense_block_emitted
 run_case "aid_endpoint_for_env maps flags to hosts"               t_aid_endpoint_env_selection
 run_case "otel block enabled for managed AID sink"               t_otel_block_enabled_for_managed_sink

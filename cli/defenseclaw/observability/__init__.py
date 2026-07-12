@@ -14,13 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Observability setup helpers.
-
-Provides a small preset registry for telemetry destinations (gateway
-OTel exporter + ``audit_sinks``) plus the writer used by
-``defenseclaw setup observability`` and the ``setup splunk`` back-compat
-aliases.
-"""
+"""Canonical v8 observability preset registry."""
 
 from defenseclaw.observability.presets import (
     PRESETS,
@@ -28,26 +22,10 @@ from defenseclaw.observability.presets import (
     preset_choices,
     resolve_preset,
 )
-from defenseclaw.observability.writer import (
-    Destination,
-    WriteResult,
-    apply_preset,
-    list_destinations,
-    migrate_flat_otel,
-    remove_destination,
-    set_destination_enabled,
-)
 
 __all__ = [
     "PRESETS",
-    "Destination",
     "Preset",
-    "WriteResult",
-    "apply_preset",
-    "list_destinations",
-    "migrate_flat_otel",
     "preset_choices",
-    "remove_destination",
     "resolve_preset",
-    "set_destination_enabled",
 ]

@@ -34,7 +34,7 @@ import "net/http"
 // The unified handler owns:
 //
 //   - structured audit envelope writes (logConnectorHookAuditEnvelope),
-//   - native OTel metrics (RecordHookOutcome / RecordHookTokenUsage),
+//   - generation-pinned v8 hook, inspect, and token metric families,
 //   - raw-event deduplication (profile runtime RememberRawEvents),
 //   - W3C trace propagation from the agent-side span,
 //   - panic recovery across dedupe, emit, evaluate, audit, and

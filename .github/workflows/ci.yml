@@ -153,9 +153,80 @@ jobs:
           tmp="$(mktemp -d)"
           whl="$(find dist -maxdepth 1 -name 'defenseclaw-*.whl' -print -quit)"
           test -n "$whl"
+          python3 - "$whl" "$tmp/telemetry-resource-digests.json" <<'PY'
+          import gzip
+          import hashlib
+          import json
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1])
+          digest_path = Path(sys.argv[2])
+          sources = {
+              "defenseclaw/_data/telemetry/v8/telemetry.schema.json": Path(
+                  "schemas/telemetry/runtime/telemetry.schema.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/catalog.json": Path(
+                  "schemas/telemetry/runtime/catalog.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json": Path(
+                  "schemas/telemetry/runtime/compatibility/v7-exporter-selection.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json": Path(
+                  "schemas/telemetry/runtime/compatibility/galileo-rich-v2.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/local-observability-v1.json": Path(
+                  "schemas/telemetry/runtime/compatibility/local-observability-v1.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/openinference-v1.json": Path(
+                  "schemas/telemetry/runtime/compatibility/openinference-v1.json.gz"
+              ),
+          }
+          with zipfile.ZipFile(wheel) as archive:
+              packaged = {
+                  name for name in archive.namelist()
+                  if name.startswith("defenseclaw/_data/telemetry/v8/") and not name.endswith("/")
+              }
+              if packaged != set(sources):
+                  raise SystemExit(f"unexpected telemetry wheel resources: {sorted(packaged)}")
+              digests = {}
+              for member, source_path in sources.items():
+                  source = gzip.decompress(source_path.read_bytes())
+                  bundled = archive.read(member)
+                  if bundled != source:
+                      raise SystemExit(f"wheel resource drift: {member}")
+                  json.loads(bundled)
+                  digests[Path(member).name] = hashlib.sha256(source).hexdigest()
+          digest_path.write_text(json.dumps(digests), encoding="utf-8")
+          PY
           uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
           uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
+          (
+            cd "$tmp"
+            PYTHONNOUSERSITE=1 PYTHONPATH= "$tmp/venv/bin/python" - "$tmp/telemetry-resource-digests.json" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          import defenseclaw.observability.schema_resources as resource_module
+
+          expected = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          module_path = Path(resource_module.__file__).resolve()
+          if not module_path.is_relative_to(Path(sys.prefix).resolve()):
+              raise SystemExit(f"telemetry resource API was not imported from the installed wheel: {module_path}")
+          resources = {
+              "telemetry.schema.json": resource_module.telemetry_v8_schema_bytes(),
+              "catalog.json": resource_module.telemetry_v8_catalog_bytes(),
+          }
+          for name, payload in resources.items():
+              if hashlib.sha256(payload).hexdigest() != expected[name]:
+                  raise SystemExit(f"installed telemetry resource drift: {name}")
+              json.loads(payload)
+          PY
+          )
 
   upgrade-smoke:
     name: Upgrade Refusal Contract (unsigned PR candidate)
@@ -340,6 +411,10 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+          # This one gate explicitly proves the PR #403/#412 compatibility
+          # commits remain ancestors. Portable unit/source-archive validation
+          # checks their documented SHAs without requiring Git history.
+          fetch-depth: 0
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
@@ -351,7 +426,39 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make plugin
       - run: make dev-pycli
-      - run: make check
+      - run: make check VERIFY_OBSERVABILITY_BASELINE_ANCESTRY=1
+
+  local-observability-golden:
+    name: Local Observability Golden
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: make dev-pycli
+      - name: Start the local observability stack
+        run: bundles/local_observability_stack/bin/openclaw-observability-bridge up --timeout 180
+      - name: Emit and verify native v8 telemetry
+        env:
+          DEFENSECLAW_LOCAL_OBSERVABILITY_OTLP_ENDPOINT: http://127.0.0.1:4318
+        run: |
+          go test ./internal/gateway -run TestLocalObservabilityGoldenProducerScenario -count=1
+          .venv/bin/python scripts/check_grafana_dashboards.py \
+            --require-packaged \
+            --live \
+            --inventory \
+            --inventory-hours 1 \
+            --live-golden \
+            --golden-lookback-minutes 15 \
+            --golden-wait-seconds 60
+      - name: Stop the local observability stack
+        if: ${{ always() }}
+        run: bundles/local_observability_stack/bin/openclaw-observability-bridge reset
 
   make-test:
     name: make test (unified)
@@ -426,6 +533,11 @@ jobs:
         run: go test ./internal/gateway/connector/ -run "ProxyConnector|IsProxyConnector|ConnectorSupportedOnOS|RegistryNamesFilter|HookInvocationCommand|ShellWordPassesNativeCommandThrough|BuildCodexHooksTableHashesTheCommand|IsOwnedHookRecognizesNativeCommand"
       - name: Go test - hook token trust
         run: go test ./internal/gateway/connector/ -run "HookAPIToken|LoadHookAPITokens" -count=1
+      # Central v8 redaction requires a persistent correlation key on every
+      # supported gateway platform. Execute the native protected-DACL,
+      # no-reparse, concurrent-creation, and exact-length contract here.
+      - name: Go test - redaction correlation key custody
+        run: go test ./internal/observability/redaction -run "WindowsCorrelationKey" -count=1
       # Execute the native `defenseclaw-gateway hook` entrypoint + sidecar resolution.
       - name: Go test - hook entrypoint
         run: go test ./internal/cli/ -run "BuildHookOptions|ReadHookSidecar|HookCommandRegistered"

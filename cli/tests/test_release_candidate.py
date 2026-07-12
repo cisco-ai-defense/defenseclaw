@@ -32,6 +32,19 @@ TEST_CERTIFICATE_PEM = (
 # The unit fixture only exercises canonical PEM/DER framing.  The release workflow
 # immediately asks Cosign to validate the real X.509 certificate and exact OIDC identity.
 TEST_CERTIFICATE_WRAPPER = base64.b64encode(TEST_CERTIFICATE_PEM)
+HARD_CUT_VERSION = "0.8.5"
+HARD_CUT_IDENTITY = {
+    "schema_version": 1,
+    "source_release": HARD_CUT_VERSION,
+    "source_install_compatibility_epoch": 2,
+    "runtime_config_version": 8,
+}
+HARD_CUT_PROVENANCE_ARGS = {
+    "source_tree": "b" * 40,
+    "bridge_commit": "f" * 40,
+    "bridge_tree": "1" * 40,
+    "bridge_checksums_sha256": "2" * 64,
+}
 RELEASE_ARTIFACTS = release_candidate._expected_release_artifacts(VERSION)
 PROTECTED_WHEEL = RELEASE_ARTIFACTS["wheel"]
 PHASE_TWO_MUTATOR_SOURCE = (ROOT / "cli/defenseclaw/phase_two_mutator.py").read_text(encoding="utf-8")
@@ -124,6 +137,27 @@ def _activate_local_observability_manifest(*, was_running: bool):
 """
 
 
+@pytest.fixture(autouse=True)
+def _bridge_fixture_uses_bridge_source_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep bridge artifact fixtures bound to the separately reviewed B source."""
+
+    reviewed = release_candidate._reviewed_source_install_identity
+
+    def identity(version: str) -> dict[str, int | str]:
+        if version == VERSION:
+            return {
+                "schema_version": 1,
+                "source_release": VERSION,
+                "source_install_compatibility_epoch": 1,
+                "runtime_config_version": 7,
+            }
+        return reviewed(version)
+
+    monkeypatch.setattr(release_candidate, "_reviewed_source_install_identity", identity)
+
+
 def _write_release_inventory(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text(json.dumps([rows]), encoding="utf-8")
 
@@ -153,13 +187,13 @@ def test_release_progression_requires_target_newer_than_reviewed_and_published(
         ],
     )
 
-    assert release_candidate.validate_release_progression("0.8.4", releases) == (
-        "0.8.3",
+    assert release_candidate.validate_release_progression("0.8.5", releases) == (
+        "0.8.4",
         "0.8.3",
     )
 
     with pytest.raises(release_candidate.CandidateError, match="strictly newer"):
-        release_candidate.validate_release_progression("0.8.3", releases)
+        release_candidate.validate_release_progression("0.8.4", releases)
 
 
 def test_release_progression_uses_published_stable_max_even_when_policy_lags(
@@ -452,6 +486,326 @@ def _sealed_candidate(
     release_candidate.canonicalize_release_certificate(certificate)
     release_candidate.seal(root, VERSION, COMMIT)
     return root
+
+
+def _configure_hard_cut_provenance_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(release_candidate, "runtime_asset_names", lambda _version: ())
+    monkeypatch.setattr(
+        release_candidate,
+        "macos_asset_names",
+        lambda _version, _status: (),
+    )
+    monkeypatch.setattr(release_candidate, "resolver_asset_names", lambda _version: ())
+    monkeypatch.setattr(release_candidate, "verify_runtime", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_gateway_archives",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_resolver_assets",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_upgrade_manifest",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_wheel",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_legacy_refusal_envelopes",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_expected_release_artifacts",
+        lambda _version: {"wheel": "unused.dcwheel"},
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_reviewed_source_install_identity",
+        lambda version: HARD_CUT_IDENTITY if version == HARD_CUT_VERSION else {},
+    )
+
+
+def _assemble_hard_cut_provenance_unit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> Path:
+    _configure_hard_cut_provenance_unit(monkeypatch)
+    runtime = tmp_path / f"{name}-runtime"
+    macos = tmp_path / f"{name}-macos"
+    root = tmp_path / name
+    runtime.mkdir()
+    macos.mkdir()
+    release_candidate.assemble(
+        runtime,
+        macos,
+        root,
+        HARD_CUT_VERSION,
+        COMMIT,
+        "notarized",
+        **HARD_CUT_PROVENANCE_ARGS,
+    )
+    return root
+
+
+def test_hard_cut_release_provenance_is_deterministic_signed_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _assemble_hard_cut_provenance_unit(tmp_path, monkeypatch, "first")
+    second = _assemble_hard_cut_provenance_unit(tmp_path, monkeypatch, "second")
+    first_provenance = first / "dist/release-provenance.json"
+    second_provenance = second / "dist/release-provenance.json"
+    first_source_map = first / "dist/release-source-map.json"
+    second_source_map = second / "dist/release-source-map.json"
+
+    assert first_provenance.read_bytes() == second_provenance.read_bytes()
+    assert first_source_map.read_bytes() == second_source_map.read_bytes()
+    expected_bridge = {
+        "version": VERSION,
+        "commit": HARD_CUT_PROVENANCE_ARGS["bridge_commit"],
+        "tree": HARD_CUT_PROVENANCE_ARGS["bridge_tree"],
+        "checksums_sha256": HARD_CUT_PROVENANCE_ARGS[
+            "bridge_checksums_sha256"
+        ],
+    }
+    expected_source_map = {
+        "schema_version": 1,
+        "release_version": HARD_CUT_VERSION,
+        "source_commit": COMMIT,
+        "source_tree": HARD_CUT_PROVENANCE_ARGS["source_tree"],
+        "policy_mode": "same_as_release_source",
+        "policy_commit": COMMIT,
+        "policy_tree": HARD_CUT_PROVENANCE_ARGS["source_tree"],
+        "source_install_identity": HARD_CUT_IDENTITY,
+        "bridge": expected_bridge,
+    }
+    assert json.loads(first_source_map.read_text(encoding="utf-8")) == expected_source_map
+    assert json.loads(first_provenance.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "release_version": HARD_CUT_VERSION,
+        "source_commit": COMMIT,
+        "source_tree": HARD_CUT_PROVENANCE_ARGS["source_tree"],
+        "policy_commit": COMMIT,
+        "policy_tree": HARD_CUT_PROVENANCE_ARGS["source_tree"],
+        "release_source_map_sha256": release_candidate._sha256(first_source_map),
+        "source_install_identity": HARD_CUT_IDENTITY,
+        "bridge": expected_bridge,
+    }
+    assert "release-provenance.json" not in release_candidate.published_asset_names(
+        VERSION, "notarized"
+    )
+    assert "release-provenance.json" in release_candidate.payload_asset_names(
+        HARD_CUT_VERSION, "notarized"
+    )
+    assert "release-source-map.json" in release_candidate.payload_asset_names(
+        HARD_CUT_VERSION, "notarized"
+    )
+    assert "release-provenance.json" in release_candidate.published_asset_names(
+        HARD_CUT_VERSION, "notarized"
+    )
+
+    (first / "dist/checksums.txt.sig").write_bytes(b"sigstore signature")
+    (first / "dist/checksums.txt.pem").write_bytes(TEST_CERTIFICATE_PEM)
+    release_candidate.seal(first, HARD_CUT_VERSION, COMMIT)
+    release_candidate.verify(first, HARD_CUT_VERSION, COMMIT)
+
+    checksums = release_candidate._parse_checksums(first / "dist/checksums.txt")
+    assert set(checksums) == {"release-provenance.json", "release-source-map.json"}
+    manifest = json.loads(
+        (first / "release-candidate.json").read_text(encoding="utf-8")
+    )
+    manifest_names = {item["name"] for item in manifest["assets"]}
+    assert {"release-provenance.json", "release-source-map.json"} <= manifest_names
+    published = tmp_path / "published-hard-cut.json"
+    published.write_text(
+        json.dumps(
+            {
+                "tagName": HARD_CUT_VERSION,
+                "isDraft": False,
+                "isImmutable": True,
+                "assets": [
+                    {
+                        "name": item["name"],
+                        "digest": f"sha256:{item['sha256']}",
+                    }
+                    for item in manifest["assets"]
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    release_candidate.verify_published_release(
+        first,
+        published,
+        HARD_CUT_VERSION,
+        COMMIT,
+    )
+
+    provenance = json.loads(first_provenance.read_text(encoding="utf-8"))
+    provenance["source_tree"] = "3" * 40
+    first_provenance.write_text(
+        release_candidate._canonical_json(provenance),
+        encoding="utf-8",
+    )
+    with pytest.raises(release_candidate.CandidateError, match="policy tree"):
+        release_candidate.verify(first, HARD_CUT_VERSION, COMMIT)
+
+
+@pytest.mark.parametrize("missing", sorted(HARD_CUT_PROVENANCE_ARGS))
+def test_hard_cut_assemble_requires_every_provenance_field(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    provenance_args = {**HARD_CUT_PROVENANCE_ARGS, missing: None}
+
+    with pytest.raises(release_candidate.CandidateError, match="requires hard-cut provenance"):
+        release_candidate.assemble(
+            tmp_path / "runtime",
+            tmp_path / "macos",
+            tmp_path / "candidate",
+            HARD_CUT_VERSION,
+            COMMIT,
+            "notarized",
+            **provenance_args,
+        )
+
+
+@pytest.mark.parametrize("malformed", sorted(HARD_CUT_PROVENANCE_ARGS))
+def test_hard_cut_assemble_rejects_malformed_provenance_field(
+    tmp_path: Path,
+    malformed: str,
+) -> None:
+    width = 64 if malformed.endswith("sha256") else 40
+    provenance_args = {**HARD_CUT_PROVENANCE_ARGS, malformed: "A" * width}
+
+    with pytest.raises(release_candidate.CandidateError, match=malformed):
+        release_candidate.assemble(
+            tmp_path / "runtime",
+            tmp_path / "macos",
+            tmp_path / "candidate",
+            HARD_CUT_VERSION,
+            COMMIT,
+            "notarized",
+            **provenance_args,
+        )
+
+
+@pytest.mark.parametrize("forbidden", sorted(HARD_CUT_PROVENANCE_ARGS))
+def test_bridge_assemble_forbids_every_hard_cut_provenance_field(
+    tmp_path: Path,
+    forbidden: str,
+) -> None:
+    provenance_args = {forbidden: HARD_CUT_PROVENANCE_ARGS[forbidden]}
+
+    with pytest.raises(release_candidate.CandidateError, match="forbids hard-cut provenance"):
+        release_candidate.assemble(
+            tmp_path / "runtime",
+            tmp_path / "macos",
+            tmp_path / "candidate",
+            VERSION,
+            COMMIT,
+            "notarized",
+            **provenance_args,
+        )
+
+
+def test_hard_cut_seal_rejects_extra_provenance_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _assemble_hard_cut_provenance_unit(tmp_path, monkeypatch, "candidate")
+    provenance_path = root / "dist/release-provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["unreviewed"] = "field"
+    provenance_path.write_text(
+        release_candidate._canonical_json(provenance),
+        encoding="utf-8",
+    )
+    (root / "dist/checksums.txt.sig").write_bytes(b"sigstore signature")
+    (root / "dist/checksums.txt.pem").write_bytes(TEST_CERTIFICATE_PEM)
+
+    with pytest.raises(release_candidate.CandidateError, match="closed schema-1"):
+        release_candidate.seal(root, HARD_CUT_VERSION, COMMIT)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("release_version", "0.8.6", "version mismatch"),
+        ("source_commit", "9" * 40, "source_commit mismatch"),
+        ("source_install_identity", {**HARD_CUT_IDENTITY, "runtime_config_version": 7}, "identity mismatch"),
+        ("bridge.version", "0.8.3", "bridge version mismatch"),
+    ],
+)
+def test_hard_cut_provenance_rejects_tampered_identity_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    root = _assemble_hard_cut_provenance_unit(tmp_path, monkeypatch, "candidate")
+    provenance_path = root / "dist/release-provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    if field == "bridge.version":
+        provenance["bridge"]["version"] = value
+    else:
+        provenance[field] = value
+    provenance_path.write_text(
+        release_candidate._canonical_json(provenance),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(release_candidate.CandidateError, match=match):
+        release_candidate._validate_release_identity(
+            root / "dist",
+            HARD_CUT_VERSION,
+            COMMIT,
+        )
+
+
+def test_hard_cut_provenance_rejects_missing_and_noncanonical_embedded_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _assemble_hard_cut_provenance_unit(tmp_path, monkeypatch, "candidate")
+    provenance_path = root / "dist/release-provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    del provenance["policy_tree"]
+    provenance_path.write_text(
+        release_candidate._canonical_json(provenance),
+        encoding="utf-8",
+    )
+    with pytest.raises(release_candidate.CandidateError, match="closed schema-1"):
+        release_candidate._validate_release_identity(
+            root / "dist",
+            HARD_CUT_VERSION,
+            COMMIT,
+        )
+
+    provenance["policy_tree"] = "A" * 40
+    provenance_path.write_text(
+        release_candidate._canonical_json(provenance),
+        encoding="utf-8",
+    )
+    with pytest.raises(release_candidate.CandidateError, match="canonical lowercase SHA-1"):
+        release_candidate._validate_release_identity(
+            root / "dist",
+            HARD_CUT_VERSION,
+            COMMIT,
+        )
 
 
 def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
@@ -1731,6 +2085,72 @@ def _activate_local_observability_manifest(*, was_running: bool):
         release_candidate._validate_hard_cut_bundle_transaction(source)
 
 
+def test_runtime_hard_cut_bundle_transaction_matches_path_safe_candidate_contract() -> None:
+    source = (ROOT / "cli/defenseclaw/bundle_refresh.py").read_text(encoding="utf-8")
+    release_candidate._validate_hard_cut_bundle_transaction(source)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            "backup_root / _LOCAL_OBSERVABILITY_RESTART_INTENT,",
+            'backup_root / "unreviewed-intent.json",',
+            "restart intent lacks exact private authority",
+        ),
+        (
+            "    backup_root = _prepare_local_observability_backup_custody(\n",
+            "    backup_root = _unreviewed_backup_custody(\n",
+            "restart intent is not committed before stop",
+        ),
+        (
+            '            "schema_version": 2,\n',
+            '            "schema_version": 1,\n',
+            "schema version 2",
+        ),
+        (
+            "shutil.copy2(path, backup_path, follow_symlinks=False)",
+            "shutil.copy2(path, backup_path, follow_symlinks=True)",
+            "backup copy is not path-safe or exact",
+        ),
+        (
+            "            _fsync_file(created_claim)\n",
+            "",
+            "target-created claims lack exact durable custody",
+        ),
+        (
+            "            os.link(created_claim, destination_path)\n",
+            "            shutil.copy2(created_claim, destination_path)\n",
+            "bounded backup copy loop",
+        ),
+        (
+            "                native_security = windows_acl.capture_path(str(path))\n",
+            "                native_security = windows_acl.private_security_for_directory(str(path))\n",
+            "Windows security is not captured exactly",
+        ),
+        (
+            "                _restore_local_observability_backup(\n",
+            "                _skip_local_observability_backup_restore(\n",
+            "lacks exact schema-2 replay",
+        ),
+        (
+            '            "restart_required": was_running,\n',
+            '            "restart_required": False,\n',
+            "boolean restart_required",
+        ),
+    ],
+)
+def test_runtime_hard_cut_candidate_rejects_partial_or_unsafe_custody(
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    source = (ROOT / "cli/defenseclaw/bundle_refresh.py").read_text(encoding="utf-8")
+    assert source.count(old) == 1
+    with pytest.raises(release_candidate.CandidateError, match=message):
+        release_candidate._validate_hard_cut_bundle_transaction(source.replace(old, new, 1))
+
+
 def test_hard_cut_auto_bridge_exactly_matches_older_published_baselines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1785,7 +2205,11 @@ def test_hard_cut_auto_bridge_exactly_matches_older_published_baselines(
     }
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    monkeypatch.setattr(release_candidate, "_runtime_config_version_from_source", lambda: 8)
+    monkeypatch.setattr(
+        release_candidate,
+        "_runtime_config_version_from_source",
+        lambda _version: 8,
+    )
 
     with pytest.raises(release_candidate.CandidateError, match="exactly match every"):
         release_candidate._validate_upgrade_manifest(manifest_path, "0.8.5")

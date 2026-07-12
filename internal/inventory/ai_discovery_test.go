@@ -248,7 +248,7 @@ func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T)
 			Enabled: true,
 		},
 	}
-	svc, err := NewContinuousDiscoveryService(cfg, nil, nil)
+	svc, err := NewContinuousDiscoveryService(cfg)
 	if err != nil {
 		t.Fatalf("NewContinuousDiscoveryService: %v", err)
 	}
@@ -284,10 +284,9 @@ func TestContinuousDiscoveryDetectsEnhancedSignalsWithoutRawEvidence(t *testing.
 		IncludeNetworkDomains:   true,
 		DataDir:                 dataDir,
 		HomeDir:                 home,
-		EmitOTel:                false,
 		MaxFilesPerScan:         20,
 		MaxFileBytes:            64 * 1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -324,8 +323,7 @@ detectors:
 		DataDir:              filepath.Join(tmp, "data"),
 		HomeDir:              filepath.Join(tmp, "home"),
 		ConfidencePolicyPath: policyPath,
-		EmitOTel:             false,
-	}, nil, nil, nil)
+	}, nil)
 
 	policy := svc.ConfidenceParams().Policy
 	if got := policy.Detectors["package_manifest"].IdentityLR; got != 7 {
@@ -402,10 +400,9 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 		IncludeShellHistory: true,
 		DataDir:             dataDir,
 		HomeDir:             home,
-		EmitOTel:            false,
 		MaxFilesPerScan:     20,
 		MaxFileBytes:        64 * 1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -467,12 +464,11 @@ func TestContinuousDiscoveryFullScanEmitsGone(t *testing.T) {
 	cfgPath := filepath.Join(home, ".shadowai", "config.json")
 	mustWrite(t, cfgPath, "{}")
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:  true,
-		Mode:     "enhanced",
-		DataDir:  dataDir,
-		HomeDir:  home,
-		EmitOTel: false,
-	}, []AISignature{testAISignature()}, nil, nil)
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: dataDir,
+		HomeDir: home,
+	}, []AISignature{testAISignature()})
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -512,10 +508,9 @@ func TestContinuousDiscoveryDetectsLoopbackEndpointWithoutRawURL(t *testing.T) {
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -561,10 +556,9 @@ func TestDetectLocalEndpoints_PrefersHEADToAvoidTriggeringInference(t *testing.T
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
 
 	// Exercise the presence detector directly. A full scan now also runs the
 	// separate local-model inventory detector, which intentionally performs a
@@ -615,7 +609,7 @@ func TestDetectLocalEndpoints_LemonadeRequiresSuccessfulLive(t *testing.T) {
 			}
 			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
 				Enabled: true, Mode: "enhanced", DataDir: t.TempDir(), HomeDir: t.TempDir(),
-			}, []AISignature{sig}, nil, nil)
+			}, []AISignature{sig})
 
 			if got := len(svc.detectLocalEndpoints()); got != tc.want {
 				t.Fatalf("Lemonade endpoint signals = %d, want %d", got, tc.want)
@@ -654,10 +648,9 @@ func TestDetectLocalEndpoints_FallsBackToGETWhenHEADUnsupported(t *testing.T) {
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -702,10 +695,9 @@ func TestDetectLocalEndpoints_SkipsPathsOutsideAllowList(t *testing.T) {
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
 
 	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
 		t.Fatalf("runScan: %v", err)
@@ -735,12 +727,11 @@ func TestProcessNameMatchesShortNamesExactly(t *testing.T) {
 func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	tmp := t.TempDir()
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:  true,
-		Mode:     "enhanced",
-		DataDir:  filepath.Join(tmp, "data"),
-		HomeDir:  filepath.Join(tmp, "home"),
-		EmitOTel: false,
-	}, []AISignature{testAISignature()}, nil, nil)
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: filepath.Join(tmp, "data"),
+		HomeDir: filepath.Join(tmp, "home"),
+	}, []AISignature{testAISignature()})
 
 	// CLI is sending us a forged report claiming the sidecar produced it.
 	report := AIDiscoveryReport{
@@ -776,7 +767,7 @@ func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
 		Mode:    "enhanced",
 		DataDir: t.TempDir(),
 		HomeDir: t.TempDir(),
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
 	called := make(chan struct{}, 1)
 	svc.AddReportObserver(func(context.Context, AIDiscoveryReport) { called <- struct{}{} })
 	report := AIDiscoveryReport{
@@ -817,12 +808,11 @@ func TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary(t *testing.T
 	cfgPath := filepath.Join(home, ".shadowai", "config.json")
 	mustWrite(t, cfgPath, "{}")
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:  true,
-		Mode:     "enhanced",
-		DataDir:  dataDir,
-		HomeDir:  home,
-		EmitOTel: false,
-	}, []AISignature{testAISignature()}, nil, nil)
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: dataDir,
+		HomeDir: home,
+	}, []AISignature{testAISignature()})
 
 	// 1) Full scan: detect the config-path signal so it lands in
 	//    the persisted inventory.
@@ -1517,8 +1507,7 @@ mainly_for_demo = "0.1"
 		ScanRoots:       []string{tmp},
 		MaxFilesPerScan: 100,
 		MaxFileBytes:    1 << 20,
-		EmitOTel:        false,
-	}, catalog, nil, nil)
+	}, catalog)
 	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
@@ -1596,8 +1585,7 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 		ScanRoots:       []string{tmp},
 		MaxFilesPerScan: 1000,
 		MaxFileBytes:    1 << 20,
-		EmitOTel:        false,
-	}, catalog, nil, nil)
+	}, catalog)
 	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
@@ -1662,10 +1650,9 @@ func TestRunScan_SingleFlight(t *testing.T) {
 		Mode:            "enhanced",
 		DataDir:         dataDir,
 		HomeDir:         home,
-		EmitOTel:        false,
 		MaxFilesPerScan: 5,
 		MaxFileBytes:    32 * 1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
 	if svc == nil {
 		t.Fatal("expected non-nil service")
 	}
@@ -1710,10 +1697,9 @@ func TestRunScan_RespectsCancelledContext(t *testing.T) {
 		Mode:            "enhanced",
 		DataDir:         dataDir,
 		HomeDir:         home,
-		EmitOTel:        false,
 		MaxFilesPerScan: 1,
 		MaxFileBytes:    1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

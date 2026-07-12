@@ -127,6 +127,49 @@ type ApprovalRequestPayload struct {
 	ID            string                 `json:"id"`
 	SystemRunPlan *SystemRunPlan         `json:"systemRunPlan,omitempty"`
 	Request       *ApprovalRequestRecord `json:"request,omitempty"`
+	ApprovalCorrelationPayload
+}
+
+// ApprovalCorrelationPayload is the optional, source-reported correlation
+// carried either beside id or inside request by different OpenClaw releases.
+// Empty values are unknown and must not be derived from the approval ID.
+type ApprovalCorrelationPayload struct {
+	RunID             string `json:"runId,omitempty"`
+	RequestID         string `json:"requestId,omitempty"`
+	TurnID            string `json:"turnId,omitempty"`
+	OperationID       string `json:"operationId,omitempty"`
+	SessionKey        string `json:"sessionKey,omitempty"`
+	SessionID         string `json:"sessionId,omitempty"`
+	AgentID           string `json:"agentId,omitempty"`
+	AgentName         string `json:"agentName,omitempty"`
+	AgentType         string `json:"agentType,omitempty"`
+	AgentInstanceID   string `json:"agentInstanceId,omitempty"`
+	RootAgentID       string `json:"rootAgentId,omitempty"`
+	ParentAgentID     string `json:"parentAgentId,omitempty"`
+	RootSessionID     string `json:"rootSessionId,omitempty"`
+	ParentSessionID   string `json:"parentSessionId,omitempty"`
+	LineageProvenance string `json:"lineageProvenance,omitempty"`
+	LifecycleID       string `json:"lifecycleId,omitempty"`
+	AgentLifecycleID  string `json:"agentLifecycleId,omitempty"`
+	ExecutionID       string `json:"executionId,omitempty"`
+	AgentExecutionID  string `json:"agentExecutionId,omitempty"`
+	Depth             *int64 `json:"depth,omitempty"`
+	AgentDepth        *int64 `json:"agentDepth,omitempty"`
+	Phase             string `json:"phase,omitempty"`
+	AgentPhase        string `json:"agentPhase,omitempty"`
+	Sequence          *int64 `json:"sequence,omitempty"`
+	AgentSequence     *int64 `json:"agentSequence,omitempty"`
+	UserID            string `json:"userId,omitempty"`
+	UserName          string `json:"userName,omitempty"`
+	PolicyID          string `json:"policyId,omitempty"`
+	PolicyVersion     string `json:"policyVersion,omitempty"`
+	ToolID            string `json:"toolId,omitempty"`
+	ToolName          string `json:"toolName,omitempty"`
+	ToolType          string `json:"toolType,omitempty"`
+	ToolCallID        string `json:"toolCallId,omitempty"`
+	ToolProvider      string `json:"toolProvider,omitempty"`
+	ToolSkillKey      string `json:"toolSkillKey,omitempty"`
+	DestinationApp    string `json:"destinationApp,omitempty"`
 }
 
 type SystemRunPlan struct {
@@ -141,6 +184,70 @@ type ApprovalRequestRecord struct {
 	CommandArgv    []string       `json:"commandArgv,omitempty"`
 	Cwd            string         `json:"cwd,omitempty"`
 	SystemRunPlan  *SystemRunPlan `json:"systemRunPlan,omitempty"`
+	ApprovalCorrelationPayload
+}
+
+// CorrelationContext merges the top-level and nested request aliases. The
+// outer event wins when both report the same dimension; validation rejects
+// malformed values later instead of inventing replacements.
+func (p ApprovalRequestPayload) CorrelationContext() ApprovalCorrelationPayload {
+	result := p.ApprovalCorrelationPayload.normalized()
+	if p.Request == nil {
+		return result
+	}
+	return result.withFallback(p.Request.ApprovalCorrelationPayload.normalized())
+}
+
+func (p ApprovalCorrelationPayload) normalized() ApprovalCorrelationPayload {
+	p.LifecycleID = firstNonEmpty(p.LifecycleID, p.AgentLifecycleID)
+	p.ExecutionID = firstNonEmpty(p.ExecutionID, p.AgentExecutionID)
+	p.Phase = firstNonEmpty(p.Phase, p.AgentPhase)
+	if p.Depth == nil {
+		p.Depth = p.AgentDepth
+	}
+	if p.Sequence == nil {
+		p.Sequence = p.AgentSequence
+	}
+	return p
+}
+
+func (p ApprovalCorrelationPayload) withFallback(f ApprovalCorrelationPayload) ApprovalCorrelationPayload {
+	p.RunID = firstNonEmpty(p.RunID, f.RunID)
+	p.RequestID = firstNonEmpty(p.RequestID, f.RequestID)
+	p.TurnID = firstNonEmpty(p.TurnID, f.TurnID)
+	p.OperationID = firstNonEmpty(p.OperationID, f.OperationID)
+	p.SessionKey = firstNonEmpty(p.SessionKey, f.SessionKey)
+	p.SessionID = firstNonEmpty(p.SessionID, f.SessionID)
+	p.AgentID = firstNonEmpty(p.AgentID, f.AgentID)
+	p.AgentName = firstNonEmpty(p.AgentName, f.AgentName)
+	p.AgentType = firstNonEmpty(p.AgentType, f.AgentType)
+	p.AgentInstanceID = firstNonEmpty(p.AgentInstanceID, f.AgentInstanceID)
+	p.RootAgentID = firstNonEmpty(p.RootAgentID, f.RootAgentID)
+	p.ParentAgentID = firstNonEmpty(p.ParentAgentID, f.ParentAgentID)
+	p.RootSessionID = firstNonEmpty(p.RootSessionID, f.RootSessionID)
+	p.ParentSessionID = firstNonEmpty(p.ParentSessionID, f.ParentSessionID)
+	p.LineageProvenance = firstNonEmpty(p.LineageProvenance, f.LineageProvenance)
+	p.LifecycleID = firstNonEmpty(p.LifecycleID, f.LifecycleID)
+	p.ExecutionID = firstNonEmpty(p.ExecutionID, f.ExecutionID)
+	p.Phase = firstNonEmpty(p.Phase, f.Phase)
+	if p.Depth == nil {
+		p.Depth = f.Depth
+	}
+	if p.Sequence == nil {
+		p.Sequence = f.Sequence
+	}
+	p.UserID = firstNonEmpty(p.UserID, f.UserID)
+	p.UserName = firstNonEmpty(p.UserName, f.UserName)
+	p.PolicyID = firstNonEmpty(p.PolicyID, f.PolicyID)
+	p.PolicyVersion = firstNonEmpty(p.PolicyVersion, f.PolicyVersion)
+	p.ToolID = firstNonEmpty(p.ToolID, f.ToolID)
+	p.ToolName = firstNonEmpty(p.ToolName, f.ToolName)
+	p.ToolType = firstNonEmpty(p.ToolType, f.ToolType)
+	p.ToolCallID = firstNonEmpty(p.ToolCallID, f.ToolCallID)
+	p.ToolProvider = firstNonEmpty(p.ToolProvider, f.ToolProvider)
+	p.ToolSkillKey = firstNonEmpty(p.ToolSkillKey, f.ToolSkillKey)
+	p.DestinationApp = firstNonEmpty(p.DestinationApp, f.DestinationApp)
+	return p
 }
 
 // CommandContext normalizes approval-request command data across the legacy

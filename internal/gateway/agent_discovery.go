@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -64,20 +63,19 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&report); err != nil {
-		if a.otel != nil {
-			a.otel.RecordAgentDiscovery(r.Context(), "unknown", false, "malformed", 0, 0, 0)
-			a.otel.EmitAgentDiscoverySummaryLog(r.Context(), "unknown", false, "malformed", 0, 0, 0)
-		}
+		a.emitAgentDiscoverySummary(r.Context(), agentDiscoveryTelemetrySummary{
+			source: "unknown", result: "malformed",
+		})
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 
 	dropped, err := a.validateAgentDiscoveryReport(&report)
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordAgentDiscovery(r.Context(), discoverySourceOrUnknown(report.Source), report.CacheHit, "rejected", float64(report.DurationMs), len(report.Agents), 0)
-			a.otel.EmitAgentDiscoverySummaryLog(r.Context(), discoverySourceOrUnknown(report.Source), report.CacheHit, "rejected", float64(report.DurationMs), len(report.Agents), 0)
-		}
+		a.emitAgentDiscoverySummary(r.Context(), agentDiscoveryTelemetrySummary{
+			source: discoverySourceOrUnknown(report.Source), cacheHit: report.CacheHit,
+			result: "rejected", durationMs: report.DurationMs, agentsTotal: len(report.Agents),
+		})
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -90,9 +88,7 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 	// counter so the silent drop is visible to operators triaging
 	// "why isn't agent X showing up?".
 	for _, name := range dropped {
-		if a.otel != nil {
-			a.otel.RecordAgentDiscoveryError(r.Context(), name, "unknown_connector")
-		}
+		a.emitAgentDiscoveryError(r.Context(), discoverySourceOrUnknown(report.Source), name, "unknown_connector")
 	}
 
 	source := discoverySourceOrUnknown(report.Source)
@@ -101,33 +97,16 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 		if signal.Installed {
 			installed++
 		}
-		if a.otel != nil {
-			probeStatus := normalizeDiscoveryProbeStatus(signal.VersionProbeStatus)
-			a.otel.RecordAgentDiscoverySignal(r.Context(), name, signal.Installed, signal.HasConfig, signal.HasBinary, probeStatus)
-			a.otel.EmitAgentDiscoverySignalLog(r.Context(), name, signal.Installed, signal.HasConfig, signal.HasBinary, probeStatus)
-			if reason := normalizeDiscoveryErrorClass(signal.ErrorClass); reason != "" {
-				a.otel.RecordAgentDiscoveryError(r.Context(), name, reason)
-			}
+		probeStatus := normalizeDiscoveryProbeStatus(signal.VersionProbeStatus)
+		a.emitAgentDiscoverySignal(r.Context(), source, name, signal, probeStatus)
+		if reason := normalizeDiscoveryErrorClass(signal.ErrorClass); reason != "" {
+			a.emitAgentDiscoveryError(r.Context(), source, name, reason)
 		}
 	}
-	if a.otel != nil {
-		a.otel.RecordAgentDiscovery(r.Context(), source, report.CacheHit, "ok", float64(report.DurationMs), len(report.Agents), installed)
-		a.otel.EmitAgentDiscoverySummaryLog(r.Context(), source, report.CacheHit, "ok", float64(report.DurationMs), len(report.Agents), installed)
-	}
-
-	emitLifecycle(r.Context(), "agent_discovery", "completed", map[string]string{
-		"source":          source,
-		"cache_hit":       strconv.FormatBool(report.CacheHit),
-		"agents_total":    strconv.Itoa(len(report.Agents)),
-		"installed_total": strconv.Itoa(installed),
-		"duration_ms":     fmt.Sprintf("%d", report.DurationMs),
+	a.emitAgentDiscoverySummary(r.Context(), agentDiscoveryTelemetrySummary{
+		source: source, cacheHit: report.CacheHit, result: "ok", durationMs: report.DurationMs,
+		agentsTotal: len(report.Agents), installedTotal: installed,
 	})
-
-	// managed_enterprise: ship the installed-agent roster to AI Defense
-	// as an agent_inventory discovery event. Built from the validated
-	// (sanitized) report we already hold — no new scan or store. No-op
-	// outside managed mode.
-	a.emitAgentInventory(r.Context(), &report, installed)
 
 	a.writeJSON(w, http.StatusOK, agentDiscoveryResponse{
 		Status:    "ok",

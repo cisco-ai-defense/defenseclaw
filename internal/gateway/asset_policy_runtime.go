@@ -171,18 +171,6 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if !decision.Enabled || decision.RawAction != "block" {
 		return decision, false
 	}
-	if a.otel != nil {
-		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, "mcp", decision.Reason, map[string]string{
-			"source":              decision.Source,
-			"registry_status":     decision.RegistryStatus,
-			"registry_configured": fmt.Sprintf("%t", decision.RegistryConfigured),
-			"runtime_surface":     coalesceRuntimeSurface(probe.Surface, "hook"),
-			"hook_event_name":     hookEvent,
-			"tool_name":           probe.ToolName,
-			"mcp_server_name":     probe.ServerName,
-			"would_block":         fmt.Sprintf("%t", decision.WouldBlock),
-		})
-	}
 	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", connector, hookEvent)
 	if a.logger != nil {
 		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
@@ -312,30 +300,6 @@ func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurfac
 
 func (a *APIServer) emitRuntimeSkillAssetPolicyDecision(ctx context.Context, decision config.AssetPolicyDecision, connector, hookEvent string, probe skillRuntimeProbe) {
 	targetType := runtimeSkillAssetTargetType(probe)
-	if a.otel != nil {
-		attrs := map[string]string{
-			"source":              decision.Source,
-			"registry_status":     decision.RegistryStatus,
-			"registry_configured": fmt.Sprintf("%t", decision.RegistryConfigured),
-			"runtime_surface":     coalesceRuntimeSurface(probe.Surface, "hook"),
-			"hook_event_name":     hookEvent,
-			"tool_name":           probe.ToolName,
-			targetType + "_name":  probe.SkillName,
-			"would_block":         fmt.Sprintf("%t", decision.WouldBlock),
-		}
-		// Surface raw inputs whenever path-stripping or other
-		// normalization changed the agent's literal value into a
-		// different registry-matching name. This is the audit
-		// signal for "agent passed /tmp/x/<approved>/SKILL.md to
-		// match an approved name" attempts.
-		if probe.RawName != "" {
-			attrs[targetType+"_name_raw"] = probe.RawName
-		}
-		if probe.SourcePath != "" {
-			attrs[targetType+"_source_path"] = probe.SourcePath
-		}
-		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, targetType, decision.Reason, attrs)
-	}
 	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, targetType, connector, hookEvent)
 	if a.logger != nil {
 		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s name_raw=%q source_path=%q would_block=%v reason=%s",

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from defenseclaw.models import ActionEntry, Event
-from defenseclaw.tui.services.gateway_events import parse_timestamp, timestamp_label
+from defenseclaw.tui.services.event_models import parse_timestamp, timestamp_label
 
 AuditIntentKind = Literal["export"]
 AuditCommonFilter = Literal["", "risk", "blocks", "scans", "credentials"]

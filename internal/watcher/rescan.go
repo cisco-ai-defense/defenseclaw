@@ -35,7 +35,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -134,14 +133,10 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		outcome := w.rescanTarget(ctx, evt, fpCache)
 		if outcome == rescanScanned {
 			scanned++
-			if w.otel != nil {
-				w.otel.RecordWatcherEvent(ctx, "rescan_scan", string(evt.Type), "")
-			}
+			w.recordWatcherEvent(ctx, "rescan_scan", string(evt.Type), "")
 		} else {
 			skipped++
-			if w.otel != nil {
-				w.otel.RecordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
-			}
+			w.recordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
 		}
 	}
 
@@ -771,9 +766,7 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 		fmt.Fprintf(os.Stderr, "[rescan] drift alert LogEvent failed for %s: %v\n", evt.Path, err)
 	}
 
-	if w.otel != nil {
-		w.otel.RecordWatcherEvent(context.Background(), "drift", string(evt.Type), "")
-	}
+	w.recordWatcherEvent(context.Background(), "drift", string(evt.Type), "")
 
 	if w.webhooks != nil {
 		w.webhooks.Dispatch(event)
@@ -867,11 +860,10 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 }
 
 // emitRescanResult fans a watcher rescan result through the
-// unified scan emission pipeline so the rescan's per-rule findings
-// land on every observability surface: scan_results + scan_findings
-// DB rows, EventScan + EventScanFinding gateway.jsonl lines,
-// defenseclaw_scan_findings_by_rule_total metrics, and the
-// sliding-window correlator. Previously this path called
+// generated v8 scan emission pipeline so the rescan's per-rule findings land
+// in the forensic scan_results + scan_findings tables, generated finding and
+// summary logs/metrics, and the sliding-window correlator. No alternate
+// producer or provider fanout is reachable. Previously this path called
 // audit.Store.InsertScanResult directly which wrote only the
 // aggregate row and dropped every per-rule detection on the floor
 // — making periodic rescans invisible to SIEM finding queries.
@@ -881,38 +873,18 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 // persistence error) returns the empty string and lets the
 // snapshot store fall back to "" so callers don't see new failure modes.
 func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.ScanResult) string {
-	if result == nil {
+	if w == nil || w.logger == nil || result == nil {
 		return ""
 	}
-	var pers scanner.ScanPersistence
-	if w.store != nil {
-		pers = w.store
-	}
-	var tel scanner.ScanTelemetry
-	if w.otel != nil {
-		tel = w.otel
-	}
-	gw := w.gatewayLogWriter()
-
-	agent := scanner.AgentIdentity{
-		RunID: rescanRunID(),
-	}
-	scanID, err := scanner.EmitScanResult(ctx, gw, pers, tel, result, agent)
+	correlation := watcherScanCorrelation(
+		ctx, rescanRunID(), watcherConnectorName(w.cfg),
+	)
+	err := w.logger.LogScanWithCorrelation(ctx, result, result.Verdict, correlation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)
 		return ""
 	}
-	return scanID
-}
-
-// gatewayLogWriter returns the gateway.jsonl writer wired into the
-// watcher's audit logger, or nil when the logger has no writer
-// attached (test harnesses, sidecar-less CLI invocations).
-func (w *InstallWatcher) gatewayLogWriter() *gatewaylog.Writer {
-	if w == nil || w.logger == nil {
-		return nil
-	}
-	return w.logger.GatewayLogWriter()
+	return result.ScanID
 }
 
 // rescanRunID returns a fresh run ID for each rescan emission so

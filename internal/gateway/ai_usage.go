@@ -95,8 +95,7 @@ func (a *APIServer) sanitizeAIUsageReportForResponse(report inventory.AIDiscover
 	if a == nil || a.aiDiscovery == nil {
 		return report
 	}
-	opts := a.aiDiscovery.Options()
-	inventory.SanitizeEvidenceForWire(report.Signals, opts.DisableRedaction, opts.StoreRawLocalPaths)
+	inventory.SanitizeEvidenceForWire(report.Signals)
 	return report
 }
 
@@ -124,9 +123,7 @@ type componentRollup struct {
 	LastActiveAt    string                       `json:"last_active_at,omitempty"`
 }
 
-// componentLocation is one row in the per-component locations view.
-// RawPath is populated only when the gateway is configured with
-// `privacy.disable_redaction=true && ai_discovery.store_raw_local_paths=true`.
+// componentLocation is one scrubbed row in the per-component locations view.
 type componentLocation struct {
 	Detector      string  `json:"detector"`
 	State         string  `json:"state,omitempty"`
@@ -135,7 +132,6 @@ type componentLocation struct {
 	WorkspaceHash string  `json:"workspace_hash,omitempty"`
 	Quality       float64 `json:"quality,omitempty"`
 	MatchKind     string  `json:"match_kind,omitempty"`
-	RawPath       string  `json:"raw_path,omitempty"`
 	LastSeen      string  `json:"last_seen,omitempty"`
 }
 
@@ -156,7 +152,7 @@ func (a *APIServer) handleAIUsageComponents(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	report := a.aiDiscovery.Snapshot()
-	rolled := rollupComponents(report.Signals, a.aiDiscovery.ConfidenceParams(), allowRawLocations(a))
+	rolled := rollupComponents(report.Signals, a.aiDiscovery.ConfidenceParams())
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":        true,
 		"scan_id":        report.Summary.ScanID,
@@ -187,8 +183,7 @@ func (a *APIServer) handleAIUsageComponentLocations(w http.ResponseWriter, r *ht
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected /api/v1/ai-usage/components/{ecosystem}/{name}/locations"})
 		return
 	}
-	includeRaw := allowRawLocations(a)
-	locs, err := a.aiDiscovery.InventoryStore().ListComponentLocations(r.Context(), ecosystem, name, includeRaw)
+	locs, err := a.aiDiscovery.InventoryStore().ListComponentLocations(r.Context(), ecosystem, name, false)
 	if err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -245,10 +240,9 @@ func (a *APIServer) handleAIUsageComponentHistory(w http.ResponseWriter, r *http
 // the gateway has `aiDiscovery.ConfidenceParams()` it should pass
 // that value so this rollup matches what the SQL history shows.
 //
-// `includeRawPaths` controls whether RawPath leaks into the
-// componentLocation rows; the caller derives it from
-// `privacy.disable_redaction && ai_discovery.store_raw_local_paths`.
-func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceParams, includeRawPaths bool) []componentRollup {
+// RawPath is intentionally omitted from every API projection even when the
+// local forensic store retains it.
+func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceParams) []componentRollup {
 	type key struct{ ecosystem, name string }
 	bySigKey := map[key][]inventory.AISignal{}
 	for _, sig := range signals {
@@ -330,9 +324,6 @@ func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceP
 				if !sig.LastSeen.IsZero() {
 					loc.LastSeen = sig.LastSeen.UTC().Format(time.RFC3339)
 				}
-				if includeRawPaths {
-					loc.RawPath = ev.RawPath
-				}
 				entry.Locations = append(entry.Locations, loc)
 			}
 		}
@@ -371,19 +362,6 @@ func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceP
 		return out[i].Name < out[j].Name
 	})
 	return out
-}
-
-// allowRawLocations evaluates the two-flag composition that controls
-// whether RawPath leaks beyond the local process. We re-read both
-// flags from the discovery options so a config reload is reflected
-// without restarting the gateway. Defaults to false (the safest
-// stance) when the discovery service is not running.
-func allowRawLocations(a *APIServer) bool {
-	if a == nil || a.aiDiscovery == nil {
-		return false
-	}
-	opts := a.aiDiscovery.Options()
-	return opts.DisableRedaction && opts.StoreRawLocalPaths
 }
 
 // componentPathSegmentMax bounds {ecosystem} and {name} so a hostile

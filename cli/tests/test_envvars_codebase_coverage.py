@@ -132,6 +132,23 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "scripts/test-e2e-bedrock-region.sh",
     "scripts/test-e2e-custom-provider.sh",
     "scripts/test-e2e-full-stack.sh",
+    # Release, race, compiler, and live-observability test fixtures use
+    # synthetic DEFENSECLAW_* names as sentinels or opt-in test controls.
+    # They are not supported runtime configuration and must not inflate the
+    # product environment-variable registry.
+    "internal/netguard/netguard_v8_test.go",
+    "internal/observability/family_builder_static_test.go",
+    "internal/observability/integration/galileo_canonical_trace_test.go",
+    "internal/gateway/local_observability_golden_test.go",
+    "cli/tests/test_cmd_setup_trusted_paths.py",
+    "cli/tests/test_observability_v8_activation.py",
+    "cli/tests/test_render_telemetry_go.py",
+    "cli/tests/test_upgrade_release_smoke_contract.py",
+    "scripts/test-upgrade-release.sh",
+    # Test-only parent/child subprocess sentinels used by Go helper
+    # processes; they are not operator configuration and must not be
+    # published as such.
+    "internal/gateway/connector/otlp_token_test.go",
     # Docs-site policy-creator quick-start: an illustrative apply.ts
     # snippet mentions DEFENSECLAW_LOG as an example client-side toggle;
     # it is sample documentation, not a var DefenseClaw reads.

@@ -24,17 +24,13 @@ import (
 )
 
 // managedEnterpriseActive mirrors managed.IsManagedEnterprise(cfg.
-// DeploymentMode) at the gateway-package level so the package-level
-// event choke points (emitEvent and the async sink mirrors, which are
-// not methods on *APIServer and therefore have no cfg handle) can gate
-// the cloud-controlled per-inspection redaction directive on
-// managed_enterprise.
+// DeploymentMode) at the gateway-package level so request-scoped policy
+// propagation and compatibility notification sinks can gate the
+// cloud-controlled per-inspection redaction directive on managed_enterprise.
 //
-// Wired from deployment_mode at sidecar startup and hot reload (see
-// internal/cli/root.go applyPrivacyConfig and
-// internal/gateway/sidecar.go applyConfigReload), alongside the
-// existing redaction.SetAgentReasonRedactionDisabled call. Reads use
-// atomic.Bool so the emit hot path stays lock-free.
+// Wired from deployment_mode by NewSidecar and applyConfigReload, alongside
+// redaction.SetAgentReasonRedactionDisabled. Reads use atomic.Bool so request
+// hot paths stay lock-free.
 var managedEnterpriseActive atomic.Bool
 
 // SetManagedEnterpriseActive records whether the running deployment is
@@ -42,15 +38,24 @@ var managedEnterpriseActive atomic.Bool
 // may toggle it under t.Cleanup. Idempotent and atomic.
 func SetManagedEnterpriseActive(v bool) { managedEnterpriseActive.Store(v) }
 
+// setManagedEnterpriseRedactionPosture keeps the two process-local managed
+// controls synchronized at startup and after a committed hot reload. Canonical
+// destination redaction remains generation-owned; this only controls the
+// agent-facing reason carve-out and request-scoped cloud directive gate.
+func setManagedEnterpriseRedactionPosture(v bool) {
+	redaction.SetAgentReasonRedactionDisabled(v)
+	SetManagedEnterpriseActive(v)
+}
+
 // ManagedEnterpriseActive reports the flag set by
 // SetManagedEnterpriseActive.
 func ManagedEnterpriseActive() bool { return managedEnterpriseActive.Load() }
 
 // redactionDecisionKey is the private context key under which the
 // per-inspection cloud redaction directive rides the request context
-// from the evaluate*/proxy inspection sites down to the emit choke
-// points. Kept as an unexported empty struct type so no other package
-// can collide with or read it.
+// from the evaluate*/proxy inspection sites to the canonical v8 projection
+// boundary and compatibility sinks. Kept as an unexported empty struct type so
+// no other package can collide with or read it.
 type redactionDecisionKey struct{}
 
 // withRedactionDecision returns a child context carrying the

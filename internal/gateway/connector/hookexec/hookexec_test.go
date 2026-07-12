@@ -133,6 +133,87 @@ func TestMalformedLegacyTokenIsNotAcceptedAsRaw(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeSuppressesCursorCompatibilityImport(t *testing.T) {
+	const (
+		cursorPayload = `{"hook_event_name":"preToolUse","cursor_version":"3.10.17","session_id":"cursor-session","tool_name":"Shell"}`
+		claudePayload = `{"hook_event_name":"PreToolUse","session_id":"claude-session","tool_name":"Bash"}`
+		liveScript    = "#!/bin/bash\n# defenseclaw-managed-hook v6\nexit 0\n"
+		tombstone     = "#!/bin/sh\n# defenseclaw-managed-hook v0 (disabled tombstone)\nexit 0\n"
+	)
+
+	tests := []struct {
+		name              string
+		payload           string
+		cursorScript      string
+		cursorToken       bool
+		removeClaudeToken bool
+		strict            bool
+		wantRequests      int
+	}{
+		{
+			name:              "live Cursor bridge suppresses before missing Claude token",
+			payload:           cursorPayload,
+			cursorScript:      liveScript,
+			cursorToken:       true,
+			removeClaudeToken: true,
+			strict:            true,
+			wantRequests:      0,
+		},
+		{
+			name:         "Cursor tombstone does not suppress",
+			payload:      cursorPayload,
+			cursorScript: tombstone,
+			cursorToken:  true,
+			wantRequests: 1,
+		},
+		{
+			name:         "missing Cursor token does not suppress",
+			payload:      cursorPayload,
+			cursorScript: liveScript,
+			wantRequests: 1,
+		},
+		{
+			name:         "genuine Claude payload does not suppress",
+			payload:      claudePayload,
+			cursorScript: liveScript,
+			cursorToken:  true,
+			wantRequests: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := run(t, "claudecode", ok(`{"action":"allow"}`), func(opts *Options) {
+				opts.Stdin = strings.NewReader(tc.payload)
+				opts.StrictAvailability = tc.strict
+				if tc.removeClaudeToken {
+					if err := os.Remove(filepath.Join(opts.HookDir, ".token")); err != nil {
+						t.Fatalf("remove Claude token: %v", err)
+					}
+				}
+				if tc.cursorToken {
+					if err := os.WriteFile(filepath.Join(opts.HookDir, ".hook-cursor.token"), []byte("cursor-token\n"), 0o600); err != nil {
+						t.Fatalf("write Cursor token: %v", err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(opts.HookDir, "cursor-hook.sh"), []byte(tc.cursorScript), 0o700); err != nil {
+					t.Fatalf("write Cursor hook: %v", err)
+				}
+			})
+
+			if result.code != 0 {
+				t.Fatalf("Run code = %d, want 0; stderr=%q", result.code, result.stderr)
+			}
+			if result.rt.requests != tc.wantRequests {
+				t.Fatalf("gateway requests = %d, want %d", result.rt.requests, tc.wantRequests)
+			}
+			if result.stdout != "" || result.stderr != "" {
+				t.Fatalf("unexpected hook output: stdout=%q stderr=%q", result.stdout, result.stderr)
+			}
+		})
+	}
+}
+
 // --- Allow / block decision golden tests (the agent-facing contract) ---
 
 func TestDecisionGolden(t *testing.T) {

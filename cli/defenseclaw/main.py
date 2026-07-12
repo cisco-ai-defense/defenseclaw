@@ -40,6 +40,7 @@ from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.commands.cmd_mcp import mcp
 from defenseclaw.commands.cmd_migrations import migrations_cmd
+from defenseclaw.commands.cmd_observability import observability_cmd
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
@@ -58,8 +59,17 @@ from defenseclaw.context import AppContext
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
 
 SKIP_LOAD_COMMANDS = {
-    "agent", "init", "migrations", "quickstart", "sandbox", "tui",
-    "uninstall", "reset", "version",
+    "agent",
+    "config",
+    "init",
+    "migrations",
+    "observability",
+    "quickstart",
+    "sandbox",
+    "tui",
+    "uninstall",
+    "reset",
+    "version",
 }
 
 # Commands that may legitimately run before config.yaml exists or while
@@ -69,6 +79,25 @@ SKIP_LOAD_COMMANDS = {
 # precisely when something on disk is wrong; refusing to run because
 # config didn't validate would defeat its purpose.
 SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "upgrade", "version"}
+
+# These commands are the only top-level boundaries permitted to operate on an
+# existing pre-v8 document. They either create/replace a configuration,
+# perform the explicit upgrade, or remove an installation. Every other group
+# preflights the raw schema discriminator before a Python compatibility
+# dataclass can be constructed.
+LEGACY_CONFIG_BOUNDARY_COMMANDS = {
+    "init",
+    "migrations",
+    "reset",
+    "uninstall",
+    "upgrade",
+    "version",
+}
+
+# First-run/read-only groups may run before config.yaml exists, but must reject
+# an existing non-v8 document. The actual write boundary is independently
+# protected by Config.save().
+ALLOW_MISSING_V8_PREFLIGHT = {"agent", "config", "observability", "quickstart", "tui"}
 
 
 def _is_help_invocation(ctx: click.Context) -> bool:
@@ -120,10 +149,27 @@ def cli(ctx: click.Context) -> None:
                 err=True,
             )
             raise SystemExit(1)
-    if invoked in SKIP_LOAD_COMMANDS or _is_help_invocation(ctx):
+    if _is_help_invocation(ctx):
         return
 
     from defenseclaw import config as cfg_mod
+
+    if invoked in SKIP_LOAD_COMMANDS:
+        if invoked not in LEGACY_CONFIG_BOUNDARY_COMMANDS:
+            try:
+                cfg_mod.require_v8_config(allow_missing=invoked in ALLOW_MISSING_V8_PREFLIGHT)
+            except cfg_mod.ConfigVersionError as exc:
+                click.echo(str(exc), err=True)
+                raise SystemExit(1) from exc
+        return
+
+    if invoked not in SKIP_AUTO_VALIDATE:
+        try:
+            cfg_mod.require_v8_config()
+        except cfg_mod.ConfigVersionError as exc:
+            click.echo(str(exc), err=True)
+            raise SystemExit(1) from exc
+
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
@@ -142,6 +188,8 @@ def cli(ctx: click.Context) -> None:
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
+    source_is_v8 = getattr(app.cfg, "_source_config_version", None) == 8
+
     # Fast-fail on config errors before any command runs, so operators
     # see a clear diagnostic instead of a deep stack trace. Skipped for
     # recovery commands (doctor/config/keys/upgrade) so a broken config
@@ -156,8 +204,10 @@ def cli(ctx: click.Context) -> None:
                 click.echo(f"  ✗ {result.parse_error}", err=True)
             for issue in result.errors:
                 click.echo(f"  ✗ {issue}", err=True)
-            click.echo("  Run 'defenseclaw config validate' for details, or "
-                      "'defenseclaw doctor --fix' to auto-repair.", err=True)
+            click.echo(
+                "  Run 'defenseclaw config validate' for details, or 'defenseclaw doctor --fix' to auto-repair.",
+                err=True,
+            )
             raise SystemExit(1)
 
     try:
@@ -167,7 +217,7 @@ def cli(ctx: click.Context) -> None:
         click.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
-    app.logger = Logger(app.store, app.cfg.splunk)
+    app.logger = Logger.from_config(app.cfg) if source_is_v8 else Logger.no_runtime()
 
 
 @cli.result_callback()
@@ -205,6 +255,7 @@ cli.add_command(upgrade)
 cli.add_command(migrations_cmd, "migrations")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
+cli.add_command(observability_cmd, "observability")
 cli.add_command(settings_cmd, "settings")
 cli.add_command(uninstall_cmd, "uninstall")
 cli.add_command(reset_cmd, "reset")

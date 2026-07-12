@@ -866,7 +866,6 @@ class TestGuardrailRulePackScoping(unittest.TestCase):
             self.app.cfg.guardrail,
             human_approval=None,
             hilt_min_severity=None,
-            disable_redaction=None,
             **kwargs,
         )
 

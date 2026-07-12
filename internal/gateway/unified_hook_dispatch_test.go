@@ -200,7 +200,7 @@ func jsonKeys(m map[string]interface{}) []string {
 // renderAgentHookResponseForProfile MUST project them onto the
 // JSON output map so hook scripts (and any downstream consumer
 // of the HTTP response body) can pivot on the same join key
-// surfaced via gateway.jsonl, scan_findings, and the audit DB
+// surfaced via canonical logs, scan_findings, and the audit DB
 // structured envelope.
 //
 // Regression guard: the original render projection built a

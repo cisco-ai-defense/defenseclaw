@@ -78,8 +78,8 @@ func (p *GuardrailProxy) handleListProviders(w http.ResponseWriter, r *http.Requ
 // roll the provider list out from under running requests.
 //
 // On success emits an EventGatewayLifecycle event ("provider-reload")
-// so operators can see in gateway.jsonl exactly when an overlay took
-// effect.
+// so operators can see in canonical observability data exactly when an
+// overlay took effect.
 func (p *GuardrailProxy) handleReloadProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -28,7 +28,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"gopkg.in/yaml.v3"
 )
 
@@ -382,11 +381,13 @@ func copilotNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 // telemetry object embedded in settings.json.
 func geminiCLINativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 	spec := &NativeOTLPSpec{
-		Kind:           NativeOTLPJSONBlock,
-		Endpoint:       "http://" + strings.TrimSpace(opts.APIAddr),
-		Protocol:       "http",
-		PathScope:      OTLPScopeGeminiCLI,
-		LogUserPrompts: redaction.DisableAll(),
+		Kind:      NativeOTLPJSONBlock,
+		Endpoint:  "http://" + strings.TrimSpace(opts.APIAddr),
+		Protocol:  "http",
+		PathScope: OTLPScopeGeminiCLI,
+		// Native source capture must remain full-fidelity. Central v8 routing
+		// applies the selected redaction profile to each destination copy.
+		LogUserPrompts: true,
 	}
 	// Best-effort: mint or load the scoped token here so the spec
 	// can render its endpoint deterministically. patchGeminiTelemetry

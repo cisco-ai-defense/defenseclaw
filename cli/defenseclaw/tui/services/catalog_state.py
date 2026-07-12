@@ -923,6 +923,11 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
             hint="Loading tools...",
         )
 
+    def set_store(self, store: object | None) -> None:
+        """Rebind the audit store after a configuration reload."""
+
+        self.store = store
+
     def apply_json(self, text: str) -> None:
         self.apply_loaded(parse_tool_list_json(text))
 
@@ -933,15 +938,21 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         if self.store is None:
             self.apply_filter()
             return
-        self.items = ()
-        self.filtered = ()
         try:
             entries = self.store.list_actions_by_type("tool")
         except Exception as exc:  # noqa: BLE001 - panel state renders store errors.
             self.message = f"Error loading tools: {exc}"
             self._clamp_cursor()
             return
-        self.items = tools_from_action_entries(entries)
+        self.apply_action_entries(entries)
+
+    def apply_action_entries(self, entries: Sequence[object]) -> None:
+        """Apply tool actions supplied by the shared TUI read snapshot."""
+
+        next_items = tools_from_action_entries(entries)
+        if self.items == next_items and self.loaded and not self.message:
+            return
+        self.items = next_items
         self.loaded = True
         self.message = ""
         self.apply_filter()
@@ -1008,8 +1019,11 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
-            self.refresh()
-            return CatalogPanelAction(True, hint="Refreshed.")
+            return CatalogPanelAction(
+                True,
+                hint="Refreshing tools...",
+                reload_requested=True,
+            )
         return CatalogPanelAction(False)
 
     def summary_text(self, title: str) -> str:

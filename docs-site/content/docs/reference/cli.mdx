@@ -56,7 +56,8 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup galileo [status\|test\|enable\|disable\|remove]` | Configure and verify Galileo Cloud or self-hosted OTLP traces. |
 | `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
-| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP telemetry destinations and audit-log sinks. `migrate-otel` previews the upgrade-time configuration migration by default and `--apply` repairs/persists it manually. Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 destinations across OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus capabilities. Omitted destination policy means all supported signals/buckets, unredacted. Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw observability plan` | Print the masked effective v8 graph: generated local SQLite policy, collection, destination capabilities, routes, profiles, retention, and warnings. |
 
 For observability destinations, `name` is the stable identity: a new name adds,
 and an existing name updates only that destination. Run `list --json` for the
@@ -123,7 +124,7 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
 | `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
-| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
 ## AI discovery
 
@@ -187,7 +188,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway status` | `defenseclaw-gateway` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. |
 | `defenseclaw-gateway policy reload` | `defenseclaw-gateway` | Re-read OPA policies from disk without bouncing the daemon. |
 | `defenseclaw-gateway watchdog [start\|stop\|status]` | `defenseclaw-gateway` | Health-watchdog daemon that notifies when the gateway is down. |
-| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail the gateway's JSONL fan-out — every decision and event is appended here. There is **no** built-in `gateway logs` subcommand; the JSONL fan-out is the canonical decision log. |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail a configured `kind: jsonl` destination. It contains only records selected for that destination; mandatory complete local log history remains SQLite. |
 
 ## TUI
 

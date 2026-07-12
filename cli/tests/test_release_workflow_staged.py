@@ -380,6 +380,8 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "signed Windows matrix has no pre-bridge source" in text
     assert "windows_prebridge_baselines" in text
     assert "CurrentConfigVersion" in text
+    assert "ObservabilityV8ConfigVersion" in text
+    assert "compatibility ceiling" in text
     for name in ("linux-upgrade", "macos-upgrade"):
         assert jobs[name]["strategy"]["matrix"]["baseline"] == (
             "${{ fromJSON(needs.release-preflight.outputs.baselines) }}"
@@ -393,9 +395,13 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "required_bridge_version" in text
     assert "min_upgrade_protocol" in text
     assert "auto_bridge_from does not match the reviewed pre-bridge matrix" in text
-    assert "Require immutable published bridge" in text
-    assert 'release.get("isImmutable") is not True' in text
+    assert "Resolve immutable published bridge provenance" in text
+    assert '"isImmutable": True' in text
     assert "published_asset_names(expected, status)" in text
+    assert "payload_asset_names(expected, status)" in text
+    assert "cosign verify-blob" in text
+    assert '--source-tree "$SOURCE_TREE"' in text
+    assert '--bridge-checksums-sha256 "$BRIDGE_CHECKSUMS_SHA256"' in text
     assert not re.search(r"\b0\.8\.[45]\b", text)
 
 

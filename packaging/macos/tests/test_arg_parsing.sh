@@ -11,7 +11,7 @@ t_install_help() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--mode {observe|action}" "mode flag in help"
   assert_contains "${out}" "--connector LIST"        "connector flag in help"
-  assert_contains "${out}" "--disable-redaction"     "disable redaction flag in help"
+  assert_not_contains "${out}" "--disable-redaction" "removed global redaction flag"
   assert_contains "${out}" "comma-separated"         "comma-separated note in help"
   assert_contains "${out}" "Per-user hook wiring"    "per-user section header"
 }
@@ -75,28 +75,6 @@ t_uninstall_help_omits_service_user() {
   local out
   out="$("${UNINSTALL_SH}" --help 2>&1)" || _fail "uninstall --help should exit 0"
   assert_not_contains "${out}" "--service-user" "uninstall --help must not mention --service-user (root-mode daemon)"
-}
-
-t_install_default_redaction_is_on() {
-  # Parse install.sh's own defaults section directly so we're asserting
-  # the actual install-time contract, not just what render_config emits
-  # when handed a value. If a future edit flips this back to
-  # "true" (redaction off by default), this test catches it before
-  # anything ships.
-  local default
-  default="$(awk '
-    /^DISABLE_REDACTION=/ {
-      # DISABLE_REDACTION="false"
-      match($0, /"([^"]+)"/, m)
-      print m[1]
-      exit
-    }' "${INSTALL_SH}" 2>/dev/null)"
-  # awk on macOS has no `match` capture — fall back to a portable parse.
-  if [[ -z "${default}" ]]; then
-    default="$(grep -E '^DISABLE_REDACTION=' "${INSTALL_SH}" | head -1 \
-      | sed -E 's/^DISABLE_REDACTION="?([^"]+)"?.*/\1/')"
-  fi
-  assert_eq "${default}" "false" "install.sh DISABLE_REDACTION default is false (redaction ON)"
 }
 
 t_install_bad_port_exits_nonzero() {
@@ -191,7 +169,6 @@ run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_
 run_case "install --port out-of-range"    t_install_bad_port_exits_nonzero
 run_case "install unsupported connector"  t_install_warns_unsupported_connector
 run_case "install non-root rejected"      t_install_requires_root
-run_case "install default redaction on"   t_install_default_redaction_is_on
 run_case "install --env flag documented"  t_install_help_documents_env
 run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero
 run_case "install --override-endpoint documented" t_install_help_documents_override_endpoint

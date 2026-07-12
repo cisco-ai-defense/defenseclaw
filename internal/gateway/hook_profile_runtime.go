@@ -139,6 +139,7 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		EvaluationID:      resp.EvaluationID,
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
+		SourceReason:      resp.SourceReason,
 	}
 }
 
@@ -156,5 +157,6 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		EvaluationID:      resp.EvaluationID,
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
+		SourceReason:      resp.SourceReason,
 	}
 }

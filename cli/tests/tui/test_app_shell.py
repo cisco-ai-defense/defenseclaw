@@ -22,6 +22,11 @@ import pytest
 from defenseclaw.config import RegistrySource
 from defenseclaw.db import Store
 from defenseclaw.models import Counts, Event
+from defenseclaw.observability.v8_status import (
+    V8BucketStatus,
+    V8DestinationStatus,
+    V8OperatorStatus,
+)
 from defenseclaw.tui.app import (
     _DEFENSECLAW_LOGO,
     DefenseClawTUI,
@@ -29,6 +34,7 @@ from defenseclaw.tui.app import (
     _enforcement_label,
     _event_histogram,
     _fetch_ai_usage,
+    _fetch_v8_operator_status,
     _overview_config,
     _policy_posture,
 )
@@ -67,11 +73,54 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
 
 
+def _v8_destination(
+    *,
+    name: str = "collector",
+    kind: str = "otlp",
+    endpoint: str = "https://collector.example.test/v1/traces",
+    signals: tuple[str, ...] = ("logs", "traces", "metrics"),
+) -> V8DestinationStatus:
+    return V8DestinationStatus(
+        name=name,
+        kind=kind,
+        enabled=True,
+        generated=False,
+        capabilities=signals,
+        selected_signals=signals,
+        policy_form="capability_default",
+        endpoint=endpoint,
+        route_count=1,
+        buckets=("platform.health",),
+        redaction_profiles=("none",),
+    )
+
+
+def _v8_status(tmp_path, *destinations: V8DestinationStatus) -> V8OperatorStatus:
+    return V8OperatorStatus(
+        source=str(tmp_path / "config.yaml"),
+        data_dir=str(tmp_path),
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=0,
+        local_path=str(tmp_path / "audit.db"),
+        judge_bodies_path=str(tmp_path / "judge.db"),
+        destinations=destinations,
+        buckets=(V8BucketStatus("platform.health", ("logs", "traces", "metrics"), "none"),),
+        warnings=(),
+        judge_bodies_enabled=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_textual_shell_starts_on_overview() -> None:
     app = DefenseClawTUI()
 
     async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+        assert app.active_panel == "overview"
+
+        app.action_switch_panel("tools")
         await pilot.pause()
 
         assert app.active_panel == "overview"
@@ -88,39 +137,155 @@ async def test_overview_renders_observability_destination_panel(tmp_path) -> Non
     from rich.console import Console
 
     overview = OverviewPanelModel(OverviewConfig(data_dir=str(tmp_path)), version="test")
+    overview.set_observability_status(
+        _v8_status(
+            tmp_path,
+            _v8_destination(
+                name="galileo",
+                kind="galileo",
+                endpoint="https://api.example.test/otel/traces",
+                signals=("traces",),
+            ),
+        )
+    )
+    overview.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="running")))
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(260, 50)) as pilot:
+        await pilot.pause()
+        console = Console(width=260, height=80, record=True)
+        console.print(app._overview_renderable())
+        rendered = console.export_text()
+
+    assert "OBSERVABILITY DESTINATIONS · RUNTIME" in rendered
+    assert "galileo" in rendered
+    assert "traces" in rendered
+    assert "api.example.test" in rendered
+    assert "/otel/traces" in rendered
+
+
+@pytest.mark.asyncio
+async def test_overview_renders_canonical_v8_policy_and_bounded_live_health(tmp_path) -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(OverviewConfig(data_dir=str(tmp_path)), version="test")
+    overview.set_observability_status(
+        V8OperatorStatus(
+            source=str(tmp_path / "config.yaml"),
+            data_dir=str(tmp_path),
+            plan_digest="a" * 64,
+            bucket_catalog_version=1,
+            retention_days=0,
+            local_path=str(tmp_path / "audit.db"),
+            judge_bodies_path=str(tmp_path / "judge.db"),
+            destinations=(
+                V8DestinationStatus(
+                    name="collector",
+                    kind="otlp",
+                    enabled=True,
+                    generated=False,
+                    capabilities=("logs", "traces", "metrics"),
+                    selected_signals=("logs", "traces", "metrics"),
+                    policy_form="capability_default",
+                    endpoint="https://collector.example.test/v1/traces",
+                    route_count=1,
+                    buckets=("platform.health",),
+                    redaction_profiles=("none",),
+                ),
+            ),
+            buckets=(
+                V8BucketStatus(
+                    "platform.health",
+                    ("logs", "traces", "metrics"),
+                    "none",
+                ),
+            ),
+            warnings=(),
+            judge_bodies_enabled=False,
+        )
+    )
     overview.set_health(
         HealthSnapshot(
             telemetry=SubsystemHealth(
                 state="running",
+                last_error="Authorization: Bearer must-not-render",
                 details={
-                    "destinations": [
-                        {
-                            "name": "galileo",
-                            "preset": "galileo",
-                            "enabled": True,
-                            "signals": "traces",
-                            "endpoint": "https://api.example.test/otel/traces",
-                            "routing": {"accepted": 3, "dropped": 1},
-                        }
-                    ]
+                    "destination": "collector",
+                    "state": "degraded",
+                    "reason": "queue_full",
+                    "failure": "retryable_delivery",
+                    "headers": {"authorization": "must-not-render"},
                 },
             )
         )
     )
     app = DefenseClawTUI(overview_model=overview)
 
-    async with app.run_test(size=(170, 50)) as pilot:
+    async with app.run_test(size=(260, 55)) as pilot:
         await pilot.pause()
-        console = Console(width=170, height=80, record=True)
+        console = Console(width=260, height=100, record=True)
         console.print(app._overview_renderable())
         rendered = console.export_text()
 
-    assert "OBSERVABILITY DESTINATIONS · RUNTIME" in rendered
-    assert "Galileo" in rendered
-    assert "traces" in rendered
-    assert "75.0% (3/4)" in rendered
-    assert "api.example.test" in rendered
-    assert "/otel/traces" in rendered
+    assert "Local SQLite · retention=unbounded · controller=unavailable · judge capture=disabled" in rendered
+    assert "collector" in rendered
+    assert "enabled" in rendered
+    assert "degraded (queue_full)" in rendered
+    assert "logs,traces,metrics" in rendered
+    assert "unredacted (none)" in rendered
+    assert "unavailable" in rendered
+    assert "https://collector.example.test/v1/traces" in rendered
+    assert "must-not-render" not in rendered
+    assert "Authorization" not in rendered
+
+
+def test_v8_tui_status_loader_preserves_legacy_and_bounds_invalid_source_errors(tmp_path) -> None:
+    config = SimpleNamespace(data_dir=str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 7\n")
+    assert _fetch_v8_operator_status(config, tmp_path) == (None, "")
+
+    config_path.write_text(
+        "config_version: 8\n"
+        "observability:\n"
+        "  destinations:\n"
+        "    - name: collector\n"
+        "      kind: otlp\n"
+        "      endpoint: https://user:secret@example.test/?token=must-not-render\n"
+        "      unsupported: must-not-render\n"
+    )
+    status, error = _fetch_v8_operator_status(config, tmp_path)
+    assert status is None
+    assert error.startswith("invalid v8 configuration at $")
+    assert "must-not-render" not in error
+    assert "user:secret" not in error
+
+
+@pytest.mark.asyncio
+async def test_exact_v8_hides_global_redaction_actions(tmp_path) -> None:
+    from rich.console import Console
+
+    cfg = SimpleNamespace(
+        _source_config_version=8,
+        data_dir=str(tmp_path),
+        audit_db=str(tmp_path / "audit.db"),
+    )
+    overview = OverviewPanelModel(OverviewConfig(data_dir=str(tmp_path)), version="test")
+    app = DefenseClawTUI(config=cfg, overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        console = Console(width=170, height=80, record=True)
+        console.print(app._overview_renderable())
+        assert "[R] Redaction" not in console.export_text()
+
+        await pilot.press("8")
+        await pilot.pause()
+        assert list(app.query("#logs-redaction")) == []
+        await pilot.press("R")
+        await pilot.pause()
+        assert app.active_panel == "registries"
+        assert all(screen.__class__.__name__ != "RedactionToggleScreen" for screen in app.screen_stack)
 
 
 @pytest.mark.asyncio
@@ -594,10 +759,34 @@ async def test_tool_policy_tab_is_removed() -> None:
 
         assert app.active_panel == "overview"
 
-        app.action_switch_panel("tools")
-        await pilot.pause()
 
-        assert app.active_panel == "overview"
+@pytest.mark.asyncio
+async def test_unchanged_status_and_tab_labels_skip_widget_updates(monkeypatch) -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        status = app.query_one("#status", Static)
+        status_updates: list[object] = []
+        original_status_update = status.update
+
+        def tracked_status_update(content: object = "") -> None:
+            status_updates.append(content)
+            original_status_update(content)
+
+        monkeypatch.setattr(status, "update", tracked_status_update)
+        app._last_status_signature = None  # noqa: SLF001
+        app._set_status("steady")  # noqa: SLF001
+        app._set_status("steady")  # noqa: SLF001
+        assert len(status_updates) == 1
+
+        tabs = app.query_one("#tabs", Tabs)
+        audit_tab = tabs.get_tab("tab-audit")
+        assert audit_tab is not None
+        app._update_tab_labels()  # noqa: SLF001
+        first_label = audit_tab.label
+        app._update_tab_labels()  # noqa: SLF001
+        assert audit_tab.label is first_label
 
 
 @pytest.mark.asyncio
@@ -753,9 +942,8 @@ async def test_overview_quick_actions_match_go_navigation_and_scan() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_redaction_notifications_and_uninstall_open_go_style_modals() -> None:
+async def test_overview_notifications_and_uninstall_open_go_style_modals() -> None:
     config = SimpleNamespace(
-        privacy=SimpleNamespace(disable_redaction=False),
         notifications=SimpleNamespace(enabled=True),
     )
     app = DefenseClawTUI(config=config)
@@ -767,21 +955,6 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
     app._run_command = fake_run  # type: ignore[method-assign]
 
     async with app.run_test(size=(150, 44)) as pilot:
-        await pilot.press("R")
-        await pilot.pause()
-        assert app.screen_stack[-1].__class__.__name__ == "RedactionToggleScreen"
-        assert app.screen_stack[-1].model.title == "Redaction kill-switch"
-
-        await pilot.press("enter")  # redaction-off is a danger action -> arms only
-        await pilot.pause()
-        assert not seen  # not run yet; the gate requires a second confirm
-        await pilot.press("enter")  # confirms
-        await pilot.pause()
-        assert seen[-1] == ("defenseclaw", ("setup", "redaction", "off", "--yes"))
-        assert config.privacy.disable_redaction is True
-        assert app.active_panel == "activity"
-
-        app.action_switch_panel("overview")
         await pilot.press("N")
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "NotificationsToggleScreen"
@@ -805,9 +978,8 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
 
 
 @pytest.mark.asyncio
-async def test_logs_redaction_key_opens_same_privacy_modal() -> None:
-    config = {"privacy": {"disable_redaction": True}}
-    app = DefenseClawTUI(config=config)
+async def test_logs_redaction_key_is_retired_and_r_opens_registries() -> None:
+    app = DefenseClawTUI()
     seen: list[tuple[str, tuple[str, ...]]] = []
 
     async def fake_run(binary: str, args: tuple[str, ...], **_kwargs: object) -> None:
@@ -821,19 +993,9 @@ async def test_logs_redaction_key_opens_same_privacy_modal() -> None:
         await pilot.press("R")
         await pilot.pause()
 
-        assert app.screen_stack[-1].__class__.__name__ == "RedactionToggleScreen"
-        assert app.screen_stack[-1].model.default_action().command.args == (
-            "setup",
-            "redaction",
-            "on",
-            "--yes",
-        )
-
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert seen[-1] == ("defenseclaw", ("setup", "redaction", "on", "--yes"))
-        assert config["privacy"]["disable_redaction"] is False
+        assert app.active_panel == "registries"
+        assert all(screen.__class__.__name__ != "RedactionToggleScreen" for screen in app.screen_stack)
+        assert seen == []
 
 
 @pytest.mark.asyncio
@@ -1499,6 +1661,31 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_raw_process_log_tail_is_read_off_the_textual_thread(tmp_path, monkeypatch) -> None:
+    from defenseclaw.tui.panels import logs as logs_module
+
+    (tmp_path / "gateway.log").write_text("gateway ready\n", encoding="utf-8")
+    app = DefenseClawTUI(data_dir=tmp_path)
+    app.active_panel = "logs"
+    app.logs_model.source = "gateway"
+    request = app.logs_model.pending_file_refresh("gateway")
+    assert request is not None
+    reader_threads: list[int] = []
+    raw_reader = logs_module._tail_text_file
+
+    def tracked_reader(path, **kwargs):
+        reader_threads.append(threading.get_ident())
+        return raw_reader(path, **kwargs)
+
+    monkeypatch.setattr(logs_module, "_tail_text_file", tracked_reader)
+    await app._run_log_file_refresh(request)  # noqa: SLF001
+
+    assert reader_threads
+    assert all(thread_id != threading.get_ident() for thread_id in reader_threads)
+    assert app.logs_model.lines["gateway"] == ["gateway ready"]
+
+
+@pytest.mark.asyncio
 async def test_successful_first_run_command_deactivates_embedded_setup() -> None:
     app = DefenseClawTUI(first_run=True)
 
@@ -1783,6 +1970,40 @@ async def test_slow_refresh_uses_tools_store_refresh_without_catalog_subprocess(
     assert app._slow_refresh_running is False  # noqa: SLF001
 
 
+@pytest.mark.asyncio
+async def test_slow_tools_refresh_uses_repository_worker_when_available(tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    app.tools_model.loaded = True
+    app._read_repository = object()  # type: ignore[assignment]  # noqa: SLF001
+    scheduled: list[bool] = []
+    app._schedule_data_refresh = (  # type: ignore[method-assign]
+        lambda *, force=False: scheduled.append(force)
+    )
+    app.tools_model.refresh = lambda: pytest.fail("tools SQLite read ran on UI loop")  # type: ignore[method-assign]
+
+    app._slow_refresh_running = True  # noqa: SLF001
+    await app._run_slow_refresh()  # noqa: SLF001
+
+    assert scheduled == [True]
+    assert app._slow_refresh_running is False  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_tool_mutation_refresh_uses_repository_worker(tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    app.tools_model.loaded = True
+    app._read_repository = object()  # type: ignore[assignment]  # noqa: SLF001
+    scheduled: list[bool] = []
+    app._schedule_data_refresh = (  # type: ignore[method-assign]
+        lambda *, force=False: scheduled.append(force)
+    )
+    app.tools_model.refresh = lambda: pytest.fail("tools SQLite read ran on UI loop")  # type: ignore[method-assign]
+
+    await app._refresh_loaded_catalog_after_mutation("tools")  # noqa: SLF001
+
+    assert scheduled == [True]
+
+
 def test_fetch_ai_usage_uses_gateway_auth_and_accept_headers() -> None:
     seen: dict[str, str] = {}
 
@@ -1872,18 +2093,27 @@ async def test_setup_panel_renders_wizards_and_form() -> None:
 async def test_setup_global_shortcuts_save_restart_clear_and_revert() -> None:
     cfg: dict = {"notifications": {"enabled": True}}
     setup = SetupPanelModel(cfg)
-    setup.mode = "config"
-    setup.sections = (
-        ConfigSection(
-            "Notifications",
-            (ConfigField("Enabled", "notifications.enabled", "bool", "false", "true"),),
-            "",
-        ),
-    )
     app = DefenseClawTUI(config=cfg, setup_model=setup)
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("0")
+        await pilot.pause()
+
+        # Install the edit after startup status loading has settled; the
+        # canonical Observability status refresh rebuilds Setup sections.
+        setup.mode = "config"
+        setup.sections = (
+            ConfigSection(
+                "Notifications",
+                (ConfigField("Enabled", "notifications.enabled", "bool", "false", "true"),),
+                "",
+            ),
+        )
+        setup.active_section = 0
+        setup.active_line = 0
+        app._render_chrome()  # noqa: SLF001 - deterministic edited Setup state.
+        assert setup.has_changes()
+
         await pilot.press("S")
         await pilot.pause()
 
@@ -1908,27 +2138,31 @@ async def test_setup_global_shortcuts_save_restart_clear_and_revert() -> None:
 
 
 @pytest.mark.asyncio
-async def test_setup_audit_sink_editor_opens_and_dispatches_disable_preview() -> None:
-    cfg = {
-        "audit_sinks": [
-            {
-                "name": "splunk-prod",
-                "kind": "splunk_hec",
-                "endpoint": "https://splunk.example.com:8088/services/collector",
-                "enabled": True,
-            }
-        ]
-    }
+async def test_setup_observability_editor_opens_and_dispatches_disable_preview(tmp_path) -> None:
+    cfg = {"config_version": 8}
     setup = SetupPanelModel(cfg)
-    setup.mode = "config"
-    audit_sinks_section = next(
-        index for index, section in enumerate(setup.sections) if section.name == "Audit Sinks"
-    )
-    setup.select_section(audit_sinks_section)
     app = DefenseClawTUI(config=cfg, setup_model=setup)
 
     async with app.run_test(size=(150, 44)) as pilot:
         await pilot.press("0")
+        await pilot.pause()
+        setup.mode = "config"
+        setup.set_observability_status(
+            _v8_status(
+                tmp_path,
+                _v8_destination(
+                    name="splunk-prod",
+                    kind="splunk_hec",
+                    endpoint="https://splunk.example.com:8088/services/collector",
+                    signals=("logs",),
+                ),
+            )
+        )
+        observability_section = next(
+            index for index, section in enumerate(setup.sections) if section.name == "Observability"
+        )
+        setup.select_section(observability_section)
+        app._render_chrome()  # noqa: SLF001 - deterministic canonical destination state.
         await pilot.press("E")
         await pilot.pause()
 
@@ -2074,13 +2308,20 @@ async def test_registries_mouse_tabs_and_sync_button_open_preview(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> None:
-    cfg = {
-        "audit_sinks": [
-            {"name": "splunk-prod", "kind": "splunk_hec", "endpoint": "https://example", "enabled": True}
-        ]
-    }
+async def test_setup_mouse_controls_open_config_save_and_resource_editor(tmp_path) -> None:
+    cfg = {"config_version": 8}
     setup = SetupPanelModel(cfg)
+    setup.set_observability_status(
+        _v8_status(
+            tmp_path,
+            _v8_destination(
+                name="splunk-prod",
+                kind="splunk_hec",
+                endpoint="https://example",
+                signals=("logs",),
+            ),
+        )
+    )
     app = DefenseClawTUI(config=cfg, setup_model=setup)
 
     async with app.run_test(size=(190, 44)) as pilot:
@@ -2092,7 +2333,7 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
         assert setup.mode == "config"
 
         setup.select_section(
-            next(index for index, section in enumerate(setup.sections) if section.name == "Audit Sinks")
+            next(index for index, section in enumerate(setup.sections) if section.name == "Observability")
         )
         app._render_chrome()  # noqa: SLF001 - deterministic section switch.
         await pilot.click("#setup-edit-list")
@@ -2427,7 +2668,7 @@ async def test_ai_discovery_enable_button_routes_to_command(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_ai_discovery_scan_and_refresh_buttons_route_to_commands(monkeypatch) -> None:
-    """Scan + Refresh route to the existing scan/usage CLI calls."""
+    """Scan + Refresh route to the usage scan/snapshot CLI calls."""
 
     ai_model = AIDiscoveryPanelModel()
     ai_model.set_snapshot(AIUsageSnapshot(enabled=True, signals=()))
@@ -2442,7 +2683,7 @@ async def test_ai_discovery_scan_and_refresh_buttons_route_to_commands(monkeypat
         app._handle_ai_control("ai-refresh")  # noqa: SLF001
         await pilot.pause()
         assert submitted == [
-            "defenseclaw agent discover",
+            "defenseclaw agent discovery scan",
             "defenseclaw agent usage --json",
         ]
 
@@ -2762,11 +3003,66 @@ def test_refresh_cached_config_closes_stale_audit_store(monkeypatch, tmp_path) -
     assert new_store.closed is False
     assert app.alerts_model.store is new_store
     assert app.audit_model.store is new_store
+    assert app.tools_model.store is new_store
 
     # Second reload returning the SAME handle must NOT close it
     # (otherwise we'd close the live store we just installed).
     app._refresh_cached_config()  # noqa: SLF001
     assert new_store.closed is False, "live store was closed by no-op reload"
+
+
+def test_refresh_cached_config_replaces_snapshot_repository(monkeypatch, tmp_path) -> None:
+    old_db = tmp_path / "old.db"
+    new_db = tmp_path / "new.db"
+    old_db.touch()
+    new_db.touch()
+    old_config = SimpleNamespace(data_dir=str(tmp_path), audit_db=str(old_db))
+    new_config = SimpleNamespace(data_dir=str(tmp_path), audit_db=str(new_db))
+
+    class FakeStore:
+        def close(self) -> None:
+            pass
+
+    stores = {str(old_db): FakeStore(), str(new_db): FakeStore()}
+
+    class FakeRepository:
+        def __init__(self, path: str) -> None:
+            self.path = path
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    repositories: list[FakeRepository] = []
+
+    def repository_factory(path: str) -> FakeRepository:
+        repository = FakeRepository(path)
+        repositories.append(repository)
+        return repository
+
+    monkeypatch.setattr(
+        "defenseclaw.tui.app._audit_store",
+        lambda cfg: stores[str(cfg.audit_db)],
+    )
+    monkeypatch.setattr("defenseclaw.tui.app.TUIReadRepository", repository_factory)
+    app = DefenseClawTUI(config=old_config)
+    app._read_snapshot = object()  # type: ignore[assignment]  # noqa: SLF001
+    app._snapshot_panel_revisions = {"audit": 7}  # noqa: SLF001
+    monkeypatch.setattr("defenseclaw.tui.app.config_module.load", lambda: new_config)
+    monkeypatch.setattr(app, "_refresh_models_from_disk", lambda: None)
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: None)
+    monkeypatch.setattr(app, "_propagate_connector", lambda _health: None)
+    monkeypatch.setattr(app, "_schedule_observability_status_load", lambda: None)
+
+    app._refresh_cached_config()  # noqa: SLF001
+
+    assert [repository.path for repository in repositories] == [str(old_db), str(new_db)]
+    assert repositories[0].closed is True
+    assert repositories[1].closed is False
+    assert app._read_repository is repositories[1]  # noqa: SLF001
+    assert app._read_snapshot is None  # noqa: SLF001
+    assert app._snapshot_panel_revisions == {}  # noqa: SLF001
+    assert app.tools_model.store is stores[str(new_db)]
 
 
 def test_startup_binds_alerts_model_to_audit_store(monkeypatch, tmp_path) -> None:
@@ -2783,22 +3079,76 @@ def test_startup_binds_alerts_model_to_audit_store(monkeypatch, tmp_path) -> Non
     assert app.alerts_model.store is store
 
 
+def test_startup_retries_configured_audit_db_that_does_not_exist_yet(monkeypatch, tmp_path) -> None:
+    audit_db = tmp_path / "gateway-will-create.db"
+    paths: list[str] = []
+
+    class Repository:
+        def __init__(self, path: str) -> None:
+            paths.append(path)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("defenseclaw.tui.app.TUIReadRepository", Repository)
+    app = DefenseClawTUI(config=SimpleNamespace(audit_db=str(audit_db)))
+
+    assert paths == [str(audit_db)]
+    assert app._read_repository is not None  # noqa: SLF001
+
+
+def test_repository_mode_never_falls_back_to_ui_thread_sql_before_first_snapshot() -> None:
+    calls: list[str] = []
+
+    class Store:
+        def count_scan_results_since(self, _since: object) -> int:
+            calls.append("scan-count")
+            return 0
+
+        def connector_hook_event_stats(self) -> dict[str, object]:
+            calls.append("hook-stats")
+            return {}
+
+        def list_connector_hook_event_summaries(self, _limit: int) -> list[object]:
+            calls.append("hook-events")
+            return []
+
+    store = Store()
+    app = DefenseClawTUI(
+        alerts_model=AlertsPanelModel(store=store),
+        audit_model=AuditPanelModel(store=store),
+    )
+    app._read_repository = object()  # type: ignore[assignment]  # noqa: SLF001
+    app._read_snapshot = None  # noqa: SLF001
+
+    app._overview_session_enforcement_counts()  # noqa: SLF001
+    app._connector_hook_event_stats()  # noqa: SLF001
+    app._recent_connector_hook_events()  # noqa: SLF001
+
+    assert calls == []
+
+
+def test_overview_uses_repository_session_scan_count() -> None:
+    from defenseclaw.tui.services.read_repository import TUIReadSnapshot
+
+    app = DefenseClawTUI()
+    app._read_repository = object()  # type: ignore[assignment]  # noqa: SLF001
+    app._read_snapshot = TUIReadSnapshot(  # noqa: SLF001
+        revision=1,
+        data_version=1,
+        enforcement_counts=Counts(total_scans=99),
+        session_scan_count=4,
+        session_scan_since=datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+    app.overview_model.set_enforcement_counts(EnforcementCounts(total_scans=99))
+
+    assert app._overview_session_enforcement_counts().total_scans == 4  # noqa: SLF001
+
+
 def test_refresh_alerts_mirrors_loaded_alerts_with_cheap_enforcement_counts(tmp_path) -> None:
-    """Refreshing alerts should use actionable summaries and cheap counts."""
+    """Refreshing alerts should mirror loaded canonical rows and cheap counts."""
 
     class FakeStore:
-        def list_actionable_alert_summaries(self, limit: int) -> list[AlertEvent]:
-            assert limit == 500
-            return [
-                AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
-            ]
-
-        def list_alert_summaries(self, _limit: int) -> list[AlertEvent]:
-            raise AssertionError("default refresh should use actionable summaries")
-
-        def list_alerts(self, _limit: int) -> list[AlertEvent]:
-            raise AssertionError("refresh should use list_alert_summaries")
-
         def get_counts(self) -> object:
             raise AssertionError("refresh should not scan counts")
 
@@ -2811,6 +3161,11 @@ def test_refresh_alerts_mirrors_loaded_alerts_with_cheap_enforcement_counts(tmp_
                 total_scans=11,
             )
 
+    alerts = AlertsPanelModel(store=FakeStore())
+    alerts.set_events([AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one")])
+    # This unit isolates the app-level count projection. Canonical SQLite
+    # ingestion is covered by test_v8_event_history.py.
+    alerts.refresh = lambda: None  # type: ignore[method-assign]
     overview = OverviewPanelModel()
     overview.set_enforcement_counts(
         EnforcementCounts(
@@ -2824,7 +3179,7 @@ def test_refresh_alerts_mirrors_loaded_alerts_with_cheap_enforcement_counts(tmp_
     )
     app = DefenseClawTUI(
         data_dir=tmp_path,
-        alerts_model=AlertsPanelModel(store=FakeStore()),
+        alerts_model=alerts,
         overview_model=overview,
     )
 
@@ -3411,31 +3766,30 @@ def test_setup_wizard_mode_hint_renders_bracketed_hint_literally() -> None:
     assert "webhooks[0].url" in plain
 
 
-def test_setup_audit_sink_summary_renders_kind_and_state_literally(tmp_path) -> None:
-    """Build a config object with a single audit sink, run it through
-    ``_audit_sink_summary_fields``, and verify both bracket pairs
-    survive Rich parsing in the resulting summary line. Without the
-    escape Rich consumes lowercase ``[stdout]`` / ``[enabled]`` as
-    style tags and the summary collapses to just the sink name.
-    """
+def test_setup_observability_summary_renders_canonical_destination_policy(tmp_path) -> None:
+    """The Setup summary is derived from the masked canonical v8 plan."""
 
-    from defenseclaw.tui.panels.setup import _audit_sink_summary_fields
+    from defenseclaw.tui.panels.setup import _v8_observability_fields
 
-    cfg = SimpleNamespace(
-        audit_sinks=(
-            SimpleNamespace(name="primary", kind="stdout", enabled=True),
-            SimpleNamespace(name="archive", kind="splunk_hec", enabled=False),
+    fields = _v8_observability_fields(
+        _v8_status(
+            tmp_path,
+            _v8_destination(
+                name="primary",
+                kind="http_jsonl",
+                endpoint="https://logs.example.test/ingest",
+                signals=("logs",),
+            ),
         )
     )
-    fields = _audit_sink_summary_fields(cfg)
-    # Render each sink's summary value through Rich and check the
-    # bracketed kind/state badges survive.
-    summaries = [Text.from_markup(field.value).plain for field in fields]
-    joined = "\n".join(summaries)
-    assert "[stdout]" in joined
-    assert "[enabled]" in joined
-    assert "[splunk_hec]" in joined
-    assert "[disabled]" in joined
+    summary = next(field.value for field in fields if field.label == "primary")
+    assert summary == (
+        "http_jsonl · enabled · signals=logs · "
+        "redaction=unredacted (none) · buckets=platform.health · "
+        "limits=not-applicable · "
+        "https://logs.example.test/ingest"
+    )
+    assert all("audit_sinks" not in field.key for field in fields)
 
 
 def test_audit_panel_render_text_renders_e_export_close_filter_literally() -> None:

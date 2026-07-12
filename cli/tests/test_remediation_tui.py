@@ -16,7 +16,6 @@ One test per finding fixed in the ``cli/defenseclaw/tui`` package:
 * F-0801 - credentials wizard must feed the secret over stdin, not argv.
 * F-0482 - command preview must redact ``--env KEY=VALUE`` values.
 * F-0803 - MCP set form must route env secrets through the child env, not argv.
-* F-0501 - gateway scan loader must survive malformed JSONL rows.
 * F-0521 - plugin action menu must target ``row.id`` (not ``display_name``).
 * F-0781 - audit export must be written owner-only (0600).
 * F-0782 - activity output save must be written owner-only (0600).
@@ -31,7 +30,6 @@ import pytest
 from defenseclaw.models import Event
 from defenseclaw.tui.app import DefenseClawTUI
 from defenseclaw.tui.executor import CommandExecutor
-from defenseclaw.tui.panels.alerts import AlertsPanelModel
 from defenseclaw.tui.panels.audit import AuditPanelModel
 from defenseclaw.tui.panels.setup import (
     CredentialRow,
@@ -47,7 +45,6 @@ from defenseclaw.tui.services.catalog_state import (
     plugin_action_intent,
     plugin_direct_scan_intent,
 )
-from defenseclaw.tui.services.gateway_events import load_gateway_scan_blocks
 
 
 def _set_wizard_field(model: SetupPanelModel, label: str, value: str) -> None:
@@ -200,38 +197,6 @@ async def test_f0803_mcp_env_secret_via_environment_not_argv(tmp_path) -> None:
     payload = json.loads(capture.read_text(encoding="utf-8"))
     assert all(secret not in arg for arg in payload["argv"])
     assert payload["api_key"] == secret
-
-
-# ---------------------------------------------------------------------------
-# F-0501: malformed gateway scan rows must not crash the Alerts refresh.
-# ---------------------------------------------------------------------------
-def test_f0501_malformed_gateway_rows_are_skipped(tmp_path) -> None:
-    gateway = tmp_path / "gateway.jsonl"
-    gateway.write_text(
-        # Non-object JSON (was AttributeError on payload.get).
-        "42\n"
-        # Non-numeric counters (was ValueError on int("NaN")).
-        '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
-        '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
-        '"verdict":"warn","duration_ms":"NaN","total_count":"NaN"}}\n'
-        # Outright garbage.
-        "not json at all\n"
-        # A well-formed row that must still be parsed.
-        '{"event_type":"scan","scan":{"scan_id":"sid2","duration_ms":12,"total_count":3}}\n',
-        encoding="utf-8",
-    )
-
-    blocks = load_gateway_scan_blocks(gateway)
-    by_id = {block.scan_id: block for block in blocks}
-    assert {"sid1", "sid2"} <= set(by_id)
-    # Bad counters coerce to 0 instead of raising.
-    assert by_id["sid1"].duration_ms == 0
-    assert by_id["sid1"].total_count == 0
-    assert by_id["sid2"].duration_ms == 12
-    assert by_id["sid2"].total_count == 3
-
-    # The Alerts panel refresh that consumes the loader must not raise.
-    AlertsPanelModel(tmp_path).refresh_gateway_scans()
 
 
 # ---------------------------------------------------------------------------

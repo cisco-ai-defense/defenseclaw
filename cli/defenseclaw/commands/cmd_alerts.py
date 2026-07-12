@@ -28,11 +28,11 @@ existing aliases/scripts keep working.
 from __future__ import annotations
 
 import json
+import uuid
 
 import click
 
 from defenseclaw import ux
-from defenseclaw.audit_actions import ACTION_ACK_ALERTS, ACTION_DISMISS_ALERTS
 from defenseclaw.context import AppContext, pass_ctx
 
 # ---------------------------------------------------------------------------
@@ -351,22 +351,8 @@ def _alerts_default(
 )
 @pass_ctx
 def alerts_acknowledge(app: AppContext, severity: str) -> None:
-    """Mark alerts as acknowledged (downgrades severity to ACK in the audit DB)."""
-    if not app.store:
-        raise click.ClickException("No audit store — run 'defenseclaw init' first.")
-    before = {"open_severities": severity}
-    n = app.store.acknowledge_alerts("all" if severity == "all" else severity)
-    after = {"acknowledged_rows": n}
-    if app.logger:
-        app.logger.log_activity(
-            actor="cli:operator",
-            action=ACTION_ACK_ALERTS,
-            target_type="alert",
-            target_id="audit_events",
-            before=before,
-            after=after,
-            diff=[{"path": "/alerts", "op": "replace", "before": before, "after": after}],
-        )
+    """Mark alerts acknowledged through the canonical protected-state API."""
+    n = _set_alert_disposition(app, severity, "acknowledged")
     ux.ok(f"Acknowledged {n} alert(s).")
 
 
@@ -380,20 +366,34 @@ def alerts_acknowledge(app: AppContext, severity: str) -> None:
 )
 @pass_ctx
 def alerts_dismiss(app: AppContext, severity: str) -> None:
-    """Dismiss alerts from the active operator view (same DB update as acknowledge)."""
-    if not app.store:
-        raise click.ClickException("No audit store — run 'defenseclaw init' first.")
-    before = {"visible_severities": severity}
-    n = app.store.dismiss_alerts_visible("all" if severity == "all" else severity)
-    after = {"cleared_rows": n}
-    if app.logger:
-        app.logger.log_activity(
-            actor="cli:operator",
-            action=ACTION_DISMISS_ALERTS,
-            target_type="alert",
-            target_id="audit_events",
-            before=before,
-            after=after,
-            diff=[{"path": "/alerts", "op": "replace", "before": before, "after": after}],
-        )
+    """Dismiss alerts through the canonical protected-state API."""
+    n = _set_alert_disposition(app, severity, "dismissed")
     ux.ok(f"Dismissed {n} alert(s) from the active list.")
+
+
+def _set_alert_disposition(app: AppContext, severity: str, disposition: str) -> int:
+    if app.cfg is None or getattr(app.cfg, "_source_config_version", None) != 8:
+        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
+    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.logger import _gateway_api_host
+
+    token = app.cfg.gateway.resolved_token()
+    if not token:
+        raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the v8 gateway.")
+    client = OrchestratorClient(
+        host=_gateway_api_host(app.cfg),
+        port=int(app.cfg.gateway.api_port),
+        timeout=10,
+        token=token,
+    )
+    try:
+        response = client.set_alert_disposition(
+            operation_id=f"alert-review-{uuid.uuid4().hex}",
+            disposition=disposition,
+            severity=severity,
+        )
+    except Exception as exc:
+        raise click.ClickException("Canonical alert disposition was not confirmed by the gateway.") from exc
+    finally:
+        client.close()
+    return int(response.get("applied", 0)) + int(response.get("no_change", 0))

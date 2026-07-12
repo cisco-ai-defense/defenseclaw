@@ -325,12 +325,13 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 
 ## Webhook Notification Config
 
-> **Not an audit sink.** `webhooks[]` delivers low-volume, per-event
+> **Not a telemetry destination.** `webhooks[]` delivers low-volume, per-event
 > chat/incident notifications (Slack, PagerDuty, Webex, HMAC-signed
 > generic JSON). High-volume every-event forwarding lives under
-> `audit_sinks[]` and is managed with `defenseclaw setup observability`
-> — see [docs/OBSERVABILITY.md](OBSERVABILITY.md) §3.4 (`http_jsonl`)
-> and §7 (notifier webhooks) for the full split.
+> `observability.destinations[]` in config v8 and is managed with
+> `defenseclaw setup observability` — see
+> [docs/OBSERVABILITY.md](OBSERVABILITY.md) for destination capabilities,
+> routes, centralized redaction, and the notification/telemetry split.
 
 The `webhooks` section in `config.yaml` configures outbound HTTP notifications
 for enforcement events. Each entry defines a webhook endpoint. Disabled by

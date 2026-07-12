@@ -73,7 +73,11 @@ def _make_cfg(data_dir: str) -> Config:
     """
     cfg_path = os.path.join(data_dir, "config.yaml")
     with open(cfg_path, "w", encoding="utf-8") as f:
-        f.write("llm:\n  provider: anthropic\n  model: claude-sonnet-4-5\n")
+        f.write(
+            "config_version: 8\n"
+            "observability: {}\n"
+            "llm:\n  provider: anthropic\n  model: claude-sonnet-4-5\n"
+        )
     return _load_via_env(data_dir)
 
 

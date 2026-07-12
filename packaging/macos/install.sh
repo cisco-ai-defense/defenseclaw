@@ -36,7 +36,6 @@ set -euo pipefail
 DEFAULT_MODE="observe"
 DEFAULT_CONNECTOR="codex"
 DEFAULT_API_PORT="18970"
-DISABLE_REDACTION="false"
 DEFAULT_ENV="prod"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -236,7 +235,6 @@ Gateway options:
                             Defense host for adhoc testing. Takes precedence
                             over --env. Must be a full http(s) URL, e.g.
                             https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
-  --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
   --skip-build              Reuse an existing gateway binary (no rebuild)
@@ -267,7 +265,6 @@ while [[ $# -gt 0 ]]; do
     --port)             API_PORT="${2:?}"; shift 2;;
     --env)              AID_ENV="${2:?}"; shift 2;;
     --override-endpoint) OVERRIDE_ENDPOINT="${2:?}"; shift 2;;
-    --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
     --plist)            PLIST_SRC="${2:?}"; PLIST_SRC_ORIGIN="override"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
@@ -549,11 +546,11 @@ CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 [[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
   || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_off=${DISABLE_REDACTION})"
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive)"
 CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
   || die "could not reserve a private managed-config staging file"
 INSTALL_TEMP_FILES+=("${CONFIG_TMP}")
-render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTION}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
+render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
 ln "${CONFIG_TMP}" "${CONFIG_PATH}" \

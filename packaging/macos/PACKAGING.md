@@ -35,12 +35,18 @@ Common flags:
 | `--mode {observe\|action}` | `observe` | Guardrail + asset_policy mode |
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
-| `--disable-redaction` | on | Turn off audit/sink redaction |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
 | `--skip-connector` | — | Gateway only; skip user-space hook wiring |
 | `--skip-launchd` | — | Install files without bootstrapping the daemon |
 
 Full reference: `./install.sh --help`.
+
+The installer writes strict `config_version: 8` with local history under
+`observability.local` and `observability.defaults.redaction_profile: sensitive`.
+The retired global `--disable-redaction` switch is not accepted. To change the
+posture, edit the administrator-owned v8 source with a global, bucket, or
+destination profile, run `defenseclaw config validate` and
+`defenseclaw observability plan`, then restart the daemon.
 
 `install.sh` is fresh-install-only. It refuses current managed paths, legacy
 managed paths, per-user DefenseClaw state, or loaded DefenseClaw launchd jobs

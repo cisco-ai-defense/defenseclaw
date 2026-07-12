@@ -937,8 +937,11 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["hermes"])
 
     def test_flags_ignored_with_subcommand_warns(self):
-        with _stub_side_effects():
-            res = _invoke(["-c", "hermes", "redaction", "status"], self.app)
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(), retention_days=0, plan_digest="test"),
+        ):
+            res = _invoke(["-c", "hermes", "observability", "list"], self.app)
         self.assertIn("are ignored when a setup", res.output)
 
 

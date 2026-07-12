@@ -237,7 +237,7 @@ func TestClampPromptDirectionAction(t *testing.T) {
 //   - non-prompt directions: untouched at any severity
 //
 // Demotions also preserve Severity, Findings, and the original Reason so
-// gateway.jsonl readers can grep for the original (more aggressive) policy
+// canonical event readers can search for the original (more aggressive) policy
 // decision via the "policy-action=<original>" marker.
 func TestClampPromptDirectionVerdict(t *testing.T) {
 	t.Run("nil verdict is a no-op", func(t *testing.T) {
@@ -280,7 +280,7 @@ func TestClampPromptDirectionVerdict(t *testing.T) {
 		// CRITICAL prompts (clear injection chains, exfil payloads,
 		// known credential dumps) get the [DefenseClaw] block
 		// response. The Reason is not annotated because no demotion
-		// occurred — operators reading gateway.jsonl see the raw
+		// occurred — operators reading the canonical event see the raw
 		// rule match exactly as the scanner produced it.
 		v := &ScanVerdict{
 			Action:   guardrailActionBlock,

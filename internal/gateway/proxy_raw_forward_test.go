@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 func TestExtractRawForwardCompletionNonStreaming(t *testing.T) {
@@ -238,6 +240,8 @@ func TestRawForwardPreservesHeadersAndAzureAuth(t *testing.T) {
 	allowRawForwardPrivateTargets(t)
 
 	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "observe")
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	proxy.bindObservabilityV8Trace(runtime)
 	body := mustJSON(t, map[string]interface{}{
 		"model":    "gpt-4",
 		"messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
@@ -264,6 +268,25 @@ func TestRawForwardPreservesHeadersAndAzureAuth(t *testing.T) {
 	}
 	if gotAPIKey != "azure-key" {
 		t.Fatalf("Azure api-key = %q, want azure-key", gotAPIKey)
+	}
+	var forwarded int64
+	for _, metric := range capture.metricSnapshot() {
+		if metric.Descriptor().Name != observability.TelemetryInstrumentDefenseClawGatewayForwardedHeaders {
+			continue
+		}
+		if attributes := metric.Attributes(); attributes["defenseclaw.metric.path"] != "chat-completions" ||
+			attributes["defenseclaw.metric.result"] != "ok" {
+			t.Fatalf("generated forwarded-header attributes=%v", attributes)
+		}
+		value, ok := metric.Value().Int64()
+		if !ok {
+			t.Fatalf("generated forwarded-header value=%v", metric.Value())
+		}
+		forwarded += value
+	}
+	// Content-Type plus the two allowed OpenAI metadata headers are forwarded.
+	if forwarded != 3 {
+		t.Fatalf("generated forwarded-header count=%d want=3", forwarded)
 	}
 }
 

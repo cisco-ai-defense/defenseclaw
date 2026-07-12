@@ -25,8 +25,10 @@ mocked ``subprocess.run``.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,7 +62,9 @@ class TestRsyncOverwrite(unittest.TestCase):
         self._write(self.dest, "bin/run.sh", "old\n")
 
         refreshed, preserved, errors = _rsync_overwrite(
-            src=Path(self.src), dest=Path(self.dest), preserve=(),
+            src=Path(self.src),
+            dest=Path(self.dest),
+            preserve=(),
         )
 
         self.assertEqual(errors, [])
@@ -75,7 +79,9 @@ class TestRsyncOverwrite(unittest.TestCase):
         self._write(self.src, "compose/docker-compose.local.yml", "new\n")
 
         refreshed, _preserved, errors = _rsync_overwrite(
-            src=Path(self.src), dest=Path(self.dest), preserve=(),
+            src=Path(self.src),
+            dest=Path(self.dest),
+            preserve=(),
         )
 
         self.assertEqual(errors, [])
@@ -135,7 +141,9 @@ class TestRsyncOverwrite(unittest.TestCase):
         self._write(self.dest, "bin/dest-only.sh", "i-stay\n")
 
         _refreshed, _preserved, errors = _rsync_overwrite(
-            src=Path(self.src), dest=Path(self.dest), preserve=(),
+            src=Path(self.src),
+            dest=Path(self.dest),
+            preserve=(),
         )
 
         self.assertEqual(errors, [])
@@ -354,8 +362,49 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         return os.path.join(self.tmp, "observability-stack")
 
     @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_refresh_normalizes_container_access_under_private_umask(
+        self,
+        mock_bundle: MagicMock,
+    ) -> None:
+        """Wheel extraction modes cannot make non-root containers unreadable."""
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+        if os.name == "nt":
+            self.skipTest("POSIX bind-mount mode contract")
+        for root, dirs, files in os.walk(self.bundle):
+            os.chmod(root, 0o700)
+            for name in dirs:
+                os.chmod(os.path.join(root, name), 0o700)
+            for name in files:
+                os.chmod(os.path.join(root, name), 0o600)
+
+        mock_bundle.return_value = Path(self.bundle)
+        result = refresh_local_observability_stack(self.tmp)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(
+            stat.S_IMODE(os.stat(os.path.join(self._dest(), "docker-compose.yml")).st_mode),
+            0o644,
+        )
+        self.assertEqual(
+            stat.S_IMODE(os.stat(os.path.join(self._dest(), "run.sh")).st_mode),
+            0o755,
+        )
+        self.assertEqual(
+            stat.S_IMODE(os.stat(os.path.join(self._dest(), "grafana", "dashboards")).st_mode),
+            0o755,
+        )
+
+        custom = os.path.join(self._dest(), "grafana", "dashboards", "team-private.json")
+        with open(custom, "w", encoding="utf-8") as handle:
+            handle.write('{"uid":"team-private"}\n')
+        os.chmod(custom, 0o600)
+        refresh_local_observability_stack(self.tmp)
+        self.assertEqual(stat.S_IMODE(os.stat(custom).st_mode), 0o644)
+
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
     def test_default_refresh_preserves_operator_dashboards(
-        self, mock_bundle: MagicMock,
+        self,
+        mock_bundle: MagicMock,
     ) -> None:
         """The default refresh must not stomp on operator-edited dashboards."""
         from defenseclaw.bundle_refresh import refresh_local_observability_stack
@@ -390,7 +439,9 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         with open(operator_prom, encoding="utf-8") as handle:
             self.assertIn("operator-edited prometheus", handle.read())
         bridge_bin = os.path.join(
-            self._dest(), "bin", "openclaw-observability-bridge",
+            self._dest(),
+            "bin",
+            "openclaw-observability-bridge",
         )
         with open(bridge_bin, encoding="utf-8") as handle:
             self.assertIn("v3 bridge", handle.read())
@@ -398,7 +449,8 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
 
     @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
     def test_refresh_config_overwrites_operator_surfaces(
-        self, mock_bundle: MagicMock,
+        self,
+        mock_bundle: MagicMock,
     ) -> None:
         """``refresh_config=True`` is the destructive mode operators opt
         into when they want a clean wipe of dashboards / rules /
@@ -423,7 +475,8 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
 
     @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
     def test_refresh_config_removes_only_retired_managed_dashboards(
-        self, mock_bundle: MagicMock,
+        self,
+        mock_bundle: MagicMock,
     ) -> None:
         """Upgrade tombstones prune retired DefenseClaw assets without
         deleting destination-only operator dashboards.
@@ -440,11 +493,43 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         with open(custom, "w", encoding="utf-8") as handle:
             handle.write('{"title": "custom"}\n')
 
-        result = refresh_local_observability_stack(self.tmp, refresh_config=True)
+        digest = hashlib.sha256(b'{"title": "retired"}\n').hexdigest()
+        with patch.dict(
+            "defenseclaw.bundle_refresh._LOCAL_OBSERVABILITY_RETIRED_SHA256",
+            {"grafana/dashboards/defenseclaw-reliability.json": frozenset({digest})},
+            clear=True,
+        ):
+            result = refresh_local_observability_stack(self.tmp, refresh_config=True)
 
         self.assertFalse(os.path.exists(retired))
         self.assertTrue(os.path.exists(custom))
         self.assertIn(
+            "grafana/dashboards/defenseclaw-reliability.json (removed)",
+            result.refreshed_paths,
+        )
+
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_refresh_config_preserves_custom_bytes_at_retired_filename(
+        self,
+        mock_bundle: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+        mock_bundle.return_value = Path(self.bundle)
+        refresh_local_observability_stack(self.tmp)
+        retired = os.path.join(
+            self._dest(),
+            "grafana",
+            "dashboards",
+            "defenseclaw-reliability.json",
+        )
+        with open(retired, "w", encoding="utf-8") as handle:
+            handle.write('{"title": "operator collision"}\n')
+
+        result = refresh_local_observability_stack(self.tmp, refresh_config=True)
+
+        self.assertTrue(os.path.exists(retired))
+        self.assertNotIn(
             "grafana/dashboards/defenseclaw-reliability.json (removed)",
             result.refreshed_paths,
         )
@@ -482,7 +567,9 @@ class TestIsComposeProjectRunning(unittest.TestCase):
     @patch("defenseclaw.bundle_refresh.subprocess.run")
     @patch("defenseclaw.bundle_refresh.shutil.which", return_value="/usr/bin/docker")
     def test_returns_true_when_docker_lists_a_container_id(
-        self, _which: MagicMock, mock_run: MagicMock,
+        self,
+        _which: MagicMock,
+        mock_run: MagicMock,
     ) -> None:
         from defenseclaw.bundle_refresh import is_compose_project_running
 
@@ -498,7 +585,9 @@ class TestIsComposeProjectRunning(unittest.TestCase):
     @patch("defenseclaw.bundle_refresh.subprocess.run")
     @patch("defenseclaw.bundle_refresh.shutil.which", return_value="/usr/bin/docker")
     def test_returns_false_when_docker_lists_no_containers(
-        self, _which: MagicMock, mock_run: MagicMock,
+        self,
+        _which: MagicMock,
+        mock_run: MagicMock,
     ) -> None:
         from defenseclaw.bundle_refresh import is_compose_project_running
 
@@ -511,7 +600,9 @@ class TestIsComposeProjectRunning(unittest.TestCase):
     )
     @patch("defenseclaw.bundle_refresh.shutil.which", return_value="/usr/bin/docker")
     def test_returns_false_on_docker_exec_error(
-        self, _which: MagicMock, _run: MagicMock,
+        self,
+        _which: MagicMock,
+        _run: MagicMock,
     ) -> None:
         from defenseclaw.bundle_refresh import is_compose_project_running
 

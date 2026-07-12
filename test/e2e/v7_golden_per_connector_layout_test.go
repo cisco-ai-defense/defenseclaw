@@ -13,8 +13,14 @@ package e2e
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+func goldenPathForConnector(t *testing.T, connector, name string) string {
+	t.Helper()
+	return filepath.Join(moduleRoot(t), "test", "e2e", "testdata", "v7", "golden", connector, name)
+}
 
 // TestGoldenPerConnectorLayout — Plan E3.4 / item 1.
 //

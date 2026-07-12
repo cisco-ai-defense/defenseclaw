@@ -26,16 +26,16 @@ import (
 // handleUnifiedConnectorHook is the single entry point that every
 // connector hook route registers through. Responsibilities:
 //
-//  1. Emit the defenseclaw_connector_hook_unified_dispatch_total
-//     metric (per-connector) so operators can confirm traffic is
+//  1. Emit the generated metric.connector.hook.unified_dispatch
+//     family (per connector) so operators can confirm traffic is
 //     flowing through the unified pipeline (vs. an out-of-tree
 //     registration that bypasses audit/metrics emission).
 //  2. Delegate to handleAgentHook(name). EVERY connector — codex,
 //     claudecode, hermes, cursor, windsurf, geminicli, copilot —
 //     flows through the same handler now. Connector-specific event
 //     emission, dedupe, and evaluation live behind HookProfile runtime
-//     callbacks; shared audit, metrics, trace propagation, W3C
-//     headers, and OTel emissions stay in handleAgentHook.
+//     callbacks; shared audit, generated metrics, trace propagation,
+//     and W3C headers stay in handleAgentHook.
 //
 // Why this matters: prior to this PR, codex and claudecode each
 // owned a full bespoke HTTP handler that re-implemented the entire
@@ -50,9 +50,7 @@ func (a *APIServer) handleUnifiedConnectorHook(name string) http.HandlerFunc {
 	// closure does not pay the lookup cost per request.
 	unified := a.handleAgentHook(name)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if a.otel != nil {
-			a.otel.RecordUnifiedHookDispatch(r.Context(), name)
-		}
+		a.recordUnifiedHookDispatchMetricV8(r.Context(), name)
 		unified(w, r)
 	}
 }

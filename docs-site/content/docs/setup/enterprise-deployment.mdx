@@ -209,13 +209,18 @@ stat -c '%U:%G %a %n' \
 Create `/etc/defenseclaw/config.yaml`:
 
 ```yaml
-config_version: 7
+config_version: 8
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
-audit_db: /var/lib/defenseclaw/audit.db
-judge_bodies_db: /var/lib/defenseclaw/judge_bodies.db
 plugin_dir: /var/lib/defenseclaw/plugins
 policy_dir: /var/lib/defenseclaw/policies
+observability:
+  local:
+    path: /var/lib/defenseclaw/audit.db
+    judge_bodies_path: /var/lib/defenseclaw/judge_bodies.db
+    retention_days: 90
+  defaults:
+    redaction_profile: sensitive
 gateway:
   device_key_file: /var/lib/defenseclaw/device.key
   api_bind: 127.0.0.1

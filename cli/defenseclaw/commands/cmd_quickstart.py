@@ -256,6 +256,7 @@ def _configured_quickstart_connectors(cfg_mod) -> list[str]:
         config_file = cfg_mod.config_path()
         if not os.path.exists(config_file):
             return []
+        cfg_mod.require_v8_config()
         cfg = cfg_mod.load()
     except Exception:
         return []

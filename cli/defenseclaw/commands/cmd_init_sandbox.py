@@ -148,7 +148,7 @@ def sandbox_init_cmd(app: AppContext) -> None:
     """
     import platform
 
-    from defenseclaw.config import config_path, load
+    from defenseclaw.config import config_path, load, require_v8_config
 
     if platform.system() != "Linux":
         click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
@@ -159,7 +159,12 @@ def sandbox_init_cmd(app: AppContext) -> None:
         click.echo("         Run 'defenseclaw init' first.", err=True)
         raise SystemExit(1)
 
+    require_v8_config()
     cfg = app.cfg or load()
+    if getattr(cfg, "_source_config_version", None) != 8:
+        raise click.ClickException(
+            "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+        )
     app.cfg = cfg
 
     # SU-03 (sandbox gate): require openclaw to be a genuinely active connector,
@@ -185,7 +190,7 @@ def sandbox_init_cmd(app: AppContext) -> None:
     from defenseclaw.logger import Logger
 
     store = app.store or Store(cfg.audit_db)
-    logger = app.logger or Logger(store, cfg.splunk)
+    logger = app.logger or Logger.from_config(cfg)
 
     already_configured = cfg.openshell.is_standalone()
     sandbox_ok = False
@@ -677,9 +682,7 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
     try:
         sandbox_pw = _pwd.getpwnam("sandbox")
         result = subprocess.run(
-            _trusted_privileged_argv(
-                "chown", "-R", f"{sandbox_pw.pw_uid}:{sandbox_pw.pw_gid}", "--", canonical_path
-            ),
+            _trusted_privileged_argv("chown", "-R", f"{sandbox_pw.pw_uid}:{sandbox_pw.pw_gid}", "--", canonical_path),
             capture_output=True,
             text=True,
         )
@@ -876,19 +879,13 @@ def _trusted_root_owned_file(path: str, *, allow_symlinks: bool = False) -> str 
             return None
         if not stat.S_ISLNK(info.st_mode):
             break
-        if (
-            not allow_symlinks
-            or info.st_uid != 0
-            or not _trusted_root_owned_directory_chain(os.path.dirname(current))
-        ):
+        if not allow_symlinks or info.st_uid != 0 or not _trusted_root_owned_directory_chain(os.path.dirname(current)):
             return None
         try:
             target = os.readlink(current)
         except OSError:
             return None
-        current = os.path.abspath(
-            target if os.path.isabs(target) else os.path.join(os.path.dirname(current), target)
-        )
+        current = os.path.abspath(target if os.path.isabs(target) else os.path.join(os.path.dirname(current), target))
     else:
         return None
     if os.path.realpath(current) != current or not _trusted_root_owned_directory_chain(os.path.dirname(current)):

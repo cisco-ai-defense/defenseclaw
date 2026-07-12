@@ -11,14 +11,12 @@ keywords:
 
 `~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit the file. The running gateway watches the active `config.yaml`, validates the full file on change, and reconciles supported updates without a full process restart. Some storage identity fields still require a real `defenseclaw-gateway restart`.
 
-The current Go configuration contract is version 7. Older files may omit
-`config_version` or carry a lower value; the gateway migrates those values in
-memory before validation so an interrupted upgrade can still start. Release
-migrations persist changes that must become durable. In particular, the v7
-upgrade converts a legacy flat OTel exporter into one named
-`otel.destinations[]` route without replacing any destinations already in the
-file. See [Upgrade DefenseClaw](/docs/get-started/upgrade) for the backup,
-migration, and verification flow.
+The current strict configuration contract is version 8. Existing supported v7
+files are converted automatically by the ordinary `defenseclaw upgrade`
+transaction. The gateway does not rewrite legacy files at startup and does not
+run v7 and v8 observability formats in parallel. See
+[Upgrade DefenseClaw](/docs/get-started/upgrade) for the backup, atomic migration,
+rollback, and verification flow.
 
 ## On-disk layout
 
@@ -62,10 +60,13 @@ migration, and verification flow.
 
 ## config.yaml schema
 
-The shape below mirrors the dataclasses in `cli/defenseclaw/config.py` and the matching Go structs in `internal/config/`. Every block is optional — `defenseclaw setup *` writes only the fields it needs and the merge keeps your hand-edits intact.
+The shape below shows the normal source-authoring surface. Every block is
+optional, and setup commands preserve comments and unrelated hand edits. Use
+`defenseclaw config reference observability` for the generated all-knobs
+reference instead of copying every default into this file.
 
 ```yaml
-config_version: 7             # current Go schema; older files are migrated safely
+config_version: 8             # strict current schema; upgrade migrates supported v7 files
 
 claw:
   mode: claudecode             # single-connector mode; setup aliases select this with --connector.
@@ -82,73 +83,75 @@ gateway:
   config_reload:
     mode: hot                  # hot | restart; omitted means hot
 
-# Named OTel fan-out destinations. The top-level block owns the master switch,
-# resource identity, sampler, and emission policy; each destination has an
-# independent transport and bounded export queue.
-otel:
-  enabled: true
+# One observability graph owns collection, local history, routing, redaction,
+# sampling, metrics policy, and every optional destination. Defaults collect
+# all logs/traces/metrics, persist collected logs to SQLite, and export every
+# capability of an enabled destination unredacted when send/routes are omitted.
+# Galileo's omitted preset policy is additionally restricted to the generated
+# available galileo-rich-v2 trace-family membership.
+observability:
   resource:
     attributes:
-      service.name: defenseclaw
-  traces:
-    sampler: always_on
-    sampler_arg: "1.0"
+      service.name: defenseclaw-gateway
+      deployment.environment.name: production
+  trace_policy:
+    sampler: parentbased_always_on
+    semantic_profile: defenseclaw-genai-rich-v1
+  metric_policy:
+    export_interval_seconds: 60
+    temporality: delta
+  local:
+    path: ~/.defenseclaw/audit.db
+    judge_bodies_path: ~/.defenseclaw/judge_bodies.db
+    retention_days: 90
+  # Omit defaults/buckets for full-fidelity collection. List only deliberate
+  # overrides; a route cannot resurrect a signal disabled at collection.
+  buckets:
+    diagnostic:
+      collect: {logs: false, traces: false, metrics: false}
+    model.io:
+      redaction_profile: content
+  redaction_profiles:
+    soc:
+      extends: sensitive
+      detectors: [pii, credentials, secrets]
+      field_classes:
+        content: detect
+        evidence: detect
+        path: hash
+        credential: remove
   destinations:
     - name: local-observability
-      preset: local-otlp
-      enabled: true
+      kind: otlp
       protocol: grpc
       endpoint: 127.0.0.1:4317
-      tls: { insecure: true }
-      traces: { enabled: true }
-      metrics: { enabled: true }
-      logs: { enabled: true }
+      network_safety: {allow_private_networks: true}
+      # Omitted send/routes means every bucket and all OTLP capabilities:
+      # logs, traces, and metrics. Profile resolves per bucket; model.io uses
+      # content above and every other omitted bucket inherits none.
     - name: galileo
+      kind: otlp
       preset: galileo
-      enabled: true
-      protocol: http
+      protocol: http/protobuf
       endpoint: https://api.galileo.ai/otel/traces
       batch: { scheduled_delay_ms: 1000 }
       headers:
-        Galileo-API-Key: ${GALILEO_API_KEY}
+        Galileo-API-Key: {env: GALILEO_API_KEY}
         project: defenseclaw
         logstream: production
-      span_filter:
-        operations:
-          - name: chat
-            require_attributes:
-              - gen_ai.operation.name
-              - gen_ai.provider.name
-              - gen_ai.request.model
-              - gen_ai.input.messages
-              - gen_ai.output.messages
-          - name: invoke_agent
-            require_attributes:
-              - gen_ai.operation.name
-              - gen_ai.agent.name
-              - gen_ai.provider.name
-              - openinference.span.kind
-              - gen_ai.input.messages
-              - gen_ai.output.messages
-          - name: execute_tool
-            require_attributes:
-              - gen_ai.operation.name
-              - gen_ai.tool.name
-              - openinference.span.kind
-              - gen_ai.tool.call.arguments
-              - gen_ai.tool.call.result
-              - gen_ai.input.messages
-              - gen_ai.output.messages
-      traces: { enabled: true }
-      metrics: { enabled: false }
-      logs: { enabled: false }
-
-# `defenseclaw upgrade` persists legacy flat `otel.protocol` / `otel.endpoint`
-# and signal transport blocks as a named destination. Runtime loading also
-# performs the same conversion in memory as an interrupted-upgrade fallback.
-# Preview or repair the persisted conversion with:
-# `defenseclaw setup observability migrate-otel [--apply]`.
-# Sampling remains process-wide and cannot differ by destination.
+      # Keep send/routes omitted for the compiler-owned traces-only route whose
+      # event_names equal the generated available Galileo family membership.
+      # Explicit send/routes replace that filter and express operator intent.
+    # More optional destinations join the same graph. Splunk HEC is logs-only.
+    - name: org-splunk
+      kind: splunk_hec
+      endpoint: https://splunk.example.com/services/collector/event
+      token_env: SPLUNK_ACCESS_TOKEN
+      index: defenseclaw
+      send:
+        signals: [logs]
+        buckets: [compliance.activity, security.finding, enforcement.action]
+        redaction_profile: soc
 
 # Top-level LLM block. Written by `defenseclaw setup llm` (and copied
 # into per-component blocks via the `--inherit-from` machinery). The
@@ -268,32 +271,7 @@ guardrail:
     claudecode:
       mode: observe            # only logs; everything else inherits the global default
 
-# Top-level redaction switches; persistent kill-switches are deliberately
-# top-level so multi-tenant operators can audit them without grepping the
-# guardrail block.
-privacy:
-  disable_redaction: false     # true bypasses redaction on every sink
-
-# Audit fan-out is a top-level list; each entry is a kind-tagged sink.
-# `setup observability add <preset>` and `setup splunk` both write here.
-audit_sinks:
-  - name: org-splunk
-    kind: splunk_hec
-    enabled: true
-    endpoint: https://splunk.example.com/services/collector
-    splunk_hec:
-      token_env: SPLUNK_ACCESS_TOKEN
-      index: defenseclaw
-  - name: local-otlp-logs
-    kind: otlp_logs
-    enabled: true
-    endpoint: 127.0.0.1:4317
-    otlp_logs:
-      protocol: grpc
-      insecure: true
-
-# Notifier webhooks (Slack / PagerDuty / Webex / generic). Distinct from
-# audit sinks — these are managed by `defenseclaw setup webhook`.
+# Notifier webhooks remain separate from telemetry routing.
 webhooks:
   - name: oncall-slack
     type: slack
@@ -302,6 +280,68 @@ webhooks:
     secret_env: ""             # optional HMAC for `type: generic`
     min_severity: HIGH
 ```
+
+The source file stays small because omissions compile to explicit effective
+policy. With `observability: {}`, all 14 buckets collect logs, traces, and
+metrics, local SQLite stores all collected logs unredacted, and no remote
+destination exists. Adding an enabled destination without `send` or `routes`
+selects every bucket, every signal supported by that destination, and profile
+`none` (unredacted). A logs-only kind therefore sends all logs; a general OTLP
+kind sends logs, traces, and metrics. The Galileo preset instead generates one
+traces-only `capability-default` route whose event-name selector is restricted to
+the available family membership in its generated compatibility profile.
+
+An explicit `send` block or advanced `routes` block replaces that generated route.
+For Galileo this is operator intent, not an implicit intersection with profile
+membership. Explicit policy can narrow buckets and select a destination-specific
+redaction profile, but any selected nonmember reaches the compatibility projector,
+is rejected as `unsupported_shape`, and is reported through destination failure
+accounting and health. Enumerate reviewed compatible `event_names` in an advanced
+route when exact family control is required; inspect the generated membership and
+effective route with `defenseclaw config show --effective --section observability` and
+`defenseclaw observability plan` before activation.
+
+Multiple destinations are independent fan-out legs. The same collected record
+can go to SQLite, Splunk, local OTLP, and Galileo, with a different selector and
+redaction profile on each leg. An optional destination failure does not disable
+another leg.
+
+For advanced routes, YAML order matters: the first matching route wins for that
+destination and signal, and an unmatched record is not delivered. Selector
+fields are ANDed; values within one field are ORed. Supported selectors are
+`buckets`, `sources`, `connectors`, `actions`, `event_names`, and
+`min_severity`. Collection happens first, so routing cannot recreate a disabled
+signal.
+
+Exactly one generated local SQLite destination is mandatory. It is configured
+only through `observability.local`, not listed under `destinations`, and cannot
+be disabled or filtered. `retention_days: 0` means retain forever and produces a
+capacity warning. `guardrail.retain_judge_bodies` independently controls whether
+new raw judge bodies are captured.
+
+### Destination transport and queue limits
+
+At most 64 destinations may be configured, with names unique after canonical
+normalization. One advanced `routes` list has at most 256 entries. Queue-backed
+destinations default to 2,048 projected records and 67,108,864 bytes; valid bounds
+are `1..65536` records and `4198400..268435456` bytes. JSONL and console accept
+only these queue fields.
+
+Splunk HEC, HTTP JSONL, and OTLP additionally default to batches of at most 512
+records/8,388,608 fully encoded bytes with a 5,000 ms scheduled delay and a
+10,000 ms per-attempt timeout. Batch count is `1..8192` and cannot exceed queue
+count; batch bytes are `4263936..67108864`; delay is `1..600000` ms. Galileo's
+omitted preset delay resolves to 1,000 ms. Prometheus is pull-based and rejects
+`batch`.
+
+If queue count or bytes would overflow, the newest attempted enqueue is dropped;
+older FIFO work, mandatory SQLite, and sibling destinations remain intact.
+Transient or ambiguous acknowledgements retry the exact immutable projection and
+record ID. Remote delivery is not exactly once because an acknowledgement can be
+lost after receipt. The effective plan shows all resolved adapter/preset defaults.
+
+See [Observability](/docs/observability) for the bucket catalog, capability
+matrix, route examples, and redaction precedence.
 
 `gateway.config_reload.mode` controls what happens after a valid `config.yaml`
 change:
@@ -401,7 +441,7 @@ A handful of high-traffic env vars are inlined below. The full inventory — eve
   type={{
     "DEFENSECLAW_HOME": {
       type: "path",
-      description: "Override the data directory (default ~/.defenseclaw). Affects config.yaml, .env, audit.db, gateway.jsonl, hook scripts, and the registries cache.",
+      description: "Override the data directory (default ~/.defenseclaw). Affects config.yaml, .env, audit.db, hook scripts, and the registries cache; gateway.jsonl exists there only when an optional kind: jsonl destination explicitly uses that path.",
     },
     "DEFENSECLAW_LLM_KEY": {
       type: "string",
@@ -419,13 +459,9 @@ A handful of high-traffic env vars are inlined below. The full inventory — eve
       type: "open|closed",
       description: "Per-shell override of guardrail.hook_fail_mode for response-layer failures. Read by every connector hook script.",
     },
-    "DEFENSECLAW_DISABLE_REDACTION": {
-      type: "0|1",
-      description: "When 1, every persistent sink (audit DB, OTel logs, webhooks, Splunk HEC) emits raw values. The strongest opt-out; mirrors privacy.disable_redaction in config.",
-    },
     "SPLUNK_ACCESS_TOKEN": {
       type: "string",
-      description: "Splunk HEC token. Default consumer for any audit_sinks entry whose splunk_hec.token_env points at it.",
+      description: "Splunk HEC token. Referenced by an observability.destinations[] splunk_hec token_env field.",
     },
   }}
 />

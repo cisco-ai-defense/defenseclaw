@@ -152,7 +152,9 @@ HARNESS_EXIT_CODE=4
 
 dc_upgrade_copy_artifacts() {
   local name
-  for name in gateway.log gateway.jsonl watchdog.log; do
+  # The cleanup trap stops the gateway first, so these SQLite files are
+  # quiescent and can be copied byte-for-byte as canonical v8 evidence.
+  for name in gateway.log audit.db judge_bodies.db watchdog.log; do
     if [ -f "${DEFENSECLAW_HOME}/${name}" ]; then
       /bin/cp -p "${DEFENSECLAW_HOME}/${name}" "${ARTIFACTS_DIR}/gateway/${name}" 2>/dev/null || true
     fi
@@ -211,10 +213,10 @@ dc_upgrade_cleanup() {
   local original_rc=$?
   trap - EXIT INT TERM HUP
   set +e
-  dc_upgrade_copy_artifacts
   if [ "${GATEWAY_STARTED}" = "1" ]; then
     PATH="${ORIGINAL_PATH}" defenseclaw-gateway stop >/dev/null 2>&1 || true
   fi
+  dc_upgrade_copy_artifacts
   if [ "${SNAPSHOT_READY}" = "1" ]; then
     if ! dc_persist_restore_files; then
       RESTORE_OK=0

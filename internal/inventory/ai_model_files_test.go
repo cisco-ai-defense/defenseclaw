@@ -473,7 +473,7 @@ func TestModelFileLifecycleCarriesSignalsAcrossIncompleteRoot(t *testing.T) {
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
 		Enabled: true, Mode: "enhanced", HomeDir: home, ScanRoots: []string{root},
 		DataDir: data, MaxFilesPerScan: 1, MaxFileBytes: 64 << 10,
-	}, nil, nil, nil)
+	}, nil)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -526,7 +526,7 @@ func TestModelFileLifecycleUsesCycleWideShardAggregate(t *testing.T) {
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
 		Enabled: true, Mode: "enhanced", HomeDir: t.TempDir(), ScanRoots: []string{root},
 		DataDir: t.TempDir(), MaxFilesPerScan: 2, MaxFileBytes: 64 << 10,
-	}, nil, nil, nil)
+	}, nil)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {

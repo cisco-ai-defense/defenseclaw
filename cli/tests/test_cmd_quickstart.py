@@ -110,6 +110,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
         with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write(
+                "config_version: 8\n"
+                "observability: {}\n"
                 "claw:\n"
                 "  mode: codex\n"
                 "guardrail:\n"
@@ -176,7 +178,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         self.assertEqual(cfg["guardrail"]["connector"], "hermes")
-        self.assertEqual(cfg["guardrail"]["mode"], "observe")
+        self.assertEqual(cfg["guardrail"].get("mode", "observe"), "observe")
 
     def test_help_lists_fail_mode_flag(self):
         # Quickstart is the headless path most likely to be wired
@@ -200,7 +202,12 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
-        self.assertEqual(cfg["guardrail"]["hook_fail_mode"], "closed")
+        from defenseclaw.config import _normalize_hook_fail_mode
+
+        self.assertEqual(
+            _normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "")),
+            "closed",
+        )
 
     def test_omitting_fail_mode_resolves_to_closed(self):
         # Closes when the operator omits ``--fail-mode``
@@ -287,6 +294,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_multiple_configured_connectors_error_even_with_picked_hint(self):
         with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write(
+                "config_version: 8\n"
+                "observability: {}\n"
                 "claw:\n"
                 "  mode: codex\n"
                 "guardrail:\n"

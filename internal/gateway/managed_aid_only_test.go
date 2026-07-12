@@ -11,13 +11,27 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -29,12 +43,12 @@ type stubAIDInspector struct {
 	calls   int
 }
 
-func (s *stubAIDInspector) Inspect(_ []ChatMessage) *ScanVerdict {
+func (s *stubAIDInspector) Inspect(_ context.Context, _ []ChatMessage) *ScanVerdict {
 	s.calls++
 	return s.verdict
 }
 
-func (s *stubAIDInspector) SetTelemetry(_ *telemetry.Provider) {}
+func (s *stubAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
 
 // blockVerdict is a convenience AID block verdict. CRITICAL severity is
 // used so the proxy prompt-surface UX contract (clampPromptDirectionVerdict,
@@ -198,58 +212,206 @@ func TestHookManagedAIDOnly_MessageContentFailOpen(t *testing.T) {
 
 // --- Fail-open observability ------------------------------------------------
 
-// managedFailOpenSignal scans captured events for the managed AID fail-open
-// diagnostic and returns its distinct reason + severity_hint labels. The
-// signal rides a diagnostic (not an error) so its Fields survive the managed
-// sink redaction that would otherwise erase an error Message/Cause.
-func managedFailOpenSignal(events []gatewaylog.Event) (reason, severity string, ok bool) {
-	for _, e := range events {
-		if e.EventType != gatewaylog.EventDiagnostic || e.Diagnostic == nil ||
-			e.Diagnostic.Component != managedAIDFailOpenComponent {
-			continue
+type managedAIDFailOpenCapture struct {
+	lifecycleV8Runtime
+	records []observability.Record
+	errors  []error
+}
+
+type managedAIDFailOpenDelivery struct {
+	bytes    []byte
+	identity delivery.RoutingIdentity
+}
+
+type managedAIDFailOpenUnavailableAdapter struct {
+	delivered chan managedAIDFailOpenDelivery
+}
+
+func (*managedAIDFailOpenUnavailableAdapter) EncodedSize(sizes []int) (int, bool) {
+	return delivery.DelimitedEncodedSize(sizes, 0, 1, 0)
+}
+
+func (adapter *managedAIDFailOpenUnavailableAdapter) Deliver(
+	_ context.Context,
+	batch delivery.Batch,
+) delivery.DeliveryResult {
+	for _, item := range batch.Items() {
+		adapter.delivered <- managedAIDFailOpenDelivery{
+			bytes: item.Bytes(), identity: item.Identity(),
 		}
-		r, _ := e.Diagnostic.Fields["reason"].(string)
-		s, _ := e.Diagnostic.Fields["severity_hint"].(string)
-		return r, s, true
 	}
-	return "", "", false
+	// Model an unavailable managed endpoint after proving the immutable work
+	// reached its generated dispatcher. Optional health cannot undo SQLite.
+	return delivery.DeliveryResult{Outcome: delivery.OutcomeAuthentication}
+}
+
+type managedAIDFailOpenAdapterFactory struct {
+	adapter *managedAIDFailOpenUnavailableAdapter
+}
+
+func (factory *managedAIDFailOpenAdapterFactory) PrepareDestination(
+	_ context.Context,
+	destination config.ObservabilityV8EffectiveDestination,
+	_ telemetry.V8ResourceContext,
+) (delivery.Adapter, observabilityruntime.DestinationAdapterCleanup, error) {
+	if factory == nil || factory.adapter == nil ||
+		destination.Name != config.ObservabilityV8ManagedAIDDestinationName {
+		return nil, nil, fmt.Errorf("unexpected managed AID destination")
+	}
+	return factory.adapter, func(context.Context) error { return nil }, nil
+}
+
+func newManagedAIDFailOpenRuntime(
+	t *testing.T,
+) (*observabilityruntime.Runtime, string, *managedAIDFailOpenUnavailableAdapter) {
+	t.Helper()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "audit.db")
+	store, err := audit.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	disabled := false
+	retentionDays := 0
+	base, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
+		Local: config.ObservabilityV8LocalSource{
+			Path: path, JudgeBodiesPath: filepath.Join(directory, "judge-bodies.db"),
+			RetentionDays: &retentionDays,
+		},
+		Buckets: map[observability.Bucket]config.ObservabilityV8BucketPolicySource{
+			observability.BucketPlatformHealth: {
+				Collect: config.ObservabilityV8CollectSource{Logs: &disabled},
+			},
+			observability.BucketDiagnostic: {
+				Collect: config.ObservabilityV8CollectSource{Logs: &disabled},
+			},
+			observability.BucketAIDiscovery: {
+				Collect: config.ObservabilityV8CollectSource{Logs: &disabled},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := config.WithObservabilityV8ManagedAIDDestination(
+		base,
+		config.ObservabilityV8ManagedAIDOptions{
+			DeploymentMode: "managed_enterprise", Endpoint: "https://aid.example.test",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := redaction.NewEngine(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failureIDs atomic.Uint64
+	failureBuilder, err := observability.NewRecordBuilder(
+		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
+		observability.OccurrenceIDGeneratorFunc(func() (string, error) {
+			return fmt.Sprintf("managed-aid-failure-%d", failureIDs.Add(1)), nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reaper, err := audit.NewRetentionReaper(store, nil, 0, audit.RetentionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retention, err := observabilityruntime.NewRetentionController(
+		reaper, observabilityruntime.RetentionControllerOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &managedAIDFailOpenUnavailableAdapter{
+		delivered: make(chan managedAIDFailOpenDelivery, 4),
+	}
+	runtime, err := observabilityruntime.New(
+		t.Context(),
+		runtimegraph.ConfigFromPlan(plan, false),
+		observabilityruntime.Options{
+			Store: store, Engine: engine, RecordBuilder: failureBuilder,
+			Reporter: &discardSidecarGraphReporter{}, RetentionController: retention,
+			DestinationAdapterFactory: &managedAIDFailOpenAdapterFactory{adapter: adapter},
+			TelemetryProviderFactory: telemetry.NewV8ProviderFactory(telemetry.V8ProviderOptions{
+				Version: "managed-aid-test", Environment: "test", ServiceInstanceID: "managed-aid-test",
+				DefenseClawInstanceID: "managed-aid-test",
+			}),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := runtime.Close(ctx); closeErr != nil {
+			t.Errorf("close managed AID runtime: %v", closeErr)
+		}
+	})
+	return runtime, path, adapter
+}
+
+func (capture *managedAIDFailOpenCapture) Emit(
+	_ context.Context,
+	_ router.Metadata,
+	build observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	record, err := build(observabilityruntime.EmitContext{}, router.AdmissionOrdinary)
+	if err != nil {
+		capture.errors = append(capture.errors, err)
+		return pipeline.LocalLogOutcome{}, err
+	}
+	capture.records = append(capture.records, record)
+	return pipeline.LocalLogOutcome{}, nil
 }
 
 func TestManagedAIDFailOpen_EmitsDistinctReasons(t *testing.T) {
 	cases := []struct {
 		name         string
-		inspector    Inspector
+		inspector    *stubAIDInspector
 		msgs         []ChatMessage
+		wantCalls    int
 		wantReason   string
-		wantSeverity string
+		wantSeverity observability.Severity
 	}{
 		{
 			name:         "unwired inspector",
-			inspector:    nil,
 			msgs:         []ChatMessage{{Role: "user", Content: "hello"}},
+			wantCalls:    0,
 			wantReason:   aidFailOpenUnwired,
-			wantSeverity: "high",
+			wantSeverity: observability.SeverityHigh,
 		},
 		{
 			name:         "no content to inspect",
 			inspector:    &stubAIDInspector{verdict: blockVerdict()},
 			msgs:         nil,
+			wantCalls:    0,
 			wantReason:   aidFailOpenNoContent,
-			wantSeverity: "info",
+			wantSeverity: observability.SeverityInfo,
 		},
 		{
 			name:         "AID returns no verdict",
 			inspector:    &stubAIDInspector{verdict: nil},
 			msgs:         []ChatMessage{{Role: "user", Content: "hello"}},
+			wantCalls:    1,
 			wantReason:   aidFailOpenUnavailable,
-			wantSeverity: "high",
+			wantSeverity: observability.SeverityHigh,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			events := withCapturedEvents(t)
+			capture := &managedAIDFailOpenCapture{}
 			g := NewGuardrailInspector("both", nil, nil, "")
 			g.SetManagedMode(true)
+			configureGuardrailInspectorObservabilityV8(g, capture, nil)
 			if tc.inspector != nil {
 				g.SetCiscoInspector(tc.inspector)
 			}
@@ -258,17 +420,181 @@ func TestManagedAIDFailOpen_EmitsDistinctReasons(t *testing.T) {
 			if v == nil || v.Action != "allow" {
 				t.Fatalf("want fail-open allow, got %+v", v)
 			}
-			reason, severity, ok := managedFailOpenSignal(*events)
-			if !ok {
-				t.Fatalf("no managed AID fail-open signal emitted; events=%+v", *events)
+			if tc.inspector != nil && tc.inspector.calls != tc.wantCalls {
+				t.Fatalf("remote calls = %d, want %d", tc.inspector.calls, tc.wantCalls)
 			}
-			if reason != tc.wantReason {
-				t.Fatalf("fail-open reason = %q, want %q", reason, tc.wantReason)
+			if len(capture.errors) != 0 || len(capture.records) != 1 {
+				t.Fatalf("canonical fail-open records=%d errors=%v, want one", len(capture.records), capture.errors)
 			}
-			if severity != tc.wantSeverity {
-				t.Fatalf("fail-open severity_hint = %q, want %q", severity, tc.wantSeverity)
+			record := capture.records[0]
+			severity, present := record.Severity()
+			if !present || severity != tc.wantSeverity {
+				t.Fatalf("canonical severity=(%q,%t), want %q", severity, present, tc.wantSeverity)
+			}
+			if record.Phase() != "prompt" {
+				t.Fatalf("canonical direction phase=%q, want prompt", record.Phase())
+			}
+			availability := managedAIDFailOpenAvailabilityFailure(tc.wantReason)
+			wantBucket := observability.BucketDiagnostic
+			wantEvent := observability.EventName(observability.TelemetryEventDiagnosticMessage)
+			if availability {
+				wantBucket = observability.BucketPlatformHealth
+				wantEvent = observability.EventName(observability.TelemetryEventSubsystemDegraded)
+			}
+			if record.Bucket() != wantBucket || record.EventName() != wantEvent ||
+				record.Mandatory() != availability {
+				t.Fatalf(
+					"canonical identity=%s/%s mandatory=%t, want %s/%s mandatory=%t",
+					record.Bucket(), record.EventName(), record.Mandatory(), wantBucket, wantEvent, availability,
+				)
+			}
+			body, present := record.Body()
+			if !present {
+				t.Fatal("canonical fail-open record has no body")
+			}
+			bodyObject, err := body.Object()
+			if err != nil {
+				t.Fatal(err)
+			}
+			field := "defenseclaw.diagnostic.component"
+			if availability {
+				field = "defenseclaw.health.subsystem"
+			}
+			component, _ := bodyObject[field].(string)
+			if component != managedAIDFailOpenComponent+"."+tc.wantReason {
+				t.Fatalf("canonical %s=%q, want reason %q", field, component, tc.wantReason)
 			}
 		})
+	}
+}
+
+func TestManagedAIDFailOpenAvailabilityPersistsAndRoutesWhenSourceLogsDisabled(t *testing.T) {
+	previousLogWriter := defaultLogWriter
+	var stderr bytes.Buffer
+	defaultLogWriter = &stderr
+	t.Cleanup(func() { defaultLogWriter = previousLogWriter })
+
+	runtime, path, adapter := newManagedAIDFailOpenRuntime(t)
+	guardrail := NewGuardrailInspector("both", nil, nil, "")
+	guardrail.SetManagedMode(true)
+	configureGuardrailInspectorObservabilityV8(guardrail, runtime, nil)
+
+	cases := []struct {
+		reason    string
+		direction string
+		content   string
+		wire      func()
+	}{
+		{
+			reason: aidFailOpenUnwired, direction: "prompt", content: "private-canary-unwired",
+			wire: func() { guardrail.SetCiscoInspector(nil) },
+		},
+		{
+			reason: aidFailOpenUnavailable, direction: "completion", content: "private-canary-unavailable",
+			wire: func() { guardrail.SetCiscoInspector(&stubAIDInspector{verdict: nil}) },
+		},
+	}
+	for _, tc := range cases {
+		tc.wire()
+		verdict := guardrail.inspectManagedAIDOnly(
+			context.Background(), tc.direction,
+			[]ChatMessage{{Role: "user", Content: tc.content}},
+		)
+		if verdict == nil || verdict.Action != "allow" {
+			t.Fatalf("%s fail-open verdict = %+v, want allow", tc.reason, verdict)
+		}
+	}
+
+	deliveries := make(map[string]managedAIDFailOpenDelivery, len(cases))
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	for len(deliveries) < len(cases) {
+		select {
+		case delivered := <-adapter.delivered:
+			identity := delivered.identity
+			if identity.Bucket != string(observability.BucketPlatformHealth) ||
+				identity.Signal != string(observability.SignalLogs) ||
+				identity.EventName != observability.TelemetryEventSubsystemDegraded {
+				t.Fatalf("managed delivery identity = %+v", identity)
+			}
+			encoded := string(delivered.bytes)
+			matched := ""
+			for _, tc := range cases {
+				if strings.Contains(encoded, `"defenseclaw.health.subsystem":"`+managedAIDFailOpenComponent+"."+tc.reason+`"`) {
+					matched = tc.reason
+					if !strings.Contains(encoded, `"defenseclaw.schema.error_code":"`+tc.reason+`"`) ||
+						!strings.Contains(encoded, `"phase":"`+tc.direction+`"`) ||
+						!strings.Contains(encoded, `"severity":"HIGH"`) ||
+						!strings.Contains(encoded, `"action":"allow"`) {
+						t.Fatalf("managed delivery lost canonical fields for %s: %s", tc.reason, encoded)
+					}
+				}
+				if strings.Contains(encoded, tc.content) {
+					t.Fatalf("managed delivery leaked request content %q", tc.content)
+				}
+			}
+			if matched == "" {
+				t.Fatalf("managed delivery had no closed-enum fail-open reason: %s", encoded)
+			}
+			deliveries[matched] = delivered
+		case <-deadline.C:
+			t.Fatalf("managed deliveries = %d, want %d", len(deliveries), len(cases))
+		}
+	}
+
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query(`
+		SELECT action, severity, bucket, event_name, mandatory, projected_record_json
+		FROM audit_events
+		WHERE bucket = ? AND event_name = ?
+		ORDER BY timestamp, id`,
+		string(observability.BucketPlatformHealth), observability.TelemetryEventSubsystemDegraded,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	persisted := make(map[string]bool, len(cases))
+	for rows.Next() {
+		var action, severity, bucket, eventName, projected string
+		var mandatory int
+		if err := rows.Scan(&action, &severity, &bucket, &eventName, &mandatory, &projected); err != nil {
+			t.Fatal(err)
+		}
+		if action != "allow" || severity != string(observability.SeverityHigh) || mandatory != 1 ||
+			bucket != string(observability.BucketPlatformHealth) ||
+			eventName != observability.TelemetryEventSubsystemDegraded {
+			t.Fatalf(
+				"persisted fail-open identity = action:%s severity:%s %s/%s mandatory:%d",
+				action, severity, bucket, eventName, mandatory,
+			)
+		}
+		for _, tc := range cases {
+			if !strings.Contains(projected, `"defenseclaw.health.subsystem":"`+managedAIDFailOpenComponent+"."+tc.reason+`"`) {
+				continue
+			}
+			if !strings.Contains(projected, `"phase":"`+tc.direction+`"`) ||
+				!strings.Contains(projected, `"defenseclaw.schema.error_code":"`+tc.reason+`"`) {
+				t.Fatalf("persisted projection lost canonical fields for %s: %s", tc.reason, projected)
+			}
+			persisted[tc.reason] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != len(cases) {
+		t.Fatalf("persisted fail-open reasons = %v, want both availability branches", persisted)
+	}
+	for _, tc := range cases {
+		want := "managed AID fail-open reason=" + tc.reason + " direction=" + tc.direction
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr fallback missing %q: %s", want, stderr.String())
+		}
 	}
 }
 

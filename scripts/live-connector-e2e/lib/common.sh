@@ -17,7 +17,7 @@
 # script (~/.defenseclaw/hooks/<connector>-hook.sh). On native Windows the
 # agent invokes `defenseclaw-gateway hook --connector <name> --event <ev>`
 # (PR #308). Both forward the stdin event payload to the local gateway, so
-# every assertion below works against ~/.defenseclaw/gateway.jsonl + audit.db
+# every assertion below works against canonical ~/.defenseclaw/audit.db history
 # regardless of OS.
 
 # ---------------------------------------------------------------------------
@@ -30,10 +30,9 @@ DC_E2E_ROOT="$(cd "${DC_E2E_LIB_DIR}/.." && pwd)"
 DC_E2E_REPO_ROOT="$(cd "${DC_E2E_ROOT}/../.." && pwd)"
 DC_E2E_GOLDEN_DIR="${DC_E2E_ROOT}/golden"
 
-# DefenseClaw home (where the gateway writes gateway.jsonl / audit.db and
+# DefenseClaw home (where the gateway writes canonical SQLite history and
 # where `defenseclaw setup` installs the hook scripts + .token).
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-DC_GATEWAY_JSONL="${DEFENSECLAW_HOME}/gateway.jsonl"
 DC_AUDIT_DB="${DEFENSECLAW_HOME}/audit.db"
 
 # Results sink. Every per-event outcome is appended here as one JSON object
@@ -108,7 +107,7 @@ dc_wait_for_gateway() {
 # the e2e.yml failure path inspects.
 dc_dump_gateway_logs() {
   local f
-  for f in gateway.log gateway.jsonl watchdog.log; do
+  for f in gateway.log watchdog.log; do
     if [ -f "${DEFENSECLAW_HOME}/${f}" ]; then
       dc_log "--- ${f} (tail) ---"
       tail -n 80 "${DEFENSECLAW_HOME}/${f}" >&2 2>/dev/null || true
@@ -116,15 +115,27 @@ dc_dump_gateway_logs() {
   done
 }
 
-# dc_gateway_jsonl_count — number of JSONL events currently on disk. Used to
-# bound assertions to "events emitted since the probe" rather than the whole
-# file.
-dc_gateway_jsonl_count() {
-  if [ -f "${DC_GATEWAY_JSONL}" ]; then
-    wc -l < "${DC_GATEWAY_JSONL}" | tr -d ' '
-  else
-    printf '0'
-  fi
+# dc_event_cursor — greatest canonical SQLite audit row id currently on disk.
+# Used to bound assertions to "events emitted since the probe" rather than the
+# whole history. A missing/not-yet-migrated store has cursor zero.
+dc_event_cursor() {
+  [ -f "${DC_AUDIT_DB}" ] || { printf '0'; return 0; }
+  python3 - "${DC_AUDIT_DB}" <<'PY'
+import sqlite3
+import sys
+
+try:
+    connection = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=2)
+    value = connection.execute("SELECT COALESCE(MAX(rowid), 0) FROM audit_events").fetchone()[0]
+except (OSError, sqlite3.Error, TypeError):
+    value = 0
+finally:
+    try:
+        connection.close()
+    except (NameError, sqlite3.Error):
+        pass
+print(int(value or 0))
+PY
 }
 
 # ---------------------------------------------------------------------------
@@ -206,7 +217,7 @@ PY
 # Log staging (artifact upload on failure)
 # ---------------------------------------------------------------------------
 
-# dc_stage_logs <stage_dir> — copy gateway logs + the results JSONL into a
+# dc_stage_logs <stage_dir> — copy gateway logs + the result records into a
 # directory the workflow uploads with actions/upload-artifact. Mirrors the
 # "Stage DefenseClaw logs" step in e2e.yml.
 dc_stage_logs() {
@@ -218,6 +229,23 @@ dc_stage_logs() {
       find "${DEFENSECLAW_HOME}" -maxdepth 2 -type f -name "${pat}" \
         -exec cp {} "${stage}/" \; 2>/dev/null || true
     done
+    # A file copy can race WAL commits. Use SQLite's online backup API so a
+    # failed connector cell uploads one internally consistent canonical
+    # history snapshot for diagnosis on every OS.
+    if [ -f "${DC_AUDIT_DB}" ]; then
+      python3 - "${DC_AUDIT_DB}" "${stage}/audit.db" <<'PY' || true
+import sqlite3
+import sys
+
+source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=2)
+destination = sqlite3.connect(sys.argv[2])
+try:
+    source.backup(destination)
+finally:
+    destination.close()
+    source.close()
+PY
+    fi
   fi
   cp "${DC_E2E_RESULTS}" "${stage}/" 2>/dev/null || true
   dc_log "staged logs in ${stage}"

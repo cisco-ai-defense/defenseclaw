@@ -19,6 +19,7 @@ package connector
 import (
 	"encoding/json"
 	"net/url"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -54,9 +55,13 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
 
-	block := buildCodexOtelBlock(opts)
-	if len(block) == 0 {
-		t.Fatal("buildCodexOtelBlock returned empty map; spec validation likely failed")
+	pathToken, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+	if err != nil || pathToken == "" {
+		t.Fatalf("mint scoped Codex OTLP token: present=%v err=%v", pathToken != "", err)
+	}
+	block, err := buildCodexOtelBlockWithPathToken(opts, pathToken)
+	if err != nil {
+		t.Fatalf("buildCodexOtelBlockWithPathToken: %v", err)
 	}
 
 	for _, want := range []string{"log_user_prompt", "exporter", "trace_exporter", "metrics_exporter"} {
@@ -99,11 +104,22 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		}
 		ep, _ := otlp["endpoint"].(string)
 		if !strings.HasPrefix(ep, "http://"+opts.APIAddr) {
-			t.Errorf("%s.otlp-http.endpoint = %q; want http://%s prefix", signal, ep, opts.APIAddr)
+			t.Errorf("%s.otlp-http.endpoint does not use configured API address", signal)
+		}
+		wantSignal := map[string]string{
+			"exporter":         "logs",
+			"trace_exporter":   "traces",
+			"metrics_exporter": "metrics",
+		}[signal]
+		if !strings.HasSuffix(ep, "/otlp/codex/"+pathToken+"/v1/"+wantSignal) {
+			t.Errorf("%s.otlp-http.endpoint does not use scoped Codex %s route", signal, wantSignal)
 		}
 		hdrs := toStringMap(otlp["headers"])
-		if hdrs["x-defenseclaw-token"] != opts.APIToken {
-			t.Errorf("%s.otlp-http.headers[x-defenseclaw-token] = %q; want %q", signal, hdrs["x-defenseclaw-token"], opts.APIToken)
+		if _, present := hdrs["x-defenseclaw-token"]; present {
+			t.Errorf("%s.otlp-http.headers leaked a DefenseClaw credential", signal)
+		}
+		if _, present := hdrs["authorization"]; present {
+			t.Errorf("%s.otlp-http.headers leaked an Authorization credential", signal)
 		}
 		if hdrs["x-defenseclaw-source"] != "codex" {
 			t.Errorf("%s.otlp-http.headers[x-defenseclaw-source] = %q; want \"codex\"", signal, hdrs["x-defenseclaw-source"])
@@ -111,6 +127,53 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		if hdrs["x-defenseclaw-client"] == "" {
 			t.Errorf("%s.otlp-http.headers[x-defenseclaw-client] missing (gateway CSRF gate would reject)", signal)
 		}
+	}
+}
+
+func TestCodexHookProfile_IsPureAndLeavesScopedTokenUnresolved(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-credential"}
+	tokenPath, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("OTLPPathTokenFilePath: %v", err)
+	}
+
+	profile := NewCodexConnector().HookProfile(opts)
+	if profile.NativeOTLP == nil {
+		t.Fatal("Codex HookProfile omitted NativeOTLP metadata")
+	}
+	if profile.NativeOTLP.PathToken != "" || profile.NativeOTLP.PathScope != "" {
+		t.Fatal("Codex HookProfile resolved setup-owned path-token state")
+	}
+	if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
+		t.Fatal("Codex HookProfile touched the scoped token file")
+	}
+
+	// Rendering with an explicitly injected token is also pure: setup owns
+	// minting, while this function only maps supplied state into TOML.
+	if _, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("buildCodexOtelBlockWithPathToken: %v", err)
+	}
+	if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
+		t.Fatal("Codex OTLP renderer touched the scoped token file")
+	}
+
+	existingDir := t.TempDir()
+	seeded, err := EnsureOTLPPathToken(existingDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("seed existing scoped token: %v", err)
+	}
+	existingProfile := NewCodexConnector().HookProfile(SetupOpts{
+		DataDir: existingDir,
+		APIAddr: opts.APIAddr,
+	})
+	if existingProfile.NativeOTLP.PathToken != "" || existingProfile.NativeOTLP.PathScope != "" {
+		t.Fatal("Codex HookProfile loaded an existing setup-owned token")
+	}
+	retained, err := LoadOTLPPathToken(existingDir, OTLPScopeCodex)
+	if err != nil || retained != seeded {
+		t.Fatalf("Codex HookProfile changed existing token state: retained=%v err=%v", retained == seeded, err)
 	}
 }
 

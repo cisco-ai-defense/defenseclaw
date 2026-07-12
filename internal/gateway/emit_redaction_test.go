@@ -9,125 +9,111 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
-// rawReason is a verdict reason whose free-form literal the tokenizer
-// scrubs by default (the "found:" rule-id prefix is preserved, the
-// trailing secret-shaped literal is redacted).
+// rawReason is a verdict reason whose free-form literal the tokenizer scrubs
+// by default (the "found:" rule-id prefix is preserved while the trailing
+// secret-shaped literal is redacted).
 const rawReason = "found: leakedpassword1234567890"
 
-func lastVerdictReason(events []gatewaylog.Event) (string, bool) {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].EventType == gatewaylog.EventVerdict && events[i].Verdict != nil {
-			return events[i].Verdict.Reason, true
-		}
-	}
-	return "", false
+func projectReasonFromContext(ctx context.Context) string {
+	return redaction.ReasonForSink(rawReason, redaction.SinkPolicyFromContext(ctx))
 }
 
-func emitTestVerdict(ctx context.Context, directive *bool) {
-	emitEvent(ctx, gatewaylog.Event{
-		EventType:        gatewaylog.EventVerdict,
-		Severity:         gatewaylog.SeverityHigh,
-		Direction:        gatewaylog.DirectionPrompt,
-		RedactionEnabled: directive,
-		Verdict: &gatewaylog.VerdictPayload{
-			Stage:  gatewaylog.StageCiscoAID,
-			Action: "block",
-			Reason: rawReason,
-		},
-	})
-}
-
-func TestEmitEvent_CloudDirectiveControlsReason(t *testing.T) {
-	// Baseline redacted form (managed off, DisableAll off) so the test
-	// asserts against the real redactor output rather than a guess.
-	// DisableAll() also honors the DEFENSECLAW_DISABLE_REDACTION env var,
-	// so clear it too — otherwise a CI environment with it set would make
-	// baselineRedacted raw and fail before the feature is exercised.
+func TestManagedRedactionDecision_PropagatesCanonicalSinkPolicy(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DISABLE_REDACTION", "")
+	t.Cleanup(func() {
+		SetManagedEnterpriseActive(false)
+		redaction.SetDisableAll(false)
+	})
+
 	redaction.SetDisableAll(false)
 	baselineRedacted := redaction.ForSinkReason(rawReason)
 	if baselineRedacted == rawReason {
 		t.Fatalf("test fixture rawReason did not redact by default: %q", rawReason)
 	}
 
-	t.Run("managed + directive=false emits raw", func(t *testing.T) {
-		events := withCapturedEvents(t)
+	t.Run("managed directive false selects raw", func(t *testing.T) {
 		SetManagedEnterpriseActive(true)
-		t.Cleanup(func() { SetManagedEnterpriseActive(false) })
-		redaction.SetDisableAll(false)
-		t.Cleanup(func() { redaction.SetDisableAll(false) })
-
 		no := false
-		emitTestVerdict(withRedactionDecision(context.Background(), &no), &no)
-
-		got, ok := lastVerdictReason(*events)
-		if !ok {
-			t.Fatal("no verdict event captured")
+		ctx := withRedactionDecision(context.Background(), &no)
+		if policy := redaction.SinkPolicyFromContext(ctx); policy != redaction.SinkPolicyRaw {
+			t.Fatalf("policy = %v, want raw", policy)
 		}
-		if got != rawReason {
-			t.Fatalf("directive=false: got %q, want raw %q", got, rawReason)
+		if got := projectReasonFromContext(ctx); got != rawReason {
+			t.Fatalf("projected reason = %q, want raw %q", got, rawReason)
 		}
 	})
 
-	t.Run("managed + directive=true force-redacts even under DisableAll", func(t *testing.T) {
-		events := withCapturedEvents(t)
+	t.Run("managed directive true forces redaction", func(t *testing.T) {
 		SetManagedEnterpriseActive(true)
-		t.Cleanup(func() { SetManagedEnterpriseActive(false) })
 		redaction.SetDisableAll(true)
-		t.Cleanup(func() { redaction.SetDisableAll(false) })
-
 		yes := true
-		emitTestVerdict(withRedactionDecision(context.Background(), &yes), &yes)
-
-		got, ok := lastVerdictReason(*events)
-		if !ok {
-			t.Fatal("no verdict event captured")
+		ctx := withRedactionDecision(context.Background(), &yes)
+		if policy := redaction.SinkPolicyFromContext(ctx); policy != redaction.SinkPolicyRedact {
+			t.Fatalf("policy = %v, want redact", policy)
 		}
+		got := projectReasonFromContext(ctx)
 		if got == rawReason || !strings.Contains(got, "<redacted") {
-			t.Fatalf("directive=true under DisableAll: got %q, want redacted", got)
+			t.Fatalf("projected reason = %q, want forced redaction", got)
 		}
+		redaction.SetDisableAll(false)
 	})
 
-	t.Run("non-managed ignores directive and honors global config", func(t *testing.T) {
-		events := withCapturedEvents(t)
+	t.Run("non-managed ignores cloud directive", func(t *testing.T) {
 		SetManagedEnterpriseActive(false)
 		redaction.SetDisableAll(false)
-		t.Cleanup(func() { redaction.SetDisableAll(false) })
-
-		// Even with a directive=false, non-managed must NOT go raw.
 		no := false
-		emitTestVerdict(withRedactionDecision(context.Background(), &no), &no)
-
-		got, ok := lastVerdictReason(*events)
-		if !ok {
-			t.Fatal("no verdict event captured")
+		ctx := withRedactionDecision(context.Background(), &no)
+		if policy := redaction.SinkPolicyFromContext(ctx); policy != redaction.SinkPolicyDefault {
+			t.Fatalf("policy = %v, want default", policy)
 		}
-		if got != baselineRedacted {
-			t.Fatalf("non-managed: got %q, want baseline redacted %q", got, baselineRedacted)
+		if got := projectReasonFromContext(ctx); got != baselineRedacted {
+			t.Fatalf("projected reason = %q, want %q", got, baselineRedacted)
 		}
 	})
 
-	t.Run("managed + no directive fails closed (redacts even under DisableAll)", func(t *testing.T) {
-		events := withCapturedEvents(t)
+	t.Run("managed missing directive fails closed", func(t *testing.T) {
 		SetManagedEnterpriseActive(true)
-		t.Cleanup(func() { SetManagedEnterpriseActive(false) })
-		// DisableAll on: a missing/failed cloud directive must still
-		// redact in managed mode (fail closed), NOT fall through to raw.
 		redaction.SetDisableAll(true)
-		t.Cleanup(func() { redaction.SetDisableAll(false) })
-
-		emitTestVerdict(context.Background(), nil)
-
-		got, ok := lastVerdictReason(*events)
-		if !ok {
-			t.Fatal("no verdict event captured")
+		ctx := withRedactionDecision(context.Background(), nil)
+		if policy := redaction.SinkPolicyFromContext(ctx); policy != redaction.SinkPolicyRedact {
+			t.Fatalf("policy = %v, want redact", policy)
 		}
+		got := projectReasonFromContext(ctx)
 		if got == rawReason || !strings.Contains(got, "<redacted") {
-			t.Fatalf("managed no-directive under DisableAll: got %q, want redacted (fail closed)", got)
+			t.Fatalf("projected reason = %q, want fail-closed redaction", got)
 		}
+		redaction.SetDisableAll(false)
 	})
+}
+
+func TestManagedEnterpriseRedactionPosture_AgentReasonCarveOut(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DISABLE_REDACTION", "")
+	t.Cleanup(func() {
+		setManagedEnterpriseRedactionPosture(false)
+		redaction.SetDisableAll(false)
+	})
+	redaction.SetDisableAll(false)
+
+	const reason = "matched: PII-EMAIL:alice@example.com"
+	setManagedEnterpriseRedactionPosture(true)
+	if !ManagedEnterpriseActive() {
+		t.Fatal("managed directive gate was not enabled")
+	}
+	if got := redaction.ReasonForAgent(reason); got != reason {
+		t.Fatalf("managed agent reason = %q, want raw %q", got, reason)
+	}
+	if got := redaction.ForSinkReason(reason); !strings.Contains(got, "<redacted") {
+		t.Fatalf("managed posture changed persistent compatibility redaction: %q", got)
+	}
+
+	setManagedEnterpriseRedactionPosture(false)
+	if ManagedEnterpriseActive() {
+		t.Fatal("non-managed directive gate remained enabled")
+	}
+	if got := redaction.ReasonForAgent(reason); !strings.Contains(got, "<redacted") {
+		t.Fatalf("non-managed agent reason = %q, want redacted", got)
+	}
 }

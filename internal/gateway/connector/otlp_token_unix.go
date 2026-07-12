@@ -21,6 +21,7 @@ package connector
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -39,12 +40,42 @@ func otlpValidatePerm(path string, info os.FileInfo) error {
 }
 
 // otlpValidateOwner checks that the file at the given path is owned by the
-// current user. Returns nil if the check passes or is not applicable.
+// effective user performing the filesystem operation. Enterprise hook
+// guardians keep a real uid of 0 while temporarily dropping their effective
+// uid to the target user, so comparing against the real uid would reject files
+// that the target user just created.
 func otlpValidateOwner(path string, info os.FileInfo) error {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		if int(stat.Uid) != os.Getuid() {
-			return fmt.Errorf("OTLP path-token %s uid %d does not match current uid %d", path, stat.Uid, os.Getuid())
+		effectiveUID := os.Geteuid()
+		if int(stat.Uid) != effectiveUID {
+			return fmt.Errorf("OTLP path-token %s uid %d does not match effective uid %d", path, stat.Uid, effectiveUID)
 		}
 	}
 	return nil
+}
+
+func otlpValidateRemovalOwner(path string, info os.FileInfo) error {
+	return otlpValidateOwner(path, info)
+}
+
+func otlpValidateTokenDirectory(_, _ string) error {
+	return nil
+}
+
+func otlpPathTokenNeedsSecureReplacement(_ string) (bool, error) {
+	return false, nil
+}
+
+func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(tokenPath), "."+filepath.Base(tokenPath)+".tmp-*")
+	if err != nil {
+		return nil, "", err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		path := tmp.Name()
+		_ = tmp.Close()
+		_ = os.Remove(path)
+		return nil, "", err
+	}
+	return tmp, tmp.Name(), nil
 }

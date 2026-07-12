@@ -109,11 +109,15 @@ Open Claude Code (or whichever connector you picked). Every prompt and tool call
 defenseclaw tui
 ```
 
-Or tail the JSONL fan-out from a script:
+Or take a scriptable snapshot from mandatory SQLite event history:
 
 ```bash
-tail -f ~/.defenseclaw/gateway.jsonl | jq .
+defenseclaw-gateway audit export --limit 200 --output - | jq .
 ```
+
+JSONL is no longer an implicit mirror. If you need a continuous external file,
+configure an explicit v8 `kind: jsonl` destination with the buckets, signals,
+and redaction profile that file is allowed to receive.
 
 </Step>
 

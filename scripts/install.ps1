@@ -3213,9 +3213,9 @@ function Invoke-Quickstart {
     }
     $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
     if (-not (Test-Path $cliExe)) { Write-Warn2 "CLI not found - skipping quickstart"; return }
-    $args = @("quickstart", "--non-interactive", "--yes", "--connector", $script:PickedConnector)
-    if ($QuickstartMode) { $args += @("--mode", $QuickstartMode) }
-    & $cliExe @args
+    $quickstartArguments = @("quickstart", "--non-interactive", "--yes", "--connector", $script:PickedConnector)
+    if ($QuickstartMode) { $quickstartArguments += @("--mode", $QuickstartMode) }
+    & $cliExe @quickstartArguments
     if ($LASTEXITCODE -eq 0) { Write-Ok "Quickstart completed" } else { Write-Warn2 "Quickstart reported errors - run 'defenseclaw doctor'" }
 }
 

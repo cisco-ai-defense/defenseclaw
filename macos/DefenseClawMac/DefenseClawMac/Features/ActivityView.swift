@@ -271,8 +271,10 @@ struct ActivityView: View {
     private func loadMutations() async {
         mutationLoadGeneration += 1
         let generation = mutationLoadGeneration
+        let installationGeneration = appState.installationGeneration
         let fromDB = await appState.audit.activityEvents(limit: 500)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled,
+              installationGeneration == appState.installationGeneration else { return }
         let fromStream = await appState.stream.activity
         var seen = Set<String>()
         var merged: [ActivityMutation] = []
@@ -280,7 +282,9 @@ struct ActivityView: View {
             let key = "\(mutation.timestamp.timeIntervalSince1970)-\(mutation.action)-\(mutation.targetID)"
             if seen.insert(key).inserted { merged.append(mutation) }
         }
-        guard !Task.isCancelled, generation == mutationLoadGeneration else { return }
+        guard !Task.isCancelled,
+              generation == mutationLoadGeneration,
+              installationGeneration == appState.installationGeneration else { return }
         if merged.map(\.id) != mutations.map(\.id) { mutations = merged }
     }
 

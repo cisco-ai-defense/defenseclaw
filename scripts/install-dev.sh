@@ -542,7 +542,11 @@ print_next_steps() {
     echo ""
     echo -e "  • View daemon logs:"
     echo -e "    ${CYAN}tail -f ~/.defenseclaw/gateway.log${NC}     ${NC}# pretty/human-readable"
-    echo -e "    ${CYAN}tail -f ~/.defenseclaw/gateway.jsonl${NC}   ${NC}# structured JSONL (verdicts/judge/lifecycle)"
+    if [[ -f "${HOME}/.defenseclaw/gateway.jsonl" ]]; then
+        echo -e "    ${CYAN}tail -f ~/.defenseclaw/gateway.jsonl${NC}   ${NC}# configured JSONL destination output"
+    else
+        echo "    gateway.jsonl is not enabled; add an explicit kind: jsonl destination to create it."
+    fi
     echo ""
     echo -e "  ${BOLD}Development commands:${NC}"
     echo ""

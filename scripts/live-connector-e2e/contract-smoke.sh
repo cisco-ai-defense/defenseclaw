@@ -73,21 +73,22 @@ overall_rc=0
 drive_event() {
   local label="$1" payload="$2" expect="$3"
   local before after out code
-  before="$(dc_gateway_jsonl_count)"
+  before="$(dc_event_cursor)"
   out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${label}" "${payload}")"
   # Portable BRE: BSD sed (macOS) treats \+ as a literal '+', so use
   # [0-9][0-9]* for "one or more digits" — otherwise the exit code parses
   # empty on macOS and every allow assertion (which requires exit 0) fails.
   code="$(printf '%s\n' "${out}" | sed -n 's/^exit:\([0-9][0-9]*\)$/\1/p' | tail -1)"
-  # Give the gateway a beat to flush the JSONL line.
-  sleep 1
-  after="$(dc_gateway_jsonl_count)"
+  # Hook response and canonical persistence are deliberately decoupled. Wait
+  # for this probe's connector row instead of assuming a fixed flush delay.
+  dc_wait_for_connector_event "${DC_E2E_CONNECTOR}" "${before}" || true
+  after="$(dc_event_cursor)"
 
   # Fires: gateway received an event attributed to this connector.
   if dc_assert_fired "${DC_E2E_CONNECTOR}" "${before}"; then
-    dc_record_result "${label}:fires" pass "jsonl ${before}->${after}"
+    dc_record_result "${label}:fires" pass "sqlite ${before}->${after}"
   else
-    dc_record_result "${label}:fires" fail "jsonl ${before}->${after} exit=${code}"
+    dc_record_result "${label}:fires" fail "sqlite ${before}->${after} exit=${code}"
     overall_rc=1
   fi
 
@@ -129,7 +130,7 @@ drive_event() {
 if dc_assert_schema 1; then
   dc_record_result "schema" pass ""
 else
-  dc_record_result "schema" fail "gateway.jsonl schema validation failed"
+  dc_record_result "schema" fail "canonical SQLite history validation failed"
   overall_rc=1
 fi
 

@@ -13,11 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/google/uuid"
 )
 
-func TestLogActivityRoundTrip_CreateMutateDelete(t *testing.T) {
+func TestLogActivityV8CreateMutateDeleteUsesCanonicalHistoryOnly(t *testing.T) {
 	l := newTestLogger(t)
+	l.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary))
 	base := "resource/x"
 	steps := []struct {
 		action Action
@@ -48,16 +50,17 @@ func TestLogActivityRoundTrip_CreateMutateDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("activity rows=%d want 3", len(rows))
+	if len(rows) != 0 {
+		t.Fatalf("duplicate legacy activity rows=%d want 0", len(rows))
 	}
-	for _, row := range rows {
-		if row.DiffJSON == "" {
-			t.Errorf("empty diff for id=%s", row.ID)
-		}
-		var raw []json.RawMessage
-		if err := json.Unmarshal([]byte(row.DiffJSON), &raw); err != nil {
-			t.Errorf("diff_json: %v", err)
+	events, err := l.store.ListEvents(10)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("canonical history rows=%d want 3 error=%v", len(events), err)
+	}
+	for _, event := range events {
+		if event.Action != string(ActionConfigUpdate) ||
+			event.Structured["defenseclaw.admin.target_ref"] != "config:"+base {
+			t.Fatalf("canonical activity projection=%#v", event)
 		}
 	}
 }

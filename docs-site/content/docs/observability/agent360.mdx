@@ -15,6 +15,12 @@ did it call, and where did time, tokens, cost, or failures accumulate?** New
 root agents and subagents appear automatically as hook events arrive; no
 dashboard file is generated per agent.
 
+The dashboard is protected by the generated `local-observability-v1` consumer
+profile. Complete coverage requires the named local OTLP destination to retain
+logs, traces, metrics, and the required agent/model/tool/security/health
+buckets. `defenseclaw observability plan` reports partial coverage if an
+operator intentionally narrows that route.
+
 ## Open an agent
 
 1. Start the [local observability stack](/docs/observability/local-observability).
@@ -31,8 +37,8 @@ You can also open Agent360 directly and use its variables:
 | **Connector** | Separate Codex, Claude Code, and other hook connectors. |
 | **Agent** | Select the durable root or delegated agent identity. |
 | **Scope** | **This agent** isolates one agent; **Agent tree** includes every correlated descendant. |
-| **Lifecycle** | Restrict the view to one resumed-session lifecycle. |
-| **Execution** | Restrict the view to one concrete attempt within a lifecycle. |
+| **Lifecycle (drilldown)** | Restrict execution-detail panels to one stable agent lifecycle. Structural tree panels intentionally ignore this filter so descendants with their own lifecycle IDs remain visible. |
+| **Execution (drilldown)** | Restrict execution-detail panels to one concrete attempt within a lifecycle. |
 | **Trace ID** | Pivot the lower section to one Tempo execution trace. |
 
 ## Read the overview
@@ -49,18 +55,44 @@ execution detail:
 | **Turns** | De-duplicated completed conversational turns. | Compares useful interaction volume without counting every hook delivery. |
 | **Model calls** | Completed chat/model operations. | Separates model work from lifecycle envelopes and tool calls. |
 | **Tool calls** | De-duplicated completed tool operations. | Reveals automation intensity and tool-heavy executions. |
-| **Descendants** | Correlated child agents under the selected root. | Detects delegation and unexpected fan-out. |
+| **Descendants in selected root tree** | Correlated transitive child agents under the selected root. | Detects delegation and unexpected fan-out at any observed depth. |
 | **Input/output tokens** | Connector- or provider-reported usage only. | Tracks context growth and response volume without inventing estimates. |
 | **Reported cost** | Cost reported by the connector, normalized for cumulative and per-call semantics. | Supports cost investigation while preserving the source's meaning. |
-| **Terminal success** | Successful terminal events divided by all terminal outcomes. | Measures completed versus failed/interrupted lifecycles; notification-only events do not inflate it. |
+| **Terminal event success rate** | Successful terminal events divided by all terminal outcomes. | Measures completed versus failed/interrupted lifecycles; it is not the latest root agent's state, and notification-only events do not inflate it. |
 | **Enforced hook blocks** | Final hook decisions returned to a connector as `block`. | Separates a real prevented action from a scanner-only or observe-mode result. |
 | **Observe-mode would-blocks** | Guardrail blocks that were returned as advisory/allow because enforcement was unavailable or disabled. | Shows where a policy would stop work before switching a connector to action mode. |
 
-The **Execution phase timeline** preserves sub-second ordering for lifecycle,
-model, and tool phases. Throughput and p95 latency show whether activity is
-increasing and which operation class is slow. **Executions and last activity**
-keeps the lifecycle and execution IDs visible so a resumed long-running agent
-does not look like an unrelated process.
+The **Execution phase timeline** shows the current phase for each selected
+execution. Throughput and p95 latency show whether activity is increasing and
+which operation class is slow. **Executions and last activity** keeps the
+lifecycle and execution IDs visible and links each row back into the matching
+drilldown, so a resumed long-running agent does not look like an unrelated
+process.
+
+## Follow the complete lifecycle
+
+Use two complementary panels instead of expecting one trace to represent an
+agent's entire lifetime:
+
+- **Lifecycle DAG — prompt → agents → work → outcomes** is the structural view.
+  It keeps every observed descendant in the selected root tree even though each
+  child owns a different lifecycle and execution ID. Repeated work is summarized
+  per owning agent: one model node per provider/model pair and one tool node per
+  normalized tool family, with total call counts and click-through to the
+  underlying canonical records.
+- **Ordered lifecycle and work sequence — root to terminal** is the causal
+  chronology. It combines root/session starts, exact prompt submissions, subagent
+  starts and stops, model requests/responses, tool calls/results, approvals,
+  egress, guardrail decisions, phase transitions, and terminal outcomes in
+  timestamp order. Every line includes all reported current/root/parent session
+  and agent identities, lineage provenance, lifecycle/execution/request/turn/run/
+  operation correlation, model/tool/approval identity, and trace/span IDs.
+
+Sequence numbers are monotonic within an execution, not globally across a root
+tree. Use timestamps plus root/parent/depth fields to read interleaved sibling
+work. A missing trace ID does not sever the lifecycle: asynchronous hook
+deliveries are joined through root agent, root session, lifecycle, execution,
+and operation identities rather than fabricated span parentage.
 
 ## Follow an enforced or alternative path
 
@@ -106,24 +138,129 @@ means expected automation; a low call count with a high p95 points to a single
 blocking tool. A rising model-call count without turns completing points to a
 retry loop or an agent that is still active.
 
-## Inspect the dependency graph
+## Inspect the lifecycle DAG
 
-![Agent360 aggregate dependency map connecting the selected agent to models and tools](/images/grafana/agent360-topology.jpg)
+![Agent360 lifecycle DAG connecting session start, grouped prompt inputs, root agent, delegated agents, grouped work, message updates, approvals, and outcomes](/images/grafana/agent360-topology.jpg)
 
-The aggregate dependency map uses directed edges from agents to their observed
-dependencies:
+The **Lifecycle DAG — prompt → agents → work → outcomes** is built from canonical
+Loki events. Work and outcomes use the selected time range. Session and spawn
+anchors may be recovered from the prior 24 hours so a boundary window does not
+leave an edge endpoint missing; a recovered spawn remains only when that child has
+graph-eligible activity in the selected range. Its arrows are causal or ownership
+relationships that DefenseClaw can prove:
 
-- `agent:*` nodes are stable root or delegated agent identities;
-- `model:*` nodes come from `gen_ai.provider.name` and
-  `gen_ai.request.model`;
-- `tool:*` nodes come from `gen_ai.tool.name`;
-- agent-to-agent edges use the stable root/parent relationship.
+Some Codex versions complete a spawn tool call without emitting `SubagentStart`.
+DefenseClaw correlates a previously unseen child's first event only when one
+completed same-session spawn uniquely owns it, then emits an inferred canonical
+start with lineage provenance. Ambiguous concurrent spawns remain unresolved, so
+no false parent-child edge is drawn.
 
-The map is aggregated across the dashboard time range, so it answers **what
-does this agent depend on?** The per-trace Tempo graph answers a different
-question: **what happened, in what order, for this one request?** Use the
-aggregate map to find unexpected dependencies, then choose a trace to inspect
-the exact execution path.
+- the separate **Session start** anchor points to the root agent observed at
+  `session_start` without claiming that the session event contains prompt text;
+- canonical depth-zero prompt submissions increment one grouped **Prompt inputs**
+  node for the root; Codex uses connector-source `UserPromptSubmit` facts while
+  keeping native OTLP `model.request` mirrors in the ordered/raw views;
+- a parent agent points to each child observed at `subagent_start`;
+- an agent points to one summary node for each observed provider/model pair;
+- an agent points to one summary node for each normalized tool family: Bash, MCP,
+  Skills, Collaboration, File edits, Web/browser, Visual, or Task control; an
+  unrecognized tool keeps its reported name; exact
+  `collaboration.send_message` requests are excluded from this generic family so
+  they appear only as message groups, while other collaboration tools remain;
+- an agent points to real `collaboration.send_message` updates, an approval
+  observed in that agent's execution, turn outcomes, and session/subagent
+  terminal outcomes.
+
+The **Session start** circle is a lifecycle anchor, not an invented prompt. For
+Codex, **Prompt inputs** comes from canonical connector-source `UserPromptSubmit`
+facts, not `session_start`; recognized prompt hooks and `model.request` fallback
+keep other connectors visible. Each observation family deduplicates by turn ID,
+model-request ID, request ID, operation ID, then occurrence ID, and the summary
+shows the largest source total. When a connector includes prompt content or any other field in canonical OTEL,
+Agent360 shows it in click
+detail or links to the exact raw record; the dashboard does not remove, truncate,
+or mask it.
+
+Model summary identity is the owning agent plus provider/model and counts
+`model.request` records. It sums within each observation source and shows the
+largest source total, preventing connector/native mirrors from double-counting a
+call while retaining source-only observations. Tool summary identity is the owning agent plus normalized
+family and counts `tool.invocation.requested` records. Repeated requests increase
+the total instead of widening the graph, so a request without a terminal counterpart
+remains visible. That total is not a pending gauge or terminal-status breakdown.
+Exact operation, request/response, tool-call, status, outcome, trace, and payload
+metadata remain available through click details and filtered drill-down across the
+requested and terminal records. Root
+agent calls are not treated specially: if the root emitted matching records in
+the selected range, its model/tool family summaries appear under the root just
+like a subagent's summaries.
+
+### Read depth and identity
+
+Depth is zero-based lineage, not a count of anonymous workers:
+
+| Depth | Meaning | Golden validation identity |
+| ---: | --- | --- |
+| `0` | Root agent for the selected tree. | `golden-root` (`agent_type=root`) |
+| `1` | Direct child spawned by the root. | `golden-direct` (`agent_type=direct`) |
+| `2` | Child spawned by the depth-1 agent. | `golden-nested` (`agent_type=nested`) |
+| `3` | Child spawned by the depth-2 agent. | `golden-leaf` (`agent_type=leaf`) |
+
+The deterministic golden contract fixture covers **four agent levels total**: one
+root plus three subagent generations. It validates query and correlation behavior;
+it is not evidence that a particular live connector run created four levels. The
+lifecycle contract accepts recursive lineage from depth `0` through depth `64`;
+a real graph shows only levels actually reported or explicitly marked as inferred
+in the selected range.
+Click an agent node to see its full stable agent ID, name, type, depth,
+root/parent agent IDs, and connector rather than relying on the short label in the
+circle. Optional current/root/parent session fields remain on the session,
+lifecycle, ordered, and raw surfaces; they are deliberately not agent-node
+grouping keys, so missing or late session metadata cannot split one agent's total.
+
+The golden workload is deliberately asymmetric so ownership is testable: depth 0
+emits model and file work; depth 1 emits separate model work; a nested agent emits
+a real collaboration update; and the leaf emits shell work plus approval. Work by
+different owners remains separate, while repeated calls by one owner increment a
+grouped node. Every agent then emits its own terminal outcome. This is fixture
+evidence for the contract, not a claim about the depth or tool use of a live run.
+
+### Interpret updates and approvals honestly
+
+An update node exists only for an actual `collaboration.send_message` tool record.
+For each sender, `/root` and `/root/*` targets collapse into one **Messages to
+root** node whose target agent ID resolves to the exported root. Exact root task
+paths, calls, and terminal results remain in the ordered and raw drill-downs. A
+non-root task path remains an exact group and is not converted to an opaque agent
+ID unless canonical telemetry supplies that mapping. Generic lifecycle events are
+never relabeled as updates. The node total counts grouped send requests; use its
+filtered raw records and call IDs to inspect any terminal result.
+
+Approval records likewise do not carry an exact tool-call ID. Their dashed edge is
+agent/execution-scoped, and the click details say so; the graph does not invent a
+tool-to-approval join. The ordered sequence and shared execution/operation/trace
+fields provide the most precise available correlation.
+
+### Click for evidence and drill-down
+
+Click any node or edge to inspect its grouping key, total count, and canonical
+OTEL detail available for that summary or relationship. Depending on node type,
+Grafana exposes agent lineage and depth, session hierarchy, lifecycle/execution and
+sequence, operation/tool-call/request/response or approval identities,
+model/provider or tool family/status/exit code, outcome, session source/resume
+state, connector, trace/span/turn IDs, and known correlation limitations. When
+several records are grouped, the node links to the filtered exact raw Loki/OTEL
+records so every distinct canonical field, payload, and call identity actually
+exported remains inspectable.
+The menu also links to the owning agent, prompt/model detail, ordered lifecycle
+sequence, related Tempo traces, and an exact Tempo waterfall when a trace ID was
+actually reported. Links preserve the dashboard time range.
+
+The DAG intentionally ignores lifecycle/execution drilldown variables so the
+selected root tree does not lose children that own different lifecycle IDs. It is
+not a total event timeline. Use it to answer **who spawned whom and which agent
+owned each observed work/outcome?**, the ordered Loki sequence for cross-request
+chronology, and Tempo for one request-bounded operation's synchronous children.
 
 ## Drill into logs and traces
 
@@ -131,16 +268,23 @@ The lower dashboard correlates all three local backends:
 
 | Backend | Agent360 uses it for |
 | --- | --- |
-| **Prometheus** | Directory, counts, state, throughput, latency, token/cost totals, and aggregate topology. |
-| **Loki** | Lifecycle, model, tool, network, error, verdict, judge, finding, final hook decision, and approval-stage event details. |
-| **Tempo** | Completed-operation and enforcement-attempt trace list, waterfall, ordered execution sequence, phase durations, directed phase edges, and per-trace node graph. |
+| **Prometheus** | Directory, counts, state, throughput, latency, token/cost totals, and phase edges. |
+| **Loki** | The lifecycle DAG, ordered cross-request lifecycle/work sequence, and model, tool, network, error, verdict, judge, finding, final hook decision, and approval details. |
+| **Tempo** | Completed request-bounded operation/enforcement traces and the selected waterfall. Tempo does not claim that an asynchronous agent lifetime is one trace. |
 
-Select a **Trace ID** in **Operation and enforcement traces**. The data link
+Select a **Trace ID** in **Operation and enforcement traces — click a Trace ID**. The data link
 preserves the selected connector, agent, scope, lifecycle, execution, and time
 range while replacing only the trace ID; it does not carry an empty trace
 variable. The selected-trace waterfall then shows the hook attempt alongside
 its child operation spans. If the trace is outside the current dashboard time
 range, widen the time picker before selecting it.
+
+For a fleet-level entry point, open **Agent Activity** and choose a **Root
+session**. Its selected-session token, hook, decision, and ordered timeline
+panels match the root-session field as well as current/direct-parent session
+fields, so arbitrary observed descendant generations remain in one drilldown.
+Agent and Root Agent cells link back to this dashboard with the connector and
+time range preserved.
 
 ## Interpret missing values correctly
 
@@ -159,20 +303,30 @@ estimating usage from message length. Older data collected before a schema or
 dashboard upgrade is not backfilled; generate a new turn after upgrading to
 validate newly supported fields.
 
+Token range panels include a first-publication fallback because Prometheus
+`increase()` cannot see a counter's initial nonzero sample. A series first
+published inside the range contributes its reported cumulative value once;
+established series use their normal counter increase.
+
 ## Common investigation paths
 
 | Question | Start here | Then drill into |
 | --- | --- | --- |
 | Why is an agent still running? | Last seen + execution phase timeline | Lifecycle logs and the newest Tempo trace. |
 | Which tool made the execution slow? | Top tools + tool p95 | Selected trace waterfall and ordered sequence. |
-| Did a subagent cause the failure? | Agent tree + dependency map | Child agent ID, errors/decisions, then its trace. |
+| Did a subagent cause the failure? | Agent tree + lifecycle DAG | Child agent ID, owned work/outcome nodes, errors/decisions, then its trace. |
 | Why did tokens or cost spike? | Tokens/cost over time | Provider/model breakdown and LLM turn details. |
 | Was the action blocked, advisory, or approved—and what happened next? | Hook enforcement and recovery paths | Decision → recovery path, verdict/finding details, then the matching Tempo trace. |
 | Why is a panel empty? | Scope and time-range variables | Use the table above, then confirm the connector reported the field. |
 
-<Callout type="warn" title="Prompts and outputs are persistent telemetry">
-Agent360's Loki and Tempo panels follow DefenseClaw's persistent-sink
-redaction policy. Keep redaction enabled in shared or multi-tenant deployments.
-Only operators who have explicitly disabled redaction should expect raw prompt,
-completion, tool argument, or tool result bodies in these panels.
+<Callout type="warn" title="Dashboards display the canonical OTEL projection as received">
+Grafana, Loki, Tempo, and the dashboard queries perform no additional redaction,
+masking, or field hiding. DefenseClaw applies centralized v8 redaction before it
+exports the canonical OTEL projection to the local destination. Agent360 displays
+or links every field actually present in that projection; a field removed or
+transformed by DefenseClaw cannot be recovered by the dashboard. Fresh v8
+configuration defaults to `none` (unredacted), so raw prompt, completion, tool
+argument/result, and evidence fields appear when a producer supplies them.
+Configure `sensitive`, `content`, `strict`, or a custom profile before using the
+stack across a shared or multi-tenant trust boundary.
 </Callout>

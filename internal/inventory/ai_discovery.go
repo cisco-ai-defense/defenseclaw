@@ -43,12 +43,7 @@ import (
 	"time"
 	"unicode"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -138,27 +133,15 @@ type AIDiscoveryOptions struct {
 	IncludeNetworkDomains     bool
 	MaxFilesPerScan           int
 	MaxFileBytes              int64
-	EmitOTel                  bool
 	StoreRawLocalPaths        bool
 	ConfidencePolicyPath      string
 	RequireTrustedBinaryPaths bool
 	TrustedBinaryPrefixes     []string
-	// DisableRedaction mirrors config.Privacy.DisableRedaction. When
-	// true, on-the-wire AIDiscovery payloads (gateway events, OTel
-	// logs) carry full Evidence rows including the raw_path field
-	// (raw_path further requires StoreRawLocalPaths). When false (the
-	// default), evidence is sanitized before leaving this process so
-	// remote sinks never see local filesystem paths or unhashed
-	// values.
-	DisableRedaction bool
-	DataDir          string
-	HomeDir          string
-	// ManagedEnterprise mirrors deployment_mode == managed_enterprise.
-	// In managed mode the gateway ships the FULL endpoint inventory to
-	// AI Defense as discovery events (every active signal, including
-	// steady-state `seen`), not just lifecycle deltas — see
-	// emitGatewayEvents. Non-managed keeps the delta-only behavior so
-	// user-owned SIEMs are not flooded on every full scan.
+	DataDir                   string
+	HomeDir                   string
+	// ManagedEnterprise mirrors deployment_mode == managed_enterprise. It
+	// controls only the managed endpoint-inventory callback; canonical v8
+	// telemetry remains owned by the bound observability runtime.
 	ManagedEnterprise bool
 }
 
@@ -310,12 +293,10 @@ type AISignal struct {
 	PresenceBand  string  `json:"presence_band,omitempty"`
 	// Evidence is the per-row breakdown that the confidence engine
 	// and the gateway components endpoint consume. It ships on the
-	// wire so remote sinks (OTel, webhooks) can render the same
-	// "what we saw" view the operator gets locally. RawPath is
-	// scrubbed by SanitizeEvidenceForWire unless privacy.disable_redaction
-	// AND ai_discovery.store_raw_local_paths are both true; size is
-	// bounded by maxEvidencePerSignal so a hostile pack cannot
-	// blow up payload size.
+	// wire so remote destinations and webhooks can render the same "what we
+	// saw" view the operator gets locally. RawPath is always scrubbed by
+	// SanitizeEvidenceForWire; size is bounded by maxEvidencePerSignal so a
+	// hostile pack cannot blow up payload size.
 	Evidence []AIEvidence `json:"evidence,omitempty"`
 }
 
@@ -397,24 +378,6 @@ type ContinuousDiscoveryService struct {
 	// queries are disabled.
 	invStore         *InventoryStore
 	confidenceParams ConfidenceParams
-	otel             *telemetry.Provider
-	events           *gatewaylog.Writer
-
-	// managedInventoryEmit, when set, is invoked at the end of each
-	// scan's gateway-event fanout in managed_enterprise mode. The
-	// sidecar installs it (SetManagedInventoryEmitHook) to ship the
-	// connector / MCP-server endpoint inventory alongside the
-	// per-signal ai_discovery snapshot. Kept as an opaque callback so
-	// this package does not depend on gateway/connector or the config
-	// surfaces those inventories are built from. Nil is the normal
-	// non-managed / library-import state and is a clean no-op.
-	//
-	// managedInventoryEmitMu guards the callback: config reload writes
-	// it (SetManagedInventoryEmitHook) concurrently with the scan
-	// fanout reading it in emitGatewayEvents, so both accesses take the
-	// lock to avoid a data race and a torn/stale callback invocation.
-	managedInventoryEmitMu sync.RWMutex
-	managedInventoryEmit   func(context.Context)
 
 	mu              sync.RWMutex
 	last            AIDiscoveryReport
@@ -422,6 +385,11 @@ type ContinuousDiscoveryService struct {
 	triggers        chan chan scanResponse
 	observerMu      sync.RWMutex
 	reportObservers []AIDiscoveryReportObserver
+	// managedInventoryEmit is the sidecar-owned connector/MCP snapshot hook.
+	// It is kept independent from canonical discovery telemetry so the v8
+	// runtime remains the sole owner of signal records.
+	managedInventoryEmitMu sync.RWMutex
+	managedInventoryEmit   func(context.Context)
 	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
 	// a stalled or over-cap loopback provider cannot starve later providers.
 	modelAPIProbeCursor  atomic.Uint64
@@ -461,6 +429,9 @@ type ContinuousDiscoveryService struct {
 	// only constructs one ContinuousDiscoveryService; if that ever
 	// changes, each instance still gets its own serialization.
 	scanMu sync.Mutex
+
+	observabilityV8Mu sync.RWMutex
+	observabilityV8   AIDiscoveryObservabilityV8
 }
 
 type scanResponse struct {
@@ -470,7 +441,7 @@ type scanResponse struct {
 
 // NewContinuousDiscoveryService builds a sidecar discovery service from the
 // full gateway config. It returns nil when ai_discovery.enabled is false.
-func NewContinuousDiscoveryService(cfg *config.Config, otel *telemetry.Provider, events *gatewaylog.Writer) (*ContinuousDiscoveryService, error) {
+func NewContinuousDiscoveryService(cfg *config.Config) (*ContinuousDiscoveryService, error) {
 	if cfg == nil || !cfg.AIDiscovery.Enabled {
 		return nil, nil
 	}
@@ -479,17 +450,15 @@ func NewContinuousDiscoveryService(cfg *config.Config, otel *telemetry.Provider,
 		return nil, err
 	}
 	opts := AIDiscoveryOptionsFromConfig(cfg)
-	return NewContinuousDiscoveryServiceWithOptions(opts, catalog, otel, events), nil
+	return NewContinuousDiscoveryServiceWithOptions(opts, catalog), nil
 }
 
-func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature, otel *telemetry.Provider, events *gatewaylog.Writer) *ContinuousDiscoveryService {
+func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature) *ContinuousDiscoveryService {
 	opts = normalizeAIDiscoveryOptions(opts)
 	svc := &ContinuousDiscoveryService{
 		opts:     opts,
 		catalog:  catalog,
 		store:    NewAIStateStore(filepath.Join(opts.DataDir, "ai_discovery_state.json")),
-		otel:     otel,
-		events:   events,
 		triggers: make(chan chan scanResponse, 1),
 	}
 	// Try to open the SQLite history store. Failure is logged but
@@ -566,18 +535,13 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		IncludeNetworkDomains:     ad.IncludeNetworkDomains,
 		MaxFilesPerScan:           ad.MaxFilesPerScan,
 		MaxFileBytes:              int64(ad.MaxFileBytes),
-		EmitOTel:                  ad.EmitOTel,
 		StoreRawLocalPaths:        ad.StoreRawLocalPaths,
 		ConfidencePolicyPath:      ad.ConfidencePolicyPath,
 		RequireTrustedBinaryPaths: ad.RequireTrustedBinaryPaths,
 		TrustedBinaryPrefixes:     append([]string{}, ad.TrustedBinaryPrefixes...),
-		// Mirror the global redaction kill-switch so detectors and
-		// emitters know whether they should scrub raw_path / full
-		// evidence before a payload leaves the local process.
-		DisableRedaction:  cfg.Privacy.DisableRedaction,
-		DataDir:           cfg.DataDir,
-		HomeDir:           home,
-		ManagedEnterprise: managed.IsManagedEnterprise(cfg.DeploymentMode),
+		DataDir:                   cfg.DataDir,
+		HomeDir:                   home,
+		ManagedEnterprise:         managed.IsManagedEnterprise(cfg.DeploymentMode),
 	})
 }
 
@@ -689,16 +653,6 @@ func (s *ContinuousDiscoveryService) ConfidenceParams() ConfidenceParams {
 	return s.confidenceParams
 }
 
-// Options exposes the resolved discovery options so handlers can
-// inspect privacy flags (DisableRedaction, StoreRawLocalPaths)
-// without re-reading the global config object.
-func (s *ContinuousDiscoveryService) Options() AIDiscoveryOptions {
-	if s == nil {
-		return AIDiscoveryOptions{}
-	}
-	return s.opts
-}
-
 func (s *ContinuousDiscoveryService) LastError() error {
 	if s == nil {
 		return nil
@@ -742,20 +696,10 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 
 	start := time.Now()
 	scanID := newScanID()
-	ctx, span := s.otel.Tracer().Start(ctx, "defenseclaw.ai.discovery",
-		trace.WithAttributes(
-			attribute.String("defenseclaw.ai.discovery.scan_id", scanID),
-			attribute.String("defenseclaw.ai.discovery.source", source),
-			attribute.String("defenseclaw.ai.discovery.privacy_mode", s.opts.Mode),
-		),
-	)
-	// Mirror tenant/workspace/device join keys from the process
-	// resource onto the discovery span so backends that drop OTel
-	// resource on span rows still surface deployment context next
-	// to the trace — same parity guardrail spans get via
-	// telemetry.StartGuardrailStageSpan.
-	s.otel.SetSpanResourceContext(span)
-	defer span.End()
+	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
+		ScanID: scanID, Source: source, PrivacyMode: s.opts.Mode, StartedAt: start,
+	})
+	defer scanObservation.abort()
 
 	prev, prevErr := s.store.Load()
 	if prevErr != nil {
@@ -770,12 +714,18 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 		fmt.Fprintf(os.Stderr, "[ai-discovery] previous-scan load failed (treating workspace as new): %v\n", prevErr)
 		prev = aiStateFile{}
 	}
-	signals, stats := s.scanSignals(ctx, full, priorModelAPIFingerprints(prev.Signals))
+	signals, stats := s.scanSignals(
+		ctx,
+		scanID,
+		scanObservation,
+		full,
+		priorModelAPIFingerprints(prev.Signals),
+	)
 	if err := ctx.Err(); err != nil {
 		// A canceled refresh/client request is not a complete inventory
-		// observation. Never classify omissions or overwrite the last durable
-		// snapshot from a partial pass.
-		span.SetStatus(codes.Error, err.Error())
+		// observation. The deferred v8 abort terminates the scan trace; do not
+		// classify omissions or overwrite the last durable snapshot from this
+		// partial pass.
 		s.mu.Lock()
 		s.lastErr = err
 		s.mu.Unlock()
@@ -785,14 +735,6 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 		stats.Errors++
 	}
 	report := s.classifyAndPersist(scanID, source, start, signals, stats, prev, full)
-	if stats.Errors > 0 {
-		span.SetStatus(codes.Error, "one or more detectors failed")
-	}
-	span.SetAttributes(
-		attribute.Int("defenseclaw.ai.discovery.signals", report.Summary.TotalSignals),
-		attribute.Int("defenseclaw.ai.discovery.active_signals", report.Summary.ActiveSignals),
-		attribute.Int("defenseclaw.ai.discovery.files_scanned", report.Summary.FilesScanned),
-	)
 
 	s.mu.Lock()
 	s.last = cloneAIDiscoveryReport(report)
@@ -801,6 +743,7 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 
 	s.fanoutReport(ctx, report)
 	s.notifyReportObservers(ctx, report)
+	scanObservation.end(report)
 	return report, nil
 }
 
@@ -837,22 +780,84 @@ func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, 
 // installs (no OTel, redaction enabled) don't pay for a rollup
 // they'd discard.
 func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport) {
-	otelOn := s.opts.EmitOTel && s.otel != nil && s.otel.Enabled()
-	eventsOn := s.events != nil
-	// The snapshot is only consulted when (a) OTel is on, or
-	// (b) gateway events are on AND redaction is OFF (otherwise
-	// BuildAIDiscoveryPayload strips Confidence anyway). Skip
-	// the rollup entirely when neither path needs it.
+	observer := s.observabilityV8Snapshot()
+	v8On := observer != nil
+	// The generated v8 observer is the sole telemetry owner. Skip the rollup
+	// entirely when no canonical runtime is bound.
 	var snap componentRollupSnapshot
-	if otelOn || (eventsOn && s.opts.DisableRedaction) {
+	if v8On {
 		snap = buildComponentRollupSnapshot(report.Signals, s.confidenceParams)
 	}
-	if otelOn {
-		s.emitTelemetry(ctx, report, snap)
+	if v8On {
+		components := make([]AIDiscoveryV8ComponentObservation, 0, len(snap.Groups))
+		for _, group := range snap.Groups {
+			if confidence, ok := snap.ScoreFor(group); ok {
+				if len(group.Signals) == 0 || strings.TrimSpace(group.Signals[0].Category) == "" {
+					continue
+				}
+				componentKey := strings.ToLower(group.Ecosystem) + "\x00" + strings.ToLower(group.Name)
+				components = append(components, AIDiscoveryV8ComponentObservation{
+					ComponentID: stableSignalID(componentKey), ComponentType: group.Signals[0].Category,
+					HasLifecycleChange: group.HasLifecycleChange,
+					Metrics:            buildComponentConfidenceAttrs(group, confidence, s.confidenceParams.Policy.Version),
+				})
+			}
+		}
+		_ = observer.EmitReport(ctx, reportForObservabilityV8(report), components)
 	}
-	if eventsOn {
-		s.emitGatewayEvents(ctx, report, snap)
+	// Hook installation is the live managed-mode gate. Deployment mode can
+	// change without rebuilding this service, so construction-time options
+	// must not suppress a callback installed by a later config generation.
+	s.managedInventoryEmitMu.RLock()
+	emit := s.managedInventoryEmit
+	s.managedInventoryEmitMu.RUnlock()
+	if emit != nil {
+		emit(ctx)
 	}
+}
+
+// SetManagedInventoryEmitHook installs the sidecar callback that publishes the
+// connector and MCP endpoint snapshot after each managed discovery scan. A nil
+// callback clears it. The callback does not emit discovery signals; those flow
+// exclusively through the canonical v8 observer above.
+func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context.Context)) {
+	if s == nil {
+		return
+	}
+	s.managedInventoryEmitMu.Lock()
+	s.managedInventoryEmit = fn
+	s.managedInventoryEmitMu.Unlock()
+}
+
+// reportForObservabilityV8 projects local-model lifecycle identities onto an
+// installation-keyed namespace before they cross the canonical telemetry
+// adapter boundary. The local API report keeps its ordinary signal ID, while
+// remote lifecycle correlation cannot be dictionary-tested against a guessed
+// model name. If no installation key is available, correlation is omitted.
+func reportForObservabilityV8(report AIDiscoveryReport) AIDiscoveryReport {
+	out := report
+	out.Signals = append([]AISignal(nil), report.Signals...)
+	for i := range out.Signals {
+		if out.Signals[i].Category == SignalLocalModel || out.Signals[i].Model != nil {
+			out.Signals[i].SignalID = modelLifecycleSignalID(out.Signals[i])
+		}
+	}
+	return out
+}
+
+func modelLifecycleSignalID(signal AISignal) string {
+	key := currentPathHashKey()
+	if len(key) == 0 {
+		return ""
+	}
+	identity := signal.Fingerprint
+	if identity == "" {
+		identity = signal.SignalID
+	}
+	if identity == "" {
+		return ""
+	}
+	return "model_" + keyedHashHex(key, "ai-discovery/model-signal/v1\x00"+identity)
 }
 
 type scanStats struct {
@@ -875,6 +880,8 @@ type scanStats struct {
 
 func (s *ContinuousDiscoveryService) scanSignals(
 	ctx context.Context,
+	scanID string,
+	scanObservation *aiDiscoveryScanObservation,
 	full bool,
 	priorModelAPI map[string]map[string]struct{},
 ) ([]AISignal, scanStats) {
@@ -897,20 +904,18 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	}
 	measure := func(name string, fn func() ([]AISignal, int, error)) {
 		start := time.Now()
-		_, child := s.otel.Tracer().Start(ctx, "defenseclaw.ai.discovery.detector",
-			trace.WithAttributes(attribute.String("defenseclaw.ai.discovery.detector", name)))
-		s.otel.SetSpanResourceContext(child)
+		child := scanObservation.startDetector(ctx, s, AIDiscoveryV8DetectorStart{
+			ScanID: scanID, Detector: name, StartedAt: start,
+		})
 		out, files, err := fn()
-		child.SetAttributes(attribute.Int("defenseclaw.ai.discovery.signals", len(out)))
-		if files > 0 {
-			child.SetAttributes(attribute.Int("defenseclaw.ai.discovery.files_scanned", files))
-		}
 		if err != nil {
 			stats.Errors++
-			child.RecordError(err)
-			child.SetStatus(codes.Error, err.Error())
 		}
-		child.End()
+		endedAt := time.Now()
+		child.end(AIDiscoveryV8DetectorResult{
+			EndedAt: endedAt, DurationMs: endedAt.Sub(start).Milliseconds(),
+			SignalsTotal: int64(len(out)), FilesScanned: int64(files), Failed: err != nil,
+		})
 		stats.FilesScanned += files
 		stats.DetectorDurations[name] = int(time.Since(start).Milliseconds())
 		add(out)
@@ -2346,115 +2351,6 @@ func (s *ContinuousDiscoveryService) scanRootsForRelative() []string {
 	return roots
 }
 
-func (s *ContinuousDiscoveryService) emitTelemetry(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot) {
-	if s.otel == nil || !s.otel.Enabled() {
-		return
-	}
-	sum := report.Summary
-	s.otel.RecordAIDiscoveryRun(ctx, sum.Source, sum.PrivacyMode, sum.Result, float64(sum.DurationMs), sum.TotalSignals, sum.ActiveSignals, sum.NewSignals, sum.GoneSignals, sum.FilesScanned, sum.DedupeSuppressed)
-	s.otel.EmitAIDiscoverySummaryLog(ctx, sum.Source, sum.PrivacyMode, sum.Result, float64(sum.DurationMs), sum.TotalSignals, sum.ActiveSignals, sum.NewSignals, sum.GoneSignals, sum.FilesScanned)
-	if sum.Errors > 0 {
-		s.otel.RecordAIDiscoveryError(ctx, "scan", "partial")
-	}
-	for _, sig := range report.Signals {
-		// Telemetry emission stays delta-focused to avoid flooding
-		// log sinks on every full scan now that report.Signals
-		// includes steady-state `seen` entries (so the API can
-		// render full inventory). New / changed / gone are still
-		// emitted because those are real lifecycle events.
-		if sig.State != AIStateNew && sig.State != AIStateChanged && sig.State != AIStateGone {
-			continue
-		}
-		s.otel.RecordAIDiscoverySignal(ctx, sig.Category, sig.Vendor, sig.Product, sig.State, sig.Detector, sig.Confidence)
-		s.otel.EmitAIDiscoverySignalLog(ctx, sig.Category, sig.Vendor, sig.Product, sig.State, sig.Detector, sig.Confidence)
-	}
-	// Component-level emission off the SHARED snapshot so every
-	// downstream consumer sees byte-identical identity / presence
-	// numbers. Cardinality is bounded by the discovered component
-	// set, not by signal volume. Logs only fire when at least one
-	// signal in the group experienced a lifecycle change so we
-	// don't flood SIEMs with duplicate "AI component confidence"
-	// rows for a steady-state monorepo.
-	policyVersion := s.confidenceParams.Policy.Version
-	for _, g := range snap.Groups {
-		conf, ok := snap.ScoreFor(g)
-		if !ok {
-			continue
-		}
-		attrs := buildComponentConfidenceAttrs(g, conf, policyVersion)
-		s.otel.RecordAIComponentConfidence(ctx, attrs)
-		if g.HasLifecycleChange {
-			s.otel.EmitAIComponentConfidenceLog(ctx, attrs)
-		}
-	}
-}
-
-// SetManagedInventoryEmitHook installs the callback invoked after each
-// scan's ai_discovery fanout to emit the connector / MCP endpoint
-// inventory in managed_enterprise mode. Safe to call with nil to clear
-// it. Set by the sidecar at boot and on config reload so the closure
-// always captures the current config + connector registry.
-func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context.Context)) {
-	if s == nil {
-		return
-	}
-	s.managedInventoryEmitMu.Lock()
-	s.managedInventoryEmit = fn
-	s.managedInventoryEmitMu.Unlock()
-}
-
-func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot) {
-	if s.events == nil {
-		return
-	}
-	// managed_enterprise: after the per-signal ai_discovery snapshot,
-	// ship the connector / MCP endpoint inventory on the same scan
-	// cadence so AI Defense sees a fresh full picture each cycle. The
-	// hook is a no-op outside managed mode (never installed there).
-	// Snapshot the callback under the lock so a concurrent config
-	// reload can't swap it mid-read.
-	if s.opts.ManagedEnterprise {
-		s.managedInventoryEmitMu.RLock()
-		emit := s.managedInventoryEmit
-		s.managedInventoryEmitMu.RUnlock()
-		if emit != nil {
-			defer emit(ctx)
-		}
-	}
-	opts := s.opts
-	// snap.Scores is non-nil only when DisableRedaction is true
-	// (see fanoutReport). When redaction is on, every per-signal
-	// payload ships without Confidence anyway, so a nil Scores
-	// map is the correct skip-the-lookup signal.
-	for _, sig := range report.Signals {
-		// managed_enterprise ships the FULL inventory to AI Defense:
-		// every active signal (`seen` + `new` + `changed`, plus `gone`
-		// as a lifecycle delta) becomes its own ai_discovery event so
-		// the cloud always has the complete endpoint snapshot. Outside
-		// managed mode we stay delta-only (skip steady-state `seen`) to
-		// avoid flooding user-owned SIEMs on every full scan.
-		if !opts.ManagedEnterprise &&
-			sig.State != AIStateNew && sig.State != AIStateChanged && sig.State != AIStateGone {
-			continue
-		}
-		payload := BuildAIDiscoveryPayload(sig, report.Summary.ScanID, PayloadOpts{
-			DisableRedaction:   opts.DisableRedaction,
-			StoreRawLocalPaths: opts.StoreRawLocalPaths,
-			Confidence:         snap.LookupSignal(sig),
-		})
-		// EmitContext (not Emit) so the writer can stamp run_id /
-		// trace_id from the active discovery span — without this,
-		// AI-discovery rows in gateway.jsonl carry empty correlation
-		// fields and operators cannot pivot from a discovery span
-		// in Tempo to its envelope row in Loki/Splunk.
-		s.events.EmitContext(ctx, gatewaylog.Event{
-			EventType:   gatewaylog.EventAIDiscovery,
-			Severity:    gatewaylog.SeverityInfo,
-			AIDiscovery: payload,
-		})
-	}
-}
-
 // componentSignalGroup is one rollup row's worth of state used by
 // the OTel emitter. Capturing the canonical ecosystem / name
 // strings (first non-empty wins, matching gateway.rollupComponents)
@@ -2590,9 +2486,8 @@ func (s componentRollupSnapshot) ScoreFor(g componentSignalGroup) (ConfidenceRes
 // rollup when the signal has no component block so non-SDK
 // rows (Claude Code, Cursor, Codex, ...) get confidence on the
 // API / CLI / TUI surfaces too. Returns nil only for signals
-// that have neither a component nor a vendor+product pair --
-// nil is the documented signal to BuildAIDiscoveryPayload that
-// the wire payload should not carry confidence fields.
+// that have neither a component nor a vendor+product pair. Canonical v8
+// adapters treat nil as the absence of a confidence observation.
 func (s componentRollupSnapshot) LookupSignal(sig AISignal) *ConfidenceResult {
 	// Local model IDs deliberately do not participate in product/component
 	// confidence rollups: they are unbounded identities held in sig.Model,
@@ -2631,6 +2526,12 @@ func groupSignalsForRollup(signals []AISignal) []componentSignalGroup {
 	order := []componentKey{}
 	for _, sig := range signals {
 		if sig.State == AIStateGone {
+			continue
+		}
+		// A model ID is an unbounded, user-controlled identity. It must never
+		// become an ecosystem/name metric label, even if an external report
+		// supplies a Component block on a local-model signal.
+		if sig.Model != nil || sig.Category == SignalLocalModel {
 			continue
 		}
 		k, ok := keyForComponent(sig.Component)
@@ -2838,11 +2739,21 @@ func EnrichSignalsWithComponentConfidence(signals []AISignal, params ConfidenceP
 		if conf == nil {
 			continue
 		}
-		signals[i].IdentityScore = clampPayloadScore(conf.IdentityScore)
+		signals[i].IdentityScore = clampConfidenceScore(conf.IdentityScore)
 		signals[i].IdentityBand = conf.IdentityBand
-		signals[i].PresenceScore = clampPayloadScore(conf.PresenceScore)
+		signals[i].PresenceScore = clampConfidenceScore(conf.PresenceScore)
 		signals[i].PresenceBand = conf.PresenceBand
 	}
+}
+
+func clampConfidenceScore(value float64) float64 {
+	if value != value || value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 func buildComponentConfidenceAttrs(g componentSignalGroup, conf ConfidenceResult, policyVersion int) telemetry.AIComponentConfidenceAttrs {
@@ -2859,211 +2770,6 @@ func buildComponentConfidenceAttrs(g componentSignalGroup, conf ConfidenceResult
 		PolicyVersion:  policyVersion,
 		DetectorCount:  len(conf.Detectors),
 	}
-}
-
-// PayloadOpts is the privacy-flag bundle threaded into
-// BuildAIDiscoveryPayload. Two flags compose: extended fields ride
-// on DisableRedaction; raw paths additionally require
-// StoreRawLocalPaths so an operator who set DisableRedaction = true
-// but kept StoreRawLocalPaths = false (the default) still gets
-// scrubbed RawPath values on the wire.
-//
-// Confidence is the optional per-component confidence result
-// shared across every signal in the same (ecosystem, name) group.
-// When set and DisableRedaction is true, the helper stamps the
-// identity / presence score, band, factors, and detector list on
-// the wire payload so downstream OTel + webhook receivers can
-// dedupe and alert on the engine output without re-running it.
-type PayloadOpts struct {
-	DisableRedaction   bool
-	StoreRawLocalPaths bool
-	Confidence         *ConfidenceResult
-}
-
-// BuildAIDiscoveryPayload renders an AISignal into the wire-format
-// gatewaylog.AIDiscoveryPayload, applying the privacy-flag
-// composition described on AIDiscoveryPayload. Exposed as a
-// standalone helper (rather than a method) so external integrations
-// (test harnesses, sample event generators, eBPF probes) can build
-// payloads identical to what the sidecar emits.
-func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gatewaylog.AIDiscoveryPayload {
-	out := &gatewaylog.AIDiscoveryPayload{
-		ScanID:        scanID,
-		SignalID:      sig.SignalID,
-		Category:      sig.Category,
-		Vendor:        sig.Vendor,
-		Product:       sig.Product,
-		Confidence:    sig.Confidence,
-		State:         sig.State,
-		EvidenceTypes: sig.EvidenceTypes,
-		PathHashes:    sig.PathHashes,
-		Basenames:     sig.Basenames,
-		WorkspaceHash: sig.WorkspaceHash,
-	}
-	// Model filenames commonly contain the same private repository/model
-	// identity as sig.Model.ID. Do not let that identity bypass the extended
-	// model-metadata privacy gate through the otherwise-safe basename field.
-	if (sig.Category == SignalLocalModel || sig.Model != nil) && !opts.DisableRedaction {
-		out.SignalID = redactedModelSignalID(sig)
-		out.PathHashes = nil
-		out.Basenames = nil
-		out.WorkspaceHash = ""
-	}
-	if !sig.LastSeen.IsZero() {
-		out.LastSeen = sig.LastSeen.UTC().Format(time.RFC3339)
-	}
-	if !opts.DisableRedaction {
-		// Redacted mode: ship only the minimal set above. Extended
-		// fields stay zero so omitempty hides them from receivers.
-		return out
-	}
-	// Extended mode: every field below ships so downstream OTel /
-	// webhook consumers can do their own confidence rendering and
-	// dedupe on (component.ecosystem, component.name).
-	out.Detector = sig.Detector
-	if sig.Component != nil {
-		out.Component = &gatewaylog.AIDiscoveryComponent{
-			Ecosystem: sig.Component.Ecosystem,
-			Name:      sig.Component.Name,
-			Version:   sig.Component.Version,
-			Framework: sig.Component.Framework,
-		}
-	}
-	if sig.Model != nil {
-		out.Model = &gatewaylog.AIDiscoveryModel{
-			ID:        sig.Model.ID,
-			Status:    sig.Model.Status,
-			Format:    sig.Model.Format,
-			Provider:  sig.Model.Provider,
-			Recipe:    sig.Model.Recipe,
-			Modality:  sig.Model.Modality,
-			Device:    sig.Model.Device,
-			SizeBytes: sig.Model.SizeBytes,
-			Pinned:    sig.Model.Pinned,
-		}
-	}
-	if sig.Runtime != nil {
-		started := ""
-		if !sig.Runtime.StartedAt.IsZero() {
-			started = sig.Runtime.StartedAt.UTC().Format(time.RFC3339)
-		}
-		out.Runtime = &gatewaylog.AIDiscoveryRuntime{
-			PID:       sig.Runtime.PID,
-			PPID:      sig.Runtime.PPID,
-			StartedAt: started,
-			UptimeSec: sig.Runtime.UptimeSec,
-			User:      sig.Runtime.User,
-			Comm:      sig.Runtime.Comm,
-		}
-	}
-	if sig.LastActiveAt != nil && !sig.LastActiveAt.IsZero() {
-		out.LastActiveAt = sig.LastActiveAt.UTC().Format(time.RFC3339)
-	}
-	if len(sig.Evidence) > 0 {
-		evidence := make([]gatewaylog.AIDiscoveryEvidence, 0, len(sig.Evidence))
-		var rawPaths []string
-		for _, ev := range sig.Evidence {
-			row := gatewaylog.AIDiscoveryEvidence{
-				Type:          ev.Type,
-				Basename:      ev.Basename,
-				PathHash:      ev.PathHash,
-				ValueHash:     ev.ValueHash,
-				WorkspaceHash: ev.WorkspaceHash,
-				Quality:       ev.Quality,
-				MatchKind:     ev.MatchKind,
-			}
-			if opts.StoreRawLocalPaths {
-				row.RawPath = ev.RawPath
-				if ev.RawPath != "" {
-					rawPaths = append(rawPaths, ev.RawPath)
-				}
-			}
-			evidence = append(evidence, row)
-		}
-		out.Evidence = evidence
-		if len(rawPaths) > 0 {
-			out.RawPaths = rawPaths
-		}
-	}
-	if opts.Confidence != nil {
-		conf := opts.Confidence
-		// Engine output is in [0,1] but we don't trust callers
-		// to have validated; clamp on the wire so a corrupt
-		// snapshot can't ship NaN to a downstream histogram.
-		out.IdentityScore = clampPayloadScore(conf.IdentityScore)
-		out.IdentityBand = conf.IdentityBand
-		out.PresenceScore = clampPayloadScore(conf.PresenceScore)
-		out.PresenceBand = conf.PresenceBand
-		if len(conf.IdentityFactors) > 0 {
-			out.IdentityFactors = wireFactors(conf.IdentityFactors)
-		}
-		if len(conf.PresenceFactors) > 0 {
-			out.PresenceFactors = wireFactors(conf.PresenceFactors)
-		}
-		if len(conf.Detectors) > 0 {
-			detectors := make([]string, len(conf.Detectors))
-			copy(detectors, conf.Detectors)
-			out.Detectors = detectors
-		}
-	}
-	return out
-}
-
-func redactedModelSignalID(sig AISignal) string {
-	key := currentPathHashKey()
-	if len(key) == 0 {
-		// Detached/legacy callers have no installation secret with which to
-		// build a dictionary-resistant pseudonym. Omitting correlation is safer
-		// than shipping the reversible public fingerprint.
-		return ""
-	}
-	identity := sig.Fingerprint
-	if identity == "" {
-		identity = sig.SignalID
-	}
-	if identity == "" {
-		return ""
-	}
-	return "model_" + keyedHashHex(key, "ai-discovery/model-signal/v1\x00"+identity)
-}
-
-// clampPayloadScore mirrors the OTel-side clamp so the wire
-// payload and the metrics never disagree on the score range. Kept
-// in this package (rather than imported from telemetry) so the
-// inventory package stays free of telemetry's dependency tree --
-// matters for unit tests that build payloads without spinning up
-// an OTel provider.
-func clampPayloadScore(v float64) float64 {
-	if v != v { // NaN
-		return 0
-	}
-	if v < 0 {
-		return 0
-	}
-	if v > 1 {
-		return 1
-	}
-	return v
-}
-
-// wireFactors renders ConfidenceFactor rows into the JSON wire
-// shape downstream sinks expect. We allocate a fresh slice (rather
-// than aliasing) so a downstream sink that mutates its received
-// payload can't poison the engine's in-memory result.
-func wireFactors(in []ConfidenceFactor) []gatewaylog.AIDiscoveryFactor {
-	out := make([]gatewaylog.AIDiscoveryFactor, 0, len(in))
-	for _, f := range in {
-		out = append(out, gatewaylog.AIDiscoveryFactor{
-			Detector:    f.Detector,
-			EvidenceID:  f.EvidenceID,
-			MatchKind:   f.MatchKind,
-			Quality:     f.Quality,
-			Specificity: f.Specificity,
-			LR:          f.LR,
-			LogitDelta:  f.LogitDelta,
-		})
-	}
-	return out
 }
 
 // AISourceExternal is the value forcibly written into AIDiscoveryReport
@@ -3189,31 +2895,20 @@ func containsUnicodeControl(value string) bool {
 	return strings.IndexFunc(value, unicode.IsControl) >= 0
 }
 
-// SanitizeEvidenceForWire scrubs every AISignal.Evidence row to
-// match the operator's privacy stance:
-//
-//   - When `disableRedaction` is false (the default), RawPath is
-//     unconditionally cleared and Quality / MatchKind are kept (those
-//     are not sensitive).
-//   - When `disableRedaction` is true, RawPath is preserved only when
-//     `storeRawLocalPaths` is also true -- the two flags compose so a
-//     casual `disable_redaction: true` does not silently start
-//     shipping local paths on the wire if the operator has not
-//     explicitly opted into raw-path storage.
-//
-// The function operates in-place on the slice header but copies each
-// AIEvidence value before mutating, so the caller's underlying slice
-// data is not modified.
-func SanitizeEvidenceForWire(signals []AISignal, disableRedaction, storeRawLocalPaths bool) {
+// SanitizeEvidenceForWire unconditionally clears RawPath from every
+// AISignal.Evidence row while retaining non-sensitive Quality and MatchKind.
+// Local raw-path persistence is a separate forensic-store concern and never
+// grants an API or destination export bypass. The function operates in-place
+// on the slice header but copies each AIEvidence value before mutating, so the
+// caller's underlying slice data is not modified.
+func SanitizeEvidenceForWire(signals []AISignal) {
 	for i := range signals {
 		if len(signals[i].Evidence) == 0 {
 			continue
 		}
 		out := make([]AIEvidence, len(signals[i].Evidence))
 		for j, ev := range signals[i].Evidence {
-			if !(disableRedaction && storeRawLocalPaths) {
-				ev.RawPath = ""
-			}
+			ev.RawPath = ""
 			out[j] = ev
 		}
 		signals[i].Evidence = out

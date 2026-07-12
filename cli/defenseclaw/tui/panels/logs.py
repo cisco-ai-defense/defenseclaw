@@ -13,9 +13,8 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -29,11 +28,15 @@ from defenseclaw.tui.services.gateway_log_views import (
     SEVERITY_FILTERS,
     SEVERITY_LABELS,
     GatewayLogRow,
+    GatewayLogViews,
     detail_pairs,
-    load_gateway_log_views,
+    load_v8_log_views,
+    matches_structured_filters,
 )
 
 LogSource = Literal["gateway", "verdicts", "otel", "watchdog"]
+RawLogSource = Literal["gateway", "watchdog"]
+FileSignature = tuple[int, int, int, int, int]
 
 LOG_SOURCES: tuple[LogSource, ...] = ("gateway", "verdicts", "otel", "watchdog")
 LOG_SOURCE_LABELS: dict[LogSource, str] = {
@@ -140,14 +143,32 @@ LOW_SIGNAL_LOG_PATTERNS: tuple[str, ...] = (
     "severity:medium",
 )
 
-REDACTION_ENV_VAR = "DEFENSECLAW_DISABLE_REDACTION"
-TRUTHY_REDACTION_VALUES = {"1", "true", "yes", "on"}
 _UNSET_SIGNATURE = object()
 
 FILTER_TYPE_ACTION = "action"
 FILTER_TYPE_EVENT_TYPE = "event_type"
 FILTER_TYPE_PRESET = "preset"
 FILTER_TYPE_SEVERITY = "severity"
+
+
+@dataclass(frozen=True)
+class LogFileReadRequest:
+    """Immutable raw-log read request prepared on the UI thread."""
+
+    source: RawLogSource
+    path: Path
+    signature: FileSignature | None
+
+
+@dataclass(frozen=True)
+class LogFileSnapshot:
+    """Raw-log tail loaded off-thread and ready for an atomic model swap."""
+
+    request: LogFileReadRequest
+    lines: tuple[str, ...] = ()
+    error: str = ""
+    final_signature: FileSignature | None = None
+    stable: bool = True
 
 
 @dataclass(frozen=True)
@@ -285,20 +306,20 @@ class LogTableRow:
 class LogsPanelModel:
     """State and pure helpers for the Logs panel.
 
-    The model mirrors the Go panel's read path: free-form gateway/watchdog
-    tails, structured Verdicts and OTEL streams from gateway.jsonl, chip
-    filters, search, cursor selection, and scroll clamping.
+    Structured verdict and telemetry rows come exclusively from the canonical
+    v8 SQLite event history. Free-form gateway/watchdog text tails remain
+    available for process diagnostics; they are not telemetry routing inputs.
     """
 
     def __init__(
         self,
         data_dir: Path | None = None,
         *,
-        config: object | None = None,
-        env: Mapping[str, str] | None = None,
+        store: object | None = None,
     ) -> None:
         self.data_dir = data_dir
-        self.redaction = log_redaction_state(config=config, env=env)
+        self.store = store
+        self.redaction = LogRedactionState(False)
         self.source: LogSource = "gateway"
         self.lines: dict[LogSource, list[str]] = {source: [] for source in LOG_SOURCES}
         self.error_messages: dict[LogSource, str] = {source: "" for source in LOG_SOURCES}
@@ -325,10 +346,9 @@ class LogsPanelModel:
         # operator knows whether anything interesting happened while
         # they were reading. ``None`` = not paused for this source.
         self._pause_baseline: dict[LogSource, int | None] = {source: None for source in LOG_SOURCES}
-        # File tails and structured gateway events are polled every two
-        # seconds. Most ticks observe identical files; remember their cheap
-        # stat signatures so those ticks don't reread/reparse up to 1.5 MiB
-        # of logs on Textual's UI thread.
+        # Raw file tails are polled while their source is visible. Most ticks
+        # observe identical files; remember cheap stat signatures so only a
+        # changed tail is decoded by the app's background worker.
         self._refresh_signatures: dict[str, object] = {}
         # A single render asks for the same filtered source several times
         # (table rows, summary, source tabs, cursor clamping). Cache the pure
@@ -336,7 +356,7 @@ class LogsPanelModel:
         # filter change instead of repeatedly in the same keypress/frame.
         self._filtered_lines_cache: dict[
             LogSource,
-            tuple[tuple[str, ...], tuple[str, str, str], tuple[str, ...]],
+            tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
         ] = {}
 
     def set_data_dir(self, data_dir: str | Path | None) -> None:
@@ -361,6 +381,10 @@ class LogsPanelModel:
                 self._filtered_lines_cache.clear()
                 self._clamp_cursor()
         self.data_dir = next_data_dir
+
+    def set_store(self, store: object | None) -> None:
+        self.store = store
+        self._refresh_signatures.pop("structured", None)
 
     @property
     def paused(self) -> bool:
@@ -552,11 +576,11 @@ class LogsPanelModel:
         if self.source == "verdicts":
             return (
                 f"Streaming {LOG_SOURCE_LABELS[self.source]}. Up/Down select; Enter detail; "
-                "Space pause; / search; a/t/s chips; J judge history; R redaction."
+                "Space pause; / search; a/t/s chips; J judge history."
             )
         return (
             f"Streaming {LOG_SOURCE_LABELS[self.source]}. Up/Down select; Enter detail; "
-            "Space pause; / search; e errors; w warnings; R redaction."
+            "Space pause; / search; e errors; w warnings."
         )
 
     def set_connector_filter(self, connector: str) -> None:
@@ -621,51 +645,119 @@ class LogsPanelModel:
     def refresh(self) -> None:
         """Reload the active log files from ``data_dir``."""
 
-        if self.data_dir is None:
+        if self.data_dir is None and self.store is None:
             return
-        changed_sources: set[LogSource] = set()
-        for source, filename in (("gateway", "gateway.log"), ("watchdog", "watchdog.log")):
-            path = self.data_dir / filename
-            signature = _file_signature(path)
-            if self._refresh_signatures.get(source, _UNSET_SIGNATURE) == signature:
-                continue
-            if self._load_file(source, path):
-                self._refresh_signatures[source] = signature
-                changed_sources.add(source)
-            elif signature is None:
-                # A missing file is a stable snapshot; creation changes the
-                # signature and naturally retries. Existing-but-unreadable
-                # files keep the old signature so transient failures retry.
-                self._refresh_signatures[source] = signature
-
-        gateway_events_path = self.data_dir / "gateway.jsonl"
-        structured_signature = (
-            _file_signature(gateway_events_path),
-            self.verdict_action,
-            self.verdict_event_type,
-            self.verdict_severity,
-        )
-        if self._refresh_signatures.get("structured", _UNSET_SIGNATURE) != structured_signature:
-            views = load_gateway_log_views(
-                gateway_events_path,
-                action_filter=self.verdict_action,
-                event_type_filter=self.verdict_event_type,
-                severity_filter=self.verdict_severity,
-            )
-            self.error_messages["verdicts"] = views.error
-            self.error_messages["otel"] = views.error
-            if not views.error:
-                self._refresh_signatures["structured"] = structured_signature
-                self.verdict_rows = list(views.verdict_rows)
-                self.otel_rows = list(views.otel_rows)
-                self.lines["verdicts"] = list(views.verdict_lines)
-                self.lines["otel"] = list(views.otel_lines)
-                changed_sources.update(("verdicts", "otel"))
-            elif structured_signature[0] is None:
-                self._refresh_signatures["structured"] = structured_signature
+        changed_sources = self.refresh_files()
+        if self.store is not None:
+            views = load_v8_log_views(self.store)
+            changed_sources.update(self.apply_v8_views(views))
 
         if self.source in changed_sources:
             self._clamp_cursor()
+
+    def refresh_files(
+        self,
+        sources: Iterable[LogSource] | None = None,
+    ) -> set[LogSource]:
+        """Synchronously refresh selected raw tails for compatibility callers."""
+
+        selected = tuple(sources) if sources is not None else ("gateway", "watchdog")
+        changed_sources: set[LogSource] = set()
+        for source in selected:
+            if source not in {"gateway", "watchdog"}:
+                continue
+            request = self.pending_file_refresh(source)
+            if request is None:
+                continue
+            if self.apply_file_snapshot(self.read_file_request(request)):
+                changed_sources.add(source)
+        return changed_sources
+
+    def pending_file_refresh(self, source: RawLogSource) -> LogFileReadRequest | None:
+        """Return a read request only when one raw file signature changed."""
+
+        if self.data_dir is None:
+            return None
+        filename = "gateway.log" if source == "gateway" else "watchdog.log"
+        path = self.data_dir / filename
+        signature = _file_signature(path)
+        if self._refresh_signatures.get(source, _UNSET_SIGNATURE) == signature:
+            return None
+        return LogFileReadRequest(source=source, path=path, signature=signature)
+
+    @staticmethod
+    def read_file_request(request: LogFileReadRequest) -> LogFileSnapshot:
+        """Read a bounded raw tail without mutating panel state."""
+
+        try:
+            lines = _tail_text_file(request.path)
+        except OSError as exc:
+            final_signature = _file_signature(request.path)
+            return LogFileSnapshot(
+                request=request,
+                error=f"Cannot open: {exc}",
+                final_signature=final_signature,
+                stable=final_signature == request.signature,
+            )
+        final_signature = _file_signature(request.path)
+        return LogFileSnapshot(
+            request=request,
+            lines=lines,
+            final_signature=final_signature,
+            stable=final_signature == request.signature,
+        )
+
+    def apply_file_snapshot(self, snapshot: LogFileSnapshot) -> bool:
+        """Atomically apply a raw tail on the Textual thread."""
+
+        if self.data_dir is None or not snapshot.stable:
+            return False
+        source = snapshot.request.source
+        filename = "gateway.log" if source == "gateway" else "watchdog.log"
+        if snapshot.request.path != self.data_dir / filename:
+            return False
+        if snapshot.error:
+            changed = self.error_messages[source] != snapshot.error
+            self.error_messages[source] = snapshot.error
+            if snapshot.final_signature is None:
+                # Missing is a stable state. Existing-but-unreadable files
+                # retain the previous signature so the next poll retries.
+                self._refresh_signatures[source] = None
+            return changed
+
+        next_lines = list(snapshot.lines)
+        changed = self.lines[source] != next_lines or bool(self.error_messages[source])
+        self.lines[source] = next_lines
+        self.error_messages[source] = ""
+        self._refresh_signatures[source] = snapshot.final_signature
+        if changed:
+            self._filtered_lines_cache.pop(source, None)
+        return changed
+
+    def apply_v8_views(self, views: GatewayLogViews) -> set[LogSource]:
+        """Apply views projected from a shared canonical-history snapshot."""
+
+        changed_sources: set[LogSource] = set()
+        self.error_messages["verdicts"] = views.error
+        self.error_messages["otel"] = views.error
+        verdict_rows = list(views.verdict_rows)
+        otel_rows = list(views.otel_rows)
+        verdict_lines = list(views.verdict_lines)
+        otel_lines = list(views.otel_lines)
+        if (
+            self.verdict_rows != verdict_rows
+            or self.otel_rows != otel_rows
+            or self.lines["verdicts"] != verdict_lines
+            or self.lines["otel"] != otel_lines
+        ):
+            self.verdict_rows = verdict_rows
+            self.otel_rows = otel_rows
+            self.lines["verdicts"] = verdict_lines
+            self.lines["otel"] = otel_lines
+            changed_sources.update(("verdicts", "otel"))
+            self._filtered_lines_cache.pop("verdicts", None)
+            self._filtered_lines_cache.pop("otel", None)
+        return changed_sources
 
     def set_source(self, source: LogSource) -> None:
         self.source = source
@@ -726,12 +818,33 @@ class LogsPanelModel:
         active = source or self.source
         rows = self.lines[active]
         rows_snapshot = tuple(rows)
-        filter_signature = (self.filter_mode, self.search_text, self.connector_filter)
+        filter_signature = (
+            self.filter_mode,
+            self.search_text,
+            self.connector_filter,
+            self.verdict_action if active == "verdicts" else "",
+            self.verdict_event_type if active == "verdicts" else "",
+            self.verdict_severity if active == "verdicts" else "",
+        )
         cached = self._filtered_lines_cache.get(active)
         if cached is not None and cached[0] == rows_snapshot and cached[1] == filter_signature:
             return list(cached[2])
-        if self.filter_mode == FILTER_NONE and not self.search_text and not self.connector_filter:
+        has_structured_filter = active == "verdicts" and any(
+            (self.verdict_action, self.verdict_event_type, self.verdict_severity)
+        )
+        if (
+            self.filter_mode == FILTER_NONE
+            and not self.search_text
+            and not self.connector_filter
+            and not has_structured_filter
+        ):
             filtered = rows_snapshot
+        elif active == "verdicts" and len(self.verdict_rows) == len(rows):
+            filtered = tuple(
+                line
+                for row, line in zip(self.verdict_rows, rows, strict=True)
+                if self._structured_line_matches(row, line)
+            )
         else:
             filtered = tuple(line for line in rows if self.line_matches_current_filter(line.lower()))
         self._filtered_lines_cache[active] = (rows_snapshot, filter_signature, filtered)
@@ -817,8 +930,6 @@ class LogsPanelModel:
 
         if key == "J" and not self.searching and self.source == "verdicts":
             return LogPanelAction(True, hint="Open the SQLite-backed judge response history.", modal="judge-history")
-        if key == "R" and not self.searching:
-            return LogPanelAction(True, hint="Open redaction toggle confirmation.", modal="redaction")
         if key == "N" and not self.searching:
             return LogPanelAction(True, hint="Open notifications toggle confirmation.", modal="notifications")
         if key == "space":
@@ -964,7 +1075,7 @@ class LogsPanelModel:
         if self.search_text:
             # E5: recognize the same ``connector:<name>`` token as the Audit
             # and Alerts panels. Connector-hook log lines carry the connector
-            # as ``connector=<name>`` (gateway.jsonl / OTEL render), so match
+            # as ``connector=<name>`` (canonical OTEL render), so match
             # that form first and fall back to a bare substring; the remaining
             # free text keeps the legacy substring search.
             connector_value, remaining = split_connector_token(self.search_text.lower())
@@ -1008,9 +1119,37 @@ class LogsPanelModel:
         rendered = self.lines[source]
         if len(rendered) != len(rows):
             return []
-        if self.filter_mode == FILTER_NONE and not self.search_text and not self.connector_filter:
+        has_structured_filter = source == "verdicts" and any(
+            (self.verdict_action, self.verdict_event_type, self.verdict_severity)
+        )
+        if (
+            self.filter_mode == FILTER_NONE
+            and not self.search_text
+            and not self.connector_filter
+            and not has_structured_filter
+        ):
             return list(rows)
-        return [row for row, line in zip(rows, rendered, strict=True) if self.line_matches_current_filter(line.lower())]
+        return [
+            row
+            for row, line in zip(rows, rendered, strict=True)
+            if self._structured_line_matches(row, line, source=source)
+        ]
+
+    def _structured_line_matches(
+        self,
+        row: GatewayLogRow,
+        line: str,
+        *,
+        source: LogSource = "verdicts",
+    ) -> bool:
+        if source == "verdicts" and not matches_structured_filters(
+            row,
+            action_filter=self.verdict_action if row.action else "",
+            event_type_filter=self.verdict_event_type if row.event_type else "",
+            severity_filter=self.verdict_severity if row.severity else "",
+        ):
+            return False
+        return self.line_matches_current_filter(line.lower())
 
     def _selected_structured_row(self, source: LogSource, rows: list[GatewayLogRow]) -> GatewayLogRow | None:
         if self.source != source or not rows:
@@ -1049,10 +1188,8 @@ class LogsPanelModel:
     def _reset_structured_source(self) -> None:
         self.scroll["verdicts"] = 0
         self.cursor_moved["verdicts"] = False
-        if self.data_dir is not None:
-            self.refresh()
-        else:
-            self._clamp_cursor()
+        self._filtered_lines_cache.pop("verdicts", None)
+        self._clamp_cursor()
 
     def _load_file(self, source: LogSource, path: Path) -> bool:
         try:
@@ -1076,13 +1213,7 @@ class LogsPanelModel:
                 f" severity={SEVERITY_LABELS[self.verdict_severity]}"
             )
         search = f" search={self.search_text}" if self.search_text else ""
-        raw = "  RAW redaction off" if self.redaction.disabled else ""
-        return f"{source_label}  {state}  filter={filter_label}{chips}{search}{raw}"
-
-    def sync_redaction_state(self, *, config: object | None = None, env: Mapping[str, str] | None = None) -> None:
-        """Refresh the model's effective redaction badge state."""
-
-        self.redaction = log_redaction_state(config=config, env=env)
+        return f"{source_label}  {state}  filter={filter_label}{chips}{search}"
 
     def _detail_title_for_row(self, row: GatewayLogRow | None) -> str:
         if self.source == "verdicts":
@@ -1114,46 +1245,6 @@ def _chip_group(
         for value in values
     )
     return LogChipGroupState(group=group, label=label, shortcut=shortcut, chips=chips)
-
-
-def redaction_disabled_for_logs_badge(
-    *,
-    config: object | None = None,
-    env: Mapping[str, str] | None = None,
-) -> bool:
-    """Return true when Logs should show the foreground RAW badge."""
-
-    return log_redaction_state(config=config, env=env).disabled
-
-
-def log_redaction_state(
-    *,
-    config: object | None = None,
-    env: Mapping[str, str] | None = None,
-) -> LogRedactionState:
-    """Resolve effective redaction state from config plus env override."""
-
-    source = ""
-    disabled = False
-    privacy = getattr(config, "privacy", None)
-    if bool(getattr(privacy, "disable_redaction", False)):
-        disabled = True
-        source = "privacy.disable_redaction=true"
-    environ = os.environ if env is None else env
-    env_value = str(environ.get(REDACTION_ENV_VAR, "")).strip()
-    if env_value.lower() in TRUTHY_REDACTION_VALUES:
-        disabled = True
-        env_source = f"{REDACTION_ENV_VAR}={env_value}"
-        source = f"{source}, {env_source}" if source else env_source
-    if not disabled:
-        return LogRedactionState(False)
-    return LogRedactionState(
-        disabled=True,
-        badge_label="RAW",
-        style_key="raw",
-        hint="redaction off - `defenseclaw setup redaction on` to re-enable",
-        source=source,
-    )
 
 
 def _filter_change(filter_type: str, old: str, new: str) -> LogFilterChange | None:
