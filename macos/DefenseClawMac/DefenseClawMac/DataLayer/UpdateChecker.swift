@@ -73,12 +73,12 @@ actor UpdateChecker {
 
     /// Latest Mac-app release.
     func latestRelease() async -> ReleaseInfo? {
-        await fetchLatest(repo: Self.repo)
+        await fetchLatest(repo: Self.repo, requireSelfUpdateAsset: true)
     }
 
     /// Latest DefenseClaw runtime release (upstream repo).
     func latestRuntimeRelease() async -> ReleaseInfo? {
-        await fetchLatest(repo: Self.runtimeRepo)
+        await fetchLatest(repo: Self.runtimeRepo, requireSelfUpdateAsset: false)
     }
 
     /// Parse "defenseclaw, version 0.7.0"-style output into "0.7.0".
@@ -88,7 +88,7 @@ actor UpdateChecker {
         return String(output[range])
     }
 
-    private func fetchLatest(repo: String) async -> ReleaseInfo? {
+    private func fetchLatest(repo: String, requireSelfUpdateAsset: Bool) async -> ReleaseInfo? {
         guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -97,16 +97,31 @@ actor UpdateChecker {
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag = dict["tag_name"] as? String
         else { return nil }
+        return Self.releaseInfo(
+            from: dict,
+            repo: repo,
+            tag: tag,
+            requireSelfUpdateAsset: requireSelfUpdateAsset
+        )
+    }
+
+    nonisolated static func releaseInfo(
+        from dict: [String: Any],
+        repo: String,
+        tag: String,
+        requireSelfUpdateAsset: Bool
+    ) -> ReleaseInfo? {
         let assets = (dict["assets"] as? [[String: Any]]) ?? []
-        guard let zip = Self.selectSelfUpdateAsset(from: assets) else {
+        let zip = Self.selectSelfUpdateAsset(from: assets)
+        if requireSelfUpdateAsset && zip == nil {
             return nil
         }
         return ReleaseInfo(
             tag: tag,
             version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
-            assetName: (zip["name"] as? String) ?? "",
-            assetURL: (zip["browser_download_url"] as? String) ?? "",
-            assetSHA256: ((zip["digest"] as? String) ?? "")
+            assetName: (zip?["name"] as? String) ?? "",
+            assetURL: (zip?["browser_download_url"] as? String) ?? "",
+            assetSHA256: ((zip?["digest"] as? String) ?? "")
                 .replacingOccurrences(of: "sha256:", with: ""),
             htmlURL: (dict["html_url"] as? String) ?? "https://github.com/\(repo)/releases",
             notes: (dict["body"] as? String) ?? ""
