@@ -119,20 +119,22 @@ curl -sS http://127.0.0.1:18970/healthz
 
 Requires `sudo`. The installer:
 
-- Creates directories under the managed install tree (all `root:wheel`):
-  - `/opt/cisco/secureclient/defenseclaw/bin/` — `0755` (gateway binary)
-  - `/opt/cisco/secureclient/defenseclaw/etc/` — `0755` (config.yaml)
-  - `/opt/cisco/secureclient/defenseclaw/runtime/` — `0750` (audit DB, tokens, device key)
-  - `/opt/cisco/secureclient/defenseclaw/hook-guardian-state/` — `0750` (authorization records)
-  - `/Library/Logs/Cisco/SecureClient/DefenseClaw/` — `0750`
+- Creates directories under the managed install tree:
+  - `/opt/cisco/secureclient/defenseclaw/` — `root:wheel 0755`
+  - `/opt/cisco/secureclient/defenseclaw/bin/` — `root:wheel 0755` (gateway binary)
+  - `/opt/cisco/secureclient/defenseclaw/etc/` — `root:defenseclaw 0750` (config.yaml)
+  - `/opt/cisco/secureclient/defenseclaw/runtime/` — `defenseclaw:defenseclaw 0750` (audit DB, tokens, device key)
+  - `/opt/cisco/secureclient/defenseclaw/hook-guardian/` — `root:defenseclaw 0750` (hook target manifest)
+  - `/opt/cisco/secureclient/defenseclaw/hook-guardian-state/` — `root:defenseclaw 0750` (authorization records)
+  - `/Library/Logs/Cisco/SecureClient/DefenseClaw/` — `defenseclaw:defenseclaw 0750`
 - Writes `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` (`root:wheel 0644`) and `launchctl bootstrap`s it.
-- Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:wheel 0640`.
-- Does NOT create a dedicated service user. The gateway daemon runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
+- Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:defenseclaw 0640`.
+- Creates the `defenseclaw` service user/group for managed file ownership. The gateway daemon still runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
 - Wires per-user hook configs in the target user's `~/.codex/config.toml`, `~/.claude/settings.json`, and/or `~/.cursor/hooks.json` depending on `--connector`.
 - Sweeps legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `com.defenseclaw.gateway.plist`) if present — an upgrade from an older install produces a clean cutover.
 
 ### Runtime privileges
 
-The daemon runs as **root** (uid 0). The plist deliberately omits `UserName` / `GroupName` so launchd defaults to root; the managed cloud auth provider requires root to read and re-perm its on-disk credential store. No dedicated service user is created. Every install-time chown of a DefenseClaw-owned path uses `root:wheel`.
+The daemon runs as **root** (uid 0). The plist deliberately omits `UserName` / `GroupName` so launchd defaults to root; the managed cloud auth provider requires root to read and re-perm its on-disk credential store. The installer still creates the `defenseclaw` service identity so managed config, manifest, runtime, guardian-state, and log paths can be group-restricted to `defenseclaw` instead of world-readable.
 
 Upgrades from a pre-root install (which provisioned a `defenseclaw` service user via `dscl` / `sysadminctl`) are handled by `uninstall.sh --purge`, which sweeps the legacy uid/gid so a subsequent reinstall starts from a clean uid namespace.

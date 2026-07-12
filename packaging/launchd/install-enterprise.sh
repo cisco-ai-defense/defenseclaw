@@ -300,6 +300,7 @@ if [ "$START_JOBS" = true ]; then
     /bin/launchctl bootstrap system "$GATEWAY_PLIST_DEST" || die "failed to bootstrap gateway LaunchDaemon"
     if ! /bin/launchctl bootstrap system "$GUARDIAN_PLIST_DEST"; then
         /bin/launchctl bootout "system/${GATEWAY_LABEL}" >/dev/null 2>&1 || true
+        /bin/rm -f "$GATEWAY_PLIST_DEST" "$GUARDIAN_PLIST_DEST"
         die "failed to bootstrap hook guardian LaunchDaemon"
     fi
     /bin/launchctl enable "system/${GATEWAY_LABEL}"

@@ -18,12 +18,12 @@ sudo -n true || fail "passwordless sudo is required"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 installer="${root}/packaging/launchd/install-enterprise.sh"
-managed_root="/Library/Application Support/DefenseClaw"
-config_dest="${managed_root}/config.yaml"
-binary_root=/Library/DefenseClaw
+managed_root="/opt/cisco/secureclient/defenseclaw"
+config_dest="${managed_root}/etc/config.yaml"
+binary_root=/opt/cisco/secureclient/defenseclaw
 gateway_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
 guardian_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
-log_dir=/Library/Logs/DefenseClaw
+log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-packaging.XXXXXX")"
 user_created=false
 group_created=false
@@ -100,11 +100,11 @@ manifest_source="${fixture}/targets.yaml"
 cat >"$config_source" <<'EOF'
 config_version: 7
 deployment_mode: managed_enterprise
-data_dir: /Library/Application Support/DefenseClaw/runtime
-audit_db: /Library/Application Support/DefenseClaw/runtime/audit.db
-judge_bodies_db: /Library/Application Support/DefenseClaw/runtime/judge_bodies.db
-plugin_dir: /Library/Application Support/DefenseClaw/runtime/plugins
-policy_dir: /Library/Application Support/DefenseClaw/runtime/policies
+data_dir: /opt/cisco/secureclient/defenseclaw/runtime
+audit_db: /opt/cisco/secureclient/defenseclaw/runtime/audit.db
+judge_bodies_db: /opt/cisco/secureclient/defenseclaw/runtime/judge_bodies.db
+plugin_dir: /opt/cisco/secureclient/defenseclaw/runtime/plugins
+policy_dir: /opt/cisco/secureclient/defenseclaw/runtime/policies
 gateway:
   api_bind: 127.0.0.1
   api_port: 18970

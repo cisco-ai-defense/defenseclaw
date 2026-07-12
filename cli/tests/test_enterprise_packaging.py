@@ -216,6 +216,11 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
     assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
     assert "installer accepted a write-capable managed-root ACL" in smoke
+    assert "managed_root=\"/opt/cisco/secureclient/defenseclaw\"" in smoke
+    assert "config_dest=\"${managed_root}/etc/config.yaml\"" in smoke
+    assert "log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw" in smoke
+    assert "/Library/Application Support/DefenseClaw" not in smoke
+    assert "/Library/DefenseClaw" not in smoke
 
 
 def test_launchd_enterprise_installer_matches_cisco_plist_layout():
@@ -245,4 +250,15 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
     assert f'GUARDIAN_LABEL={guardian["Label"]}' in text
     assert '"system/${GATEWAY_LABEL}"' in text
     assert '"system/${GUARDIAN_LABEL}"' in text
+    assert '/bin/rm -f "$GATEWAY_PLIST_DEST" "$GUARDIAN_PLIST_DEST"' in text
     assert "system/com.defenseclaw." not in text
+
+    packaging = (ROOT / "packaging" / "macos" / "PACKAGING.md").read_text(encoding="utf-8")
+    documented_contract = {
+        "`/opt/cisco/secureclient/defenseclaw/etc/` — `root:defenseclaw 0750`",
+        "`/opt/cisco/secureclient/defenseclaw/hook-guardian/` — `root:defenseclaw 0750`",
+        "`/opt/cisco/secureclient/defenseclaw/hook-guardian-state/` — `root:defenseclaw 0750`",
+        "`/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:defenseclaw 0640`",
+    }
+    missing_contract = sorted(value for value in documented_contract if value not in packaging)
+    assert not missing_contract
