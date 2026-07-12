@@ -128,6 +128,7 @@ dc_assert_observability() {
   bash "${DC_E2E_REPO_ROOT}/test/e2e/observability_assertions.sh" \
     --jsonl "${DC_GATEWAY_JSONL}" \
     --db "${DC_AUDIT_DB}" \
+    --judge-bodies-db "${DEFENSECLAW_HOME}/judge_bodies.db" \
     --ts-window-seconds 3600 \
     --no-require-verdict \
     "$@"

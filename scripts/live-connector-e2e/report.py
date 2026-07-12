@@ -76,7 +76,13 @@ def summarize(rows: list[dict]):
         cells[key][event] = status
         v = r.get("version") or ""
         if v and v != "unknown":
-            versions.setdefault(key, v)
+            # Upgrade-regression artifacts contain the passing baseline first.
+            # Prefer the candidate phase so regression issues name the release
+            # that actually failed instead of the known-good baseline.
+            if str(event).startswith("candidate-"):
+                versions[key] = v
+            else:
+                versions.setdefault(key, v)
         if status == "fail":
             failures.append((key[0], key[1], event, r.get("detail", "")))
     return cells, versions, failures
