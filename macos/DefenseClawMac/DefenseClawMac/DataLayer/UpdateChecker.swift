@@ -98,28 +98,29 @@ actor UpdateChecker {
               let tag = dict["tag_name"] as? String
         else { return nil }
         let assets = (dict["assets"] as? [[String: Any]]) ?? []
-        let appZips = assets.filter {
-            let name = ($0["name"] as? String) ?? ""
-            return name.hasPrefix("DefenseClawMac-")
-                && name.contains("-macos-arm64")
-                && name.hasSuffix(".zip")
+        guard let zip = Self.selectSelfUpdateAsset(from: assets) else {
+            return nil
         }
-        // Prefer a Developer ID signed + notarized artifact once release
-        // credentials are configured. Until then, releases intentionally use
-        // the explicit "unverified" suffix.
-        let zip = appZips.first {
-            !(($0["name"] as? String) ?? "").contains("-unverified")
-        } ?? appZips.first
         return ReleaseInfo(
             tag: tag,
             version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
-            assetName: (zip?["name"] as? String) ?? "",
-            assetURL: (zip?["browser_download_url"] as? String) ?? "",
-            assetSHA256: ((zip?["digest"] as? String) ?? "")
+            assetName: (zip["name"] as? String) ?? "",
+            assetURL: (zip["browser_download_url"] as? String) ?? "",
+            assetSHA256: ((zip["digest"] as? String) ?? "")
                 .replacingOccurrences(of: "sha256:", with: ""),
             htmlURL: (dict["html_url"] as? String) ?? "https://github.com/\(repo)/releases",
             notes: (dict["body"] as? String) ?? ""
         )
+    }
+
+    nonisolated static func selectSelfUpdateAsset(from assets: [[String: Any]]) -> [String: Any]? {
+        assets.first {
+            let name = ($0["name"] as? String) ?? ""
+            return name.hasPrefix("DefenseClawMac-")
+                && name.contains("-macos-arm64")
+                && name.hasSuffix(".zip")
+                && !name.contains("-unverified")
+        }
     }
 
     // MARK: - Download + install + restart
@@ -194,13 +195,11 @@ actor UpdateChecker {
         guard signature.exitCode == 0 else {
             return "The downloaded app failed code-signature verification: \(signature.output)"
         }
-        if !release.assetName.contains("-unverified") {
-            let assessment = await Self.runProcess(
-                "/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", newApp.path]
-            )
-            guard assessment.exitCode == 0 else {
-                return "The downloaded app failed Gatekeeper assessment: \(assessment.output)"
-            }
+        let assessment = await Self.runProcess(
+            "/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", newApp.path]
+        )
+        guard assessment.exitCode == 0 else {
+            return "The downloaded app failed Gatekeeper assessment: \(assessment.output)"
         }
 
         // Swap the running bundle: move the old aside (the running process keeps

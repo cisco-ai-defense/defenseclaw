@@ -204,7 +204,7 @@ jobs:
           MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-          MACOS_REQUIRE_NOTARIZATION: ${{ vars.MACOS_REQUIRE_NOTARIZATION || 'false' }}
+          MACOS_REQUIRE_NOTARIZATION: ${{ vars.MACOS_REQUIRE_NOTARIZATION || 'true' }}
         run: scripts/build-macos-app-release.sh "$RELEASE_VERSION" dist
 
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
