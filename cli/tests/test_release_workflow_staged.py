@@ -253,6 +253,13 @@ def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
 def test_release_conditionally_notarizes_or_publishes_explicit_unverified_assets() -> None:
     workflow = _workflow()
     macos_job = workflow["jobs"]["macos-app"]
+    setup_uv_step = next(
+        step
+        for step in macos_job["steps"]
+        if step.get("uses", "").startswith("astral-sh/setup-uv@")
+    )
+    assert setup_uv_step["with"]["enable-cache"] == "false"
+
     build_step = next(
         step
         for step in macos_job["steps"]
