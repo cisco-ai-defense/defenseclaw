@@ -30,6 +30,11 @@ struct UpdateCheckerSafetyTests {
         rejectsAbsolutePathsBeforeExtraction()
         rejectsSymlinkEntriesBeforeExtraction()
         rejectsUnexpectedTopLevelFiles()
+        rejectsEmptyArchive()
+        rejectsTildePrefixedPaths()
+        rejectsHardlinkEntries()
+        rejectsMultipleAppBundles()
+        rejectsArchiveWithNoAppBundle()
         print("Update checker safety tests passed")
     }
 
@@ -71,6 +76,41 @@ struct UpdateCheckerSafetyTests {
             UpdateChecker.ZipArchiveEntry(path: "README.txt", mode: "-rw-r--r--"),
         ])
         expect(result.isFailure(containing: "single top-level .app"), "top-level extras are rejected")
+    }
+
+    private static func rejectsEmptyArchive() {
+        let result = UpdateChecker.validateUpdateArchive(entries: [])
+        expect(result.isFailure(containing: "archive is empty"), "empty archive is rejected")
+    }
+
+    private static func rejectsTildePrefixedPaths() {
+        let result = UpdateChecker.validateUpdateArchive(entries: [
+            UpdateChecker.ZipArchiveEntry(path: "~/Library/LaunchAgents/persist.plist", mode: "-rw-r--r--"),
+        ])
+        expect(result.isFailure(containing: "unsafe path"), "tilde-prefixed paths are rejected")
+    }
+
+    private static func rejectsHardlinkEntries() {
+        let result = UpdateChecker.validateUpdateArchive(entries: [
+            UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac.app/Contents/Info.plist", mode: "-rw-r--r--"),
+            UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac.app/Contents/Resources/link", mode: "hrwxr-xr-x"),
+        ])
+        expect(result.isFailure(containing: "link"), "hardlink entries are rejected")
+    }
+
+    private static func rejectsMultipleAppBundles() {
+        let result = UpdateChecker.validateUpdateArchive(entries: [
+            UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac.app/Contents/Info.plist", mode: "-rw-r--r--"),
+            UpdateChecker.ZipArchiveEntry(path: "OtherDefenseClawMac.app/Contents/Info.plist", mode: "-rw-r--r--"),
+        ])
+        expect(result.isFailure(containing: "single top-level .app"), "multiple .app bundles are rejected")
+    }
+
+    private static func rejectsArchiveWithNoAppBundle() {
+        let result = UpdateChecker.validateUpdateArchive(entries: [
+            UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac/Contents/Info.plist", mode: "-rw-r--r--"),
+        ])
+        expect(result.isFailure(containing: "single top-level .app"), "archives without .app bundle are rejected")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ label: String) {
