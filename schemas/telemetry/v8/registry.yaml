@@ -29,12 +29,12 @@ inbound_bindings:
       target: defenseclaw.request.id
       value_type: string
       normalization: identifier-v1
-      sources: [gen_ai.request.id, request.id, codex.turn.id, turn.id, turn_id]
+      sources: [defenseclaw.request.id, request.id]
     - id: turn-id-v1
       target: defenseclaw.turn.id
       value_type: string
       normalization: identifier-v1
-      sources: [codex.turn.id, turn.id, turn_id]
+      sources: [defenseclaw.turn.id, codex.turn.id, turn.id, turn_id]
     - id: provider-v1
       target: gen_ai.provider.name
       value_type: string
@@ -376,7 +376,7 @@ inbound_bindings:
           - {location: leaf_attribute, key: gen_ai.operation.name, operator: equals_expansion_operation, value_type: string}
           - {location: leaf_attribute, key: $expansion_required_key, operator: present, value_type: target}
           - {location: span, key: $ended, operator: valid_ended_span, value_type: structural}
-      mapping: {strategy: standard-genai-span-v1, alias_sets: [conversation-id-v1, request-id-v1, provider-v1, request-model-v1]}
+      mapping: {strategy: standard-genai-span-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1]}
       derived_targets: []
       time_rule: span-end-v1
       outcome_rule: otel-status-v1
@@ -412,7 +412,7 @@ inbound_bindings:
         predicates:
           - {location: leaf_attribute, key: defenseclaw.signal, operator: absent, value_type: string}
           - {location: leaf_attribute, key: event.name, operator: equals, values: [codex.user_prompt], value_type: string}
-      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, provider-v1, request-model-v1, input-content-v1]}
+      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1, input-content-v1]}
       derived_targets: []
       time_rule: log-time-observed-receipt-v1
       outcome_rule: {fixed: attempted}
@@ -427,7 +427,7 @@ inbound_bindings:
         predicates:
           - {location: leaf_attribute, key: defenseclaw.signal, operator: absent, value_type: string}
           - {location: leaf_attribute, key: event.name, operator: equals, values: [claude_code.user_prompt], value_type: string}
-      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, provider-v1, request-model-v1, input-content-v1]}
+      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1, input-content-v1]}
       derived_targets: []
       time_rule: log-time-observed-receipt-v1
       outcome_rule: {fixed: attempted}
@@ -445,7 +445,7 @@ inbound_bindings:
           - {location: leaf_attribute, key: event.kind, operator: equals, values: [response.completed], value_type: string}
           - {location: leaf_attribute, key: input_token_count, operator: present, value_type: string}
           - {location: leaf_attribute, key: output_token_count, operator: present, value_type: string}
-      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, provider-v1, request-model-v1, output-content-v1, input-tokens-v1, output-tokens-v1, cached-input-tokens-v1]}
+      mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, turn-id-v1, provider-v1, request-model-v1, output-content-v1, input-tokens-v1, output-tokens-v1, cached-input-tokens-v1]}
       derived_targets:
         - {family: metric.defenseclaw.agent.token.usage, strategy: codex-token-fields-v1}
       time_rule: log-time-observed-receipt-v1

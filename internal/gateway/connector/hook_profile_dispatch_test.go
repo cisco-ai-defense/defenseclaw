@@ -41,15 +41,15 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		// wire replies come from the shared hookOnlyProfileRespond
 		// hermes case.
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
-		{"cursor", func() Connector { return NewCursorConnector() }, false, true, true},
-		{"windsurf", func() Connector { return NewWindsurfConnector() }, false, true, true},
+		{"cursor", func() Connector { return NewCursorConnector() }, true, true, true},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, true, true, true},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, false, true, true},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, false, true, true},
-		// Antigravity is the only generic hook-only connector that
-		// SETS Decode, because agy v1 ships a nested `toolCall`
-		// wire shape that the generic normalizer can't read. See
-		// antigravity_hook_profile.go.
+		// Antigravity uses Decode because agy v1 ships a nested
+		// `toolCall` wire shape that the generic normalizer cannot read.
+		// Cursor and Windsurf use Decode only for their connector-native
+		// generation/execution-to-turn semantics.
 		{"antigravity", func() Connector { return NewAntigravityConnector() }, true, true, true},
 		// opencode controls its own flat wire shape (the bridge plugin we
 		// ship), so it needs no Decode; Respond comes from the shared
@@ -73,6 +73,47 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 			}
 			if got := profile.Respond != nil; got != tc.wantRespond {
 				t.Errorf("%s Respond set=%v want=%v", tc.name, got, tc.wantRespond)
+			}
+		})
+	}
+}
+
+func TestHookOnlyProfiles_MapDocumentedNativeTurnIDs(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile func(map[string]interface{}) HookProfileRequest
+		payload map[string]interface{}
+		want    string
+	}{
+		{"cursor generation", cursorProfileDecode, map[string]interface{}{"generation_id": "gen-7"}, "gen-7"},
+		{"cursor explicit turn fallback", cursorProfileDecode, map[string]interface{}{"turn_id": "turn-7"}, "turn-7"},
+		{"windsurf execution", windsurfProfileDecode, map[string]interface{}{"execution_id": "exec-9"}, "exec-9"},
+		{"windsurf explicit turn fallback", windsurfProfileDecode, map[string]interface{}{"turn_id": "turn-9"}, "turn-9"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.profile(tc.payload).TurnID; got != tc.want {
+				t.Fatalf("TurnID=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHookOnlyProfiles_DoNotCrossMapUnrelatedIDsToTurns(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile func(map[string]interface{}) HookProfileRequest
+		payload map[string]interface{}
+	}{
+		{"cursor execution", cursorProfileDecode, map[string]interface{}{"execution_id": "exec-7"}},
+		{"cursor tool call", cursorProfileDecode, map[string]interface{}{"tool_call_id": "tool-7"}},
+		{"windsurf generation", windsurfProfileDecode, map[string]interface{}{"generation_id": "gen-9"}},
+		{"windsurf step", windsurfProfileDecode, map[string]interface{}{"step_id": "step-9"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.profile(tc.payload).TurnID; got != "" {
+				t.Fatalf("TurnID=%q want empty", got)
 			}
 		})
 	}

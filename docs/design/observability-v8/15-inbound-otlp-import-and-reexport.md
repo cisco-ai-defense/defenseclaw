@@ -175,7 +175,8 @@ lower-precedence alias.
 |---|---|
 | authenticated connector/source | Receiver path-token identity; payload `source`, `connector`, and `service.name` cannot override it |
 | conversation/session ID | `gen_ai.conversation.id`, `conversation.id`, `session.id`, `session_id` |
-| request/turn ID | `gen_ai.request.id`, `request.id`, `codex.turn.id`, `turn.id`, `turn_id` |
+| transport request ID | `defenseclaw.request.id`, `request.id` |
+| prompt/response turn ID | `defenseclaw.turn.id`, `codex.turn.id`, `turn.id`, `turn_id` |
 | provider | `gen_ai.provider.name`, then authenticated source; `service.name` is retained only as bounded import provenance, not authority |
 | request model | `gen_ai.request.model`, `gen_ai.response.model`, `model` |
 | input content | `gen_ai.input.messages`, `prompt`, `user_prompt`, `gen_ai.prompt`, `llm.prompt`, `codex.prompt`, `message`, `content`, then scalar log body |

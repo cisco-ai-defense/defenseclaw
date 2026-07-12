@@ -673,7 +673,7 @@ Do not execute any obsolete raw-network hint printed by a frozen
 a shell. The authenticated resolver performs `source → 0.8.4 bridge → fresh
 0.8.4 controller → 0.8.5 hard cut` as one transaction.
 
-When a compatible v8 hard-cut target is published, the upgrader backs up the
+During the `0.8.5` hard cut, the upgrader backs up the
 exact source, establishes and validates the v7 bridge state, creates and
 validates the whole v8 candidate, promotes inline observability credentials
 into locked environment references, writes atomically, refreshes owned local
@@ -693,7 +693,7 @@ secret-free preview. Such a preview is never required before
 ### Install and environment ownership
 
 Release `0.8.4` remains on `config_version: 7` and does not create the v8
-destination model. A fresh install of the future v8 hard-cut release will write
+destination model. A fresh `0.8.5` install writes
 strict `config_version: 8`; its setup commands will add or update named entries
 under `observability.destinations`. Use the release installer only for a new
 host. On an existing installation, use the coherent `0.8.4` controller or, for

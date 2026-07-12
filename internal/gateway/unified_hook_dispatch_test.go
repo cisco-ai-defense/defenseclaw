@@ -102,7 +102,8 @@ func TestHookProfileForConnector(t *testing.T) {
 		// hermes has no Decode: its `extra` content is recovered by the
 		// generic decoder's ContentEnvelopeKey fallback.
 		{"hermes", "hermes", "hermes", false, true, true},
-		{"cursor", "cursor", "cursor", false, true, true},
+		{"cursor", "cursor", "cursor", true, true, true},
+		{"windsurf", "windsurf", "windsurf", true, true, true},
 		{"openhands", "openhands", "openhands", false, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}

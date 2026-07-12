@@ -1179,8 +1179,6 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 	}
 	turnID := firstString(payload,
 		"turn_id", "turnId", "turnID",
-		"execution_id", "executionId", "generation_id", "generationId",
-		"tool_call_id", "toolCallId", "message_id", "messageId", "step_id", "stepId",
 	)
 	cwd := firstString(payload, "cwd", "working_dir", "workingDir", "working_directory", "workingDirectory")
 	if cwd == "" {
