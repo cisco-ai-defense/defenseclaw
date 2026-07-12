@@ -29,6 +29,7 @@ struct UpdateCheckerVerificationTests {
         selectsVerifiedSelfUpdateAsset()
         rejectsNonAppZipAssets()
         allowsRuntimeReleaseWithoutSelfUpdateAsset()
+        returnsPopulatedReleaseInfoForAppSelfUpdate()
         print("Update checker verification tests passed")
     }
 
@@ -98,6 +99,28 @@ struct UpdateCheckerVerificationTests {
             requireSelfUpdateAsset: true
         )
         expect(appRelease == nil, "app self-update still requires a verified app zip")
+    }
+
+    private static func returnsPopulatedReleaseInfoForAppSelfUpdate() {
+        let release = UpdateChecker.releaseInfo(
+            from: [
+                "html_url": "https://github.com/cisco-ai-defense/defenseclaw/releases/tag/v1.2.3",
+                "body": "App release",
+                "assets": [
+                    [
+                        "name": "DefenseClawMac-1.2.3-macos-arm64.zip",
+                        "browser_download_url": "https://example.test/verified.zip",
+                        "digest": "sha256:def",
+                    ],
+                ],
+            ],
+            repo: "cisco-ai-defense/defenseclaw",
+            tag: "v1.2.3",
+            requireSelfUpdateAsset: true
+        )
+        expect(release?.assetName == "DefenseClawMac-1.2.3-macos-arm64.zip", "app release asset name is preserved")
+        expect(release?.assetURL == "https://example.test/verified.zip", "app release asset URL is preserved")
+        expect(release?.assetSHA256 == "def", "app release digest prefix is stripped")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ label: String) {
