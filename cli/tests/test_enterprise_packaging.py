@@ -200,8 +200,14 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
         'CONFIG_DEST="/opt/cisco/secureclient/defenseclaw/etc/config.yaml"',
         'install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root wheel 0640',
         'install_file_atomic "$MANIFEST_SOURCE" "$MANIFEST_DEST" root wheel 0640',
-        '/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"',
-        '/usr/bin/install -d -o root -g wheel -m 0750 "$RUNTIME_DIR" "$GUARDIAN_DIR" "$AUTH_DIR" "$LOG_DIR"',
+        'create_directory_no_replace "$BINARY_ROOT" root wheel 0755',
+        'create_directory_no_replace "$BIN_DIR" root wheel 0755',
+        'create_directory_no_replace "$ETC_DIR" root wheel 0755',
+        'create_directory_no_replace "$RUNTIME_DIR" root wheel 0750',
+        'create_directory_no_replace "$GUARDIAN_DIR" root wheel 0750',
+        'create_directory_no_replace "$AUTH_DIR" root wheel 0750',
+        'create_directory_no_replace "$LOG_DIR" root wheel 0750',
+        'for parent in /opt /opt/cisco /opt/cisco/secureclient "$LOG_VENDOR_DIR" "$LOG_PRODUCT_DIR"; do',
         'assert_path_metadata "$CONFIG_DEST" file 0 "$WHEEL_GID" 640',
         'assert_path_metadata "$MANIFEST_DEST" file 0 "$WHEEL_GID" 640',
         'assert_path_metadata "$ETC_DIR" dir 0 "$WHEEL_GID" 755',
@@ -225,9 +231,7 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     }
     missing = sorted(value for value in required if value not in text)
     assert not missing
-    directory_creation = (
-        '/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"'
-    )
+    directory_creation = 'create_directory_no_replace "$BINARY_ROOT" root wheel 0755'
     for ancestor in ("/opt", "/opt/cisco", "/opt/cisco/secureclient"):
         assert text.index(directory_creation) < text.index(f"assert_trusted_system_dir {ancestor}")
     stale_service_identity_contract = {
@@ -240,21 +244,59 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     present = sorted(value for value in stale_service_identity_contract if value in text)
     assert not present
 
+    assert "existing DefenseClaw installation detected at" in text
+    assert "no changes were made. This installer is fresh-install-only" in text
+    assert "remain on the current version" in text
+    assert 'local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"' in text
+    assert '/usr/bin/dscl . -read "/Users/${local_user}" NFSHomeDirectory' in text
+    assert '"${local_home}/.defenseclaw"' in text
+    assert '"${local_home}/.local/bin/defenseclaw"' in text
+    assert '"${local_home}/.local/bin/defenseclaw-gateway"' in text
+    assert "BINARY_ROOT=/opt/cisco/secureclient/defenseclaw" in text
+    assert "LOG_DIR=/Library/Logs/Cisco/SecureClient/DefenseClaw" in text
+    assert "LEGACY_GATEWAY_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.gateway.plist" in text
+    assert "LEGACY_GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist" in text
+    assert "com.defenseclaw.gateway" in text
+    assert "com.defenseclaw.hook-guardian" in text
+    guard_offset = text.index("existing DefenseClaw installation detected at")
+    user_scan_offset = text.index('local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"')
+    assert guard_offset < text.index(directory_creation)
+    assert guard_offset < text.index('ROLLBACK_DIR="$(/usr/bin/mktemp -d')
+    assert user_scan_offset < text.index('require_regular_source "$CONFIG_SOURCE"')
+    atomic_install = text[
+        text.index("install_file_atomic() {") : text.index("plist_pins_managed_mode() {")
+    ]
+    assert '/bin/mv -f -- "$temporary" "$destination"' not in atomic_install
+    assert '/bin/ln -- "$temporary" "$destination"' in atomic_install
+    assert "appeared concurrently and was preserved" in text
+    assert guard_offset < text.index("ROLLBACK_ARMED=true")
+    assert guard_offset < text.index('stop_job_if_loaded "$GUARDIAN_LABEL"')
+    assert '/bin/launchctl enable "system/${GATEWAY_LABEL}"' in text
+    assert '/bin/launchctl kickstart -k "system/${GATEWAY_LABEL}"' in text
+    assert "system/com.defenseclaw.gateway" not in text
+    assert "system/com.defenseclaw.hook-guardian" not in text
+
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "macos-enterprise-packaging:" in workflow
     assert "./scripts/test-macos-enterprise-packaging.sh" in workflow
 
     smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
     assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
-    assert "installer accepted a write-capable managed-root ACL" in smoke
+    assert "fresh-install-only enterprise package accepted a write-capable existing root" in smoke
     assert "managed_root=\"/opt/cisco/secureclient/defenseclaw\"" in smoke
     assert "config_dest=\"${managed_root}/etc/config.yaml\"" in smoke
     assert "log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw" in smoke
     assert "assert_no_defenseclaw_identity()" in smoke
-    assert smoke.count("assert_no_defenseclaw_identity \"") == 3
+    assert smoke.count("assert_no_defenseclaw_identity \"") == 5
     assert "dscl . -create" not in smoke
-    assert "/Library/Application Support/DefenseClaw" not in smoke
-    assert "/Library/DefenseClaw" not in smoke
+    assert 'legacy_managed_root="/Library/Application Support/DefenseClaw"' in smoke
+    assert "legacy_binary_root=/Library/DefenseClaw" in smoke
+    assert "fresh-install-only enterprise package overwrote an existing deployment" in smoke
+    assert "enterprise package ignored a per-user DefenseClaw installation" in smoke
+    assert "per-user refusal did not name the dscl-resolved home marker" in smoke
+    assert "per-user refusal mutated managed destination" in smoke
+    assert "existing-install refusal modified managed config" in smoke
+    assert "enterprise package repaired/overwrote existing damaged metadata" in smoke
 
 
 def test_launchd_enterprise_installer_matches_cisco_plist_layout():

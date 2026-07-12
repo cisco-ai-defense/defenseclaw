@@ -30,7 +30,7 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-readonly MIN_GO_VERSION="1.22"
+readonly MIN_GO_VERSION="1.26.4"
 readonly MIN_PYTHON_VERSION="3.10"
 readonly MAX_PYTHON_VERSION="3.13"
 readonly PREFERRED_PYTHON_VERSIONS=("3.12" "3.11" "3.13" "3.10")
@@ -59,6 +59,12 @@ log_step()    { echo -e "\n${BOLD}${CYAN}==> $*${NC}"; }
 die() {
     log_error "$@"
     exit 1
+}
+
+source_install_ownership() {
+    "${SCRIPT_DIR}/source-install-preflight.sh" "$1" \
+        "${REPO_ROOT}" "${INSTALL_DIR}" ".venv/bin" \
+        "defenseclaw" "defenseclaw-gateway"
 }
 
 command_exists() {
@@ -110,17 +116,17 @@ extract_version() {
 
 check_os() {
     log_step "Detecting Operating System"
-    
+
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
     ARCH="$(uname -m)"
-    
+
     case "${ARCH}" in
         x86_64)  ARCH_NORMALIZED="amd64" ;;
         aarch64) ARCH_NORMALIZED="arm64" ;;
         arm64)   ARCH_NORMALIZED="arm64" ;;
         *)       die "Unsupported architecture: ${ARCH}" ;;
     esac
-    
+
     case "${OS}" in
         darwin)
             OS_NAME="macOS"
@@ -144,7 +150,7 @@ check_git() {
     if ! command_exists git; then
         die "Git is not installed. Install it from https://git-scm.com/"
     fi
-    
+
     local git_version
     git_version="$(extract_version "$(git --version)")"
     log_success "Git ${git_version} found"
@@ -377,9 +383,13 @@ install_python_cli() {
     ${pip_cmd} -e ".[tui]"
     
     log_success "Python CLI installed (editable mode)"
-    mkdir -p "${INSTALL_DIR}"
-    ln -sf "${VENV_DIR}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
-    log_success "Linked defenseclaw into ${INSTALL_DIR}"
+    if [[ "${SKIP_INSTALL:-false}" == false ]]; then
+        source_install_ownership ensure-dir
+        source_install_ownership publish-cli
+        log_success "Linked defenseclaw into ${INSTALL_DIR}"
+    else
+        log_info "Skipping shared CLI publication (--skip-install)"
+    fi
     
     # Note: cisco-ai-skill-scanner requires additional dependencies.
     # Users can manually install: pip install cisco-ai-skill-scanner
@@ -436,25 +446,24 @@ build_go_gateway() {
 install_go_gateway() {
     log_step "Installing Go Gateway"
     
-    local binary_name="defenseclaw-gateway"
+    local binary_name="defenseclaw-gateway" sign_error=""
     local src="${REPO_ROOT}/${binary_name}"
     local dest="${INSTALL_DIR}/${binary_name}"
     
     if [[ ! -f "${src}" ]]; then
         die "Binary ${src} not found. Run build first."
     fi
-    
-    mkdir -p "${INSTALL_DIR}"
-    cp "${src}" "${dest}"
-    chmod +x "${dest}"
-    
-    # Re-sign on macOS (copying invalidates adhoc signature)
+
     if [[ "${OS}" == "darwin" ]]; then
-        codesign -f -s - "${dest}" 2>/dev/null || true
+        sign_error="$(/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
+            "${src}" 2>&1)" || die "Could not ad-hoc sign ${src}: ${sign_error}"
     fi
     
+    source_install_ownership ensure-dir
+    source_install_ownership publish-gateway
+
     log_success "Installed ${binary_name} to ${dest}"
-    
+
     # Check if INSTALL_DIR is in PATH
     if ! echo "${PATH}" | grep -q "${INSTALL_DIR}"; then
         log_warn "${INSTALL_DIR} is not in your PATH"
@@ -628,6 +637,12 @@ main() {
                 ;;
         esac
     done
+
+    # Dependency discovery and tool installation can mutate the host. Refuse an
+    # out-of-band source overwrite first; --check remains a read-only exception.
+    if [[ "${check_only}" == false ]]; then
+        source_install_ownership check
+    fi
     
     # Check dependencies
     check_os
@@ -659,6 +674,8 @@ main() {
     # Export yes_mode for use in functions
     YES_MODE="${yes_mode}"
     export YES_MODE
+    SKIP_INSTALL="${skip_install}"
+    export SKIP_INSTALL
     
     # Install
     setup_python_venv
@@ -668,6 +685,7 @@ main() {
     
     if [[ "${skip_install}" == false ]]; then
         install_go_gateway
+        source_install_ownership claim
     else
         log_info "Skipping gateway install (--skip-install)"
     fi

@@ -66,6 +66,29 @@ from datetime import datetime, timezone
 CURRENT_SCHEMA_VERSION = 1
 
 STATE_FILE_NAME = ".migration_state.json"
+_UPGRADE_MUTATION_TOKEN_ENV = "DEFENSECLAW_UPGRADE_MUTATION_TOKEN"
+
+
+def upgrade_mutation_temp_suffix() -> str:
+    """Return the current upgrade attempt's safe temporary-file suffix.
+
+    The hard-cut controller supplies a per-attempt token while phase two is
+    mutating migration state and configuration. Upgrade fault-injection tests
+    intentionally crash between a temporary write and its atomic replace;
+    recovery can then remove only ``upgrade-<token>.`` files owned by that
+    attempt without sweeping another attempt's or an operator's files.
+
+    Only an exact 32-character lowercase hexadecimal token is allowed into a
+    filename. Ordinary migration runs, missing tokens, and malformed tokens
+    retain the historical unsuffixed temporary-file prefixes by returning an
+    empty string.
+    """
+    mutation_token = os.environ.get(_UPGRADE_MUTATION_TOKEN_ENV, "")
+    if len(mutation_token) != 32:
+        return ""
+    if not all(character in "0123456789abcdef" for character in mutation_token):
+        return ""
+    return f"upgrade-{mutation_token}."
 
 
 class FutureSchemaError(RuntimeError):
@@ -256,7 +279,9 @@ def save(data_dir: str, state: MigrationState) -> None:
     # explicitly. dir=data_dir keeps the rename on the same filesystem
     # as the target — required for os.replace to be atomic.
     fd, tmp_path = tempfile.mkstemp(
-        prefix=".migration_state.", suffix=".tmp", dir=data_dir,
+        prefix=f".migration_state.{upgrade_mutation_temp_suffix()}",
+        suffix=".tmp",
+        dir=data_dir,
     )
     try:
         with os.fdopen(fd, "w") as f:

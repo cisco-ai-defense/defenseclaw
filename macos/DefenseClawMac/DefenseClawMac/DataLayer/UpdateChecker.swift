@@ -39,6 +39,10 @@ enum UpgradeState: Equatable {
     case checking
     case downloading
     case installing
+    /// No mutation failed; the operator must complete an external authenticated action.
+    /// Keep human-readable guidance separate from the exact runnable command so
+    /// copy actions never put explanatory prose on the operator's pasteboard.
+    case actionRequired(guidance: String, command: String)
     case failed(String)
 }
 
@@ -315,6 +319,9 @@ actor UpdateChecker {
             guard !entry.mode.hasPrefix("l") && !entry.mode.hasPrefix("h") else {
                 return .failure("link entry \(path) is not allowed")
             }
+            guard entry.mode.hasPrefix("-") || entry.mode.hasPrefix("d") else {
+                return .failure("unsupported archive entry type for \(path)")
+            }
             let root = String(first)
             topLevelNames.insert(root)
             if root.hasSuffix(".app") {
@@ -335,9 +342,9 @@ actor UpdateChecker {
         output.split(whereSeparator: \.isNewline).compactMap { rawLine in
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { return nil }
-            let fields = line.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: true)
-            guard fields.count >= 9 else { return nil }
-            return ZipArchiveEntry(path: String(fields[8]), mode: String(fields[0]))
+            let fields = line.split(separator: " ", maxSplits: 9, omittingEmptySubsequences: true)
+            guard fields.count == 10, fields[0].count == 10 else { return nil }
+            return ZipArchiveEntry(path: String(fields[9]), mode: String(fields[0]))
         }
     }
 

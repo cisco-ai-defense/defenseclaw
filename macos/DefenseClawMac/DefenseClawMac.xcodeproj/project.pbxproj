@@ -209,7 +209,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.8.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.cisco.defenseclaw.macos;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -235,7 +235,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.8.4;
 				OTHER_CODE_SIGN_FLAGS = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.cisco.defenseclaw.macos;
 				PRODUCT_NAME = "$(TARGET_NAME)";

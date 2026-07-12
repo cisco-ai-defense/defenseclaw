@@ -43,6 +43,7 @@ from defenseclaw.envvars import (  # noqa: E402  (sys.path manipulated above)
     CATEGORY_SPLUNK_BRIDGE,
     CATEGORY_TELEMETRY,
     CATEGORY_TEST_FIXTURE,
+    CATEGORY_UPGRADE_INTERNAL,
     EnvVar,
     load_registry,
 )
@@ -58,6 +59,7 @@ _CATEGORY_ORDER = (
     CATEGORY_DEBUG,
     CATEGORY_DISCOVERY,
     CATEGORY_HOOK_INTERNAL,
+    CATEGORY_UPGRADE_INTERNAL,
     CATEGORY_SPLUNK_BRIDGE,
     CATEGORY_TEST_FIXTURE,
 )
@@ -73,6 +75,7 @@ _CATEGORY_TITLES = {
     CATEGORY_DEBUG: "Debug / verbose logging",
     CATEGORY_DISCOVERY: "Discovery & probes",
     CATEGORY_HOOK_INTERNAL: "Hook-internal (do not override)",
+    CATEGORY_UPGRADE_INTERNAL: "Upgrade-internal (do not override)",
     CATEGORY_SPLUNK_BRIDGE: "Splunk-bridge bundle",
     CATEGORY_TEST_FIXTURE: "Test fixtures (test-only)",
 }
