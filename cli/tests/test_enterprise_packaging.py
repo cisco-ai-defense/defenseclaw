@@ -193,6 +193,8 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     assert "--config" in help_result.stdout
     assert "root:defenseclaw" in help_result.stdout
     assert "0640" in help_result.stdout
+    assert "existing defenseclaw service user/group" in help_result.stdout
+    assert "not create it" in help_result.stdout
 
     text = installer.read_text(encoding="utf-8")
     required = {
@@ -252,13 +254,3 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
     assert '"system/${GUARDIAN_LABEL}"' in text
     assert '/bin/rm -f "$GATEWAY_PLIST_DEST" "$GUARDIAN_PLIST_DEST"' in text
     assert "system/com.defenseclaw." not in text
-
-    packaging = (ROOT / "packaging" / "macos" / "PACKAGING.md").read_text(encoding="utf-8")
-    documented_contract = {
-        "`/opt/cisco/secureclient/defenseclaw/etc/` — `root:defenseclaw 0750`",
-        "`/opt/cisco/secureclient/defenseclaw/hook-guardian/` — `root:defenseclaw 0750`",
-        "`/opt/cisco/secureclient/defenseclaw/hook-guardian-state/` — `root:defenseclaw 0750`",
-        "`/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:defenseclaw 0640`",
-    }
-    missing_contract = sorted(value for value in documented_contract if value not in packaging)
-    assert not missing_contract

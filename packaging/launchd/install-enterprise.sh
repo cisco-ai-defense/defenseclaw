@@ -40,6 +40,9 @@ Installs the macOS managed-enterprise gateway and guardian. The managed
 config is atomically installed as root:defenseclaw with mode 0640 and is
 verified before either LaunchDaemon can start.
 
+An existing defenseclaw service user/group is required; this installer does
+not create it.
+
 Options:
   --config PATH    Administrator-approved managed config (required)
   --manifest PATH  Administrator-approved guardian targets (required)
