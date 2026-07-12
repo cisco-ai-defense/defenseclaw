@@ -18,7 +18,7 @@
 #
 # Layer A targets every registry connector (golden payload -> installed hook
 # entrypoint). Layer B only targets connectors that ship a driver under
-# drivers/; contract-only connectors (hermes, windsurf, antigravity) are
+# drivers/; contract-only connectors (hermes and windsurf) are
 # skipped with a recorded `skip` so the matrix stays honest.
 
 set -euo pipefail

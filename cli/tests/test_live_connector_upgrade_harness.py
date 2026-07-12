@@ -1,0 +1,183 @@
+"""Safety contracts for the persistent-macOS connector upgrade harness."""
+
+from __future__ import annotations
+
+import os
+import runpy
+import stat
+import subprocess
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+HARNESS = REPO / "scripts" / "live-connector-e2e" / "upgrade-regression.sh"
+PERSIST = REPO / "scripts" / "live-connector-e2e" / "lib" / "persistent-macos.sh"
+REPORT = REPO / "scripts" / "live-connector-e2e" / "report.py"
+
+
+def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    merged = os.environ.copy()
+    if env:
+        merged.update(env)
+    return subprocess.run(
+        ["bash", "-c", script],
+        cwd=REPO,
+        env=merged,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_harness_cli_exposes_workflow_contract() -> None:
+    proc = subprocess.run(
+        ["bash", str(HARNESS), "--help"],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    for flag in (
+        "--connector",
+        "--baseline-version",
+        "--candidate-version",
+        "--results",
+        "--classification-output",
+    ):
+        assert flag in proc.stdout
+
+
+def test_harness_never_globally_installs_or_removes_auth_homes() -> None:
+    text = HARNESS.read_text(encoding="utf-8")
+    persist_text = PERSIST.read_text(encoding="utf-8")
+    assert "npm install -g" not in text
+    assert "npm i -g" not in text
+    assert "rm -rf" not in text
+    assert 'export DEFENSECLAW_HOME="${SCRATCH}/defenseclaw"' in text
+    assert 'export DC_E2E_AGENT_WORKSPACE="${SCRATCH}/workspace"' in text
+    assert 'cd "${DC_E2E_AGENT_WORKSPACE}"' in text
+    assert "--no-restart" in text
+    assert "--skip-git-repo-check" in text
+    assert "switching to isolated candidate without re-running" in text
+    assert "defenseclaw-gateway stop" in text
+    assert 'if [ "${LOCK_ACQUIRED}" = "1" ]' in text
+    assert "antigravity.google/cli/install.sh" not in text
+    assert "read -r DC_PERSIST_WS_PORT DC_PERSIST_API_PORT DC_PERSIST_SCANNER_PORT" in persist_text
+
+
+def test_snapshot_restore_preserves_exact_bytes_and_mode(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    config = home / ".codex" / "config.toml"
+    snapshot = tmp_path / "snapshot"
+    config.parent.mkdir(parents=True)
+    original = b'model = "original"\n# keep whitespace  \n'
+    config.write_bytes(original)
+    config.chmod(0o640)
+
+    proc = _bash(
+        f"""
+        set -euo pipefail
+        dc_err() {{ printf '%s\n' "$*" >&2; }}
+        . {PERSIST!s}
+        dc_persist_snapshot_init {snapshot!s}
+        dc_persist_snapshot_file {config!s}
+        printf '%s\n' changed > {config!s}
+        chmod 600 {config!s}
+        dc_persist_restore_files
+        """,
+        env={"HOME": str(home)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert config.read_bytes() == original
+    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+
+
+def test_snapshot_restore_removes_only_created_file_not_parent(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    parent = home / ".gemini" / "config"
+    config = parent / "hooks.json"
+    snapshot = tmp_path / "snapshot"
+    parent.mkdir(parents=True)
+
+    proc = _bash(
+        f"""
+        set -euo pipefail
+        dc_err() {{ printf '%s\n' "$*" >&2; }}
+        . {PERSIST!s}
+        dc_persist_snapshot_init {snapshot!s}
+        dc_persist_snapshot_file {config!s}
+        printf '{{}}\n' > {config!s}
+        dc_persist_restore_files
+        """,
+        env={"HOME": str(home)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not config.exists()
+    assert parent.is_dir()
+
+
+def test_snapshot_rejects_symlinked_connector_config(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "target"
+    target.write_text("secret", encoding="utf-8")
+    config = home / "config.toml"
+    config.symlink_to(target)
+    snapshot = tmp_path / "snapshot"
+
+    proc = _bash(
+        f"""
+        set -euo pipefail
+        dc_err() {{ printf '%s\n' "$*" >&2; }}
+        . {PERSIST!s}
+        dc_persist_snapshot_init {snapshot!s}
+        dc_persist_snapshot_file {config!s}
+        """,
+        env={"HOME": str(home)},
+    )
+    assert proc.returncode != 0
+    assert "symlinked config" in proc.stderr
+    assert target.read_text(encoding="utf-8") == "secret"
+
+
+def test_lock_release_refuses_another_process_owner(tmp_path: Path) -> None:
+    lock = tmp_path / "active.lock"
+    lock.mkdir()
+    (lock / "pid").write_text("999999\n", encoding="utf-8")
+    proc = _bash(
+        f"""
+        set -euo pipefail
+        dc_err() {{ printf '%s\n' "$*" >&2; }}
+        . {PERSIST!s}
+        dc_persist_release_lock {lock!s}
+        """
+    )
+    assert proc.returncode != 0
+    assert "refusing to release" in proc.stderr
+    assert lock.is_dir()
+    assert (lock / "pid").read_text(encoding="utf-8") == "999999\n"
+
+
+def test_report_prefers_candidate_version_over_known_good_baseline() -> None:
+    summarize = runpy.run_path(str(REPORT))["summarize"]
+    _cells, versions, failures = summarize(
+        [
+            {
+                "connector": "codex",
+                "os": "macos",
+                "event": "baseline:lifecycle:fires",
+                "status": "pass",
+                "version": "0.142.5",
+            },
+            {
+                "connector": "codex",
+                "os": "macos",
+                "event": "candidate-upgrade:lifecycle:fires",
+                "status": "fail",
+                "version": "0.144.1",
+                "detail": "hook missing",
+            },
+        ]
+    )
+    assert versions[("codex", "macos")] == "0.144.1"
+    assert failures == [("codex", "macos", "candidate-upgrade:lifecycle:fires", "hook missing")]
