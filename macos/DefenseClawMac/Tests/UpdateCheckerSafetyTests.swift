@@ -25,6 +25,7 @@ enum RuntimePayload {
 @main
 struct UpdateCheckerSafetyTests {
     static func main() {
+        parsesRealZipInfoListing()
         acceptsSingleAppBundleArchive()
         rejectsPathTraversalBeforeExtraction()
         rejectsAbsolutePathsBeforeExtraction()
@@ -33,10 +34,39 @@ struct UpdateCheckerSafetyTests {
         rejectsEmptyArchive()
         rejectsTildePrefixedPaths()
         rejectsHardlinkEntries()
+        rejectsSpecialFileEntries()
         rejectsMultipleAppBundles()
         rejectsArchiveWithNoAppBundle()
         rejectsEmptyArchivePath()
         print("Update checker safety tests passed")
+    }
+
+    private static func parsesRealZipInfoListing() {
+        let listing = """
+        Archive:  DefenseClawMac-0.8.5-macos-arm64.zip
+        Zip file size: 2421636 bytes, number of entries: 3
+        drwxr-xr-x  2.1 unx        0 bx        0 stor 26-Jul-08 12:07 DefenseClawMac.app/
+        -rw-r--r--  2.1 unx      163 bX       86 defN 26-Jul-08 12:07 DefenseClawMac.app/Contents/Info.plist
+        -rw-r--r--  2.1 unx      123 bX       75 defN 26-Jul-08 12:07 DefenseClawMac.app/Contents/Resources/Release Notes.txt
+        3 files, 286 bytes uncompressed, 161 bytes compressed:  43.7%
+        """
+        let entries = UpdateChecker.parseZipEntries(listing)
+        expect(entries == [
+            UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac.app/", mode: "drwxr-xr-x"),
+            UpdateChecker.ZipArchiveEntry(
+                path: "DefenseClawMac.app/Contents/Info.plist",
+                mode: "-rw-r--r--"
+            ),
+            UpdateChecker.ZipArchiveEntry(
+                path: "DefenseClawMac.app/Contents/Resources/Release Notes.txt",
+                mode: "-rw-r--r--"
+            ),
+        ], "zipinfo headers and footers are ignored and entry paths retain spaces")
+        expect(
+            UpdateChecker.validateUpdateArchive(entries: entries)
+                == .success(appBundleName: "DefenseClawMac.app"),
+            "a real zipinfo listing for one app bundle is accepted"
+        )
     }
 
     private static func acceptsSingleAppBundleArchive() {
@@ -97,6 +127,16 @@ struct UpdateCheckerSafetyTests {
             UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac.app/Contents/Resources/link", mode: "hrwxr-xr-x"),
         ])
         expect(result.isFailure(containing: "link"), "hardlink entries are rejected")
+    }
+
+    private static func rejectsSpecialFileEntries() {
+        let result = UpdateChecker.validateUpdateArchive(entries: [
+            UpdateChecker.ZipArchiveEntry(
+                path: "DefenseClawMac.app/Contents/Resources/device",
+                mode: "crw-r--r--"
+            ),
+        ])
+        expect(result.isFailure(containing: "unsupported archive entry"), "special files are rejected")
     }
 
     private static func rejectsMultipleAppBundles() {

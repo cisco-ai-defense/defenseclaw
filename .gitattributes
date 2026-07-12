@@ -1,0 +1,5 @@
+# Release-candidate gates compare these reviewed sources byte-for-byte across
+# Linux, macOS, and Windows runners. Keep their checkout representation stable.
+scripts/upgrade.sh text eol=lf
+scripts/upgrade.ps1 text eol=lf
+cli/defenseclaw/install_publish.py text eol=lf

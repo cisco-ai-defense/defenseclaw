@@ -19,6 +19,75 @@ from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+MAKEFILE = ROOT / "Makefile"
+INSTALL_DOC = ROOT / "docs" / "INSTALL.md"
+
+
+def test_unsigned_local_dist_is_never_advertised_as_schema2_installer_input() -> None:
+    posix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    docs = INSTALL_DOC.read_text(encoding="utf-8")
+
+    assert "unsigned directory produced by `make dist` is intentionally rejected" in posix
+    assert "unsigned directory produced by `make dist` is rejected" in windows
+    assert "$(DIST_DIR)/ is not authenticated installer input for 0.8.4+" in makefile
+    assert "Do not pass the unsigned output of `make dist`" in docs
+    assert "signed checksums and certificate" in docs
+    assert "./scripts/install.sh --local dist/" not in docs
+
+
+def test_existing_install_refusal_names_authenticated_latest_mode_resolver() -> None:
+    posix = INSTALL_SH.read_text(encoding="utf-8")
+    windows = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert posix.count(
+        "authenticated release-owned upgrade resolver from the target release in latest mode"
+    ) == 2
+    assert "bash defenseclaw-upgrade.sh --yes" in posix
+    assert "Do not pass --version" in posix
+    assert "blob/main/docs/CLI.md#upgrade" in posix
+
+    assert (
+        "authenticated release-owned upgrade resolver from the target release in latest mode"
+    ) in windows
+    assert "& .\\defenseclaw-upgrade.ps1 -Yes" in windows
+    assert "Do not pass -Version" in windows
+    assert "blob/main/docs/CLI.md#upgrade" in windows
+    assert "defenseclaw upgrade where supported" not in windows
+
+
+def test_windows_installer_smoke_never_stubs_schema2_provenance() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r"(?ms)^  windows-installer-smoke:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    assert match is not None
+    job = match.group(0)
+
+    assert "must never stub provenance verification" in job
+    assert "scripts/stamp-version.sh 0.8.3" in job
+    assert "scripts/source_release_identity.py check --expected-release 0.8.3" in job
+    assert "main.version=0.8.3" in job
+    assert "make dist-upgrade-manifest" in job
+    assert "make dist-upgrade-manifest dist-checksums" not in job
+    assert "hashlib.sha256(path.read_bytes()).hexdigest()" in job
+    assert 'path.relative_to(root).as_posix()' in job
+    assert 'manifest.get("schema_version") != 1' in job
+    assert 'manifest.get("release_version") != "0.8.3"' in job
+    assert '"release_artifacts" in manifest' in job
+    assert "cosign.cmd" not in job
+    assert "installer smoke stub" not in job
+    assert "DEFENSECLAW-PROTECTED-ARTIFACT-V1" not in job
+    assert "did not report exact 0.8.3" in job
+
+    policy = job.index("Build and verify legacy installer policy fixture")
+    install = job.index("Run install.ps1 against local artifacts")
+    assert policy < job.index("upgrade-manifest.json", policy) < install
+    assert policy < job.index("make dist-upgrade-manifest", policy) < install
+    assert policy < job.index('root / "checksums.txt"', policy) < install
 
 
 def test_sandbox_installer_fallback_uses_selected_release() -> None:

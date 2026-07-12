@@ -42,7 +42,7 @@ The EC2 instance needs the following installed. Commands below assume Ubuntu 24.
 
 | Dependency | Version | Purpose |
 |------------|---------|---------|
-| Go | 1.25+ | Build DefenseClaw gateway |
+| Go | 1.26.4+ | Build DefenseClaw gateway |
 | Node.js | 20+ | Build TypeScript plugin |
 | Python | 3.12+ | CLI, tests, E2E helpers |
 | uv | latest | Python package management |

@@ -21,6 +21,11 @@ GATEWAY_LABEL=com.cisco.secureclient.defenseclaw
 GUARDIAN_LABEL=com.cisco.secureclient.defenseclaw.hook-guardian
 GATEWAY_PLIST_DEST=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
 GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
+LEGACY_BINARY_ROOT=/Library/DefenseClaw
+LEGACY_MANAGED_ROOT="/Library/Application Support/DefenseClaw"
+LEGACY_LOG_DIR=/Library/Logs/DefenseClaw
+LEGACY_GATEWAY_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.gateway.plist
+LEGACY_GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
 
 die() {
     printf 'defenseclaw enterprise install: %s\n' "$*" >&2
@@ -238,18 +243,48 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
+forget_temporary() {
+    local expected="$1"
+    local index
+    for index in "${!TEMP_FILES[@]}"; do
+        if [ "${TEMP_FILES[${index}]}" = "$expected" ]; then
+            unset "TEMP_FILES[${index}]"
+            return
+        fi
+    done
+}
+
 install_file_atomic() {
     local source="$1"
     local destination="$2"
     local owner="$3"
     local group="$4"
     local mode="$5"
-    local temporary="${destination}.new.$$"
+    local temporary
     refuse_symlink "$destination"
-    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || die "temporary install path already exists: $temporary"
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] \
+        || die "install destination appeared after fresh-host preflight: $destination"
+    temporary="$(/usr/bin/mktemp "${destination}.new.XXXXXX")" \
+        || die "could not reserve a private install file beside $destination"
     TEMP_FILES+=("$temporary")
     /usr/bin/install -o "$owner" -g "$group" -m "$mode" "$source" "$temporary"
-    /bin/mv -f -- "$temporary" "$destination"
+    /bin/ln -- "$temporary" "$destination" \
+        || die "install destination appeared concurrently and was preserved: $destination"
+    /bin/rm -f -- "$temporary"
+    forget_temporary "$temporary"
+}
+
+create_directory_no_replace() {
+    local path="$1"
+    local owner="$2"
+    local group="$3"
+    local mode="$4"
+    [ ! -e "$path" ] && [ ! -L "$path" ] \
+        || die "install directory appeared after fresh-host preflight: $path"
+    /bin/mkdir -- "$path" \
+        || die "install directory appeared concurrently and was preserved: $path"
+    /usr/sbin/chown "$owner:$group" "$path"
+    /bin/chmod "$mode" "$path"
 }
 
 plist_pins_managed_mode() {
@@ -314,6 +349,60 @@ done
 [ "$(/usr/bin/uname -s)" = Darwin ] || die "this installer supports macOS only"
 [ "$EUID" -eq 0 ] || die "run this installer as root"
 
+# This low-level package installer cannot provide the release transition
+# graph, 0.8.4 fresh-controller handoff, or exact rollback required for an
+# in-place upgrade. Detect every installed marker before validating identities,
+# unloading launchd, or changing a destination.
+for existing_path in \
+    "$BINARY_ROOT" \
+    "$LOG_DIR" \
+    "$LEGACY_BINARY_ROOT" \
+    "$LEGACY_MANAGED_ROOT" \
+    "$LEGACY_LOG_DIR" \
+    "$GATEWAY_PLIST_DEST" \
+    "$GUARDIAN_PLIST_DEST" \
+    "$LEGACY_GATEWAY_PLIST_DEST" \
+    "$LEGACY_GUARDIAN_PLIST_DEST"; do
+    if [ -e "$existing_path" ] || [ -L "$existing_path" ]; then
+        die "existing DefenseClaw installation detected at $existing_path; no changes were made. This installer is fresh-install-only. Use the release-owned managed-enterprise staged upgrade path; if none is published for the target release, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
+    fi
+done
+
+# A system LaunchDaemon would contend with a consumer gateway in any local
+# account, not only the account that invoked this root-owned installer. Resolve
+# configured homes through Directory Services instead of assuming /Users/name,
+# and do it before source validation or any service/filesystem mutation.
+local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)" \
+    || die "could not enumerate local users to prove this is a fresh DefenseClaw host; no changes were made"
+while IFS= read -r local_user; do
+    [ -n "$local_user" ] || continue
+    local_home="$(/usr/bin/dscl . -read "/Users/${local_user}" NFSHomeDirectory 2>/dev/null \
+        | /usr/bin/sed -n 's/^NFSHomeDirectory: //p')"
+    [ -n "$local_home" ] || continue
+    case "$local_home" in
+        /*) ;;
+        *) die "local user ${local_user} has a non-absolute home; cannot prove this is a fresh DefenseClaw host; no changes were made" ;;
+    esac
+    for existing_path in \
+        "${local_home}/.defenseclaw" \
+        "${local_home}/.local/bin/defenseclaw" \
+        "${local_home}/.local/bin/defenseclaw-gateway"; do
+        if [ -e "$existing_path" ] || [ -L "$existing_path" ]; then
+            die "existing DefenseClaw installation detected at $existing_path; no changes were made. This installer is fresh-install-only. Use the release-owned managed-enterprise staged upgrade path; if none is published for the target release, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
+        fi
+    done
+done <<<"$local_users"
+for existing_label in \
+    com.cisco.secureclient.defenseclaw \
+    com.cisco.secureclient.defenseclaw.hook-guardian \
+    com.defenseclaw.gateway \
+    com.defenseclaw.hook-guardian; do
+    if /bin/launchctl print "system/${existing_label}" >/dev/null 2>&1; then
+        die "existing DefenseClaw launchd job detected (${existing_label}); no changes were made. This installer is fresh-install-only. Use the release-owned managed-enterprise staged upgrade path; if none is published for the target release, remain on the current version and contact the deployment owner."
+    fi
+done
+unset existing_path existing_label local_users local_user local_home
+
 require_regular_source "$CONFIG_SOURCE" "managed config"
 require_regular_source "$MANIFEST_SOURCE" "guardian manifest"
 require_regular_source "$BINARY_SOURCE" "gateway binary"
@@ -375,14 +464,19 @@ ROLLBACK_ARMED=true
 stop_job_if_loaded "$GUARDIAN_LABEL"
 stop_job_if_loaded "$GATEWAY_LABEL"
 
-for parent in "$LOG_VENDOR_DIR" "$LOG_PRODUCT_DIR"; do
+for parent in /opt /opt/cisco /opt/cisco/secureclient "$LOG_VENDOR_DIR" "$LOG_PRODUCT_DIR"; do
     if [ ! -d "$parent" ]; then
-        /usr/bin/install -d -o root -g wheel -m 0755 "$parent"
+        create_directory_no_replace "$parent" root wheel 0755
     fi
     assert_trusted_system_dir "$parent"
 done
-/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"
-/usr/bin/install -d -o root -g wheel -m 0750 "$RUNTIME_DIR" "$GUARDIAN_DIR" "$AUTH_DIR" "$LOG_DIR"
+create_directory_no_replace "$BINARY_ROOT" root wheel 0755
+create_directory_no_replace "$BIN_DIR" root wheel 0755
+create_directory_no_replace "$ETC_DIR" root wheel 0755
+create_directory_no_replace "$RUNTIME_DIR" root wheel 0750
+create_directory_no_replace "$GUARDIAN_DIR" root wheel 0750
+create_directory_no_replace "$AUTH_DIR" root wheel 0750
+create_directory_no_replace "$LOG_DIR" root wheel 0750
 assert_trusted_system_dir /opt
 assert_trusted_system_dir /opt/cisco
 assert_trusted_system_dir /opt/cisco/secureclient

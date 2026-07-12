@@ -453,9 +453,15 @@ class TestRunMigrations(unittest.TestCase):
         import defenseclaw.commands.cmd_version as cmd_version
         from defenseclaw import migration_state
 
+        installed_version = defenseclaw.__version__
         defenseclaw.__version__ = "0.7.0"
         cmd_version.__version__ = "0.7.0"
-        for attr in ("detect_schema", "is_future_schema", "FutureSchemaError"):
+        for attr in (
+            "detect_schema",
+            "is_future_schema",
+            "FutureSchemaError",
+            "upgrade_mutation_temp_suffix",
+        ):
             delattr(migration_state, attr)
 
         calls: list[str] = []
@@ -476,8 +482,8 @@ class TestRunMigrations(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertEqual(calls, ["0.8.0"])
-        self.assertEqual(refreshed_version, "0.8.0")
-        self.assertEqual(refreshed_cmd_version, "0.8.0")
+        self.assertEqual(refreshed_version, installed_version)
+        self.assertEqual(refreshed_cmd_version, installed_version)
 
     def test_legacy_openclaw_restart_shim_for_pre_061_upgrade(self):
         with (
@@ -1712,11 +1718,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
 
     def test_managed_config_never_consumes_service_runtime_overlay(self):
         runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
-        self._write(
-            "deployment_mode: managed_enterprise\n"
-            "guardrail:\n"
-            "  mode: action\n"
-        )
+        self._write("deployment_mode: managed_enterprise\nguardrail:\n  mode: action\n")
         _write_json(runtime_path, {"mode": "observe"})
         before = self._read()
 
@@ -2061,6 +2063,24 @@ class TestAtomicWriteTextModePreservation(unittest.TestCase):
         # File does not exist yet → the explicit mode pins the perms.
         self.assertTrue(_atomic_write_text(path, "{}", mode=0o600))
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_scopes_temp_prefix_to_valid_upgrade_attempt(self):
+        path = os.path.join(self.tmp, "config.yaml")
+        token = "0123456789abcdef" * 2
+        original_mkstemp = tempfile.mkstemp
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": token},
+            ),
+            patch("tempfile.mkstemp", wraps=original_mkstemp) as mkstemp,
+        ):
+            self.assertTrue(_atomic_write_text(path, "new\n"))
+
+        self.assertEqual(
+            mkstemp.call_args.kwargs["prefix"],
+            f".tmp.upgrade-{token}.",
+        )
 
 
 if __name__ == "__main__":

@@ -17,8 +17,9 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make rego-test` | OPA tests for `policies/rego/` |
 | `make check` | Audit action, error code, schema, and provider coverage parity gates |
 | `make lint` | Ruff, Go formatting/linting, and Python compile check |
-| `make upgrade-smoke` | Build/serve candidate artifacts and run a real old-version upgrade in a throwaway HOME |
-| `make upgrade-smoke-matrix` | Run the release upgrade smoke against all supported historical baselines |
+| `make upgrade-smoke` | Build an unsigned schema-2 candidate and prove an old controller refuses it before mutation |
+| `make upgrade-smoke-matrix` | Run that unsigned-candidate refusal contract across all supported historical baselines |
+| `make upgrade-signed-protocol-matrix` | Run the full resolver success/refusal policy against an already signed candidate (release gate only) |
 
 ## Focused Tests
 
@@ -45,27 +46,39 @@ Run E2E tests only when the required local services, credentials, and platform a
 
 ## Release Upgrade Smoke
 
-Before cutting a release, run the upgrade smoke on at least macOS and Linux. It builds or consumes candidate release artifacts, installs an older DefenseClaw in a temporary `HOME`, redirects that old `defenseclaw upgrade` command to a localhost release server, and verifies:
+Schema-2 releases deliberately cannot be installed from an unsigned working-tree
+candidate. A generic PR job cannot mint the
+`release.yaml@refs/heads/main` Fulcio identity, and the test harness must not
+replace that identity or fake a successful `cosign` check. The ordinary local
+smoke therefore installs authenticated historical releases in a temporary
+`HOME` and verifies both explicit-target and latest-mode attempts:
 
-- the upgrade exits successfully
-- every `required_cli_migrations` entry from `upgrade-manifest.json` is recorded in `.migration_state.json`
-- CLI and gateway versions match the candidate version
-- known regression markers such as `Traceback`, `AttributeError`, missing required migrations, and component drift are absent
-- the Textual metric tile refresh path works in the installed environment
-- signed candidates run the default upgrade path; `--allow-unverified` is only added automatically for unsigned local smoke artifacts
+- refuse the schema-2 candidate before service stop, backup, or mutation
+- leave CLI, gateway, config, OpenClaw state, permissions, and PID state unchanged
+- emit the historical controller's expected forward-compatibility failure
+- ship exact reviewed POSIX and PowerShell resolver assets bound by the candidate checksums
+
+The protected release workflow separately signs the sealed candidate and then
+runs the full manifest-derived resolver matrix. That signed gate verifies
+successful bridge activation, fresh-controller handoff, required migrations,
+exact CLI/gateway versions, health, receipts, and rollback behavior before
+publish.
 
 ```bash
-# Current platform, building candidate artifacts from the working tree.
+# Current platform, proving one old controller refuses the unsigned candidate.
 make upgrade-smoke ARGS="--from-version 0.7.2"
 
-# Full supported historical matrix.
+# Full supported historical refusal matrix used by generic PR CI.
 make upgrade-smoke-matrix
 
-# Reuse an existing release-style dist directory, such as in release CI.
-make upgrade-smoke-matrix ARGS="--release-dir dist --baseline-mode seed"
+# Full positive protocol matrix. This requires the sealed, release-workflow-
+# signed candidate; it must not be pointed at unsigned local artifacts.
+make upgrade-signed-protocol-matrix \
+  ARGS="--release-dir release-candidate/dist --baseline-mode seed"
 
-# Custom subset, useful while debugging one old branch of the upgrade path.
-scripts/test-upgrade-release.sh --from-versions "0.7.2,0.6.6,0.5.0,0.4.0"
+# Legacy schema-1 positive harness, retained only for old release fixtures.
+make upgrade-legacy-smoke-matrix \
+  ARGS="--target-version 0.8.3 --release-root /path/to/published-release-root --baseline-mode seed"
 ```
 
 For a Linux host without the repo's Go toolchain, prepare candidate artifacts on a machine that can cross-build, copy the printed release root to Linux, then run the same smoke there:
@@ -73,18 +86,32 @@ For a Linux host without the repo's Go toolchain, prepare candidate artifacts on
 ```bash
 scripts/test-upgrade-release.sh --prepare-only --platform linux/arm64 --keep-workdir
 scp -r /tmp/defenseclaw-upgrade-smoke.xxxxxx/candidate-release openclaw-vineeth:/tmp/
-ssh openclaw-vineeth 'scripts/test-upgrade-release.sh --release-root /tmp/candidate-release --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.5,0.6.4,0.6.3,0.6.2,0.6.1,0.6.0,0.5.0,0.4.0" --baseline-mode seed'
+ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.5,0.6.4,0.6.3,0.6.2,0.6.1,0.6.0,0.5.0,0.4.0" --baseline-mode seed --refusal-contract-only'
 ```
 
-The default matrix covers every published 0.4.0+ baseline that has both a Python wheel, platform gateway archives, and an upgrade command: `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. Baselines newer than the candidate target are skipped automatically so local CI does not accidentally test downgrades before a release workflow stamps the next version. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so they are not live-upgradeable by this harness.
+The default matrix covers the POSIX published 0.4.0+ baselines that have all three: a Python wheel, platform gateway archives, and an upgrade command: `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. The native Windows matrix is deliberately narrower: `0.8.3`, `0.8.2`, `0.8.1`, and `0.8.0`. Baselines newer than the candidate target are skipped automatically so local CI does not accidentally test downgrades before a release workflow stamps the next version. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so they are not live-upgradeable by this harness.
 
-The release workflow also runs `make upgrade-smoke-matrix ARGS="--release-dir dist --baseline-mode seed"` after artifacts/checksums are finalized and before `gh release create`, so a broken upgrade path aborts before assets are published.
+The release workflow builds the runtime once, seals the exact candidate bytes,
+and runs manifest-derived Linux, macOS, and native Windows upgrade gates before
+the protected publish job can create an immutable release. The publisher then
+reads the release back and verifies the exact sealed asset set and digests.
+
+### 0.8.4 bridge rollout order
+
+Publish `0.8.4` as the latest release before merging or cutting the
+observability-v8 hard-cut release. Confirm GitHub reports the release immutable,
+let the bridge soak, and retain evidence that the sealed `0.8.4` candidate
+upgraded successfully from every version in
+`release/upgrade-baselines.json` on the required native platforms. Only after
+that proof is green should the hard-cut change land and its candidate be cut.
+The later hard-cut baseline policy must include published `0.8.4`; do not treat
+an uncut branch artifact as the bridge.
 
 ## CI Workflows
 
 | Workflow | Purpose |
 |----------|---------|
-| `.github/workflows/ci.yml` | Go lint/test, Python test, TypeScript test, Rego test, upgrade smoke, and parity checks |
+| `.github/workflows/ci.yml` | Go lint/test, Python test, TypeScript test, Rego test, unsigned schema-2 refusal contract, and parity checks |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | Tagged release artifacts |
 

@@ -30,7 +30,15 @@ config_dest="${managed_root}/etc/config.yaml"
 gateway_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
 guardian_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
 log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw
+gateway_dest="${managed_root}/bin/defenseclaw-gateway"
+legacy_binary_root=/Library/DefenseClaw
+legacy_managed_root="/Library/Application Support/DefenseClaw"
+legacy_log_dir=/Library/Logs/DefenseClaw
+legacy_gateway_plist=/Library/LaunchDaemons/com.defenseclaw.gateway.plist
+legacy_guardian_plist=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-packaging.XXXXXX")"
+probe_marker=""
+probe_owned=false
 installation_owned=false
 
 cleanup() {
@@ -42,22 +50,48 @@ cleanup() {
         sudo -n rm -rf -- "$managed_root" "$log_dir"
         sudo -n rm -f -- "$gateway_plist" "$guardian_plist"
     fi
+    if [ "$probe_owned" = true ]; then
+        rm -f -- "${probe_marker}/existing-state" >/dev/null 2>&1 || true
+        rmdir -- "$probe_marker" >/dev/null 2>&1 || true
+    fi
     rm -rf -- "$fixture"
     exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
-for path in "$managed_root" "$log_dir" "$gateway_plist" "$guardian_plist"; do
+for path in \
+    "$managed_root" "$log_dir" \
+    "$legacy_binary_root" "$legacy_managed_root" "$legacy_log_dir" \
+    "$gateway_plist" "$guardian_plist" \
+    "$legacy_gateway_plist" "$legacy_guardian_plist"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || fail "refusing to overwrite pre-existing path: $path"
 done
-for label in com.cisco.secureclient.defenseclaw com.cisco.secureclient.defenseclaw.hook-guardian; do
+for label in \
+    com.cisco.secureclient.defenseclaw \
+    com.cisco.secureclient.defenseclaw.hook-guardian \
+    com.defenseclaw.gateway \
+    com.defenseclaw.hook-guardian; do
     if sudo -n launchctl print "system/${label}" >/dev/null 2>&1; then
         fail "refusing to unload pre-existing job: $label"
     fi
 done
 installation_owned=true
 assert_no_defenseclaw_identity "cannot verify service-user-free install while a defenseclaw identity exists"
+
+probe_user="$(id -un)"
+probe_home="$(
+    dscl . -read "/Users/${probe_user}" NFSHomeDirectory 2>/dev/null \
+        | sed -n 's/^NFSHomeDirectory: //p'
+)"
+[ -n "$probe_home" ] || fail "could not resolve the CI user's Directory Services home"
+case "$probe_home" in
+    /*) ;;
+    *) fail "the CI user's Directory Services home is not absolute: $probe_home" ;;
+esac
+probe_marker="${probe_home}/.defenseclaw"
+[ ! -e "$probe_marker" ] && [ ! -L "$probe_marker" ] \
+    || fail "refusing to overwrite the CI user's existing DefenseClaw marker: $probe_marker"
 
 config_source="${fixture}/config.yaml"
 manifest_source="${fixture}/targets.yaml"
@@ -81,6 +115,34 @@ EOF
 printf 'version: 1\ntargets: []\n' >"$manifest_source"
 chmod 0666 "$config_source" "$manifest_source"
 
+# A PATH-independent consumer install in any Directory Services home must stop
+# this system installer before source validation, launchd, or destination
+# mutation. Use the disposable CI user's real dscl-resolved home so the probe
+# does not create or depend on the retired DefenseClaw service identity.
+mkdir -- "$probe_marker"
+probe_owned=true
+printf 'preserve\n' >"${probe_marker}/existing-state"
+if sudo -n "$installer" \
+    --binary "$binary" \
+    --config "$config_source" \
+    --manifest "$manifest_source" \
+    --no-start >"${fixture}/per-user.stdout" 2>"${fixture}/per-user.stderr"; then
+    fail "enterprise package ignored a per-user DefenseClaw installation"
+fi
+grep -Fq "$probe_marker" "${fixture}/per-user.stderr" || fail "per-user refusal did not name the dscl-resolved home marker"
+grep -Fq "no changes were made" "${fixture}/per-user.stderr" || fail "per-user refusal did not attest no changes"
+[ "$(cat "${probe_marker}/existing-state")" = preserve ] || fail "per-user refusal changed consumer state"
+for path in \
+    "$managed_root" "$log_dir" \
+    "$legacy_binary_root" "$legacy_managed_root" "$legacy_log_dir" \
+    "$gateway_plist" "$guardian_plist" \
+    "$legacy_gateway_plist" "$legacy_guardian_plist"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "per-user refusal mutated managed destination: $path"
+done
+rm -f -- "${probe_marker}/existing-state"
+rmdir -- "$probe_marker"
+probe_owned=false
+
 sudo -n "$installer" \
     --binary "$binary" \
     --config "$config_source" \
@@ -94,29 +156,61 @@ wheel_gid="$(stat -f '%g' /Library)"
 [ ! -w "$config_dest" ] || fail "standard user can write managed config"
 assert_no_defenseclaw_identity "installer created a defenseclaw identity during fresh install"
 
-config_hash_before_acl="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+config_hash_before_refusal="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+gateway_hash_before_refusal="$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')"
+if sudo -n "$installer" \
+    --binary "$binary" \
+    --config "$config_source" \
+    --manifest "$manifest_source" \
+    --no-start >"${fixture}/reinstall.stdout" 2>"${fixture}/reinstall.stderr"; then
+    fail "fresh-install-only enterprise package overwrote an existing deployment"
+fi
+grep -Fq "existing DefenseClaw installation detected" "${fixture}/reinstall.stderr" || fail "existing-install refusal was not explicit"
+grep -Fq "no changes were made" "${fixture}/reinstall.stderr" || fail "existing-install refusal did not attest no changes"
+grep -Fq "remain on the current version" "${fixture}/reinstall.stderr" || fail "existing-install refusal did not give the fail-closed managed path"
+[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_before_refusal" ] || fail "existing-install refusal modified managed config"
+[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "existing-install refusal modified gateway binary"
+assert_no_defenseclaw_identity "existing-install refusal created a defenseclaw identity"
+
+# A write-capable ACL must not turn a fresh-only reinstall into a repair path.
+# Preserve main's ACL safety probe while expecting the earlier existing-install
+# refusal introduced by the bridge release.
 sudo -n chmod +a "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr,writesecurity,chown" "$managed_root"
 if sudo -n "$installer" \
     --binary "$binary" \
     --config "$config_source" \
     --manifest "$manifest_source" \
     --no-start >"${fixture}/acl.stdout" 2>"${fixture}/acl.stderr"; then
-    fail "installer accepted a write-capable managed-root ACL"
+    fail "fresh-install-only enterprise package accepted a write-capable existing root"
 fi
-grep -Fq "write-capable macOS ACL is not trusted: $managed_root" "${fixture}/acl.stderr" || fail "ACL refusal was not explicit"
-[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_before_acl" ] || fail "ACL preflight failure modified managed config"
+grep -Fq "existing DefenseClaw installation detected" "${fixture}/acl.stderr" || fail "ACL-state refusal was not explicit"
+grep -Fq "no changes were made" "${fixture}/acl.stderr" || fail "ACL-state refusal did not attest no changes"
+[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_before_refusal" ] || fail "ACL-state refusal modified managed config"
+[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "ACL-state refusal modified gateway binary"
 sudo -n chmod -N "$managed_root"
 
+# Even damaged installed metadata must not turn this package installer into an
+# implicit repair/upgrade path. It refuses before replacing state; recovery is
+# owned by the staged managed upgrader.
 sudo -n chown "$(id -u):$(id -g)" "$config_dest"
 sudo -n chmod 0666 "$config_dest"
-sudo -n "$installer" \
+if sudo -n "$installer" \
     --binary "$binary" \
     --config "$config_source" \
     --manifest "$manifest_source" \
-    --no-start
-[ "$(sudo -n stat -f '%u:%g:%Lp' "$config_dest")" = "0:${wheel_gid}:640" ] || fail "installer did not repair config metadata"
-assert_no_defenseclaw_identity "installer created a defenseclaw identity during repair"
+    --no-start >"${fixture}/damaged.stdout" 2>"${fixture}/damaged.stderr"; then
+    fail "enterprise package repaired/overwrote existing damaged metadata"
+fi
+grep -Fq "fresh-install-only" "${fixture}/damaged.stderr" || fail "damaged-state refusal was not explicit"
+[ "$(sudo -n stat -f '%u:%g:%Lp' "$config_dest")" = "$(id -u):$(id -g):666" ] || fail "refusal mutated damaged config metadata"
+[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "damaged-state refusal modified gateway binary"
+assert_no_defenseclaw_identity "damaged-state refusal created a defenseclaw identity"
 
+# Preserve main's symlink-decoy safety coverage under the new fail-closed
+# reinstall contract. The decoy must remain untouched even though the managed
+# root makes the installer refuse before destination validation.
+sudo -n chown "0:${wheel_gid}" "$config_dest"
+sudo -n chmod 0640 "$config_dest"
 decoy="${fixture}/decoy.yaml"
 printf 'decoy must remain unchanged\n' >"$decoy"
 decoy_hash="$(shasum -a 256 "$decoy" | awk '{print $1}')"
@@ -127,9 +221,12 @@ if sudo -n "$installer" \
     --config "$config_source" \
     --manifest "$manifest_source" \
     --no-start >"${fixture}/symlink.stdout" 2>"${fixture}/symlink.stderr"; then
-    fail "installer accepted a symlink managed config"
+    fail "fresh-install-only enterprise package accepted an existing symlink config"
 fi
-grep -Fq "refusing symlink path: $config_dest" "${fixture}/symlink.stderr" || fail "symlink refusal was not explicit"
+grep -Fq "existing DefenseClaw installation detected" "${fixture}/symlink.stderr" || fail "symlink-state refusal was not explicit"
+grep -Fq "no changes were made" "${fixture}/symlink.stderr" || fail "symlink-state refusal did not attest no changes"
 [ "$(shasum -a 256 "$decoy" | awk '{print $1}')" = "$decoy_hash" ] || fail "symlink decoy was modified"
+[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "symlink-state refusal modified gateway binary"
+assert_no_defenseclaw_identity "symlink-state refusal created a defenseclaw identity"
 
 printf 'macOS enterprise packaging smoke passed\n'

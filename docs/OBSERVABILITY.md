@@ -718,6 +718,50 @@ sqlite3 ~/.defenseclaw/audit.db "DROP TABLE IF EXISTS judge_responses; VACUUM;"
 This is safe at any point after the upgraded sidecar has started; new
 judge bodies always land in `judge_bodies.db`.
 
+## 5.2 Automatic v7 upgrade
+
+Do not hand-convert a supported installation. A coherent installed `0.8.4`
+bridge can use its built-in controller; it authenticates and privately acquires
+the exact `0.8.4` rollback artifacts before backup or service stop:
+
+```bash
+defenseclaw upgrade --yes
+```
+
+For `0.8.3` or older, authenticate the target release's resolver asset as
+documented in [CLI Reference — upgrade](CLI.md#upgrade), then run that verified
+asset in latest mode without a version override:
+
+```bash
+bash defenseclaw-upgrade.sh --yes
+```
+
+Do not execute any obsolete raw-network hint printed by a frozen
+`0.8.3`-or-older built-in controller and do not stream a resolver directly into
+a shell.
+
+When a compatible v8 hard-cut target is published, the upgrader backs up the
+exact source, establishes and validates the v7 bridge state, creates and
+validates the whole v8 candidate, promotes inline observability credentials
+into locked environment references, writes atomically, refreshes owned local
+dashboard assets, restarts, and checks health.
+It preserves narrower v7 collection/export behavior and redaction posture
+instead of silently broadening an upgraded installation to the fresh-v8
+defaults. It also preserves local dashboard and Agent360 compatibility.
+
+The same converter may be exposed by release/support tooling as a read-only,
+secret-free preview. Such a preview is never required before the supported
+upgrade entry point and does not introduce a second apply protocol.
+
+Release `0.8.4` remains on `config_version: 7` and does not create the v8
+destination model. A fresh install of the future v8 hard-cut release will write
+strict `config_version: 8`; its setup commands will add or update named entries
+under `observability.destinations`. Use the release installer only for a new
+host. On an existing installation, use the coherent `0.8.4` controller or, for
+`0.8.3` and older, the authenticated release-owned resolver in latest mode so
+configuration, owned dashboard assets, restart, and health checks remain one
+transaction.
+
 ---
 
 ## 6. Health
