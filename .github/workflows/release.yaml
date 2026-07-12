@@ -26,6 +26,11 @@ on:
         description: "Version to release (X.Y.Z, no v prefix). Tag must not already exist."
         required: true
         type: string
+      immutable_releases_confirmed:
+        description: "Confirm repository release immutability is enabled in Settings."
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -57,12 +62,15 @@ jobs:
 
       - name: Require immutable GitHub releases
         env:
-          GH_TOKEN: ${{ github.token }}
+          IMMUTABLE_RELEASES_CONFIRMED: ${{ inputs.immutable_releases_confirmed }}
         run: |
           set -euo pipefail
-          enabled="$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)"
-          if [[ "$enabled" != "true" ]]; then
-            echo "::error title=Immutable Releases required::Enable release immutability before cutting a release."
+          # GitHub's immutable-release settings endpoint requires repository
+          # Administration: read, which is not available to GITHUB_TOKEN. Keep
+          # this preflight fail-closed without introducing an administrator PAT;
+          # the publish job separately proves the resulting release is immutable.
+          if [[ "$IMMUTABLE_RELEASES_CONFIRMED" != "true" ]]; then
+            echo "::error title=Immutable Releases confirmation required::Verify repository release immutability in Settings, then confirm it when dispatching the workflow."
             exit 1
           fi
 

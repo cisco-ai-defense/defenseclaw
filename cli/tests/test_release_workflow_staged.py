@@ -61,11 +61,28 @@ def test_release_is_manual_and_default_permissions_are_read_only() -> None:
                     "description": "Version to release (X.Y.Z, no v prefix). Tag must not already exist.",
                     "required": "true",
                     "type": "string",
-                }
+                },
+                "immutable_releases_confirmed": {
+                    "description": "Confirm repository release immutability is enabled in Settings.",
+                    "required": "true",
+                    "type": "boolean",
+                    "default": "false",
+                },
             }
         }
     }
     assert workflow["permissions"] == {"contents": "read"}
+
+
+def test_release_immutability_preflight_uses_operator_confirmation_without_admin_token() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert 'repos/$GITHUB_REPOSITORY/immutable-releases' not in text
+    assert "IMMUTABLE_RELEASES_CONFIRMED" in text
+    assert "inputs.immutable_releases_confirmed" in text
+    assert "Immutable Releases confirmation required" in text
+    assert "--json tagName,isDraft,isImmutable,assets" in text
+    assert "scripts/release_candidate.py verify-published" in text
 
 
 def test_release_automation_never_publishes_runtime_to_python_package_indexes() -> None:
