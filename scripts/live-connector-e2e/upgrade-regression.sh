@@ -13,8 +13,10 @@
 #
 # The baseline and candidate executables are installed into a run-owned
 # scratch directory. The user's global codex/claude/agy binaries are never
-# installed over, updated, or executed (except `--version` when no explicit
-# baseline is supplied). The real HOME is retained for Keychain/login reuse.
+# installed over or updated. They are only queried with `--version` when no
+# explicit baseline is supplied; native Claude is additionally invoked as an
+# exact-version installer under an isolated HOME. The real HOME is retained
+# when probes run so Keychain/login state can be reused.
 # DefenseClaw itself gets a separate DEFENSECLAW_HOME and loopback ports; the
 # user's ~/.defenseclaw is neither read nor removed. The one connector config
 # file that DefenseClaw setup patches is snapshotted and restored exactly.
@@ -307,6 +309,46 @@ dc_upgrade_install_npm() {
   printf '%s\t%s' "${prefix}/node_modules/.bin/${bin_name}" "${actual}"
 }
 
+# Claude's npm package cannot access a macOS subscription login stored in the
+# Keychain, while the signed native build can. Ask the already-installed native
+# Claude binary to install an exact release under an isolated HOME, then run
+# that binary later with the real HOME so authentication is reused. The user's
+# global ~/.local/bin/claude symlink and native version store are never changed.
+dc_upgrade_install_claude_native() {
+  local prefix="$1" requested="$2" source install_home link binary actual log
+  source="$(command -v claude 2>/dev/null)" || {
+    dc_err "the logged-in native Claude binary is not installed"
+    return 1
+  }
+  source="$(dc_persist_realpath "${source}")" || return 1
+  [ -x "${source}" ] || return 1
+  install_home="${prefix}/installer-home"
+  log="${ARTIFACTS_DIR}/$(basename "${prefix}")-native-install.log"
+  mkdir -p "${install_home}"
+  install_home="$(dc_persist_realpath "${install_home}")" || return 1
+  link="${install_home}/.local/bin/claude"
+  dc_log "installing isolated native Claude Code ${requested}"
+  HOME="${install_home}" DISABLE_AUTOUPDATER=1 \
+    dc_timeout 240 "${source}" install "${requested}" \
+    >"${log}" 2>&1 || return 1
+  [ -x "${link}" ] || return 1
+  binary="$(dc_persist_realpath "${link}")" || return 1
+  case "${binary}" in
+    "${install_home}"/.local/share/claude/versions/*) ;;
+    *)
+      dc_err "isolated Claude installer resolved outside its run-owned HOME"
+      return 1
+      ;;
+  esac
+  actual="$(HOME="${install_home}" DISABLE_AUTOUPDATER=1 \
+    dc_upgrade_binary_version claudecode "${binary}")" || return 1
+  if [ "${requested}" != "latest" ] && [ "${actual}" != "${requested}" ]; then
+    dc_err "isolated native Claude version ${actual}, requested ${requested}"
+    return 1
+  fi
+  printf '%s\t%s' "${binary}" "${actual}"
+}
+
 dc_upgrade_install_antigravity_candidate() {
   local prefix="$1" requested="$2" record binary manifest_version actual
   record="$(dc_install_antigravity_release "${prefix}" "${requested}")" || return 1
@@ -331,7 +373,9 @@ dc_upgrade_install_antigravity_baseline() {
   mkdir -p "${prefix}/bin"
   /bin/cp -p "$(dc_persist_realpath "${global}")" "${prefix}/bin/agy" || return 1
   chmod 500 "${prefix}/bin/agy"
-  chmod 500 "${prefix}/bin"
+  # Keep the run-owned parent private but writable so validated scratch
+  # cleanup can unlink the read-only baseline binary.
+  chmod 700 "${prefix}/bin"
   printf '%s\t%s' "${prefix}/bin/agy" "${actual}"
 }
 
@@ -367,13 +411,17 @@ case "${CONNECTOR}" in
     IFS=$'\t' read -r CANDIDATE_BIN RESOLVED_CANDIDATE_VERSION <<< "${install_record}"
     ;;
   claudecode)
-    install_record="$(dc_upgrade_install_npm "${SCRATCH}/baseline" '@anthropic-ai/claude-code' "${BASELINE_VERSION}" claude)" || {
-      DETAIL="isolated Claude Code baseline install failed"
+    # Disable background updates before any native Claude process starts. The
+    # explicit `install` subcommand below still installs the requested release
+    # into its isolated HOME; probes later reuse the real HOME only for login.
+    export DISABLE_AUTOUPDATER=1
+    install_record="$(dc_upgrade_install_claude_native "${SCRATCH}/baseline" "${BASELINE_VERSION}")" || {
+      DETAIL="isolated native Claude Code baseline install failed"
       exit 4
     }
     IFS=$'\t' read -r BASELINE_BIN RESOLVED_BASELINE_VERSION <<< "${install_record}"
-    install_record="$(dc_upgrade_install_npm "${SCRATCH}/candidate" '@anthropic-ai/claude-code' "${CANDIDATE_VERSION}" claude)" || {
-      DETAIL="isolated Claude Code candidate install failed"
+    install_record="$(dc_upgrade_install_claude_native "${SCRATCH}/candidate" "${CANDIDATE_VERSION}")" || {
+      DETAIL="isolated native Claude Code candidate install failed"
       exit 4
     }
     IFS=$'\t' read -r CANDIDATE_BIN RESOLVED_CANDIDATE_VERSION <<< "${install_record}"
@@ -485,8 +533,10 @@ agent_run() {
           --output-format json --permission-mode acceptEdits --allowedTools Bash
         ;;
       antigravity)
-        dc_timeout 180 "${DC_UPGRADE_ACTIVE_BIN}" --print \
-          --dangerously-skip-permissions "${prompt}"
+        # agy treats every argument after --print as prompt text. Keep the
+        # permission flag first so tool calls are actually auto-approved.
+        dc_timeout 180 "${DC_UPGRADE_ACTIVE_BIN}" \
+          --dangerously-skip-permissions --print "${prompt}"
         ;;
     esac
   )
