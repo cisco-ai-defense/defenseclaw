@@ -373,6 +373,51 @@ class ConnectorVersionRadarTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(github_values["radar_json"]), stdout_payload)
 
+    def test_cli_partial_infrastructure_error_preserves_candidate_outputs(self):
+        fixture = self.root / "fixture.json"
+        github_output = self.root / "github-output.txt"
+        fixture.write_text(
+            json.dumps(
+                {
+                    "codex": {"installed": "codex-cli 0.142.5", "latest": '"0.144.1"'},
+                    "claudecode": {"installed": "2.1.207", "latest": {"error": "simulated timeout"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = radar.main(
+                [
+                    "check",
+                    "--state",
+                    str(self.state),
+                    "--fixture",
+                    str(fixture),
+                    "--github-output",
+                    str(github_output),
+                    "--connector",
+                    "codex",
+                    "--connector",
+                    "claudecode",
+                ]
+            )
+
+        self.assertEqual(exit_code, radar.EXIT_OK)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "infrastructure_error")
+        self.assertTrue(payload["has_candidates"])
+        self.assertEqual(payload["candidates"][0]["connector"], "codex")
+        self.assertEqual(payload["infrastructure_errors"][0]["connector"], "claudecode")
+
+        github_values = dict(
+            line.split("=", 1)
+            for line in github_output.read_text(encoding="utf-8").splitlines()
+        )
+        self.assertEqual(github_values["status"], "infrastructure_error")
+        self.assertEqual(github_values["any_new"], "true")
+        self.assertEqual(json.loads(github_values["matrix"])["include"][0]["connector"], "codex")
+
     def test_corrupt_state_returns_distinct_infrastructure_exit(self):
         self.state.write_text("not-json", encoding="utf-8")
         fixture = self.root / "fixture.json"

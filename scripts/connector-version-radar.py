@@ -762,7 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = infrastructure_payload(f"could not write GitHub outputs {args.github_output}: {exc}")
 
     print(json.dumps(payload, sort_keys=True))
-    return EXIT_OK if payload["status"] == "ok" else EXIT_INFRASTRUCTURE_ERROR
+    return EXIT_OK if payload["status"] == "ok" or payload.get("has_candidates") else EXIT_INFRASTRUCTURE_ERROR
 
 
 if __name__ == "__main__":
