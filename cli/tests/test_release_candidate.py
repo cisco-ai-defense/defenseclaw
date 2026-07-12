@@ -400,27 +400,34 @@ def _runtime_dir(tmp_path: Path) -> Path:
     return runtime
 
 
-def _macos_dir(tmp_path: Path) -> Path:
+def _macos_dir(tmp_path: Path, macos_verification_status: str = "notarized") -> Path:
     macos = tmp_path / "macos"
     macos.mkdir()
-    (macos / f"DefenseClawMac-{VERSION}-macos-arm64.dmg").write_bytes(b"candidate dmg")
-    _write_zip(
-        macos / f"DefenseClawMac-{VERSION}-macos-arm64.zip",
-        "DefenseClawMac.app/Contents/Info.plist",
-        b"candidate app",
-    )
+    for name in release_candidate.macos_asset_names(VERSION, macos_verification_status):
+        path = macos / name
+        if name.endswith(".dmg"):
+            path.write_bytes(b"candidate dmg")
+        else:
+            _write_zip(
+                path,
+                "DefenseClawMac.app/Contents/Info.plist",
+                b"candidate app",
+            )
     return macos
 
 
-def _sealed_candidate(tmp_path: Path) -> Path:
+def _sealed_candidate(
+    tmp_path: Path,
+    macos_verification_status: str = "notarized",
+) -> Path:
     root = tmp_path / "candidate"
     release_candidate.assemble(
         _runtime_dir(tmp_path),
-        _macos_dir(tmp_path),
+        _macos_dir(tmp_path, macos_verification_status),
         root,
         VERSION,
         COMMIT,
-        "notarized",
+        macos_verification_status,
     )
     (root / "dist/checksums.txt.sig").write_bytes(b"sigstore signature")
     (root / "dist/checksums.txt.pem").write_bytes(b"sigstore certificate")
@@ -434,14 +441,63 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     release_candidate.verify(root, VERSION, COMMIT)
 
     manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
-    assert [item["name"] for item in manifest["assets"]] == list(release_candidate.published_asset_names(VERSION))
+    assert [item["name"] for item in manifest["assets"]] == list(
+        release_candidate.published_asset_names(VERSION, "notarized")
+    )
     checksums = release_candidate._parse_checksums(root / "dist/checksums.txt")
-    assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(VERSION)
+    assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(
+        VERSION, "notarized"
+    )
     for name in release_candidate.resolver_asset_names(VERSION):
         assert (root / "dist" / name).read_bytes() == (release_candidate.RESOLVER_ASSET_SOURCES[name].read_bytes())
     assert (root / "RELEASE_NOTES.md").read_text(encoding="utf-8") == "# Candidate notes\n"
 
     release_json = tmp_path / "published.json"
+    release_json.write_text(
+        json.dumps(
+            {
+                "tagName": VERSION,
+                "isDraft": False,
+                "isImmutable": True,
+                "assets": [
+                    {
+                        "name": item["name"],
+                        "digest": f"sha256:{item['sha256']}",
+                    }
+                    for item in manifest["assets"]
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    release_candidate.verify_published_release(root, release_json, VERSION, COMMIT)
+
+
+def test_candidate_seals_and_verifies_explicit_unverified_macos_assets(
+    tmp_path: Path,
+) -> None:
+    root = _sealed_candidate(tmp_path, "unverified")
+
+    release_candidate.verify(root, VERSION, COMMIT)
+
+    manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
+    expected_names = release_candidate.published_asset_names(VERSION, "unverified")
+    assert manifest["macos_verification_status"] == "unverified"
+    assert [item["name"] for item in manifest["assets"]] == list(expected_names)
+    assert release_candidate.macos_asset_names(VERSION, "unverified") == (
+        f"DefenseClawMac-{VERSION}-macos-arm64-unverified.dmg",
+        f"DefenseClawMac-{VERSION}-macos-arm64-unverified.zip",
+    )
+    assert not any(
+        name in expected_names
+        for name in release_candidate.macos_asset_names(VERSION, "notarized")
+    )
+    checksums = release_candidate._parse_checksums(root / "dist/checksums.txt")
+    assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(
+        VERSION, "unverified"
+    )
+
+    release_json = tmp_path / "published-unverified.json"
     release_json.write_text(
         json.dumps(
             {
@@ -749,16 +805,62 @@ def test_candidate_verification_rejects_unsealed_directory(tmp_path: Path) -> No
         release_candidate.verify(root, VERSION, COMMIT)
 
 
-def test_candidate_assembly_requires_notarized_macos_artifacts(tmp_path: Path) -> None:
-    with pytest.raises(release_candidate.CandidateError, match="requires a notarized macOS app"):
+@pytest.mark.parametrize("status", ["", "adhoc", "signed-unnotarized"])
+def test_candidate_assembly_rejects_unsupported_macos_status(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    with pytest.raises(release_candidate.CandidateError, match="verification status"):
         release_candidate.assemble(
             _runtime_dir(tmp_path),
             _macos_dir(tmp_path),
             tmp_path / "candidate",
             VERSION,
             COMMIT,
-            "adhoc",
+            status,
         )
+
+
+def test_candidate_assembly_rejects_macos_names_that_disagree_with_status(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(release_candidate.CandidateError, match="missing regular file"):
+        release_candidate.assemble(
+            _runtime_dir(tmp_path),
+            _macos_dir(tmp_path),
+            tmp_path / "candidate",
+            VERSION,
+            COMMIT,
+            "unverified",
+        )
+
+
+def test_candidate_assembly_rejects_mixed_macos_asset_sets(tmp_path: Path) -> None:
+    macos = _macos_dir(tmp_path, "unverified")
+    (macos / f"DefenseClawMac-{VERSION}-macos-arm64.dmg").write_bytes(b"unexpected")
+
+    with pytest.raises(release_candidate.CandidateError, match="does not match"):
+        release_candidate.assemble(
+            _runtime_dir(tmp_path),
+            macos,
+            tmp_path / "candidate",
+            VERSION,
+            COMMIT,
+            "unverified",
+        )
+
+
+def test_candidate_verification_binds_unverified_names_to_unverified_status(
+    tmp_path: Path,
+) -> None:
+    root = _sealed_candidate(tmp_path, "unverified")
+    manifest_path = root / "release-candidate.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["macos_verification_status"] = "notarized"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(release_candidate.CandidateError, match="missing regular file"):
+        release_candidate.verify(root, VERSION, COMMIT)
 
 
 def test_runtime_verification_rejects_mismatched_upgrade_manifest(tmp_path: Path) -> None:

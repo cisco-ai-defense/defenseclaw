@@ -161,7 +161,7 @@ rm -rf "${WORK}"
 mkdir -p "${WORK}" "${PLAIN_STAGE}" "${UNIFIED_STAGE}" "${OUT_DIR}"
 
 SIGNING_IDENTITY="-"
-VERIFICATION_STATUS="adhoc"
+VERIFICATION_STATUS="unverified"
 
 APPLE_CREDENTIAL_VALUES=(
     "${MACOS_DEVELOPER_ID_P12_BASE64:-}"
@@ -423,6 +423,17 @@ if [[ "${NOTARY_READY}" == "1" ]]; then
     xcrun stapler validate "${TEMP_DMG}"
     spctl -a -t open --context context:primary-signature -vv "${TEMP_DMG}"
     VERIFICATION_STATUS="notarized"
+fi
+
+if (( APPLE_CREDENTIAL_COUNT == ${#APPLE_CREDENTIAL_VALUES[@]} )) \
+    && [[ "${VERIFICATION_STATUS}" != "notarized" ]]; then
+    echo "complete Apple credentials were configured, but signing and notarization did not complete" >&2
+    exit 1
+fi
+if (( APPLE_CREDENTIAL_COUNT == 0 )) \
+    && [[ "${VERIFICATION_STATUS}" != "unverified" ]]; then
+    echo "credential-free macOS builds must remain explicitly unverified" >&2
+    exit 1
 fi
 
 if [[ "${VERIFICATION_STATUS}" == "notarized" ]]; then

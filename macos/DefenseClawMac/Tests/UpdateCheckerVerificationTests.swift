@@ -27,6 +27,7 @@ struct UpdateCheckerVerificationTests {
     static func main() {
         rejectsUnverifiedSelfUpdateAssets()
         selectsVerifiedSelfUpdateAsset()
+        rejectsQualifiedAndMismatchedSelfUpdateAssets()
         rejectsNonAppZipAssets()
         allowsRuntimeReleaseWithoutSelfUpdateAsset()
         returnsPopulatedReleaseInfoForAppSelfUpdate()
@@ -41,7 +42,10 @@ struct UpdateCheckerVerificationTests {
                 "digest": "sha256:abc",
             ],
         ]
-        expect(UpdateChecker.selectSelfUpdateAsset(from: assets) == nil, "unverified app zip is not eligible")
+        expect(
+            UpdateChecker.selectSelfUpdateAsset(from: assets, version: "1.2.3") == nil,
+            "unverified app zip is not eligible"
+        )
     }
 
     private static func selectsVerifiedSelfUpdateAsset() {
@@ -57,8 +61,20 @@ struct UpdateCheckerVerificationTests {
                 "digest": "sha256:def",
             ],
         ]
-        let selected = UpdateChecker.selectSelfUpdateAsset(from: assets)
+        let selected = UpdateChecker.selectSelfUpdateAsset(from: assets, version: "1.2.3")
         expect(selected?["name"] as? String == "DefenseClawMac-1.2.3-macos-arm64.zip", "verified app zip is selected")
+    }
+
+    private static func rejectsQualifiedAndMismatchedSelfUpdateAssets() {
+        let assets: [[String: Any]] = [
+            ["name": "DefenseClawMac-1.2.3-macos-arm64-preview.zip"],
+            ["name": "DefenseClawMac-9.9.9-macos-arm64.zip"],
+            ["name": "DefenseClawMac-1.2.3-MACOS-arm64.zip"],
+        ]
+        expect(
+            UpdateChecker.selectSelfUpdateAsset(from: assets, version: "1.2.3") == nil,
+            "only the exact versioned canonical app zip is eligible"
+        )
     }
 
     private static func rejectsNonAppZipAssets() {
@@ -69,7 +85,10 @@ struct UpdateCheckerVerificationTests {
                 "digest": "sha256:abc",
             ],
         ]
-        expect(UpdateChecker.selectSelfUpdateAsset(from: assets) == nil, "runtime assets are not self-update assets")
+        expect(
+            UpdateChecker.selectSelfUpdateAsset(from: assets, version: "1.2.3") == nil,
+            "runtime assets are not self-update assets"
+        )
     }
 
     private static func allowsRuntimeReleaseWithoutSelfUpdateAsset() {

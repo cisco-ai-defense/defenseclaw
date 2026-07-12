@@ -110,7 +110,7 @@ Confirm the app-only ZIP contains exactly one top-level `.app` bundle and no abs
 
 The first-run runtime installer pins its fallback `uv` download by version and SHA-256 in `RuntimeInstaller.swift`. When updating that pin, use an immutable `astral-sh/uv` release, copy the Apple Silicon archive digest from the release asset, and verify the archive locally before changing both constants together.
 
-Production releases must publish verified macOS app-update assets. Configure all five release-environment secrets together (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`). The release workflow defaults `MACOS_REQUIRE_NOTARIZATION=true`, so missing credentials fail the build instead of publishing self-update assets that bypass Developer ID and Gatekeeper verification. Partial credentials fail the build as well.
+Production releases publish verified macOS app-update assets when all five release-environment secrets are configured together (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`). With none configured, the workflow publishes only ad-hoc-signed `-unverified` assets, which the in-app self-updater rejects. Partial or invalid credentials fail the build rather than silently downgrading a configured signing path.
 
 ## 5. Review before merging
 

@@ -116,13 +116,14 @@ actor UpdateChecker {
         requireSelfUpdateAsset: Bool
     ) -> ReleaseInfo? {
         let assets = (dict["assets"] as? [[String: Any]]) ?? []
-        let zip = Self.selectSelfUpdateAsset(from: assets)
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let zip = Self.selectSelfUpdateAsset(from: assets, version: version)
         if requireSelfUpdateAsset && zip == nil {
             return nil
         }
         return ReleaseInfo(
             tag: tag,
-            version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
+            version: version,
             assetName: (zip?["name"] as? String) ?? "",
             assetURL: (zip?["browser_download_url"] as? String) ?? "",
             assetSHA256: ((zip?["digest"] as? String) ?? "")
@@ -132,13 +133,17 @@ actor UpdateChecker {
         )
     }
 
-    nonisolated static func selectSelfUpdateAsset(from assets: [[String: Any]]) -> [String: Any]? {
+    nonisolated static func isEligibleSelfUpdateAsset(name: String, version: String) -> Bool {
+        name == "DefenseClawMac-\(version)-macos-arm64.zip"
+    }
+
+    nonisolated static func selectSelfUpdateAsset(
+        from assets: [[String: Any]],
+        version: String
+    ) -> [String: Any]? {
         assets.first {
             let name = ($0["name"] as? String) ?? ""
-            return name.hasPrefix("DefenseClawMac-")
-                && name.contains("-macos-arm64")
-                && name.hasSuffix(".zip")
-                && !name.contains("-unverified")
+            return Self.isEligibleSelfUpdateAsset(name: name, version: version)
         }
     }
 
@@ -159,6 +164,9 @@ actor UpdateChecker {
     func downloadAndInstall(_ release: ReleaseInfo, progress: @Sendable @escaping (UpgradeState) -> Void) async -> String? {
         guard Self.isNewer(release.version, than: Self.currentVersion) else {
             return "Refusing to install version \(release.version) over \(Self.currentVersion)."
+        }
+        guard Self.isEligibleSelfUpdateAsset(name: release.assetName, version: release.version) else {
+            return "The release asset is not the exact verified macOS app update for \(release.version)."
         }
         guard let assetURL = URL(string: release.assetURL), !release.assetURL.isEmpty else {
             return "The latest release has no downloadable zip asset."
