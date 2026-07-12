@@ -191,14 +191,31 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
         text=True,
     )
     assert "--config" in help_result.stdout
-    assert "root:defenseclaw" in help_result.stdout
+    assert "root:wheel" in help_result.stdout
     assert "0640" in help_result.stdout
+    assert "No dedicated service user or group" in help_result.stdout
 
     text = installer.read_text(encoding="utf-8")
     required = {
-        'CONFIG_DEST="${MANAGED_ROOT}/config.yaml"',
-        'install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root "$SERVICE_GROUP" 0640',
-        'assert_path_metadata "$CONFIG_DEST" file 0 "$SERVICE_GID" 640',
+        'CONFIG_DEST="/opt/cisco/secureclient/defenseclaw/etc/config.yaml"',
+        'install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root wheel 0640',
+        'install_file_atomic "$MANIFEST_SOURCE" "$MANIFEST_DEST" root wheel 0640',
+        '/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"',
+        '/usr/bin/install -d -o root -g wheel -m 0750 "$RUNTIME_DIR" "$GUARDIAN_DIR" "$AUTH_DIR" "$LOG_DIR"',
+        'assert_path_metadata "$CONFIG_DEST" file 0 "$WHEEL_GID" 640',
+        'assert_path_metadata "$MANIFEST_DEST" file 0 "$WHEEL_GID" 640',
+        'assert_path_metadata "$ETC_DIR" dir 0 "$WHEEL_GID" 755',
+        'assert_path_metadata "$RUNTIME_DIR" dir 0 "$WHEEL_GID" 750',
+        'assert_path_metadata "$GUARDIAN_DIR" dir 0 "$WHEEL_GID" 750',
+        'assert_path_metadata "$AUTH_DIR" dir 0 "$WHEEL_GID" 750',
+        'assert_path_metadata "$LOG_DIR" dir 0 "$WHEEL_GID" 750',
+        'assert_existing_secure_dir_or_absent "$RUNTIME_DIR"',
+        'assert_existing_secure_dir_or_absent "$LOG_DIR"',
+        'assert_existing_secure_dir_or_absent "$LOG_VENDOR_DIR"',
+        'assert_existing_secure_dir_or_absent "$LOG_PRODUCT_DIR"',
+        "assert_trusted_system_dir /opt",
+        "assert_trusted_system_dir /opt/cisco",
+        "assert_trusted_system_dir /opt/cisco/secureclient",
         'refuse_symlink "$CONFIG_DEST"',
         "assert_no_write_acl()",
         'assert_no_write_acl "$path"',
@@ -208,6 +225,20 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     }
     missing = sorted(value for value in required if value not in text)
     assert not missing
+    directory_creation = (
+        '/usr/bin/install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BIN_DIR" "$ETC_DIR"'
+    )
+    for ancestor in ("/opt", "/opt/cisco", "/opt/cisco/secureclient"):
+        assert text.index(directory_creation) < text.index(f"assert_trusted_system_dir {ancestor}")
+    stale_service_identity_contract = {
+        "SERVICE_USER",
+        "SERVICE_GROUP",
+        "SERVICE_UID",
+        "SERVICE_GID",
+        "assert_existing_acl_safe_dir_or_absent",
+    }
+    present = sorted(value for value in stale_service_identity_contract if value in text)
+    assert not present
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "macos-enterprise-packaging:" in workflow
@@ -216,3 +247,68 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
     assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
     assert "installer accepted a write-capable managed-root ACL" in smoke
+    assert "managed_root=\"/opt/cisco/secureclient/defenseclaw\"" in smoke
+    assert "config_dest=\"${managed_root}/etc/config.yaml\"" in smoke
+    assert "log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw" in smoke
+    assert "assert_no_defenseclaw_identity()" in smoke
+    assert smoke.count("assert_no_defenseclaw_identity \"") == 3
+    assert "dscl . -create" not in smoke
+    assert "/Library/Application Support/DefenseClaw" not in smoke
+    assert "/Library/DefenseClaw" not in smoke
+
+
+def test_launchd_enterprise_installer_matches_cisco_plist_layout():
+    installer = ROOT / "packaging" / "launchd" / "install-enterprise.sh"
+    text = installer.read_text(encoding="utf-8")
+
+    gateway_plist = ROOT / "packaging" / "launchd" / "com.cisco.secureclient.defenseclaw.plist"
+    guardian_plist = (
+        ROOT / "packaging" / "launchd" / "com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+    )
+    with gateway_plist.open("rb") as fh:
+        gateway = plistlib.load(fh)
+    with guardian_plist.open("rb") as fh:
+        guardian = plistlib.load(fh)
+
+    home = gateway["EnvironmentVariables"]["DEFENSECLAW_HOME"]
+    config = gateway["EnvironmentVariables"]["DEFENSECLAW_CONFIG"]
+    auth_dir = gateway["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
+    manifest = guardian["ProgramArguments"][-1]
+
+    assert f"BINARY_ROOT={home}" in text
+    assert f'CONFIG_DEST="{config}"' in text
+    assert f'MANIFEST_DEST="{manifest}"' in text
+    assert f'AUTH_DIR="{auth_dir}"' in text
+    assert f'GATEWAY_LABEL={gateway["Label"]}' in text
+    assert f'GUARDIAN_LABEL={guardian["Label"]}' in text
+    assert '"system/${GATEWAY_LABEL}"' in text
+    assert '"system/${GUARDIAN_LABEL}"' in text
+    assert "snapshot_file()" in text
+    assert "restore_snapshots()" in text
+    assert "rebootstrap_previously_loaded_job()" in text
+    assert "rollback_install()" in text
+    assert "GATEWAY_WAS_LOADED=true" in text
+    assert "GUARDIAN_WAS_LOADED=true" in text
+    assert 'snapshot_file "$destination"' in text
+    assert text.index("ROLLBACK_ARMED=true") < text.index('stop_job_if_loaded "$GUARDIAN_LABEL"')
+    assert 'stop_job_if_loaded "$GATEWAY_LABEL"' in text
+    assert 'stop_job_if_loaded "$GUARDIAN_LABEL"' in text
+    assert "ROLLBACK_ARMED=false" in text
+    assert "system/com.defenseclaw." not in text
+
+    deployment_docs = (
+        ROOT / "docs-site" / "content" / "docs" / "setup" / "enterprise-deployment.mdx"
+    ).read_text(encoding="utf-8")
+    documented_contract = {
+        "There is no dedicated `defenseclaw` service user on macOS.",
+        "| `/opt/cisco/secureclient/defenseclaw/etc` | `root:wheel` | `0755` |",
+        "| `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` | `root:wheel` | `0640` |",
+        "| `/opt/cisco/secureclient/defenseclaw/runtime` | `root:wheel` | `0750` |",
+        "| `/opt/cisco/secureclient/defenseclaw/hook-guardian` | `root:wheel` | `0750` |",
+        "| `/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml` | `root:wheel` | `0640` |",
+        "| `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` | `root:wheel` | `0750` |",
+        "| `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` | `0750` |",
+        "A failure after jobs are stopped restores the previous binary, config, manifest, and plists",
+    }
+    missing_contract = sorted(value for value in documented_contract if value not in deployment_docs)
+    assert not missing_contract
