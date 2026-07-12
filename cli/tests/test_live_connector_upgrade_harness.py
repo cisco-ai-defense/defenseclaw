@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import runpy
 import stat
@@ -204,3 +205,58 @@ def test_report_prefers_candidate_version_over_known_good_baseline() -> None:
     )
     assert versions[("codex", "macos")] == "0.144.1"
     assert failures == [("codex", "macos", "candidate-upgrade:lifecycle:fires", "hook missing")]
+
+
+def test_report_issue_rows_only_include_candidate_regressions(tmp_path: Path) -> None:
+    report_module = runpy.run_path(str(REPORT))
+    load_candidate_regression_results = report_module["load_candidate_regression_results"]
+    summarize = report_module["summarize"]
+
+    candidate = tmp_path / "connector-version-radar-codex-0.144.1"
+    auth_failure = tmp_path / "connector-version-radar-claudecode-2.1.208"
+    candidate.mkdir()
+    auth_failure.mkdir()
+    (candidate / "classification.json").write_text(
+        json.dumps({"classification": "candidate_regression"}),
+        encoding="utf-8",
+    )
+    (auth_failure / "classification.json").write_text(
+        json.dumps({"classification": "auth_failure"}),
+        encoding="utf-8",
+    )
+    (candidate / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "connector": "codex",
+                "os": "macos",
+                "event": "candidate-upgrade:tool-block:enforced",
+                "status": "fail",
+                "version": "0.144.1",
+                "detail": "block verdict missing",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (auth_failure / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "connector": "claudecode",
+                "os": "macos",
+                "event": "baseline:lifecycle:agent",
+                "status": "fail",
+                "version": "2.1.208",
+                "detail": "login expired",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = load_candidate_regression_results(tmp_path)
+    _cells, versions, failures = summarize(rows)
+
+    assert versions[("codex", "macos")] == "0.144.1"
+    assert failures == [
+        ("codex", "macos", "candidate-upgrade:tool-block:enforced", "block verdict missing")
+    ]

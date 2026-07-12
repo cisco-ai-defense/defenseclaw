@@ -19,9 +19,9 @@
 # and:
 #   1. Renders a connector x os x event matrix to the GitHub job summary.
 #   2. Records the resolved upstream version per connector x os.
-#   3. On ANY failing cell, builds a regression issue body and (when
-#      --open-issue is passed and gh is authenticated) opens or updates a
-#      GitHub issue labeled `connector-regression`.
+#   3. On candidate-regression classified failures, builds a regression issue
+#      body and (when --open-issue is passed and gh is authenticated) opens or
+#      updates a GitHub issue labeled `connector-regression`.
 #   4. Exits non-zero when failures exist so the report job is red — but it
 #      NEVER edits validated_versions.json or hook_contracts.json. Bumping a
 #      validated/approved version is a deliberate human action.
@@ -41,9 +41,19 @@ ISSUE_LABEL = "connector-regression"
 ISSUE_TITLE = "Connector live E2E regression"
 
 
-def load_results(results_dir: Path) -> list[dict]:
+def _path_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def load_results(results_dir: Path, *, roots: list[Path] | None = None) -> list[dict]:
     rows: list[dict] = []
     for path in sorted(results_dir.rglob("*.jsonl")):
+        if roots is not None and not any(_path_under(path, root) for root in roots):
+            continue
         try:
             with path.open(encoding="utf-8") as f:
                 for line in f:
@@ -57,6 +67,25 @@ def load_results(results_dir: Path) -> list[dict]:
         except OSError:
             continue
     return rows
+
+
+def candidate_regression_roots(results_dir: Path) -> list[Path]:
+    roots: list[Path] = []
+    for path in sorted(results_dir.rglob("classification.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("classification") == "candidate_regression":
+            roots.append(path.parent)
+    return roots
+
+
+def load_candidate_regression_results(results_dir: Path) -> list[dict]:
+    roots = candidate_regression_roots(results_dir)
+    if not roots:
+        return []
+    return load_results(results_dir, roots=roots)
 
 
 def summarize(rows: list[dict]):
@@ -236,10 +265,17 @@ def main() -> int:
             print(f"[report] could not write summary: {exc}", file=sys.stderr)
 
     if failures:
-        body = build_issue_body(failures, versions, args.run_url)
-        print("\n----- regression issue body -----\n" + body, file=sys.stderr)
+        issue_failures = failures
+        issue_versions = versions
         if args.open_issue:
+            issue_rows = load_candidate_regression_results(args.results_dir)
+            _issue_cells, issue_versions, issue_failures = summarize(issue_rows)
+        body = build_issue_body(issue_failures, issue_versions, args.run_url)
+        print("\n----- regression issue body -----\n" + body, file=sys.stderr)
+        if args.open_issue and issue_failures:
             open_or_update_issue(body, args.run_url)
+        elif args.open_issue:
+            print("[report] no candidate-regression failures to file.", file=sys.stderr)
         return 1
 
     print("[report] all cells green.")
