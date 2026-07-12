@@ -103,11 +103,11 @@ make macos-app-release
 make macos-app-release-verify
 ```
 
-Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Applications` symlink, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Confirm the zip contains the app without `RuntimePayload`, preserving the independent runtime update track. Verify both artifact names contain `-unverified` unless Developer ID signing and notarization were deliberately configured.
+Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Applications` symlink, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Confirm the zip contains the app without `RuntimePayload`, preserving the independent runtime update track. Local development builds may produce clearly named `-unverified` artifacts, but the in-app self-updater ignores those assets.
 
 The first-run runtime installer pins its fallback `uv` download by version and SHA-256 in `RuntimeInstaller.swift`. When updating that pin, use an immutable `astral-sh/uv` release, copy the Apple Silicon archive digest from the release asset, and verify the archive locally before changing both constants together.
 
-Until Apple credentials are available, releases intentionally publish the clearly named `-unverified` artifacts. When enabling verified distribution, configure all five release-environment secrets together (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`), then set the release-environment variable `MACOS_REQUIRE_NOTARIZATION=true`. Partial credentials fail the build, and the variable prevents any future release from falling back to unverified artifacts.
+Production releases must publish verified macOS app-update assets. Configure all five release-environment secrets together (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`). The release workflow defaults `MACOS_REQUIRE_NOTARIZATION=true`, so missing credentials fail the build instead of publishing self-update assets that bypass Developer ID and Gatekeeper verification. Partial credentials fail the build as well.
 
 ## 5. Review before merging
 
