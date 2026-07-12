@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
@@ -992,7 +994,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         path = os.path.join(data_dir or self.tmp_dir, "config.yaml")
         with open(path, "rb") as stream:
-            source = load_validate_v8(stream.read(), source_name=path).source
+            raw = stream.read()
+        load_validate_v8(raw, source_name=path)
+        source = yaml.safe_load(raw)
         return source.get("observability", {}).get("destinations", [])
 
     def _write_v8_destinations(self, destinations: list[dict] | None = None) -> None:

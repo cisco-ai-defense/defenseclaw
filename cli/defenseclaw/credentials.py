@@ -40,6 +40,7 @@ from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config
@@ -316,6 +317,32 @@ def _header_env_reference(headers: object, name: str) -> str:
     return ""
 
 
+def _credential_endpoint_authority(endpoint: str) -> str:
+    """Return only the display-safe scheme/host/port for a key binding.
+
+    The validated v8 source projection intentionally masks endpoint paths,
+    queries, and fragments because providers may embed credentials there.
+    Credential prompts need only the destination authority to catch a
+    region/host mismatch, so never propagate even the masked path marker.
+    """
+
+    value = str(endpoint or "").strip()
+    if not value or value in {"[REDACTED_URL]", "—"}:
+        return ""
+    has_scheme = "://" in value
+    try:
+        parsed = urlsplit(value if has_scheme else f"//{value}")
+        hostname = parsed.hostname
+        if not hostname:
+            return ""
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+    except (TypeError, ValueError):
+        return ""
+    return f"{parsed.scheme}://{host}" if has_scheme else host
+
+
 def _load_v8_observability_credential_refs(
     cfg: Config,
 ) -> _ObservabilityCredentialRefs:
@@ -352,7 +379,9 @@ def _load_v8_observability_credential_refs(
         if not isinstance(destination, Mapping) or destination.get("enabled") is False:
             continue
         kind = str(destination.get("kind") or "").strip()
-        endpoint = str(destination.get("endpoint") or "").strip()
+        endpoint = _credential_endpoint_authority(
+            str(destination.get("endpoint") or "").strip()
+        )
         candidates: list[tuple[str, str]] = []
         if kind == "splunk_hec":
             token_env = destination.get("token_env")
