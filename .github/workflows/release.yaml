@@ -403,6 +403,10 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.13"
+          # This job consumes already-built runtime artifacts and never creates
+          # a uv dependency cache. Avoid a failing post-job upload of an absent
+          # cache directory.
+          enable-cache: false
 
       - name: Verify and extract exact runtime inputs
         env:
