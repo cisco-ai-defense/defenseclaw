@@ -344,11 +344,56 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		// empirical agy-version notes.
 		profile.Decode = antigravityProfileDecode
 	}
+	if c.name == "cursor" {
+		profile.Decode = cursorProfileDecode
+	}
+	if c.name == "windsurf" {
+		profile.Decode = windsurfProfileDecode
+	}
 	// NOTE: hermes needs no Decode override. Its nested `extra` content
 	// is recovered by the generic decoder's ContentEnvelopeKey fallback
 	// (declared on the hermes hook contract), and its wire replies are
 	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
+}
+
+// Cursor documents generation_id as the identifier for one user-message
+// generation. Keep that connector-native turn mapping out of the generic
+// decoder so another connector's generation identifier cannot become a turn.
+func cursorProfileDecode(payload map[string]interface{}) HookProfileRequest {
+	return HookProfileRequest{
+		ConnectorName: "cursor",
+		HookEventName: hookFirstString(payload,
+			"hook_event_name", "hookEventName",
+			"event_type", "eventType",
+			"event_name", "eventName",
+			"agent_action_name",
+		),
+		TurnID: hookFirstString(payload,
+			"generation_id", "generationId",
+			"turn_id", "turnId", "turnID",
+		),
+		Payload: payload,
+	}
+}
+
+// Windsurf documents execution_id as one Cascade agent turn. This is a
+// connector-scoped semantic mapping, not a generic execution-to-turn alias.
+func windsurfProfileDecode(payload map[string]interface{}) HookProfileRequest {
+	return HookProfileRequest{
+		ConnectorName: "windsurf",
+		HookEventName: hookFirstString(payload,
+			"hook_event_name", "hookEventName",
+			"event_type", "eventType",
+			"event_name", "eventName",
+			"agent_action_name",
+		),
+		TurnID: hookFirstString(payload,
+			"execution_id", "executionId",
+			"turn_id", "turnId", "turnID",
+		),
+		Payload: payload,
+	}
 }
 
 func copilotNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {

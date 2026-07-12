@@ -207,14 +207,15 @@ func TestOTLPInboundConnectorLogMatrix(t *testing.T) {
 		content       string
 		eventName     string
 		outcome       string
+		requestID     string
 		reportedKey   string
 		stateKey      string
 		oppositeKey   string
 		oppositeState string
 	}{
-		{"otlp.codex.user_prompt.v1.log.model.request", "codex prompt", "model.request", "attempted", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state"},
-		{"otlp.claudecode.user_prompt.v1.log.model.request", "claude prompt", "model.request", "attempted", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state"},
-		{"otlp.codex.response_completed.v1.log.model.response", "codex response", "model.response", "completed", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state"},
+		{"otlp.codex.user_prompt.v1.log.model.request", "codex prompt", "model.request", "attempted", "request-1", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state"},
+		{"otlp.claudecode.user_prompt.v1.log.model.request", "claude prompt", "model.request", "attempted", "", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state"},
+		{"otlp.codex.response_completed.v1.log.model.response", "codex response", "model.response", "completed", "", "defenseclaw.telemetry.output.reported", "defenseclaw.content.output.state", "defenseclaw.telemetry.input.reported", "defenseclaw.content.input.state"},
 	}
 	now := time.Now().UTC()
 	for index, test := range tests {
@@ -236,6 +237,11 @@ func TestOTLPInboundConnectorLogMatrix(t *testing.T) {
 			otlpClassifierStringAttribute("session_id", "session-1"),
 			otlpClassifierStringAttribute("turn_id", "turn-1"),
 		)
+		if test.requestID != "" {
+			leaf.logRecord.Attributes = append(leaf.logRecord.Attributes,
+				otlpClassifierStringAttribute("request.id", test.requestID),
+			)
+		}
 		message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
 			Resource:  &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
 			ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{leaf.logRecord}}},
@@ -257,8 +263,15 @@ func TestOTLPInboundConnectorLogMatrix(t *testing.T) {
 			t.Fatalf("%s outcome=%#v", test.matchID, record["outcome"])
 		}
 		correlation, ok := record["correlation"].(map[string]any)
-		if !ok || correlation["session_id"] != "session-1" || correlation["request_id"] != "turn-1" {
+		if !ok || correlation["session_id"] != "session-1" || correlation["turn_id"] != "turn-1" {
 			t.Fatalf("%s correlation=%#v", test.matchID, record["correlation"])
+		}
+		requestID, requestPresent := correlation["request_id"]
+		if test.requestID == "" && requestPresent {
+			t.Fatalf("%s turn leaked into request_id=%#v; correlation=%#v", test.matchID, requestID, correlation)
+		}
+		if test.requestID != "" && requestID != test.requestID {
+			t.Fatalf("%s request_id=%#v want %q; correlation=%#v", test.matchID, requestID, test.requestID, correlation)
 		}
 		body, ok := record["body"].(map[string]any)
 		if !ok || body[test.reportedKey] != true || body[test.stateKey] != "preserved" ||
