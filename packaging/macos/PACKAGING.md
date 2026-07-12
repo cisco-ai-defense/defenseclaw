@@ -127,7 +127,7 @@ Requires `sudo`. The installer:
   - `/opt/cisco/secureclient/defenseclaw/hook-guardian/` — `root:defenseclaw 0750` (hook target manifest)
   - `/opt/cisco/secureclient/defenseclaw/hook-guardian-state/` — `root:defenseclaw 0750` (authorization records)
   - `/Library/Logs/Cisco/SecureClient/DefenseClaw/` — `defenseclaw:defenseclaw 0750`
-- Writes `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` (`root:wheel 0644`) and `launchctl bootstrap`s it.
+- Writes `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` and `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist` (`root:wheel 0644`) and `launchctl bootstrap`s both.
 - Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:defenseclaw 0640`.
 - Creates the `defenseclaw` service user/group for managed file ownership. The gateway daemon still runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
 - Wires per-user hook configs in the target user's `~/.codex/config.toml`, `~/.claude/settings.json`, and/or `~/.cursor/hooks.json` depending on `--connector`.
