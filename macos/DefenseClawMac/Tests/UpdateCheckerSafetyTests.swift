@@ -35,6 +35,7 @@ struct UpdateCheckerSafetyTests {
         rejectsHardlinkEntries()
         rejectsMultipleAppBundles()
         rejectsArchiveWithNoAppBundle()
+        rejectsEmptyArchivePath()
         print("Update checker safety tests passed")
     }
 
@@ -111,6 +112,14 @@ struct UpdateCheckerSafetyTests {
             UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac/Contents/Info.plist", mode: "-rw-r--r--"),
         ])
         expect(result.isFailure(containing: "single top-level .app"), "archives without .app bundle are rejected")
+    }
+
+    private static func rejectsEmptyArchivePath() {
+        let result = UpdateChecker.validateUpdateArchive(entries: [
+            UpdateChecker.ZipArchiveEntry(path: "DefenseClawMac.app/Contents/Info.plist", mode: "-rw-r--r--"),
+            UpdateChecker.ZipArchiveEntry(path: "", mode: "-rw-r--r--"),
+        ])
+        expect(result.isFailure(containing: "empty archive path"), "empty archive paths are rejected")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ label: String) {
