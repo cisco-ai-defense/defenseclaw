@@ -69,6 +69,7 @@ RESOLVER_ASSET_SOURCES = {
     "defenseclaw-upgrade.ps1": ROOT / "scripts" / "upgrade.ps1",
 }
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
+MACOS_VERIFICATION_STATUSES = ("notarized", "unverified")
 
 
 class CandidateError(RuntimeError):
@@ -175,11 +176,25 @@ def runtime_asset_names(version: str) -> tuple[str, ...]:
     )
 
 
-def macos_asset_names(version: str) -> tuple[str, ...]:
+def _validate_macos_verification_status(status: object) -> str:
+    if not isinstance(status, str) or status not in MACOS_VERIFICATION_STATUSES:
+        raise CandidateError(
+            "macOS verification status must be exactly one of "
+            f"{MACOS_VERIFICATION_STATUSES!r}, got {status!r}"
+        )
+    return status
+
+
+def macos_asset_names(
+    version: str,
+    macos_verification_status: str,
+) -> tuple[str, ...]:
     _validate_version(version)
+    status = _validate_macos_verification_status(macos_verification_status)
+    suffix = "" if status == "notarized" else "-unverified"
     return (
-        f"DefenseClawMac-{version}-macos-arm64.dmg",
-        f"DefenseClawMac-{version}-macos-arm64.zip",
+        f"DefenseClawMac-{version}-macos-arm64{suffix}.dmg",
+        f"DefenseClawMac-{version}-macos-arm64{suffix}.zip",
     )
 
 
@@ -190,23 +205,29 @@ def resolver_asset_names(version: str) -> tuple[str, ...]:
     return tuple(sorted(RESOLVER_ASSET_SOURCES))
 
 
-def payload_asset_names(version: str) -> tuple[str, ...]:
+def payload_asset_names(
+    version: str,
+    macos_verification_status: str,
+) -> tuple[str, ...]:
     return tuple(
         sorted(
             (
                 *runtime_asset_names(version),
-                *macos_asset_names(version),
+                *macos_asset_names(version, macos_verification_status),
                 *resolver_asset_names(version),
             )
         )
     )
 
 
-def published_asset_names(version: str) -> tuple[str, ...]:
+def published_asset_names(
+    version: str,
+    macos_verification_status: str,
+) -> tuple[str, ...]:
     return tuple(
         sorted(
             (
-                *payload_asset_names(version),
+                *payload_asset_names(version, macos_verification_status),
                 "checksums.txt",
                 "checksums.txt.pem",
                 "checksums.txt.sig",
@@ -2607,22 +2628,27 @@ def assemble(
 ) -> None:
     _validate_version(version)
     _validate_commit(commit)
-    if macos_verification_status != "notarized":
-        raise CandidateError(
-            "production release candidate requires a notarized macOS app; "
-            f"got {macos_verification_status!r}"
-        )
+    macos_verification_status = _validate_macos_verification_status(
+        macos_verification_status
+    )
     if root.exists():
         raise CandidateError(f"candidate output already exists: {root}")
 
     verify_runtime(runtime_dir, version)
     _validate_gateway_archives(runtime_dir, version, commit=commit)
-    _require_regular_files(macos_dir, macos_asset_names(version), "macOS artifact")
+    macos_names = macos_asset_names(version, macos_verification_status)
+    _require_regular_files(macos_dir, macos_names, "macOS artifact")
+    actual_macos_names = _strict_file_names(macos_dir, "macOS artifact")
+    if actual_macos_names != tuple(sorted(macos_names)):
+        raise CandidateError(
+            "macOS artifact directory does not match its verification status: "
+            f"got {actual_macos_names!r}, want {tuple(sorted(macos_names))!r}"
+        )
 
     dist = root / "dist"
     dist.mkdir(parents=True)
     _copy_exact(runtime_dir, dist, runtime_asset_names(version))
-    _copy_exact(macos_dir, dist, macos_asset_names(version))
+    _copy_exact(macos_dir, dist, macos_names)
     _copy_resolver_assets(dist, version)
     _validate_resolver_assets(dist, version)
 
@@ -2630,7 +2656,10 @@ def assemble(
     if notes.is_file() and not notes.is_symlink():
         shutil.copy2(notes, root / "RELEASE_NOTES.md")
 
-    checksum_lines = [f"{_sha256(dist / name)}  {name}" for name in payload_asset_names(version)]
+    checksum_lines = [
+        f"{_sha256(dist / name)}  {name}"
+        for name in payload_asset_names(version, macos_verification_status)
+    ]
     (dist / "checksums.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
 
     metadata = {
@@ -2677,18 +2706,21 @@ def seal(root: Path, version: str, commit: str) -> None:
     _validate_version(version)
     _validate_commit(commit)
     metadata = _read_json_object(root / "candidate-metadata.json", "candidate metadata")
+    macos_verification_status = _validate_macos_verification_status(
+        metadata.get("macos_verification_status")
+    )
     expected_metadata = {
         "schema_version": SCHEMA_VERSION,
         "release_version": version,
         "commit": commit,
-        "macos_verification_status": "notarized",
+        "macos_verification_status": macos_verification_status,
         "source_install_identity": _reviewed_source_install_identity(version),
     }
     if metadata != expected_metadata:
         raise CandidateError(f"candidate metadata mismatch: got {metadata!r}")
 
     dist = root / "dist"
-    names = published_asset_names(version)
+    names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
     if actual_names != names:
@@ -2698,7 +2730,7 @@ def seal(root: Path, version: str, commit: str) -> None:
         )
 
     checksums = _parse_checksums(dist / "checksums.txt")
-    payload_names = payload_asset_names(version)
+    payload_names = payload_asset_names(version, macos_verification_status)
     if tuple(sorted(checksums)) != payload_names:
         raise CandidateError("checksums.txt does not cover the exact publish payload")
     for name, expected in checksums.items():
@@ -2732,13 +2764,14 @@ def verify(root: Path, version: str, commit: str) -> None:
         raise CandidateError("release candidate version mismatch")
     if manifest.get("commit") != commit:
         raise CandidateError("release candidate commit mismatch")
-    if manifest.get("macos_verification_status") != "notarized":
-        raise CandidateError("release candidate macOS app is not notarized")
+    macos_verification_status = _validate_macos_verification_status(
+        manifest.get("macos_verification_status")
+    )
     if manifest.get("source_install_identity") != _reviewed_source_install_identity(version):
         raise CandidateError("release candidate source-install identity mismatch")
 
     dist = root / "dist"
-    expected_names = published_asset_names(version)
+    expected_names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, expected_names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
     if actual_names != expected_names:
@@ -2775,7 +2808,9 @@ def verify(root: Path, version: str, commit: str) -> None:
         raise CandidateError("sealed release notes are missing")
 
     checksums = _parse_checksums(dist / "checksums.txt")
-    if tuple(sorted(checksums)) != payload_asset_names(version):
+    if tuple(sorted(checksums)) != payload_asset_names(
+        version, macos_verification_status
+    ):
         raise CandidateError("checksums.txt coverage changed after sealing")
     for name, expected in checksums.items():
         if _sha256(dist / name) != expected:
@@ -2931,7 +2966,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"release candidate verified: {args.version} at {args.commit}")
         elif args.command == "list-assets":
             verify(args.root, args.version, args.commit)
-            for name in published_asset_names(args.version):
+            for name in _strict_file_names(args.root / "dist", "release candidate"):
                 print(name)
         elif args.command == "verify-published":
             verify_published_release(args.root, args.release_json, args.version, args.commit)

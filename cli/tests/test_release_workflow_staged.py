@@ -250,6 +250,40 @@ def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
     assert "gateway candidate version mismatch" in text
 
 
+def test_release_conditionally_notarizes_or_publishes_explicit_unverified_assets() -> None:
+    workflow = _workflow()
+    macos_job = workflow["jobs"]["macos-app"]
+    build_step = next(
+        step
+        for step in macos_job["steps"]
+        if step.get("name") == "Build, sign, notarize, and package app"
+    )
+    assert build_step["env"]["MACOS_REQUIRE_NOTARIZATION"] == "false"
+
+    rendered = str(macos_job)
+    for secret in (
+        "MACOS_DEVELOPER_ID_P12_BASE64",
+        "MACOS_DEVELOPER_ID_P12_PASSWORD",
+        "MACOS_NOTARY_KEY_BASE64",
+        "MACOS_NOTARY_KEY_ID",
+        "MACOS_NOTARY_ISSUER_ID",
+    ):
+        assert f"secrets.{secret}" in rendered
+    assert "notarized)" in rendered
+    assert "unverified)" in rendered
+    assert "explicitly suffixed -unverified app assets" in rendered
+    assert "signed-unnotarized)" not in rendered
+
+    release_text = WORKFLOW.read_text(encoding="utf-8")
+    assert "MACOS_VERIFICATION_STATUSES" in release_text
+    assert "names == required" in release_text
+
+    build_text = MACOS_BUILD.read_text(encoding="utf-8")
+    assert 'VERIFICATION_STATUS="unverified"' in build_text
+    assert '[[ "${VERIFICATION_STATUS}" != "notarized" ]]' in build_text
+    assert '[[ "${VERIFICATION_STATUS}" != "unverified" ]]' in build_text
+
+
 def test_posix_installer_cannot_bypass_upgrade_graph_on_existing_install() -> None:
     text = POSIX_INSTALLER.read_text(encoding="utf-8")
     assert "An existing DefenseClaw installation was detected. No changes were made." in text
@@ -291,7 +325,7 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "auto_bridge_from does not match the reviewed pre-bridge matrix" in text
     assert "Require immutable published bridge" in text
     assert 'release.get("isImmutable") is not True' in text
-    assert "set(published_asset_names(expected))" in text
+    assert "published_asset_names(expected, status)" in text
     assert not re.search(r"\b0\.8\.[45]\b", text)
 
 
