@@ -627,6 +627,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
 	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
 	macos/DefenseClawMac/script/test_update_checker_verification.sh
+	macos/DefenseClawMac/script/test_update_checker_safety.sh
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check extensions dist-cli
