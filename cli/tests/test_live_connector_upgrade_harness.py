@@ -13,6 +13,8 @@ REPO = Path(__file__).resolve().parents[2]
 HARNESS = REPO / "scripts" / "live-connector-e2e" / "upgrade-regression.sh"
 PERSIST = REPO / "scripts" / "live-connector-e2e" / "lib" / "persistent-macos.sh"
 REPORT = REPO / "scripts" / "live-connector-e2e" / "report.py"
+ANTIGRAVITY_DRIVER = REPO / "scripts" / "live-connector-e2e" / "drivers" / "antigravity.sh"
+DRIVER_COMMON = REPO / "scripts" / "live-connector-e2e" / "drivers" / "_driver_common.sh"
 
 
 def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -53,6 +55,7 @@ def test_harness_never_globally_installs_or_removes_auth_homes() -> None:
     persist_text = PERSIST.read_text(encoding="utf-8")
     assert "npm install -g" not in text
     assert "npm i -g" not in text
+    assert "@anthropic-ai/claude-code" not in text
     assert "rm -rf" not in text
     assert 'export DEFENSECLAW_HOME="${SCRATCH}/defenseclaw"' in text
     assert 'export DC_E2E_AGENT_WORKSPACE="${SCRATCH}/workspace"' in text
@@ -63,7 +66,27 @@ def test_harness_never_globally_installs_or_removes_auth_homes() -> None:
     assert "defenseclaw-gateway stop" in text
     assert 'if [ "${LOCK_ACQUIRED}" = "1" ]' in text
     assert "antigravity.google/cli/install.sh" not in text
+    assert 'HOME="${install_home}" DISABLE_AUTOUPDATER=1' in text
+    assert 'dc_timeout 240 "${source}" install "${requested}"' in text
+    assert 'install_home="$(dc_persist_realpath "${install_home}")"' in text
+    assert '"${install_home}"/.local/share/claude/versions/*' in text
+    claude_case = text.index("  claudecode)\n", text.index('case "${CONNECTOR}" in'))
+    disable_autoupdater = text.index("export DISABLE_AUTOUPDATER=1", claude_case)
+    baseline_install = text.index("dc_upgrade_install_claude_native", claude_case)
+    assert disable_autoupdater < baseline_install
     assert "read -r DC_PERSIST_WS_PORT DC_PERSIST_API_PORT DC_PERSIST_SCANNER_PORT" in persist_text
+
+
+def test_antigravity_permission_flag_precedes_print_prompt() -> None:
+    expected = '--dangerously-skip-permissions --print "${prompt}"'
+    assert expected in HARNESS.read_text(encoding="utf-8")
+    assert expected in ANTIGRAVITY_DRIVER.read_text(encoding="utf-8")
+
+
+def test_block_probe_forbids_model_retries() -> None:
+    text = DRIVER_COMMON.read_text(encoding="utf-8")
+    assert "If that exact command is blocked or denied, stop immediately." in text
+    assert "Do not retry, rewrite, encode, split, or run an alternative command." in text
 
 
 def test_snapshot_restore_preserves_exact_bytes_and_mode(tmp_path: Path) -> None:
