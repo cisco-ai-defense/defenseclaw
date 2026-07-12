@@ -213,7 +213,7 @@ def status(app: AppContext, as_json: bool) -> None:
                 f"{ux.dim(f'(audit DB error: {db_error})')}"
             )
 
-    # Observability destinations (OTel exporter + audit sinks)
+    # Canonical v8 collection, routing, redaction, and destination status.
     _print_observability_status(cfg)
 
     # Sidecar status
@@ -721,46 +721,30 @@ def _hook_guardian_status(cfg) -> dict:
 
 
 def _print_observability_status(cfg) -> None:
-    """Enumerate every observability destination — gateway OTel exporter
-    plus every ``audit_sinks`` entry — in a single section.
+    """Render the compiler-owned canonical v8 destination plan."""
 
-    The old ``_print_splunk_integration_status`` was hard-coded to Splunk
-    hydration and a single exporter and
-    so couldn't see Datadog, Honeycomb, New Relic, or extra Splunk HEC
-    sinks configured via ``setup observability``. This walks the YAML
-    via the observability writer so whatever ``setup observability add``
-    writes shows up here for free.
-    """
-    # Lazy import so ``status`` stays fast on systems that never
-    # configured observability (avoids the YAML read when possible).
-    from defenseclaw.observability import list_destinations
-    from defenseclaw.observability.presets import PRESETS
-
-    try:
-        destinations = list_destinations(cfg.data_dir)
-    except Exception:
-        destinations = []
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.v8_status import inspect_v8_operator_status
 
     ux.section("Observability")
-
-    if not destinations:
-        click.echo("    " + ux.dim("(none configured — run `defenseclaw setup observability add <preset>`)"))
+    try:
+        status = inspect_v8_operator_status(config_path_for_data_dir(cfg.data_dir))
+    except Exception as exc:  # noqa: BLE001 - status remains useful when the sidecar is stopped.
+        click.echo("    " + ux._style(f"canonical v8 plan unavailable: {exc}", fg="yellow"))
         return
 
-    for d in destinations:
-        label = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
-        state = ux._style("enabled", fg="green") if d.enabled else ux._style("disabled", fg="bright_black")
-        target_tag = "otel" if d.target == "otel" else "sink"
-        click.echo(f"    {ux.bold(f'{d.name:<26s}')}{ux.dim(f'[{target_tag}]')} {state}  {ux.dim('—')} {label}")
-
-        if d.target == "otel" and d.enabled:
-            enabled_signals = [s for s, on in d.signals.items() if on]
-            if enabled_signals:
-                click.echo(f"      {ux.dim('signals:')} {', '.join(sorted(enabled_signals))}")
-            if d.endpoint:
-                click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
-        elif d.enabled and d.endpoint:
-            click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
+    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    click.echo(f"    {ux.dim('plan:')} {status.plan_digest[:12]}  {ux.dim('retention:')} {retention}")
+    for destination in status.destinations:
+        state = ux._style("enabled", fg="green") if destination.enabled else ux._style("disabled", fg="bright_black")
+        signals = ",".join(destination.selected_signals) or "none"
+        click.echo(
+            f"    {ux.bold(f'{destination.name:<26s}')}"
+            f"{ux.dim(f'[{destination.kind}]')} {state}  "
+            f"{signals}  {destination.redaction_label}"
+        )
+        if destination.endpoint:
+            click.echo(f"      {ux.dim('target:')} {destination.endpoint}")
 
 
 def _scanner_overrides_summary(cfg) -> str:

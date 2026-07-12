@@ -39,7 +39,7 @@ The flags above explicitly set: connector, mode, optional HITL, and optional rul
 | Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
 | Verify after setup | on | `--no-verify` |
 
 See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
@@ -57,7 +57,7 @@ defenseclaw setup openclaw \
   --restart
 ```
 
-The proxy is in the data path but nothing blocks. Every prompt, response, and tool call lands in `~/.defenseclaw/gateway.jsonl`. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
+The proxy is in the data path but nothing blocks. Every collected prompt, response, and tool call lands in mandatory SQLite event history; optional v8 destinations receive their selected, redacted projections. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
 
 </Tab>
 

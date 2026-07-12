@@ -8,39 +8,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
-// redactedScanResultJSON serializes a copy of “result“ whose finding
-// description / location / remediation fields have been passed through
-// redaction.ForSinkString. ("Raw scan JSON stores
-// unredacted secret-bearing findings"): callers persist this JSON into
-// scan_results.raw_json, which is read back through GetScanRawJSON and
-// LatestScansByScanner -- both surfaces had previously leaked the raw
-// matched source line.
-func redactedScanResultJSON(r *ScanResult) ([]byte, error) {
+// scanResultJSON retains the source-backed result for the local forensic
+// store. Canonical v8 producers build immutable records from the same source;
+// the central pipeline then applies each destination's redaction profile.
+// Transforming this copy here would make the default-unredacted profile and
+// destination-specific projections impossible.
+func scanResultJSON(r *ScanResult) ([]byte, error) {
 	if r == nil {
 		return []byte(`{}`), nil
 	}
-	clone := *r
-	if len(r.Findings) > 0 {
-		safe := make([]Finding, len(r.Findings))
-		for i, f := range r.Findings {
-			cf := f
-			cf.Description = redaction.ForSinkString(cf.Description)
-			cf.Location = redaction.ForSinkString(cf.Location)
-			cf.Remediation = redaction.ForSinkString(cf.Remediation)
-			safe[i] = cf
-		}
-		clone.Findings = safe
-	}
-	return json.MarshalIndent(clone, "", "  ")
+	return json.MarshalIndent(r, "", "  ")
 }
 
 // ScanPersistence persists scan summary + per-finding rows. Implemented by
@@ -48,11 +33,6 @@ func redactedScanResultJSON(r *ScanResult) ([]byte, error) {
 type ScanPersistence interface {
 	InsertScanSummary(ScanSummaryParams) error
 	InsertScanFindings(scanID, target string, findings []Finding, meta ScanFindingMeta) error
-}
-
-// ScanTelemetry records per-finding metrics. Implemented by *telemetry.Provider.
-type ScanTelemetry interface {
-	RecordScanFindingByRule(ctx context.Context, scannerName, ruleID, severity, connector string)
 }
 
 // Correlator runs after findings are persisted to detect multi-step
@@ -153,24 +133,32 @@ type ScanFindingMeta struct {
 	EvaluationID string
 }
 
-// EmitScanResult fans out one EventScan + N EventScanFinding events (when w
-// is non-nil), persists scan_results + scan_findings (when pers is non-nil),
-// and records per-finding metrics (when tel is non-nil). Returns the
-// correlation scan_id (UUID v4).
+// EmitScanResult owns only scan identity, enrichment, forensic persistence,
+// and correlator invocation. Canonical logs and metrics are emitted by the
+// audit logger after this call, so this package never receives a gateway JSONL
+// writer or telemetry provider and cannot create a duplicate signal path.
 func EmitScanResult(
 	ctx context.Context,
-	w *gatewaylog.Writer,
 	pers ScanPersistence,
-	tel ScanTelemetry,
 	result *ScanResult,
 	agent AgentIdentity,
 ) (scanID string, err error) {
 	if result == nil {
 		return "", fmt.Errorf("scanner: EmitScanResult: nil result")
 	}
-	scanID = uuid.New().String()
+	scanID = strings.TrimSpace(result.ScanID)
+	if scanID == "" {
+		scanID = uuid.New().String()
+	} else if _, parseErr := uuid.Parse(scanID); parseErr != nil {
+		return "", fmt.Errorf("scanner: EmitScanResult: invalid scan ID")
+	}
+	// Publish the effective identifier on the in-memory result as well as every
+	// persisted/emitted projection. Canonical callers need the exact allocated
+	// join key after this single allocation boundary.
+	result.ScanID = scanID
 
 	for i := range result.Findings {
+		result.Findings[i].FindingOccurrenceID = uuid.NewString()
 		result.Findings[i].RuleID = EnsureRuleID(&result.Findings[i], result.Scanner)
 		// Auto-populate DataAxis labels when the finding creator left
 		// them blank. The enricher (installed by the guardrail wiring
@@ -195,20 +183,7 @@ func EmitScanResult(
 		}
 	}
 
-	targetType := result.EffectiveTargetType()
 	verdict := VerdictForResult(result)
-	counts := severityCounts(result)
-	maxSev := toGatewaySeverity(result.MaxSeverity())
-
-	// Normalize to v7 gateway-event schema enums. The raw Scanner /
-	// TargetType / Verdict values can be full scanner names ("skill-scanner"),
-	// classification bucket names ("code", "inventory"), or upper-case
-	// verdicts from external scanners. Writing the raw values tripped
-	// SCHEMA_VIOLATION drops on gateway.jsonl; persistence + telemetry
-	// keep the original values for backwards compatibility.
-	scannerEnum := NormalizeScannerEnum(result.Scanner)
-	targetTypeEnum := NormalizeTargetTypeEnum(targetType)
-	verdictEnum := NormalizeVerdictEnum(verdict)
 
 	prov := version.Current()
 	meta := ScanFindingMeta{
@@ -229,19 +204,7 @@ func EmitScanResult(
 	}
 
 	if pers != nil {
-		// ("Raw scan JSON stores unredacted
-		// secret-bearing findings"): the per-finding rows pass
-		// description / location / remediation through
-		// redaction.ForSinkString, but the legacy emitter
-		// serialised the same Finding values via result.JSON() and
-		// stored them in scan_results.raw_json without redaction.
-		// CodeGuard finding descriptions contain the raw matched
-		// source line, so a hardcoded secret matched by CG-CRED-001
-		// would persist verbatim in the SQLite audit DB and be
-		// fetchable via GetScanRawJSON. Redact a copy of the
-		// findings before serialising so raw_json reflects the
-		// same sanitised view as the per-finding rows.
-		raw, jerr := redactedScanResultJSON(result)
+		raw, jerr := scanResultJSON(result)
 		if jerr != nil {
 			raw = []byte(`{}`)
 		}
@@ -288,108 +251,5 @@ func EmitScanResult(
 		}
 	}
 
-	if w != nil {
-		w.Emit(gatewaylog.Event{
-			Timestamp:         time.Now().UTC(),
-			EventType:         gatewaylog.EventScan,
-			Severity:          maxSev,
-			RunID:             meta.RunID,
-			RequestID:         meta.RequestID,
-			SessionID:         meta.SessionID,
-			TraceID:           meta.TraceID,
-			AgentID:           agent.AgentID,
-			AgentName:         agent.AgentName,
-			AgentInstanceID:   agent.AgentInstanceID,
-			SidecarInstanceID: agent.SidecarInstanceID,
-			Scan: &gatewaylog.ScanPayload{
-				ScanID:       scanID,
-				Scanner:      scannerEnum,
-				Target:       result.Target,
-				TargetType:   targetTypeEnum,
-				Verdict:      verdictEnum,
-				DurationMs:   result.Duration.Milliseconds(),
-				SeverityMax:  maxSev,
-				Counts:       counts,
-				TotalCount:   len(result.Findings),
-				ExitCode:     result.ExitCode,
-				Error:        result.ScanError,
-				EvaluationID: agent.EvaluationID,
-			},
-		})
-		for i := range result.Findings {
-			f := &result.Findings[i]
-			ln := 0
-			if f.LineNumber != nil {
-				ln = *f.LineNumber
-			}
-			w.Emit(gatewaylog.Event{
-				Timestamp:         time.Now().UTC(),
-				EventType:         gatewaylog.EventScanFinding,
-				Severity:          toGatewaySeverity(f.Severity),
-				RunID:             meta.RunID,
-				RequestID:         meta.RequestID,
-				SessionID:         meta.SessionID,
-				TraceID:           meta.TraceID,
-				AgentID:           agent.AgentID,
-				AgentName:         agent.AgentName,
-				AgentInstanceID:   agent.AgentInstanceID,
-				SidecarInstanceID: agent.SidecarInstanceID,
-				ScanFinding: &gatewaylog.ScanFindingPayload{
-					ScanID:       scanID,
-					Scanner:      scannerEnum,
-					Target:       result.Target,
-					FindingID:    f.ID,
-					RuleID:       f.RuleID,
-					Category:     f.Category,
-					Title:        f.Title,
-					Description:  f.Description,
-					Severity:     toGatewaySeverity(f.Severity),
-					Location:     f.Location,
-					LineNumber:   ln,
-					Remediation:  f.Remediation,
-					Tags:         f.Tags,
-					Confidence:   f.Confidence,
-					EvaluationID: agent.EvaluationID,
-				},
-			})
-		}
-	}
-
-	if tel != nil {
-		for i := range result.Findings {
-			f := &result.Findings[i]
-			tel.RecordScanFindingByRule(ctx, result.Scanner, f.RuleID, string(f.Severity), agent.Connector)
-		}
-	}
-
 	return scanID, nil
-}
-
-func severityCounts(r *ScanResult) map[string]int {
-	out := map[string]int{
-		"CRITICAL": 0,
-		"HIGH":     0,
-		"MEDIUM":   0,
-		"LOW":      0,
-		"INFO":     0,
-	}
-	for i := range r.Findings {
-		out[string(r.Findings[i].Severity)]++
-	}
-	return out
-}
-
-func toGatewaySeverity(s Severity) gatewaylog.Severity {
-	switch s {
-	case SeverityCritical:
-		return gatewaylog.SeverityCritical
-	case SeverityHigh:
-		return gatewaylog.SeverityHigh
-	case SeverityMedium:
-		return gatewaylog.SeverityMedium
-	case SeverityLow:
-		return gatewaylog.SeverityLow
-	default:
-		return gatewaylog.SeverityInfo
-	}
 }

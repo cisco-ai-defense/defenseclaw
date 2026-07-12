@@ -9,7 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for scripts/assert-gateway-jsonl.py."""
+"""Regression tests for the retained pre-v8 envelope compatibility tool."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ VALIDATOR = ROOT / "scripts" / "assert-gateway-jsonl.py"
 
 class GatewayJSONLValidatorTests(unittest.TestCase):
     def test_accepts_llm_tool_and_hook_decision_event_types(self) -> None:
-        """The live validator must stay in lockstep with the v7 envelope."""
+        """The historical validator stays in lockstep with the v7 envelope."""
         events = [
             {
                 "ts": "2026-04-29T22:09:45Z",

@@ -138,6 +138,7 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		HookOutput:        resp.ClaudeCodeOutput,
 		EvaluationID:      resp.EvaluationID,
 		RuleIDs:           resp.RuleIDs,
+		SourceReason:      resp.SourceReason,
 	}
 }
 
@@ -154,5 +155,6 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		HookOutput:        resp.CodexOutput,
 		EvaluationID:      resp.EvaluationID,
 		RuleIDs:           resp.RuleIDs,
+		SourceReason:      resp.SourceReason,
 	}
 }

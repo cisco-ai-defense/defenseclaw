@@ -36,16 +36,20 @@ import tempfile
 import unittest
 import uuid
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 from defenseclaw import config
 from defenseclaw.context import AppContext
+from defenseclaw.observability.v8_config import load_validate_v8
 
 
 def _make_app() -> tuple[AppContext, str]:
-    """Build a Click context backed by a throwaway data dir."""
+    """Build a Click context backed by a canonical-v8 throwaway data dir."""
     tmp_dir = tempfile.mkdtemp(prefix="dclaw-refresh-wiring-")
+    with open(os.path.join(tmp_dir, "config.yaml"), "w", encoding="utf-8") as handle:
+        handle.write("config_version: 8\nobservability:\n  destinations: []\n")
     cfg = config.Config(data_dir=tmp_dir)
     app = AppContext()
     app.cfg = cfg
@@ -66,6 +70,17 @@ def _read_dotenv(path: str) -> dict[str, str]:
             key, value = line.split("=", 1)
             entries[key] = value
     return entries
+
+
+def _configured_destinations(data_dir: str) -> list[dict[str, object]]:
+    """Return authored destinations from the exact-v8 fixture after setup."""
+    path = os.path.join(data_dir, "config.yaml")
+    source = load_validate_v8(open(path, "rb").read(), source_name=path).source
+    observability = source.get("observability", {})
+    assert isinstance(observability, dict)
+    destinations = observability.get("destinations", [])
+    assert isinstance(destinations, list)
+    return [destination for destination in destinations if isinstance(destination, dict)]
 
 
 def _bridge_up_args(mock_run: MagicMock) -> list[str]:
@@ -129,12 +144,19 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             stderr="",
         )
 
-        result = self.runner.invoke(
-            setup,
-            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
-            obj=self.app,
-            catch_exceptions=False,
-        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+                return_value=SimpleNamespace(destinations=()),
+            ),
+            patch("defenseclaw.observability.v8_writer._validate_candidate"),
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         env_file = _bridge_env_file(self.tmp_dir)
@@ -151,6 +173,13 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         self.assertEqual(entries["DEFENSECLAW_INTEGRATION_ENABLED"], "true")
         self.assertTrue(entries["SPLUNK_PASSWORD"].startswith("DefenseClawLocal-"))
         self.assertTrue(entries["SPLUNK_PASSWORD"].endswith("!"))
+        destinations = _configured_destinations(self.tmp_dir)
+        self.assertEqual(len(destinations), 1)
+        self.assertEqual(destinations[0]["kind"], "splunk_hec")
+        self.assertEqual(
+            destinations[0]["endpoint"],
+            "http://127.0.0.1:8088/services/collector/event",
+        )
 
     @patch(
         "defenseclaw.commands.cmd_setup._refresh_and_maybe_restart_splunk_bridge",
@@ -185,18 +214,25 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             stderr="",
         )
 
-        result = self.runner.invoke(
-            setup,
-            [
-                "splunk",
-                "--logs",
-                "--non-interactive",
-                "--accept-splunk-license",
-                "--no-refresh-bundle",
-            ],
-            obj=self.app,
-            catch_exceptions=False,
-        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+                return_value=SimpleNamespace(destinations=()),
+            ),
+            patch("defenseclaw.observability.v8_writer._validate_candidate"),
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk",
+                    "--logs",
+                    "--non-interactive",
+                    "--accept-splunk-license",
+                    "--no-refresh-bundle",
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_not_called()
@@ -205,6 +241,9 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             _bridge_up_args(mock_run),
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
+        destinations = _configured_destinations(self.tmp_dir)
+        self.assertEqual(len(destinations), 1)
+        self.assertEqual(destinations[0]["kind"], "splunk_hec")
 
 
 class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
@@ -318,14 +357,9 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
-    )
     def test_up_default_calls_refresh_helper(
         self,
-        _audit: MagicMock,
-        _otlp: MagicMock,
+        mock_otlp: MagicMock,
         _resolve: MagicMock,
         mock_run_up: MagicMock,
         _preflight: MagicMock,
@@ -357,6 +391,13 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         # The standard setup path should bring host-mounted dashboards,
         # rules, and collector config up to the latest bundled version.
         self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
+        mock_otlp.assert_called_once_with(
+            self.app,
+            endpoint="127.0.0.1:4317",
+            protocol="grpc",
+            signals=("traces", "metrics", "logs"),
+            service_name="defenseclaw",
+        )
 
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability"
@@ -376,14 +417,9 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
-    )
     def test_up_no_refresh_bundle_skips_refresh(
         self,
-        _audit: MagicMock,
-        _otlp: MagicMock,
+        mock_otlp: MagicMock,
         _resolve: MagicMock,
         mock_run_up: MagicMock,
         _preflight: MagicMock,
@@ -407,6 +443,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_not_called()
+        mock_otlp.assert_called_once()
 
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability"
@@ -426,14 +463,9 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
-    )
     def test_up_refresh_config_propagates_flag(
         self,
-        _audit: MagicMock,
-        _otlp: MagicMock,
+        mock_otlp: MagicMock,
         _resolve: MagicMock,
         mock_run_up: MagicMock,
         _preflight: MagicMock,
@@ -458,6 +490,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_called_once()
         self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
+        mock_otlp.assert_called_once()
 
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability"
@@ -477,14 +510,9 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
     )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._apply_local_otlp_audit_sink",
-    )
     def test_up_no_refresh_config_preserves_local_config(
         self,
-        _audit: MagicMock,
-        _otlp: MagicMock,
+        mock_otlp: MagicMock,
         _resolve: MagicMock,
         mock_run_up: MagicMock,
         _preflight: MagicMock,
@@ -509,6 +537,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_called_once()
         self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
+        mock_otlp.assert_called_once()
 
 
 class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):

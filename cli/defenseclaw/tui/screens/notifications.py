@@ -58,7 +58,7 @@ def build_notifications_model(currently_enabled: bool) -> ConsequenceModalModel:
     else:
         details = (
             "Turning notifications OFF stops the toaster only.",
-            "Audit DB, Splunk, OTel, and webhooks are not affected.",
+            "Event history, telemetry destinations, and webhooks are not affected.",
             "They continue to record blocks and approvals.",
         )
         consequence = "Per-category and per-source filters can silence only some toasts."

@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // defaultLogWriter is the destination for guardrail diagnostic messages.
@@ -56,7 +57,16 @@ type ScanVerdict struct {
 	// per-finding scan_findings rows it produced. Not serialized on
 	// the wire; for in-process correlation only.
 	EvaluationID string   `json:"-"`
+	ScanID       string   `json:"-"`
 	RuleIDs      []string `json:"-"`
+	Confidence   float64  `json:"-"`
+	// GeneratedTraceOwned is sticky once the v8 inspector accepted ownership,
+	// including normal collection or sampling decline. TraceContext is the
+	// exact ended apply span used to correlate later durable logs and metrics.
+	GeneratedTraceOwned bool              `json:"-"`
+	TraceContext        trace.SpanContext `json:"-"`
+	EnforcementID       string            `json:"-"`
+	FindingsEmitted     bool              `json:"-"`
 }
 
 func allowVerdict(scanner string) *ScanVerdict {
@@ -109,23 +119,21 @@ type TriageSignal struct {
 }
 
 // guardrailSpanEmitter is the callback surface the inspector
-// uses to open and close OTel spans for each stage. Kept as a
-// pair of function fields instead of an interface so the
-// sidecar wiring can populate it from internal/telemetry
-// without the inspector package importing telemetry directly.
+// uses to open and close generated spans for each stage. Callback ownership
+// keeps the inspector independent from the process runtime graph.
 //
 // A nil emitter (or either nil field) is valid — every call
-// site guards before invoking, so tests and non-otel consumers
+// site guards before invoking, so tests and non-telemetry consumers
 // opt out by just not calling SetTracer.
 //
-// `start` opens the root "stage" span (regex_only / regex_judge /
-// judge_first). `startPhase` opens child spans for each sub-stage
+// `start` opens the root evaluation span and records its strategy
+// (regex_only / regex_judge / judge_first). `startPhase` opens child spans
 // (regex, cisco_ai_defense, judge.prompt_injection, judge.pii,
 // opa, finalize) so operators can drill past stage-level latency
 // into the exact phase that dominated the budget.
 type guardrailSpanEmitter struct {
-	start       func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64))
-	startPhase  func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64))
+	start       func(ctx context.Context, stage, direction, model, mode string) (context.Context, func(verdict *ScanVerdict, latency time.Duration))
+	startPhase  func(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration))
 	recordPanic func(ctx context.Context)
 }
 
@@ -182,9 +190,8 @@ type GuardrailInspector struct {
 	engineInitOnce  sync.Once
 	engineErrLogged sync.Once
 
-	// tracer is set via SetTracer() from the sidecar wiring layer
-	// once an OTel provider is available. Kept as an interface so
-	// the inspector doesn't need to import internal/telemetry.
+	// tracer is set from the sidecar wiring layer once the process-owned v8
+	// runtime is available.
 	tracer *guardrailSpanEmitter
 }
 
@@ -288,12 +295,11 @@ func demoteLocalBlockForManaged(v *ScanVerdict) *ScanVerdict {
 	return &cp
 }
 
-// SetTracerFunc installs the OTel span emitter. Pass nil to
+// SetTracerFunc installs the generated span emitter. Pass nil to
 // disable span emission entirely (tests typically never call
-// this). The sidecar wires this to telemetry.Provider once
-// OTel is initialized.
+// this). The proxy wires it only from the authoritative v8 runtime.
 func (g *GuardrailInspector) SetTracerFunc(
-	start func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)),
+	start func(ctx context.Context, stage, direction, model, mode string) (context.Context, func(verdict *ScanVerdict, latency time.Duration)),
 ) {
 	if start == nil {
 		// Preserve any phase tracer already installed — SetTracerFunc
@@ -320,7 +326,7 @@ func (g *GuardrailInspector) SetTracerFunc(
 // legacy dashboards, or phase-only for latency debugging without
 // doubling span cost in production.
 func (g *GuardrailInspector) SetPhaseTracerFunc(
-	start func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)),
+	start func(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration)),
 ) {
 	if start == nil {
 		if g.tracer != nil {
@@ -366,9 +372,9 @@ func (g *GuardrailInspector) recordRecoveredPanic(ctx context.Context) {
 // startPhaseSpan is the internal helper every phase call site uses.
 // Returns (ctx, endFn). endFn is always non-nil so callers can
 // unconditionally `defer end(...)` without a nil guard.
-func (g *GuardrailInspector) startPhaseSpan(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
+func (g *GuardrailInspector) startPhaseSpan(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration)) {
 	if g.tracer == nil || g.tracer.startPhase == nil {
-		return ctx, func(string, string, int64) {}
+		return ctx, func(string, string, time.Duration) {}
 	}
 	return g.tracer.startPhase(ctx, phase)
 }
@@ -475,17 +481,25 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 
 	strategy := g.effectiveStrategy(direction)
 
-	// Open a span for the whole inspection — stage naming follows
-	// the strategy so dashboards can compare regex-only vs
-	// regex+judge latency distributions side-by-side.
-	var endSpan func(action, severity, reason string, latencyMs int64)
+	// Open one generated evaluation span for the whole inspection. The typed
+	// strategy field lets dashboards compare regex-only vs regex+judge latency
+	// without fragmenting the canonical span-name vocabulary.
+	var endSpan func(verdict *ScanVerdict, latency time.Duration)
 	if g.tracer != nil && g.tracer.start != nil {
 		var newCtx context.Context
-		newCtx, endSpan = g.tracer.start(ctx, strategy, direction, model)
+		newCtx, endSpan = g.tracer.start(ctx, strategy, direction, model, mode)
 		ctx = newCtx
 	}
 
 	start := time.Now()
+	traceFinished := false
+	if endSpan != nil {
+		defer func() {
+			if !traceFinished {
+				endSpan(nil, time.Since(start))
+			}
+		}()
+	}
 	var verdict *ScanVerdict
 	switch strategy {
 	case "regex_judge":
@@ -496,7 +510,8 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
 	}
 
-	latencyMs := time.Since(start).Milliseconds()
+	elapsed := time.Since(start)
+	latencyMs := elapsed.Milliseconds()
 
 	// Apply the prompt-surface UX contract before any caller observes the
 	// verdict. Done here (rather than in each call site) so the clamp is
@@ -505,11 +520,8 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 	clampPromptDirectionVerdict(verdict, direction)
 
 	if endSpan != nil {
-		var action, sev, reason string
-		if verdict != nil {
-			action, sev, reason = verdict.Action, verdict.Severity, verdict.Reason
-		}
-		endSpan(action, sev, reason, latencyMs)
+		traceFinished = true
+		endSpan(verdict, elapsed)
 	}
 
 	// Structured verdict emission — one record per top-level Inspect
@@ -591,8 +603,27 @@ func categoriesOf(findings []string) []string {
 // content (sensitive paths, dangerous commands, critical injection patterns)
 // and block the stream immediately without waiting for an LLM round-trip.
 func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	var endSpan func(verdict *ScanVerdict, latency time.Duration)
+	if g.tracer != nil && g.tracer.start != nil {
+		var started context.Context
+		started, endSpan = g.tracer.start(ctx, "regex_only", direction, model, mode)
+		ctx = started
+	}
+	start := time.Now()
+	traceFinished := false
+	if endSpan != nil {
+		defer func() {
+			if !traceFinished {
+				endSpan(nil, time.Since(start))
+			}
+		}()
+	}
 	verdict := g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
 	clampPromptDirectionVerdict(verdict, direction)
+	if endSpan != nil {
+		traceFinished = true
+		endSpan(verdict, time.Since(start))
+	}
 	return verdict
 }
 
@@ -608,7 +639,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
 	localResult = scanLocalPatterns(direction, content)
-	endRegex(phaseAction(localResult), phaseSeverity(localResult), time.Since(regexStart).Milliseconds())
+	endRegex(phaseAction(localResult), phaseSeverity(localResult), time.Since(regexStart))
 
 	// The local-HIGH short-circuit historically returned early without
 	// consulting AID cloud so a HIGH local regex hit could enforce a
@@ -627,10 +658,11 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 
 	if (sm == "remote" || sm == "both") && g.ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
-		_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(messages)
-		ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoElapsed := time.Since(t0)
+		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 	}
 
 	merged := g.mergeVerdict(localResult, ciscoResult)
@@ -677,17 +709,18 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	if len(high) > 0 && (regexVerdictForSpan == nil || severityRank["HIGH"] > severityRank[regexVerdictForSpan.Severity]) {
 		regexVerdictForSpan = &ScanVerdict{Action: guardrailFallbackActionForSeverity("HIGH"), Severity: "HIGH"}
 	}
-	endRegex(phaseAction(regexVerdictForSpan), phaseSeverity(regexVerdictForSpan), time.Since(regexStart).Milliseconds())
+	endRegex(phaseAction(regexVerdictForSpan), phaseSeverity(regexVerdictForSpan), time.Since(regexStart))
 
 	var ciscoResult *ScanVerdict
 	var ciscoElapsedMs float64
 
 	runCisco := func() {
 		t0 := time.Now()
-		_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(messages)
-		ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoElapsed := time.Since(t0)
+		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 	}
 
 	// HIGH_SIGNAL triage findings produce an immediate verdict.
@@ -727,7 +760,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.adjudicate")
 			judgeVerdict = g.judge.AdjudicateFindings(judgeCtx, direction, content, review)
-			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart).Milliseconds())
+			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart))
 		}
 		if judgeVerdict == nil || judgeVerdict.JudgeFailed {
 			judgeVerdict = signalsToVerdict(review, "local-triage-fallback")
@@ -741,7 +774,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		sweepStart := time.Now()
 		sweepCtx, endSweep := g.startPhaseSpan(ctx, "judge.sweep")
 		judgeVerdict = g.judge.RunJudges(sweepCtx, direction, content, "")
-		endSweep(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(sweepStart).Milliseconds())
+		endSweep(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(sweepStart))
 	}
 
 	// Cisco AI Defense (if configured).
@@ -803,7 +836,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.sweep")
 			v := g.judge.RunJudges(judgeCtx, direction, content, "")
-			endJudge(phaseAction(v), phaseSeverity(v), time.Since(judgeStart).Milliseconds())
+			endJudge(phaseAction(v), phaseSeverity(v), time.Since(judgeStart))
 			judgeCh <- result{verdict: v}
 		}()
 	} else {
@@ -823,7 +856,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		sigs := triagePatterns(direction, content)
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
-		endRegex("", "", time.Since(regexStart).Milliseconds())
+		endRegex("", "", time.Since(regexStart))
 		triageCh <- sigs
 	}()
 
@@ -847,17 +880,18 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		fallbackStart := time.Now()
 		_, endFallback := g.startPhaseSpan(ctx, "regex.fallback")
 		localResult := scanLocalPatterns(direction, content)
-		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart).Milliseconds())
+		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart))
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
 		}
 		// Also run Cisco remote on fallback for full parity with regex_only path.
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 			t0 := time.Now()
-			_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-			ciscoResult = g.ciscoClient.Inspect(messages)
-			ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+			ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+			ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+			ciscoElapsed := time.Since(t0)
+			ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 			localResult = g.mergeVerdict(localResult, ciscoResult)
 			if localResult != nil {
 				localResult.CiscoElapsedMs = ciscoElapsedMs
@@ -905,10 +939,11 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Cisco AI Defense (if configured).
 	if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
-		_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(messages)
-		ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoElapsed := time.Since(t0)
+		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 		merged = g.mergeVerdict(merged, ciscoResult)
 		merged.CiscoElapsedMs = ciscoElapsedMs
 	}
@@ -1025,7 +1060,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 	opaStart := time.Now()
 	opaCtx, endOPA := g.startPhaseSpan(ctx, "opa")
 	out, err := engine.EvaluateGuardrail(opaCtx, input)
-	opaLatency := time.Since(opaStart).Milliseconds()
+	opaLatency := time.Since(opaStart)
 	if err != nil || out == nil {
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.

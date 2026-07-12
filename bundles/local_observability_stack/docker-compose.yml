@@ -147,7 +147,9 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
-      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+      # Layered Node Graph layout keeps causal agent DAGs readable. The graph
+      # falls back to Grafana's force layout above its supported node limit.
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,nodeGraphDotLayout
       - GF_USERS_DEFAULT_THEME=dark
     volumes:
       - grafana-data:/var/lib/grafana

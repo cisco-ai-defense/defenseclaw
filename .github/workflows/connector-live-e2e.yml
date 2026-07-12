@@ -16,7 +16,7 @@
 #   live-matrix (Layer B) — installs the real upstream agent at its latest
 #     version, wires it with `defenseclaw setup`, and drives lifecycle + forced
 #     tool events through the real harness. Asserts observe/block/OTLP/teardown
-#     using gateway.jsonl, audit.db, and filesystem sentinel side-effects.
+#     using canonical audit.db history and filesystem sentinel side-effects.
 #     Needs provider secrets, so it never runs for fork pull requests.
 #
 #     ROLLOUT STATUS: Layer B is currently manual-only (workflow_dispatch). The
@@ -156,6 +156,9 @@ jobs:
           # connector / hook / registry / contract-script / workflow surfaces.
           if printf '%s\n' "${changed}" | grep -qE \
             -e '^internal/gateway/connector/' \
+            -e '^internal/gateway/sidecar_observability_v8' \
+            -e '^internal/audit/' \
+            -e '^internal/observability/redaction/' \
             -e '^internal/cli/' \
             -e '^cli/defenseclaw/inventory/' \
             -e '^cli/defenseclaw/commands/cmd_setup\.py$' \

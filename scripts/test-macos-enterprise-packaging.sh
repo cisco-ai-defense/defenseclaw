@@ -96,11 +96,15 @@ probe_marker="${probe_home}/.defenseclaw"
 config_source="${fixture}/config.yaml"
 manifest_source="${fixture}/targets.yaml"
 cat >"$config_source" <<'EOF'
-config_version: 7
+config_version: 8
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/secureclient/defenseclaw/runtime
-audit_db: /opt/cisco/secureclient/defenseclaw/runtime/audit.db
-judge_bodies_db: /opt/cisco/secureclient/defenseclaw/runtime/judge_bodies.db
+observability:
+  local:
+    path: /opt/cisco/secureclient/defenseclaw/runtime/audit.db
+    judge_bodies_path: /opt/cisco/secureclient/defenseclaw/runtime/judge_bodies.db
+  defaults:
+    redaction_profile: sensitive
 plugin_dir: /opt/cisco/secureclient/defenseclaw/runtime/plugins
 policy_dir: /opt/cisco/secureclient/defenseclaw/runtime/policies
 gateway:

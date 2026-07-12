@@ -18,7 +18,7 @@ duplicating the same analysis across several boards.
 <Cards>
   <Card title="Platform overview" href="http://localhost:3000/d/defenseclaw-overview" description="Health, guardrails, findings, errors, and the links into every specialist board." />
   <Card title="Live agent activity" href="http://localhost:3000/d/defenseclaw-activity" description="Cross-agent prompts, model usage, tools, destinations, and session correlation." />
-  <Card title="Agent360" href="http://localhost:3000/d/defenseclaw-agent-360" description="One agent or agent tree: lifecycle, models, tools, tokens, decisions, topology, and traces." />
+  <Card title="Agent360" href="http://localhost:3000/d/defenseclaw-agent-360" description="One agent or tree: initial and follow-up prompts, grouped per-agent model/tool work, directed lineage, outcomes, decisions, and traces." />
   <Card title="Runtime & reliability" href="http://localhost:3000/d/defenseclaw-runtime" description="Process, SQLite, exporter, audit-sink, and canonical error health in one operations board." />
 </Cards>
 
@@ -29,7 +29,7 @@ duplicating the same analysis across several boards.
 | **Overview** (`defenseclaw-overview`) | Is DefenseClaw healthy and enforcing as expected? | Operator, SOC, SRE | Prometheus, Loki | The landing board: KPIs, SLOs, guardrail outcomes, findings, errors, and links to owned detail views. |
 | **Agent Activity (Live)** (`defenseclaw-activity`) | What are agents doing across the selected time range? | Developer, incident responder | Prometheus, Loki | Cross-agent prompt → model → tool → destination flow and session correlation. Finding, discovery, topology, and pipeline duplicates intentionally live elsewhere. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Which logical agents and instances have been observed? | AI platform, inventory owner | Prometheus, Loki | Runtime Agent Directory, identity confidence, instance churn, and the one-click entry into Agent360. |
-| **Agent360** (`defenseclaw-agent-360`) | What happened inside this agent, execution, or full descendant tree? | Developer, SOC, AI platform | Prometheus, Loki, Tempo | The deepest correlated drill-down: lifecycle phases, decisions and recovery, tokens, cost, tools, network activity, directed flow, dependency topology, and trace waterfall. |
+| **Agent360** (`defenseclaw-agent-360`) | What happened inside this agent, execution, or full descendant tree? | Developer, SOC, AI platform | Prometheus, Loki, Tempo | The deepest correlated drill-down: lifecycle phases, initial/grouped follow-up prompts, decisions and recovery, tokens, cost, network activity, per-agent provider/model and tool-family summaries, and trace waterfall. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, and dependencies exist? | Asset owner, security | Prometheus, Loki, Tempo | Continuous discovery inventory, confidence, detector health, and scan traces. |
 | **Hook Connectors** (`defenseclaw-connectors`) | Which connectors are active, quiet, slow, or drifting? | Operator, integration owner | Prometheus, Loki | Cross-connector comparison and the route into Connector Detail. |
 | **Connector Detail** (`defenseclaw-connector-detail`) | Why is one connector behaving differently? | Integration owner | Prometheus, Loki | Connector-scoped hooks, latency, outcomes, tokens, findings, and recent events. |
@@ -91,15 +91,46 @@ Selecting a Trace ID sets the `trace` variable on the same dashboard and
 populates the Tempo waterfall without losing the connector, agent, lifecycle,
 or execution filters.
 
-![Agent360 directed topology and trace drill-down](/images/grafana/agent360-topology.jpg)
+The Agent360 lifecycle DAG is also interactive. Clicking a node or edge exposes
+its total count, grouping key, available lineage, session, lifecycle/execution,
+sequence, operation/call, outcome, connector, and trace fields plus
+time-range-preserving drill-down links. Session and spawn anchors may use the
+prior 24 hours to keep selected-range boundary edges renderable; a recovered spawn
+appears only when that child has graph-eligible activity in the selected range.
+Repeated model calls are summarized per
+owning agent, provider, and model. Tool calls are summarized per owning agent as
+Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual, or Task control;
+an unrecognized tool keeps its reported name. Exact
+`collaboration.send_message` requests are excluded from the generic
+Collaboration summary and appear only as message groups; other collaboration tools
+remain in that family. Filtered links retain access to every exact raw canonical
+OTEL record. Stable agent nodes use agent/root/parent identity, name, type, depth,
+and connector; optional session fields stay in lifecycle/session/ordered/raw
+detail rather than splitting totals. One per-root **Prompt inputs** node counts distinct
+depth-zero `model.request` facts, deduplicated by turn, model-request, request,
+operation, then occurrence identity; the ordered/raw views retain the individual
+initial and follow-up records. Session start stays
+a distinct lifecycle anchor and is not mislabeled as prompt content. Real
+`collaboration.send_message` updates to `/root` or `/root/*` collapse into
+one **Messages to root** node per sender, resolving the exported root agent ID
+while exact paths/calls remain in ordered/raw drill-downs. Non-root targets remain
+exact groups without fabricating an agent-ID edge.
+
+![Agent360 directed lifecycle DAG and trace drill-down](/images/grafana/agent360-topology.jpg)
 
 ## Which backend owns each answer
 
 | Backend | Best for | Dashboard behavior |
 | --- | --- | --- |
 | Prometheus | Totals, rates, quantiles, current state, inventory | Counter totals use the selected range, so a completed gateway run remains visible even when it is no longer exporting. |
-| Loki | Inputs/outputs, commands, reasons, decisions, ordered recovery | Empty means no matching event occurred in the selected range and filters. |
-| Tempo | One request or execution path and parent/child span timing | Trace panels populate only after selecting a valid Trace ID or when matching spans exist. |
+| Loki | Lifecycle DAG, cross-request chronology, inputs/outputs, commands, reasons, decisions, ordered recovery | Empty means no matching event occurred in the selected range and filters. |
+| Tempo | One request-bounded operation and its parent/child span timing | Trace panels populate only after selecting a valid Trace ID or when matching spans exist. |
+
+The dashboards do not apply their own masking, redaction, or field hiding.
+DefenseClaw centrally redacts before canonical OTEL export, and Grafana displays or
+links every field present in the received projection, including content when the
+producer supplies it. It cannot recover a field removed or transformed before
+export.
 
 ## Read empty values correctly
 

@@ -113,7 +113,7 @@ class TestGuardrailConfig(unittest.TestCase):
             self.assertEqual(g["api_key_env"], "ANTHROPIC_API_KEY")
             self.assertEqual(g["block_message"], "Blocked by policy. Contact security@acme.com.")
             self.assertEqual(g["hilt"]["enabled"], True)
-            self.assertEqual(g["hilt"]["min_severity"], "HIGH")
+            self.assertEqual(g["hilt"].get("min_severity", "HIGH"), "HIGH")
 
 
 # ---------------------------------------------------------------------------
@@ -907,7 +907,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
         self.assertTrue(raw["guardrail"]["enabled"])
-        self.assertEqual(raw["guardrail"]["mode"], "observe")
+        self.assertEqual(raw["guardrail"].get("mode", "observe"), "observe")
 
     def test_setup_succeeds_without_openclaw_config(self):
         """Setup no longer requires OpenClaw config — connector setup runs at gateway start."""
@@ -1187,7 +1187,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             raw = yaml.safe_load(f)
         self.assertEqual(raw["guardrail"]["block_message"], custom_msg)
 
-    def test_non_interactive_advanced_hilt_and_redaction_flags(self):
+    def test_non_interactive_advanced_hilt_flags(self):
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
@@ -1203,21 +1203,19 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "--human-approval",
                 "--hilt-min-severity",
                 "MEDIUM",
-                "--disable-redaction",
                 "--no-restart",
             ],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("guardrail.hilt.enabled", result.output)
-        self.assertIn("privacy.disable_redaction", result.output)
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
         self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
-        self.assertTrue(raw["privacy"]["disable_redaction"])
+        self.assertNotIn("privacy", raw)
         self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
 
     def test_yes_alias_updates_rule_pack(self):
@@ -1360,7 +1358,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(doc["guardrail"]["block_message"], custom_msg)
         self.assertEqual(doc["guardrail"]["mode"], "action")
 
-    def test_block_message_empty_by_default_in_config_yaml(self):
+    def test_block_message_default_is_effective_without_yaml_noise(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1376,7 +1374,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             doc = yaml.safe_load(f)
-        self.assertEqual(doc["guardrail"]["block_message"], "")
+        self.assertNotIn("block_message", doc["guardrail"])
+        self.assertEqual(self.app.cfg.guardrail.block_message, "")
 
     def test_help_shows_block_message_option(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1440,42 +1439,16 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
         self.assertNotIn("privacy", raw)
 
-    def test_interactive_advanced_can_disable_redaction(self):
+    def test_guardrail_help_has_no_producer_level_redaction_bypass(self):
         from defenseclaw.commands.cmd_setup import setup
 
-        self.app.cfg.claw.home_dir = self.tmp_dir
-        user_input = "\n".join([
-            "",       # enable guardrail
-            "2",      # action mode
-            "",       # hook fail-mode (default = open)
-            "n",      # human approval (inline) — declined
-            "",       # local scanner
-            "2",      # LLM role for proxy-backed connector: judge AND agent
-            "n",      # no LLM judge
-            "y",      # configure advanced options
-            "",       # default port
-            "",       # no custom block message
-            # HILT was previously here; now hoisted inline so there
-            # is one fewer prompt under advanced.
-            "y",      # disable redaction
-            "y",      # acknowledge raw-content warning
-            "",
-        ])
         result = self.runner.invoke(
-            setup,
-            ["guardrail", "--connector", "openclaw", "--no-restart"],
-            obj=self.app,
-            input=user_input,
+            setup, ["guardrail", "--help"], obj=self.app,
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Disabling redaction writes RAW content", result.output)
-
-        import yaml
-        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
-            raw = yaml.safe_load(f)
-        self.assertTrue(raw["privacy"]["disable_redaction"])
-        self.assertFalse(raw["guardrail"]["hilt"]["enabled"])
+        self.assertNotIn("--disable-redaction", result.output)
+        self.assertNotIn("--enable-redaction", result.output)
 
     def test_interactive_observe_mode_skips_hilt_entirely(self):
         """In observe mode the HILT prompt is skipped entirely.

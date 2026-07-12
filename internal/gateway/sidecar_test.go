@@ -214,9 +214,9 @@ func TestResolveActiveConnector_UnknownNameReturnsError(t *testing.T) {
 
 func TestHILTApprovalManagerSharedSidecarBroker(t *testing.T) {
 	t.Parallel()
-	hilt := NewHILTApprovalManager(nil, nil, nil)
+	hilt := NewHILTApprovalManager(nil)
 
-	router := NewEventRouter(nil, nil, nil, false, nil)
+	router := NewEventRouter(nil, nil, nil, false)
 	router.SetHILTApprovalManager(hilt)
 	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
 	api.SetHILTApprovalManager(hilt)

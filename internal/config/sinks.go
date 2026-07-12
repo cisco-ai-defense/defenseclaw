@@ -23,10 +23,8 @@ import (
 	"strings"
 )
 
-// AuditSinkKind enumerates the built-in sink implementations. Adding a
-// new sink requires (1) a new constant here, (2) a per-kind config struct
-// below, (3) a builder branch in internal/cli/audit_sinks.go, and (4) a
-// TUI editor entry in internal/tui/configedit.go.
+// AuditSinkKind enumerates removed pre-v8 sink kinds for upgrade decoding.
+// Target runtime destinations use ObservabilityV8DestinationKind instead.
 type AuditSinkKind string
 
 const (
@@ -35,9 +33,9 @@ const (
 	SinkKindHTTPJSONL AuditSinkKind = "http_jsonl"
 )
 
-// AuditSink is the YAML-facing configuration for a single audit-event
-// destination. The Manager fans out every audit event to every enabled
-// sink whose action/severity filters match.
+// AuditSink is the decoder-only pre-v8 configuration for one audit-event
+// destination. It is translated by the explicit upgrade path and never owns
+// target-runtime fan-out.
 //
 // Exactly one of {SplunkHEC, OTLPLogs, HTTPJSONL} must be populated, and
 // it must match Kind. Validate() enforces this.
@@ -248,47 +246,23 @@ func (c *HTTPJSONLSinkConfig) Validate(sinkName string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Per-connector observability routing (D5b) — Go honor-half.
+// Per-connector compatibility decoding and webhook routing.
 //
-// This is the runtime counterpart of the Python config + resolver surface in
-// cli/defenseclaw/config.py (ObservabilityConfig / PerConnectorObservability /
-// effective_audit_sinks / effective_webhooks). The Python side persists and
-// round-trips the `observability.connectors[<name>]` block and resolves it for
-// Python consumers; honoring the routing at event-emit time is the Go change
-// implemented here and consumed by internal/audit/sinks (audit sinks) and
-// internal/gateway (webhooks).
+// AuditSinks fields remain solely so the upgrade decoder can translate v7
+// source into v8 destinations. The target runtime clears them before ordinary
+// use. Webhooks are a separate notification channel and remain live.
 // ---------------------------------------------------------------------------
 
-// PerConnectorObservability is one connector's observability override. A
-// connector's events route to ITS configured sinks/webhooks, falling back to
-// the GLOBAL list (top-level audit_sinks: / webhooks:) when a dimension is
-// unset. Each dimension is independently tri-state, mirroring the Python
-// None / present-list / empty-list semantics with a Go pointer-to-slice:
-//
-//   - nil pointer    — key absent; INHERIT the global list. This is the
-//     default and the safety fallback: a connector with no
-//     per-connector config still emits to the global sinks
-//     (no silent drop).
-//   - present slice  — OVERRIDE: route this connector's events to exactly
-//     these entries. A non-nil pointer to an EMPTY slice
-//     ([] in YAML) suppresses the global list for that
-//     connector.
-//
-// AuditSinks reuses the typed AuditSink (the Go gateway owns the sink schema,
-// unlike the Python side which keeps raw mappings); Webhooks reuses
-// WebhookConfig, parity with the top-level webhooks: list.
+// PerConnectorObservability owns live notification webhook overrides. The
+// AuditSinks field remains decoder-only so the upgrade converter can preserve
+// historical connector routing decisions; target startup clears it.
 type PerConnectorObservability struct {
 	AuditSinks *[]AuditSink     `mapstructure:"audit_sinks" yaml:"audit_sinks,omitempty"`
 	Webhooks   *[]WebhookConfig `mapstructure:"webhooks"     yaml:"webhooks,omitempty"`
 }
 
-// ObservabilityConfig carries the per-connector observability routing map
-// (D5b). Connectors maps a connector name to its PerConnectorObservability
-// override. An empty/absent map preserves the legacy global-only behavior.
-// Resolution goes through EffectiveAuditSinks / EffectiveWebhooks (which take
-// the global list and fall back to it), never by reading the map directly —
-// mirroring AssetPolicyConfig and guardrail.connectors. Mirrors
-// ObservabilityConfig in cli/defenseclaw/config.py.
+// ObservabilityConfig carries notification-only connector compatibility. Live
+// telemetry routing belongs to canonical v8 destinations and routes.
 type ObservabilityConfig struct {
 	Connectors map[string]PerConnectorObservability `mapstructure:"connectors" yaml:"connectors,omitempty"`
 }
@@ -316,19 +290,6 @@ func (o *ObservabilityConfig) connectorOverride(connector string) (PerConnectorO
 	return PerConnectorObservability{}, false
 }
 
-// EffectiveAuditSinks resolves the audit sinks a connector's events route to:
-// the per-connector override (when the audit_sinks dimension is set, including
-// an explicit empty list = suppress) wins; otherwise inherit global. global is
-// the top-level cfg.AuditSinks. The returned slice is always a fresh copy so
-// callers cannot mutate config state. Mirrors
-// ObservabilityConfig.effective_audit_sinks in config.py.
-func (o *ObservabilityConfig) EffectiveAuditSinks(connector string, global []AuditSink) []AuditSink {
-	if pc, ok := o.connectorOverride(connector); ok && pc.AuditSinks != nil {
-		return append([]AuditSink(nil), (*pc.AuditSinks)...)
-	}
-	return append([]AuditSink(nil), global...)
-}
-
 // EffectiveWebhooks resolves the webhooks a connector's events route to: the
 // per-connector override (when the webhooks dimension is set, including an
 // explicit empty list = suppress) wins; otherwise inherit global. global is
@@ -341,18 +302,8 @@ func (o *ObservabilityConfig) EffectiveWebhooks(connector string, global []Webho
 	return append([]WebhookConfig(nil), global...)
 }
 
-// HasConnectorAuditSinksOverride reports whether connector has an explicit
-// per-connector audit_sinks dimension set (a present list, possibly empty).
-// A true result with zero effective sinks means "suppress global for this
-// connector"; the build/registration wiring uses this to distinguish
-// suppression from inheritance. Connector-name-insensitive.
-func (o *ObservabilityConfig) HasConnectorAuditSinksOverride(connector string) bool {
-	pc, ok := o.connectorOverride(connector)
-	return ok && pc.AuditSinks != nil
-}
-
-// HasConnectorWebhooksOverride is the webhooks counterpart of
-// HasConnectorAuditSinksOverride.
+// HasConnectorWebhooksOverride reports whether a connector explicitly owns
+// the webhook dimension, including an empty suppression list.
 func (o *ObservabilityConfig) HasConnectorWebhooksOverride(connector string) bool {
 	pc, ok := o.connectorOverride(connector)
 	return ok && pc.Webhooks != nil

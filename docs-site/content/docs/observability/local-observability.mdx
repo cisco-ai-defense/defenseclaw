@@ -28,7 +28,7 @@ The stack runs from `bundles/local_observability_stack/docker-compose.yml`:
 | `tempo` | Trace store (per-decision spans) | `3200` |
 | `grafana` | UI with seeded DefenseClaw dashboards | `3000` |
 
-All five run under one Compose project (`defenseclaw-local-observability`). They share a Docker network and the bundled Grafana datasources point at each container by service name.
+All five run under one Compose project (`defenseclaw-observability`). They share a Docker network and the bundled Grafana datasources point at each container by service name.
 
 ## Bring it up
 
@@ -40,25 +40,32 @@ All five run under one Compose project (`defenseclaw-local-observability`). They
     defenseclaw setup local-observability up
     ```
 
-    The `openclaw-observability-bridge` binary (shipped in `bundles/local_observability_stack/bin/`) drives Compose, waits for healthchecks, and writes the OTLP endpoint into `~/.defenseclaw/config.yaml` under `otel:`.
+    The `openclaw-observability-bridge` binary (shipped in `bundles/local_observability_stack/bin/`) drives Compose, waits for healthchecks, and writes one `kind: otlp` destination under `observability.destinations` in `~/.defenseclaw/config.yaml`.
   </Step>
   <Step>
     **Open Grafana.** [http://localhost:3000](http://localhost:3000) — anonymous viewer access is enabled by default for the demo dashboards. Sign in as `admin/admin` to edit.
   </Step>
   <Step>
-    **Generate traffic.** Run any DefenseClaw-managed agent, or send a synthetic event to every configured sink:
+    **Verify the destination handshake.** Probe the named destination without
+    adding the probe payload to ordinary event history or dashboard counts:
 
     ```bash
-    defenseclaw setup observability test local-observability
+    defenseclaw observability destination test local-observability
     ```
 
-    The `test` subcommand sends a probe to the named `local-observability`
-    destination. Run `defenseclaw setup observability list` first if you renamed
-    it. Test other destinations individually by name; notifier webhooks use
+    The default test is a non-mutating protocol handshake. Even the explicit
+    `--write-probe` bypasses normal collection, routing, SQLite event history,
+    and dashboard counts. The command does persist a separate bounded,
+    local-only compliance record of the attempt and outcome. Use
+    `defenseclaw setup observability list` first if you renamed the destination.
+    Notifier webhooks use
     `defenseclaw setup webhook test <name>` instead.
   </Step>
   <Step>
-    **Watch the dashboards populate.** "DefenseClaw → Overview" lights up first; per-rail dashboards (Guardrail, Admission, Judge, HITL) follow as the events flow.
+    **Generate real traffic, then inspect the relevant dashboard.** Run a
+    DefenseClaw-managed agent turn, tool call, scan, or approval flow. Panels
+    populate only for families that traffic actually emits; there is no fixed
+    dashboard-population order.
   </Step>
 </Steps>
 
@@ -73,22 +80,27 @@ defenseclaw setup local-observability up \
   --endpoint 127.0.0.1:4317 \
   --signals traces,metrics,logs \
   --service-name defenseclaw-gateway \
-  --with-audit-sink \
   --timeout 90
 ```
 
 | Flag | What it does |
 | --- | --- |
 | `--endpoint` | OTLP endpoint the gateway writes into `config.yaml`. Defaults to whatever the bridge published (`127.0.0.1:4317`). |
-| `--signals` | Comma-separated subset of `traces,metrics,logs`. Useful for low-volume installs that only want metrics. |
+| `--signals` | Comma-separated subset of `traces,metrics,logs`. Omitting it selects all three, which is required for complete bundled-dashboard coverage. |
 | `--service-name` | Resource attribute set on every emitted span. Defaults to `defenseclaw`. |
-| `--with-audit-sink` / `--no-audit-sink` | Also (or don't) add an `audit_sinks: otlp_logs` entry so audit events flow as OTel logs. Default is on. |
 | `--no-config` | Bring containers up but do **not** modify `config.yaml`. Useful when you manage gateway config out-of-band. |
 | `--refresh-config` / `--no-refresh-config` | Refresh bundled Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config by default; opt out to preserve local edits. |
 | `--no-wait` | Don't block on healthchecks — fire-and-forget. |
 | `--timeout` | Seconds to wait for healthchecks. Default 180. |
 
 The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. To use `http/protobuf`, configure that protocol on the named `local-observability` destination.
+
+<Callout title="V7 compatibility flag">
+Older releases exposed `--with-audit-sink/--no-audit-sink` because logs and OTel
+signals used separate `audit_sinks` and `otel` blocks. Config v8 has one
+destination capable of logs, traces, and metrics, so new configuration does not
+need or write a second audit sink.
+</Callout>
 
 ## What ends up in `config.yaml`
 
@@ -97,31 +109,26 @@ The example below is the result of the sample `up` command using
 `defenseclaw`.
 
 ```yaml title="~/.defenseclaw/config.yaml (after the sample command)"
-otel:
-  enabled: true
-  destinations:
-    - name: local-observability
-      preset: local-otlp
-      enabled: true
-      endpoint: 127.0.0.1:4317
-      protocol: grpc
-      tls: { insecure: true }
-      traces: { enabled: true }
-      metrics: { enabled: true }
-      logs: { enabled: true }
+config_version: 8
+observability:
   resource:
     attributes:
       service.name: defenseclaw-gateway
-
-audit_sinks:
-  - kind: otlp_logs
-    name: local-otlp-logs
-    endpoint: 127.0.0.1:4317
-    protocol: grpc
-    insecure: true
+  destinations:
+    - name: local-observability
+      kind: otlp
+      endpoint: 127.0.0.1:4317
+      protocol: grpc
+      network_safety:
+        allow_private_networks: true
 ```
 
-If a sink with the same name already exists, the bridge updates it in place rather than adding a duplicate. Other sinks (Splunk HEC, JSONL, webhooks) are left untouched.
+Because `send` and `routes` are omitted, this OTLP destination receives all
+reviewed buckets and all three signals, unredacted. That is both the v8
+capability default and the complete `local-observability-v1` dashboard profile.
+If a destination with the same name already exists, the bridge updates it in
+place rather than adding a duplicate. Other telemetry destinations and notifier
+webhooks are left untouched.
 
 ## Bundled Grafana dashboards
 
@@ -158,9 +165,9 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
 | **Findings** (`defenseclaw-findings`) | Top rules, rule_id × time heatmap, finding-to-verdict correlation. |
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | HTTP surface latency/status, OTel ingest rates, trace samples. |
 | **Scanners** (`defenseclaw-scanners`) | Sparse-safe scan throughput and duration, errors by type, findings, and quarantine actions. |
-| **Runtime & Reliability** (`defenseclaw-runtime`) | Process, SQLite, exporter, audit-sink, and canonical gateway-error health. |
+| **Runtime & Reliability** (`defenseclaw-runtime`) | Process, SQLite, v8 destination/exporter, queue, and canonical gateway-error health. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
-| **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, executions, descendants, model calls, tools/websites, inputs/outputs, reported tokens/cost, security decisions, Tempo waterfall, and agent/subagent/model/tool topology. |
+| **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, initial and grouped follow-up prompts, descendants, per-agent model/tool-family summaries, updates, approvals, outcomes, inputs/outputs, reported tokens/cost, security decisions, and Tempo waterfall. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
 
 See the [complete Grafana dashboard catalog](/docs/observability/grafana-dashboards)
@@ -187,22 +194,49 @@ Agent360 correlates the same stable fields across all three backends:
 | `defenseclaw.agent.root.id` / `parent.id` | Full descendant tree and direct parent relationship. |
 | `defenseclaw.agent.lifecycle.id` | Durable identity across gateway restarts and resumed sessions. |
 | `defenseclaw.agent.execution.id` | One concrete execution attempt. |
-| `trace_id` | Direct Loki/Prometheus exemplar pivot into the Tempo waterfall. |
+| `trace_id` | Direct pivot from a log/operation that actually reports W3C trace identity into the Tempo waterfall. Aggregate metrics do not fabricate trace IDs. |
 
 Use **Scope = This agent** for a single agent, or **Agent tree** to include
 all descendants. Prometheus supplies directory, state, throughput, latency,
-token, reported-cost totals, and the dynamic agent/subagent/model/tool graph.
-Loki supplies compact lifecycle/model/tool/network/security summaries with the
-full event available in log details. Tempo supplies the complete request
-waterfall; the trace view also exposes Grafana's built-in span graph. Select a
-row in **Recent traces** to populate the waterfall. Token and cost panels only
+token, reported-cost totals, and directed phase aggregates. Loki supplies the
+prompt-to-outcome lifecycle DAG plus compact lifecycle/model/tool/network/security
+summaries with the full event available in log details. Session and spawn anchors
+may be recovered from the prior 24 hours so selected-range boundaries remain
+renderable; a recovered spawn is kept only when its child has graph-eligible
+activity in the selected range. Repeated model work is
+grouped per owning agent, provider, and model. Repeated tools are grouped per
+owning agent as Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual,
+or Task control; an unrecognized tool keeps its reported name. Exact
+`collaboration.send_message` requests are excluded from generic Collaboration
+summaries so they appear only as message groups; other collaboration tools remain.
+Summary nodes show total requests and link to every exact raw canonical OTEL record,
+including their terminal counterparts. Stable agent nodes use agent/root/parent
+identity, name, type, depth, and connector; optional session fields stay in
+lifecycle/session/ordered/raw detail rather than splitting one agent's total. One
+per-root **Prompt inputs** node counts distinct depth-zero
+`model.request` facts, with replay-safe turn/model-request/request/operation/occurrence identity;
+**Session start** remains a separate lifecycle anchor. The ordered/raw views retain
+the individual initial and follow-up request records.
+For each sender, real collaboration updates to `/root` or `/root/*` collapse
+into one **Messages to root** node that resolves the exported root agent ID. Exact
+root task paths and calls remain in ordered/raw drill-downs; non-root targets
+remain exact groups without an invented target-agent mapping. Tempo
+supplies request-bounded waterfalls; it does not pretend an asynchronous lifetime
+is one trace. Select a row in **Operation
+and enforcement traces** to populate the waterfall. Token and cost panels only
 display values explicitly reported by the connector. Input tokens include the
 prompt/context usage reported by the provider and may be much larger than
 output for long-context agents. Missing values remain **Not reported** and are
 never estimated.
 
+The local stack performs no additional redaction, masking, or field hiding.
+DefenseClaw applies the selected v8 profile centrally before canonical OTEL export.
+Grafana displays or links every field that Loki or Tempo actually receives,
+including content when the producer supplies it; fields removed or transformed
+before export are not recoverable in a dashboard.
+
 See the [Agent360 dashboard guide](/docs/observability/agent360) for a visual
-tour of every section, the agent/model/tool topology, trace drill-down, and the
+tour of every section, the prompt-to-agent lifecycle DAG, trace drill-down, and the
 difference between **0**, **No data**, and **Not reported**.
 
 They're auto-provisioned via `bundles/local_observability_stack/grafana/provisioning/`. The folder is named "DefenseClaw" inside Grafana so they're easy to find. Edits you make in the UI are not persisted back to disk by default — copy them out with `Dashboard → JSON Model` if you want to keep them.
@@ -223,7 +257,7 @@ defenseclaw setup local-observability reset --yes
 
 <Callout type="warn">
 `reset` is destructive — your historical traces, logs, and metrics
-go with it. Splunk HEC and JSONL sinks are unaffected. `down` only stops
+go with it. Splunk HEC and JSONL destinations are unaffected. `down` only stops
 the containers; named Docker volumes survive across `down`/`up` cycles
 until you run `reset`.
 </Callout>
@@ -239,12 +273,13 @@ defenseclaw setup local-observability logs --service grafana --follow
 
 ## Use it alongside Splunk
 
-Local observability and Splunk are independent sinks. A common pattern:
+Local observability and Splunk are independent destinations. A common pattern:
 
 - Engineers and SREs use the local Grafana stack for live investigation.
 - The same gateway *also* forwards every event to the org Splunk for retention and SOC.
 
-Just run both setup commands — they edit different blocks in `config.yaml`:
+Just run both setup commands. They add separate entries to the same
+`observability.destinations` list:
 
 ```bash
 defenseclaw setup local-observability up
@@ -257,12 +292,25 @@ See [Splunk integration](/docs/observability/splunk) for the dashboards we ship 
 
 <Accordions>
   <Accordion title="Grafana shows no data">
-    Run `defenseclaw setup local-observability up` again so the host-mounted dashboards and collector config are refreshed from the bundle, then send a synthetic event with `defenseclaw setup observability test local-observability` and check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most remaining "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
+    First distinguish an empty conditional panel from a broken pipeline. **0**
+    means the series exists and its value is zero. **No data** means no matching
+    series, log, or trace exists in the selected time range and filters; that is
+    expected for panels such as approvals, findings, model tokens, and traces
+    until matching real activity occurs. **Not reported** means the event exists
+    but the connector or provider did not supply that optional field.
+
+    A destination test does not populate dashboards. Generate a real agent turn,
+    tool call, scan, or approval, widen the time range, and clear dashboard
+    filters. Then run `defenseclaw setup local-observability status`, inspect
+    `defenseclaw observability plan`, and check collector logs with
+    `defenseclaw setup local-observability logs --service otel-collector --follow`.
+    Re-run `defenseclaw setup local-observability up` if the host-mounted bundle
+    needs to be refreshed.
   </Accordion>
   <Accordion title="Port already in use">
     Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.
   </Accordion>
   <Accordion title="Reverting config.yaml">
-    `down` does not unwrite the `otel:` block. To fully detach the gateway, re-run `setup local-observability up --no-config` and then manually clear the block, or restore from `~/.defenseclaw/config.yaml.bak.<timestamp>` (created on every modification).
+    `down` does not remove the `local-observability` destination. Disable or remove that named destination through the observability setup controls when you want to detach the gateway while keeping the local data volumes.
   </Accordion>
 </Accordions>

@@ -55,9 +55,12 @@ def main(argv: list[str] | None = None) -> int:
     ):
         return _fail("lease is not owner-only")
 
+    child_env = os.environ.copy()
+    child_env["DEFENSECLAW_PHASE_TWO_MUTATOR_CHILD"] = "1"
     try:
         completed = subprocess.run(
             command,
+            env=child_env,
             check=False,
             pass_fds=(lease_fd,) if os.name == "posix" else (),
         )

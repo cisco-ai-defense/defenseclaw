@@ -1,6 +1,7 @@
 {
   "schema_version": 2,
   "published_baselines": [
+    "0.8.4",
     "0.8.3",
     "0.8.2",
     "0.8.1",
@@ -18,6 +19,7 @@
     "0.4.0"
   ],
   "published_baseline_config_versions": {
+    "0.8.4": 7,
     "0.8.3": 7,
     "0.8.2": 6,
     "0.8.1": 6,
@@ -36,6 +38,7 @@
   },
   "platform_published_baselines": {
     "windows": [
+      "0.8.4",
       "0.8.3",
       "0.8.2",
       "0.8.1",

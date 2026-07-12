@@ -441,7 +441,7 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	}
 	cfg.Claw.ConfigFile = ocPath
 
-	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil, nil)
 	targets := w.enumerateTargets()
 
 	seen := make(map[InstallType]map[string]InstallEvent)
@@ -504,7 +504,7 @@ func TestRescan_FromZeptoClawConfig(t *testing.T) {
 	}
 	cfg.Guardrail.Connector = "zeptoclaw"
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
 	targets := w.enumerateTargets()
 
 	mcpByName := make(map[string]InstallEvent)
@@ -544,7 +544,7 @@ func TestRescan_FromClaudeSettingsJSON(t *testing.T) {
 	}
 	cfg.Guardrail.Connector = "claudecode"
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
 	targets := w.enumerateTargets()
 
 	mcpByName := make(map[string]InstallEvent)
@@ -582,7 +582,7 @@ args = ["mcp.js"]
 	}
 	cfg.Guardrail.Connector = "codex"
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
 	targets := w.enumerateTargets()
 
 	var saw bool
@@ -614,7 +614,7 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	}
 	cfg.Claw.ConfigFile = ocPath
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
 	snap, err := w.snapshotMCPServer("remote-mcp")
 	if err != nil {
 		t.Fatalf("snapshotMCPServer: %v", err)

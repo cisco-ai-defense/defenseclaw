@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
-from defenseclaw.tui.widgets.hint_bar import HintEngine
+from defenseclaw.tui.widgets.hint_bar import HintBar, HintEngine
 
 
 @pytest.mark.parametrize(
@@ -119,3 +119,18 @@ def test_first_run_missing_credentials_hint_uses_status_detail() -> None:
 
     assert "Required credentials are missing" in hint
     assert "r refresh" in hint
+
+
+def test_hint_bar_skips_static_update_when_rendered_text_is_unchanged(monkeypatch) -> None:
+    bar = HintBar()
+    updates: list[str] = []
+    monkeypatch.setattr(bar, "update", updates.append)
+
+    # These distinct states intentionally render the same generic hint. The
+    # engine must still be consulted, but the Static should only be painted once.
+    bar.refresh_hint(HintState(active_panel="unknown-one"))
+    bar.refresh_hint(HintState(active_panel="unknown-two"))
+
+    assert updates == [
+        "KEYS  j/k move | Enter detail | o actions | r refresh | / filter | Esc close | Ctrl+K commands."
+    ]

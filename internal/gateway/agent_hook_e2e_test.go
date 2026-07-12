@@ -15,9 +15,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // TestHandleAgentHook_FullChain_PerConnector is the M6 end-to-end
@@ -146,31 +143,14 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		},
 	}
 
-	// Set up a real in-memory tracer so we can assert that the
-	// full chain wires gen_ai.* + defenseclaw.* span attributes for
-	// every connector.
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(prev)
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-
 	for _, sh := range shapes {
 		sh := sh
 		t.Run(sh.connector, func(t *testing.T) {
-			exp.Reset()
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = sh.connector
 			api := &APIServer{scannerCfg: cfg}
-			handler := otelHTTPServerMiddleware(
-				"sidecar-api",
-				http.HandlerFunc(api.handleAgentHook(sh.connector)),
-			)
+			handler := inboundTraceContextMiddleware(http.HandlerFunc(api.handleAgentHook(sh.connector)))
 			body, err := json.Marshal(map[string]interface{}{
 				"hook_event_name": sh.event,
 				"session_id":      "session-" + sh.connector,
@@ -225,25 +205,6 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 
 			if action, _ := parsed["action"].(string); action != sh.expectAction {
 				t.Errorf("dangerous request action=%q, want %q\nbody=%s", action, sh.expectAction, w.Body.String())
-			}
-
-			// Span attribute parity: every connector must emit a
-			// span with the gen_ai.conversation.id (session_id)
-			// set so SIEM correlation works across the full
-			// hook→audit chain.
-			spans := exp.GetSpans()
-			if len(spans) == 0 {
-				t.Fatalf("no spans recorded for connector %q", sh.connector)
-			}
-			conv, ok := attrByKey(spans[0].Attributes, "gen_ai.conversation.id")
-			if !ok {
-				t.Errorf("span missing gen_ai.conversation.id for %s", sh.connector)
-			} else if got := conv.AsString(); got != "session-"+sh.connector {
-				t.Errorf("span gen_ai.conversation.id = %q, want %q", got, "session-"+sh.connector)
-			}
-			ctorAttr, _ := attrByKey(spans[0].Attributes, "defenseclaw.connector")
-			if got := ctorAttr.AsString(); got != sh.connector {
-				t.Errorf("span defenseclaw.connector = %q, want %q", got, sh.connector)
 			}
 		})
 	}

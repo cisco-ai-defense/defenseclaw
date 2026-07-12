@@ -41,13 +41,7 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 	eventType = normalizeHookTelemetryLabel(eventType, "unknown")
 	reason = normalizeHookTelemetryLabel(reason, "unknown")
 	enrichConnectorHookTelemetrySpan(ctx, connectorName, eventType, "rejected", reason, "", "", false, "", 0)
-
-	if a.otel != nil {
-		a.otel.RecordConnectorHookInvocation(ctx, connectorName, eventType, "rejected", reason, 0)
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, "rejected", 0, bodyBytes,
-			fmt.Sprintf("source=hook connector=%s event=%s result=rejected reason=%s bytes=%d",
-				connectorName, eventType, reason, bodyBytes))
-	}
+	a.recordHookRejectionMetricsV8(ctx, connectorName, eventType, reason)
 	if a.logger != nil {
 		a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
 			Connector: connectorName,
@@ -150,14 +144,11 @@ func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, 
 	})
 }
 
-// enrichConnectorHookIdentitySpan stamps the per-connector forensic
-// identity (step_idx / enforced / rule_pack_dir) onto the active span.
-// These mirror the dedicated SQLite columns and structured envelope so
-// the OTel sink reaches DN2 parity with the other two sinks — the schema
-// at schemas/otel/connector-telemetry-event.schema.json already declares
-// these attribute keys. A zero step_idx (non-turn events) and empty
-// rule_pack_dir are omitted to keep noise out of spans. Safe no-op when
-// no recording span is on the context.
+// enrichConnectorHookIdentitySpan stamps the per-connector forensic identity
+// (step_idx / enforced / rule_pack_dir) onto the active span. These mirror the
+// dedicated SQLite columns and structured envelope. A zero step_idx (non-turn
+// events) and empty rule_pack_dir are omitted to keep noise out of spans. Safe
+// no-op when no recording span is on the context.
 func enrichConnectorHookIdentitySpan(ctx context.Context, stepIdx int, enforced bool, rulePackDir string) {
 	span := trace.SpanFromContext(ctx)
 	if span == nil || !span.IsRecording() {

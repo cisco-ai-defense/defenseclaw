@@ -75,6 +75,7 @@ final class CommandActivityStore {
         arguments: [String],
         standardInput: String? = nil,
         environment: [String: String] = [:],
+        mutation: Bool = true,
         category: String = "other",
         origin: String,
         successEffects: [String] = [],
@@ -110,6 +111,7 @@ final class CommandActivityStore {
             arguments: arguments,
             standardInput: standardInput,
             environment: environment,
+            mutation: mutation,
             runID: id
         ) { [weak self] line in
             await self?.append(line: line, to: id)

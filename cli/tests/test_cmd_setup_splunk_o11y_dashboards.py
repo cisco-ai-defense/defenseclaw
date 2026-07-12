@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -30,11 +31,28 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (
     _api_url_from_ingest_endpoint,
+    _resolve_api_url,
     splunk_o11y_dashboards,
 )
 
 
 class SplunkO11yDashboardCommandTests(unittest.TestCase):
+    def test_api_url_falls_back_to_canonical_v8_destination(self) -> None:
+        app = SimpleNamespace(cfg=SimpleNamespace(data_dir="/tmp/defenseclaw"))
+        status = SimpleNamespace(
+            destinations=(
+                SimpleNamespace(
+                    kind="otlp",
+                    endpoint="https://ingest.us1.signalfx.com/v2/datapoint",
+                ),
+            ),
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=status,
+        ):
+            self.assertEqual(_resolve_api_url(None, app), "https://api.us1.signalfx.com")
+
     def test_apply_runs_terraform_with_secret_in_env_not_args(self) -> None:
         calls = []
         console_payload = {"single": {}, "time": {}, "table": {}, "layouts": {}, "detectors": {}}

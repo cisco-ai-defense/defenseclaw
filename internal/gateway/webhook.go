@@ -33,14 +33,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
 
@@ -63,16 +61,17 @@ type WebhookDispatcher struct {
 	// INHERITS the global endpoints (the safety default — no silent drop).
 	connectorOverride map[string]bool
 
-	client       *http.Client
-	retryBackoff time.Duration
-	sem          chan struct{} // bounded concurrency
-	logger       *log.Logger
-	debug        bool
-	wg           sync.WaitGroup
-	done         chan struct{}
-	otel         atomic.Pointer[telemetry.Provider]
-	lifecycleMu  sync.Mutex
-	closed       bool
+	client            *http.Client
+	retryBackoff      time.Duration
+	sem               chan struct{} // bounded concurrency
+	logger            *log.Logger
+	debug             bool
+	wg                sync.WaitGroup
+	done              chan struct{}
+	observabilityV8Mu sync.RWMutex
+	observabilityV8   hookLifecycleMetricV8Runtime
+	lifecycleMu       sync.Mutex
+	closed            bool
 }
 
 type webhookEndpoint struct {
@@ -296,36 +295,19 @@ func newWebhookHTTPClient(allowLoopback bool, logger *log.Logger) *http.Client {
 	}
 }
 
-// BindObservability attaches the OTel provider for webhook latency,
-// cooldown, and circuit-breaker metrics. Safe to call with nil.
-func (d *WebhookDispatcher) BindObservability(p *telemetry.Provider) {
-	if d == nil {
-		return
-	}
-	d.otel.Store(p)
-}
-
 func hashWebhookTargetURL(raw string) string {
+	if digest := gatewaylog.ComputePayloadHMAC(struct {
+		Kind string `json:"kind"`
+		URL  string `json:"url"`
+	}{Kind: "webhook_endpoint", URL: raw}); digest != "" {
+		return "hmac-sha256:" + digest
+	}
+	// Detached utilities and unit tests may construct a dispatcher before the
+	// sidecar installs its device-key-derived telemetry HMAC seed. Retain a
+	// non-reversible identifier for local activity records in that case, but
+	// never project this weaker fallback into the canonical v8 metric field.
 	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:12])
-}
-
-func emitWebhookCircuitActivity(targetHash, transition string) {
-	// Circuit-breaker transitions fire from the dispatch goroutine,
-	// detached from any request context. Writer.Emit stamps the
-	// sidecar id via gatewaylog.SidecarInstanceID(); other
-	// correlation fields stay empty, which is semantically correct
-	// — a dispatch failure isn't bound to a specific caller.
-	emitEvent(context.Background(), gatewaylog.Event{
-		EventType: gatewaylog.EventActivity,
-		Severity:  gatewaylog.SeverityInfo,
-		Activity: &gatewaylog.ActivityPayload{
-			Actor:      "defenseclaw-webhook",
-			Action:     transition,
-			TargetType: "webhook_endpoint",
-			TargetID:   targetHash,
-		},
-	})
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // Dispatch sends the event to all matching endpoints asynchronously.
@@ -368,15 +350,14 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		if !ep.claimSlot(cooldownKey) {
 			d.logger.Printf("suppressed duplicate %s/%s for %s (cooldown %s)",
 				event.Target, action, ep.url, ep.cooldown)
-			ctx := context.Background()
+			ctx := webhookMetricContext(event)
 			tHash := hashWebhookTargetURL(ep.url)
-			if tel := d.otel.Load(); tel != nil {
-				tel.RecordWebhookCooldownSuppressed(ctx, ep.channelType)
-				tel.RecordWebhookDispatch(ctx, ep.channelType, "cooldown_suppressed", 0)
-				tel.RecordWebhookLatency(ctx, ep.channelType, tHash, 0, 0)
-			}
+			d.recordDeliveryV8(ctx, ep.channelType, tHash, "cooldown_suppressed", 0, 0, true)
 			emitError(ctx, string(gatewaylog.SubsystemWebhook), string(gatewaylog.ErrCodeWebhookCooldown),
 				"webhook delivery suppressed: duplicate target/action within cooldown window", nil)
+			recordGatewayErrorV8(
+				ctx, d.observabilityV8Snapshot(), string(gatewaylog.SubsystemWebhook), string(gatewaylog.ErrCodeWebhookCooldown),
+			)
 			continue
 		}
 		if !d.startDelivery() {
@@ -492,7 +473,7 @@ func (ep *webhookEndpoint) circuitBlocksNow() bool {
 	return !ep.circuitOpenUntil.IsZero() && time.Now().Before(ep.circuitOpenUntil)
 }
 
-func (ep *webhookEndpoint) noteWebhookFailure(d *WebhookDispatcher, targetHash string) {
+func (ep *webhookEndpoint) noteWebhookFailure(ctx context.Context, d *WebhookDispatcher, targetHash string) {
 	ep.brkMu.Lock()
 	ep.consecutiveFailures++
 	opened := false
@@ -503,37 +484,28 @@ func (ep *webhookEndpoint) noteWebhookFailure(d *WebhookDispatcher, targetHash s
 		opened = true
 	}
 	ep.brkMu.Unlock()
-	if tel := d.otel.Load(); opened && tel != nil {
-		ctx := context.Background()
-		tel.RecordWebhookCircuitBreaker(ctx, targetHash, "opened")
-		emitWebhookCircuitActivity(targetHash, "webhook-circuit-open")
+	if opened {
+		d.recordCircuitTransitionV8(ctx, targetHash, "opened")
 	}
 }
 
-func (ep *webhookEndpoint) noteWebhookSuccess(d *WebhookDispatcher, targetHash string) {
+func (ep *webhookEndpoint) noteWebhookSuccess(ctx context.Context, d *WebhookDispatcher, targetHash string) {
 	ep.brkMu.Lock()
 	shouldClose := ep.breakerTripped
 	ep.consecutiveFailures = 0
 	ep.circuitOpenUntil = time.Time{}
 	ep.breakerTripped = false
 	ep.brkMu.Unlock()
-	if tel := d.otel.Load(); shouldClose && tel != nil {
-		ctx := context.Background()
-		tel.RecordWebhookCircuitBreaker(ctx, targetHash, "closed")
-		emitWebhookCircuitActivity(targetHash, "webhook-circuit-closed")
+	if shouldClose {
+		d.recordCircuitTransitionV8(ctx, targetHash, "closed")
 	}
 }
 
 func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
-	tctx := context.Background()
+	tctx := webhookMetricContext(event)
 	targetHash := hashWebhookTargetURL(ep.url)
 	record := func(status int, ms float64, outcome string) {
-		tel := d.otel.Load()
-		if tel == nil {
-			return
-		}
-		tel.RecordWebhookLatency(tctx, ep.channelType, targetHash, status, ms)
-		tel.RecordWebhookDispatch(tctx, ep.channelType, outcome, ms)
+		d.recordDeliveryV8(tctx, ep.channelType, targetHash, outcome, status, ms, false)
 	}
 
 	ep.refreshCircuitAfterCooldown()
@@ -558,7 +530,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	if err != nil {
 		d.logger.Printf("format error for %s: %v", ep.url, err)
 		record(0, 0, "failed")
-		ep.noteWebhookFailure(d, targetHash)
+		ep.noteWebhookFailure(tctx, d, targetHash)
 		return false
 	}
 
@@ -601,7 +573,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 					ep.url, resp.StatusCode, event.Action, event.Severity)
 			}
 			record(resp.StatusCode, float64(ms), "delivered")
-			ep.noteWebhookSuccess(d, targetHash)
+			ep.noteWebhookSuccess(tctx, d, targetHash)
 			return true
 		}
 
@@ -610,7 +582,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 				ep.url, resp.StatusCode)
 			ms := time.Since(start).Milliseconds()
 			record(lastStatus, float64(ms), "failed")
-			ep.noteWebhookFailure(d, targetHash)
+			ep.noteWebhookFailure(tctx, d, targetHash)
 			return false
 		}
 
@@ -629,7 +601,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	d.logger.Printf("exhausted retries for %s", ep.url)
 	ms := time.Since(start).Milliseconds()
 	record(lastStatus, float64(ms), "failed")
-	ep.noteWebhookFailure(d, targetHash)
+	ep.noteWebhookFailure(tctx, d, targetHash)
 	return false
 }
 

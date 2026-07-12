@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,7 +30,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -88,6 +88,25 @@ func NewCodexConnector() *CodexConnector {
 	return &CodexConnector{}
 }
 
+// codexLifecycleMu complements the cross-process lifecycle lock. File-lock
+// semantics for separately opened descriptors differ across supported Unix
+// variants, so the process-local mutex is required as well.
+var codexLifecycleMu sync.Mutex
+
+func withCodexLifecycleTransaction(opts SetupOpts, fn func() error) error {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return fmt.Errorf("codex lifecycle transaction: empty data dir")
+	}
+	lockDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		return fmt.Errorf("codex lifecycle transaction: create lock dir: %w", err)
+	}
+
+	codexLifecycleMu.Lock()
+	defer codexLifecycleMu.Unlock()
+	return withOwnedFileLock(filepath.Join(lockDir, ".codex-lifecycle.lock"), fn)
+}
+
 func (c *CodexConnector) Name() string        { return "codex" }
 func (c *CodexConnector) HookAPIPath() string { return "/api/v1/codex/hook" }
 
@@ -108,6 +127,12 @@ func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy {
 }
 
 func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	return withCodexLifecycleTransaction(opts, func() error {
+		return c.setupLocked(ctx, opts)
+	})
+}
+
+func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error {
 	// Hook-only connector: patchCodexConfig wires hooks, OTel, and the
 	// notify bridge without rewriting provider URLs or exporting a
 	// global OPENAI_BASE_URL. The legacy LLM-proxy surface has been
@@ -137,7 +162,28 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 }
 
 func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
-	c.restoreCodexConfig(opts)
+	return withCodexLifecycleTransaction(opts, func() error {
+		return c.teardownLocked(ctx, opts)
+	})
+}
+
+func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) error {
+	if err := c.restoreCodexConfig(opts); err != nil {
+		// Keep the scoped OTLP credential valid while config.toml may still
+		// reference it. Revoking first would strand a partially restored Codex
+		// config on a permanently unauthorized endpoint.
+		return fmt.Errorf("codex teardown: config restore: %w", err)
+	}
+	managedOTLPRemains, err := codexConfigHasManagedOTLPEndpoint(codexConfigPath(), opts)
+	if err != nil {
+		return fmt.Errorf("codex teardown: verify scoped OTLP cleanup: %w", err)
+	}
+	if managedOTLPRemains {
+		return fmt.Errorf("codex teardown: managed scoped OTLP endpoint remains after config cleanup")
+	}
+	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
+		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
+	}
 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		return fmt.Errorf("codex teardown: subprocess enforcement: %w", err)
@@ -184,7 +230,18 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 			if codexValueMatches(cfg["notify"], managedNotify) {
 				residual = append(residual, "config.toml notify still points at defenseclaw bridge")
 			}
+		} else {
+			residual = append(residual, "config.toml contains invalid TOML")
 		}
+	} else if !os.IsNotExist(err) {
+		residual = append(residual, "config.toml is unreadable")
+	}
+	if tokenPath, err := OTLPPathTokenFilePath(opts.DataDir, OTLPScopeCodex); err != nil {
+		residual = append(residual, "Codex scoped OTLP token path is invalid")
+	} else if _, err := os.Lstat(tokenPath); err == nil {
+		residual = append(residual, "Codex scoped OTLP token still exists")
+	} else if !os.IsNotExist(err) {
+		residual = append(residual, "Codex scoped OTLP token cannot be verified absent")
 	}
 
 	if len(residual) > 0 {
@@ -326,6 +383,7 @@ func (c *CodexConnector) AgentPaths(opts SetupOpts) AgentPaths {
 			filepath.Join(opts.DataDir, "codex_backup.json"),
 		},
 		HookScripts:          hookScriptPathsForConnector(opts, c),
+		GeneratedFiles:       []string{filepath.Join(opts.DataDir, "hooks", otlpPathTokenFileName(OTLPScopeCodex))},
 		GeneratedExecutables: []string{filepath.Join(opts.DataDir, "notify-bridge.sh")},
 	}
 }
@@ -394,14 +452,15 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 // single declarative description of the connector consumed by:
 //   - the unified hook collector (Decode/MapVerdict/Respond callbacks
 //     below) for /api/v1/codex/hook;
-//   - buildCodexOtelBlock for the codex ~/.codex/config.toml [otel]
-//     table; and
+//   - the setup-only Codex OTLP renderer for ~/.codex/config.toml; and
 //   - operator-visible doctor reports.
 //
-// Endpoint is the gateway's loopback OTLP-HTTP receiver. Headers
-// carry the gateway token + CSRF client identifier; the spec
-// renderer canonicalizes header keys to lower-case so the resulting
-// TOML matches the wire format codex's deserializer expects.
+// Endpoint is the gateway's loopback OTLP-HTTP receiver. The profile remains
+// pure and deliberately leaves PathScope/PathToken unresolved; setup injects
+// the connector-scoped credential immediately before rendering config.toml.
+// Headers carry attribution + the CSRF client identifier only; the spec
+// renderer canonicalizes header keys to lower-case so the resulting TOML
+// matches the wire format codex's deserializer expects.
 //
 // ServiceName / ResourceAttributes are intentionally omitted —
 // codex's documented [otel] schema doesn't accept those keys, and
@@ -409,17 +468,15 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 // auth_mode, etc.) on every span/metric. See the inline comment in
 // the returned spec for the full rationale and links.
 //
-// LogUserPrompts is driven by the global redaction toggle: when the
-// operator has explicitly disabled redaction we flip codex's native
-// log_user_prompt = true so prompts flow through native telemetry
-// alongside the hook channel.
+// LogUserPrompts is always enabled at the source. Observability v8 keeps the
+// canonical record immutable and applies redaction independently for every
+// destination, so suppressing prompt content here would make an unredacted
+// route impossible and would make two destinations disagree about one source
+// occurrence.
 func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	headers := map[string]string{
 		"x-defenseclaw-source": "codex",
 		"x-defenseclaw-client": "codex-otel/1.0",
-	}
-	if opts.APIToken != "" {
-		headers["x-defenseclaw-token"] = opts.APIToken
 	}
 	// Intentionally NOT setting ServiceName / ResourceAttributes
 	// on codex's NativeOTLPSpec — see F1 rationale below.
@@ -458,7 +515,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 			Endpoint:       "http://" + opts.APIAddr,
 			Protocol:       "json",
 			Headers:        headers,
-			LogUserPrompts: redaction.DisableAll(),
+			LogUserPrompts: true,
 		},
 		// Profile-driven callbacks are the canonical shape for
 		// codex hook decode / verdict mapping / response. The
@@ -698,14 +755,21 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	delete(features, "codex_hooks")
 	cfg["features"] = features
 
-	// Native OTel exporter — runs on every install regardless of
-	// enforcement mode. Codex's [otel] block produces structured
-	// logs (raw API request/response, model + token counts) and
-	// metrics that complement the hook-based event stream. The
-	// /v1/logs and /v1/metrics endpoints on the gateway's API port
-	// receive the OTLP-HTTP payload and normalize into
-	// gateway.jsonl with source="codex_otel".
-	cfg["otel"] = buildCodexOtelBlock(opts)
+	// Native OTel exporter — runs on every install regardless of enforcement
+	// mode. Mint a dedicated Codex OTLP path token before serializing the
+	// config. The hook credential in opts.APIToken is intentionally valid only
+	// on /api/v1/codex/hook; placing it on shared /v1/* requests both fails auth
+	// and would couple two unrelated authority domains. The scoped path token
+	// is accepted only for loopback /otlp/codex/<token>/v1/<signal> requests.
+	pathToken, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+	if err != nil {
+		return fmt.Errorf("mint scoped Codex OTLP token: %w", err)
+	}
+	otelBlock, err := buildCodexOtelBlockWithPathToken(opts, pathToken)
+	if err != nil {
+		return fmt.Errorf("render scoped Codex OTLP config: %w", err)
+	}
+	cfg["otel"] = otelBlock
 
 	// agent-turn-complete bridge: codex shells out to ``notify`` with
 	// a JSON payload describing each completed turn. We point it at a
@@ -893,19 +957,19 @@ func codexCanonicalJSON(v interface{}) []byte {
 // codex-rs/config/src/types.rs::OtelExporterKind::OtlpHttp:
 //
 //	[otel]
-//	log_user_prompt = false
+//	log_user_prompt = true
 //	[otel.exporter.otlp-http]
-//	endpoint = "http://127.0.0.1:18970/v1/logs"
+//	endpoint = "http://127.0.0.1:18970/otlp/codex/<scoped-token>/v1/logs"
 //	protocol = "json"
-//	headers = { x-defenseclaw-token = "<token>" }
+//	headers = { x-defenseclaw-source = "codex", x-defenseclaw-client = "codex-otel/1.0" }
 //	[otel.trace_exporter.otlp-http]
-//	endpoint = "http://127.0.0.1:18970/v1/traces"
+//	endpoint = "http://127.0.0.1:18970/otlp/codex/<scoped-token>/v1/traces"
 //	protocol = "json"
-//	headers = { x-defenseclaw-token = "<token>" }
+//	headers = { x-defenseclaw-source = "codex", x-defenseclaw-client = "codex-otel/1.0" }
 //	[otel.metrics_exporter.otlp-http]
-//	endpoint = "http://127.0.0.1:18970/v1/metrics"
+//	endpoint = "http://127.0.0.1:18970/otlp/codex/<scoped-token>/v1/metrics"
 //	protocol = "json"
-//	headers = { x-defenseclaw-token = "<token>" }
+//	headers = { x-defenseclaw-source = "codex", x-defenseclaw-client = "codex-otel/1.0" }
 //
 // The `protocol` field is REQUIRED by codex's serde-deserialized
 // schema - omitting it produces `invalid configuration: missing
@@ -916,40 +980,36 @@ func codexCanonicalJSON(v interface{}) []byte {
 // gateway also accepts OTLP protobuf, but pinning JSON avoids changing
 // Codex's wire format during setup/teardown upgrades.
 //
-// log_user_prompt = false is the privacy-preserving default: codex's
-// native OTel emits prompt text only when this is true. When redaction
-// is explicitly disabled, DefenseClaw flips it to true so native Codex
-// OTel joins the same raw-content mode as the hook telemetry.
+// log_user_prompt = true preserves source facts. Destination-specific v8
+// redaction is applied centrally after ingest rather than destructively at
+// the Codex source.
 // Teardown restores the operator's pristine [otel] block or deletes
 // ours if there was none.
 //
-// Headers carry the gateway token so the OTLP-HTTP receiver can
-// authenticate the codex CLI process the same way the hook script
-// does. The header name is intentionally NOT "Authorization" so the
-// receiver can distinguish OTel traffic from hook/REST traffic in
-// audit logs.
-func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
+// Authentication uses a dedicated, 32-byte connector-scoped token embedded
+// in the loopback URL. It is not the hook token and cannot authorize shared
+// /v1/* or /api/v1/* routes. The only headers are non-secret attribution and
+// CSRF-client markers.
+func buildCodexOtelBlockWithPathToken(opts SetupOpts, pathToken string) (map[string]interface{}, error) {
 	// Spec-driven OTLP wiring. The connector's HookProfile carries
 	// the declarative NativeOTLPSpec; this helper just asks it for
 	// the TOML rendering. spec.TOMLBlock() validates Endpoint /
 	// Protocol / Headers and produces the same shape the codex
 	// kebab-case serde accepts.
 	//
-	// If validation ever fails (spec misconfigured in code),
-	// returning an empty map is preferable to silently writing a
-	// half-built [otel] block: codex's deserializer will reject the
-	// empty block at startup with a clear missing-field error, and
-	// the operator gets a deterministic failure instead of an
-	// OTLP exporter that succeeds-but-points-nowhere.
+	// Validation failures are returned to setup so config.toml is never
+	// replaced with a half-built [otel] block.
 	spec := (&CodexConnector{}).HookProfile(opts).NativeOTLP
 	if spec == nil {
-		return map[string]interface{}{}
+		return nil, fmt.Errorf("codex: nil NativeOTLPSpec")
 	}
+	spec.PathScope = OTLPScopeCodex
+	spec.PathToken = pathToken
 	block, err := spec.TOMLBlock()
 	if err != nil {
-		return map[string]interface{}{}
+		return nil, err
 	}
-	return block
+	return block, nil
 }
 
 // writeCodexNotifyBridge writes ~/.defenseclaw/notify-bridge.sh, the
@@ -1017,7 +1077,7 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
+func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 	backup, err := c.loadConfigBackup(opts.DataDir)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -1030,17 +1090,19 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "[codex] managed config restore skipped: %v\n", err)
 	} else if restored {
-		c.cleanupCodexRestoreArtifacts(opts, configPath)
-		return
+		return c.cleanupCodexRestoreArtifacts(opts, configPath)
 	}
 
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return c.cleanupCodexRestoreArtifacts(opts, configPath)
+		}
+		return fmt.Errorf("read config: %w", err)
 	}
 	cfg := map[string]interface{}{}
 	if err := toml.Unmarshal(raw, &cfg); err != nil {
-		return
+		return fmt.Errorf("parse config: %w", err)
 	}
 
 	removedOwnedHooks := false
@@ -1090,20 +1152,13 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		}
 	}
 
-	// Restore OTel/notify only if the current values are still the
-	// DefenseClaw-managed values. If the operator edited either field
-	// after Setup, preserve their newer config.
-	managedOtel := codexValueMatches(cfg["otel"], buildCodexOtelBlock(opts)) || codexOtelBlockLooksManaged(cfg["otel"], opts)
-	if managedOtel && backup.HadOtelBlock && len(backup.OriginalOtel) > 0 {
-		var orig interface{}
-		if err := json.Unmarshal(backup.OriginalOtel, &orig); err == nil {
-			cfg["otel"] = orig
-		} else {
-			delete(cfg, "otel")
-		}
-	} else if managedOtel {
-		delete(cfg, "otel")
-	}
+	// Restore OTel exporter entries independently. One managed sibling does not
+	// make the entire [otel] table ours: an operator may have replaced another
+	// exporter or added unrelated settings after Setup. Managed entries return to
+	// their saved value (or are deleted if Setup added them), while current
+	// operator-owned exporters/subtables survive verbatim. Ownership detection is
+	// structural and never loads or mints the scoped credential.
+	restoreCodexOtelEntries(cfg, backup, opts)
 
 	managedNotify := []interface{}{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
 	if codexValueMatches(cfg["notify"], managedNotify) && backup.HadNotify && len(backup.OriginalNotify) > 0 {
@@ -1123,26 +1178,30 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		// half-written attempt. atomicWriteFile guarantees that
 		// invariant. See S0.11.
 		if err := atomicWriteFile(configPath, out, 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "[codex] restore write failed: %v\n", err)
-			return
+			return fmt.Errorf("write restored config: %w", err)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "[codex] restore marshal failed: %v\n", err)
-		return
+		return fmt.Errorf("marshal restored config: %w", err)
 	}
 
 	discardManagedFileBackup(opts.DataDir, c.Name(), "config.toml")
-	c.cleanupCodexRestoreArtifacts(opts, configPath)
+	return c.cleanupCodexRestoreArtifacts(opts, configPath)
 }
 
-func (c *CodexConnector) cleanupCodexRestoreArtifacts(opts SetupOpts, configPath string) {
+func (c *CodexConnector) cleanupCodexRestoreArtifacts(opts SetupOpts, configPath string) error {
 	// Remove any stale hooks.json from an earlier version that
 	// mistakenly used the file-path approach, plus the notify bridge
 	// shim we wrote in Setup.
-	hooksPath := filepath.Join(filepath.Dir(configPath), "hooks.json")
-	_ = os.Remove(hooksPath)
-	_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
-	_ = os.Remove(filepath.Join(opts.DataDir, "codex_config_backup.json"))
+	for _, artifact := range []struct{ label, path string }{
+		{"legacy hooks config", filepath.Join(filepath.Dir(configPath), "hooks.json")},
+		{"notify bridge", filepath.Join(opts.DataDir, "notify-bridge.sh")},
+		{"config backup", filepath.Join(opts.DataDir, "codex_config_backup.json")},
+	} {
+		if err := os.Remove(artifact.path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", artifact.label, err)
+		}
+	}
+	return nil
 }
 
 func codexHookEntryCount(v interface{}) int {
@@ -1193,15 +1252,126 @@ func codexValueMatches(a, b interface{}) bool {
 	return string(aj) == string(bj)
 }
 
+var codexOtelExporterKeys = [...]string{"exporter", "trace_exporter", "metrics_exporter"}
+
+func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) {
+	current, ok := cfg["otel"].(map[string]interface{})
+	if !ok {
+		// A missing or non-table value is a current operator edit. It cannot
+		// contain one of our exporter endpoints, so preserve it.
+		return
+	}
+
+	var originalValue interface{}
+	originalDecoded := false
+	original := map[string]interface{}(nil)
+	if backup.HadOtelBlock && len(backup.OriginalOtel) > 0 {
+		if err := json.Unmarshal(backup.OriginalOtel, &originalValue); err == nil {
+			originalDecoded = true
+			original, _ = originalValue.(map[string]interface{})
+		}
+	}
+
+	// TOML normally decodes [otel] as a map. Preserve a legacy scalar original
+	// when the current table is still entirely Setup-owned; if the operator added
+	// anything, their current table wins and only managed entries are removed.
+	if originalDecoded && original == nil && codexOtelTableIsEntirelyManaged(current, opts) {
+		cfg["otel"] = originalValue
+		return
+	}
+
+	for _, key := range codexOtelExporterKeys {
+		value, exists := current[key]
+		if !exists || !codexExporterLooksManaged(value, opts) {
+			continue
+		}
+		if original != nil {
+			if saved, hadSaved := original[key]; hadSaved {
+				current[key] = saved
+				continue
+			}
+		}
+		delete(current, key)
+	}
+
+	// Setup owns log_user_prompt only while it retains the value Setup wrote.
+	// A current false/non-boolean value is an operator edit and must survive.
+	if value, exists := current["log_user_prompt"]; exists && value == true {
+		if original != nil {
+			if saved, hadSaved := original["log_user_prompt"]; hadSaved {
+				current["log_user_prompt"] = saved
+			} else {
+				delete(current, "log_user_prompt")
+			}
+		} else {
+			delete(current, "log_user_prompt")
+		}
+	}
+
+	// Setup replaced the original [otel] table wholesale. Re-add displaced
+	// unrelated original keys, but never overwrite a current operator edit.
+	for key, saved := range original {
+		if key == "log_user_prompt" || codexOtelExporterKey(key) {
+			continue
+		}
+		if _, exists := current[key]; !exists {
+			current[key] = saved
+		}
+	}
+
+	if len(current) == 0 {
+		delete(cfg, "otel")
+	} else {
+		cfg["otel"] = current
+	}
+}
+
+func codexOtelExporterKey(key string) bool {
+	switch key {
+	case "exporter", "trace_exporter", "metrics_exporter":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexOtelTableIsEntirelyManaged(current map[string]interface{}, opts SetupOpts) bool {
+	if len(current) == 0 {
+		return false
+	}
+	sawManagedExporter := false
+	for key, value := range current {
+		switch key {
+		case "log_user_prompt":
+			if value != true {
+				return false
+			}
+		case "exporter", "trace_exporter", "metrics_exporter":
+			if !codexExporterLooksManaged(value, opts) {
+				return false
+			}
+			sawManagedExporter = true
+		default:
+			return false
+		}
+	}
+	return sawManagedExporter
+}
+
 func codexOtelBlockLooksManaged(v interface{}, opts SetupOpts) bool {
 	m, ok := v.(map[string]interface{})
 	if !ok {
 		return false
 	}
-	return codexExporterLooksManaged(m["exporter"], "http://"+opts.APIAddr+"/v1/logs")
+	for _, key := range codexOtelExporterKeys {
+		if codexExporterLooksManaged(m[key], opts) {
+			return true
+		}
+	}
+	return false
 }
 
-func codexExporterLooksManaged(v interface{}, endpoint string) bool {
+func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
 	exporter, ok := v.(map[string]interface{})
 	if !ok {
 		return false
@@ -1210,7 +1380,12 @@ func codexExporterLooksManaged(v interface{}, endpoint string) bool {
 	if !ok {
 		return false
 	}
-	if got, _ := otlpHTTP["endpoint"].(string); got != endpoint {
+	endpoint, _ := otlpHTTP["endpoint"].(string)
+	if codexScopedOTLPEndpointLooksManaged(endpoint, opts) {
+		return true
+	}
+	legacyEndpoint := "http://" + opts.APIAddr + "/v1/logs"
+	if endpoint != legacyEndpoint {
 		return false
 	}
 	headers, _ := otlpHTTP["headers"].(map[string]interface{})
@@ -1218,4 +1393,53 @@ func codexExporterLooksManaged(v interface{}, endpoint string) bool {
 		return false
 	}
 	return headers["x-defenseclaw-source"] == "codex" || headers["x-defenseclaw-client"] == "codex-otel/1.0"
+}
+
+func codexScopedOTLPEndpointLooksManaged(endpoint string, opts SetupOpts) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
+		return false
+	}
+	base, err := url.Parse("http://" + strings.TrimSpace(opts.APIAddr))
+	if err != nil || base.Host == "" {
+		return false
+	}
+	sameConfiguredAuthority := parsed.Host == base.Host
+	equivalentLoopbackAuthority := parsed.Port() != "" && parsed.Port() == base.Port() && codexLoopbackHost(parsed.Hostname())
+	if !sameConfiguredAuthority && !equivalentLoopbackAuthority {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) != 5 || parts[0] != "otlp" || parts[1] != "codex" || parts[3] != "v1" || !otlpTokenHexRE.MatchString(parts[2]) {
+		return false
+	}
+	switch parts[4] {
+	case "logs", "metrics", "traces":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexLoopbackHost(host string) bool {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func codexConfigHasManagedOTLPEndpoint(configPath string, opts SetupOpts) (bool, error) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		return false, err
+	}
+	return codexOtelBlockLooksManaged(cfg["otel"], opts), nil
 }

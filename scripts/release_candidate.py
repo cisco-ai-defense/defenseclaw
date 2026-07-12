@@ -49,6 +49,10 @@ except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` ex
 
 SCHEMA_VERSION = 2
 RUNTIME_ATTESTATION_FILENAME = "runtime-candidate-checksums.txt"
+RELEASE_SOURCE_MAP_FILENAME = "release-source-map.json"
+RELEASE_SOURCE_MAP_SCHEMA_VERSION = 1
+RELEASE_PROVENANCE_FILENAME = "release-provenance.json"
+RELEASE_PROVENANCE_SCHEMA_VERSION = 1
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -205,6 +209,13 @@ def resolver_asset_names(version: str) -> tuple[str, ...]:
     return tuple(sorted(RESOLVER_ASSET_SOURCES))
 
 
+def release_identity_asset_names(version: str) -> tuple[str, ...]:
+    _validate_version(version)
+    if tuple(map(int, version.split("."))) < (0, 8, 5):
+        return ()
+    return (RELEASE_PROVENANCE_FILENAME, RELEASE_SOURCE_MAP_FILENAME)
+
+
 def payload_asset_names(
     version: str,
     macos_verification_status: str,
@@ -215,6 +226,7 @@ def payload_asset_names(
                 *runtime_asset_names(version),
                 *macos_asset_names(version, macos_verification_status),
                 *resolver_asset_names(version),
+                *release_identity_asset_names(version),
             )
         )
     )
@@ -450,24 +462,35 @@ def validate_release_progression(target: str, releases_json: Path) -> tuple[str,
     return reviewed_max, published_max
 
 
-def _runtime_config_version_from_source() -> int:
+def _go_config_version_literal(path: Path, name: str) -> int:
     try:
-        text = RUNTIME_CONFIG_PATH.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise CandidateError(f"could not read gateway runtime config version: {exc}") from exc
+        raise CandidateError(f"could not read gateway {name}: {exc}") from exc
     matches = re.findall(
-        r"^const[ \t]+CurrentConfigVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$",
+        rf"^\s*(?:const[ \t]+)?{re.escape(name)}[ \t]*=[ \t]*([0-9]+)[ \t]*$",
         text,
         re.MULTILINE,
     )
     if len(matches) != 1:
-        raise CandidateError(
-            "gateway source must declare exactly one literal CurrentConfigVersion"
-        )
+        raise CandidateError(f"gateway source must declare exactly one literal {name}")
     value = int(matches[0])
     if value < 1:
-        raise CandidateError("gateway CurrentConfigVersion must be positive")
+        raise CandidateError(f"gateway {name} must be positive")
     return value
+
+
+def _compatibility_config_version_from_source() -> int:
+    return _go_config_version_literal(RUNTIME_CONFIG_PATH, "CurrentConfigVersion")
+
+
+def _runtime_config_version_from_source(version: str) -> int:
+    if tuple(map(int, version.split("."))) >= (0, 8, 5):
+        return _go_config_version_literal(
+            ROOT / "internal" / "config" / "observability_v8_types.go",
+            "ObservabilityV8ConfigVersion",
+        )
+    return _compatibility_config_version_from_source()
 
 
 def _expected_runtime_config_version(version: str) -> int:
@@ -550,10 +573,21 @@ def _validate_upgrade_manifest(path: Path, version: str) -> None:
                 "platform_tested_source_versions.windows must exactly match the reviewed Windows matrix"
             )
         expected_runtime = _expected_runtime_config_version(version)
-        source_runtime = _runtime_config_version_from_source()
-        if source_runtime != expected_runtime:
+        compatibility_runtime = _compatibility_config_version_from_source()
+        if compatibility_runtime != 7:
             raise CandidateError(
-                f"release {version} requires gateway CurrentConfigVersion={expected_runtime}, "
+                "schema-2 source must retain gateway CurrentConfigVersion=7 as its "
+                f"compatibility ceiling, got {compatibility_runtime}"
+            )
+        source_runtime = _runtime_config_version_from_source(version)
+        if source_runtime != expected_runtime:
+            literal = (
+                "ObservabilityV8ConfigVersion"
+                if version_key >= (0, 8, 5)
+                else "CurrentConfigVersion"
+            )
+            raise CandidateError(
+                f"release {version} requires gateway {literal}={expected_runtime}, "
                 f"got {source_runtime}"
             )
         if (
@@ -562,7 +596,7 @@ def _validate_upgrade_manifest(path: Path, version: str) -> None:
             or runtime_config != source_runtime
         ):
             raise CandidateError(
-                "runtime_config_version must match the gateway CurrentConfigVersion literal"
+                "runtime_config_version must match the release-selected gateway config literal"
             )
         if release_artifacts != _expected_release_artifacts(version):
             raise CandidateError(
@@ -890,8 +924,8 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
         raise CandidateError("0.8.4+ mutator wrapper is not executable as a private child")
 
 
-def _validate_hard_cut_bundle_transaction(source: str) -> None:
-    """Require durable rollback authority before a 0.8.5+ bundle mutation."""
+def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
+    """Validate the compact contract fixture used by mutation tests."""
 
     try:
         tree = ast.parse(source, filename="defenseclaw/bundle_refresh.py")
@@ -2063,6 +2097,428 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         )
 
 
+def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
+    """Validate the real path-safe schema-2 transaction shipped in 0.8.5+.
+
+    The older compact fixture uses relative placeholder paths and returns a
+    boolean. The runtime transaction must instead bind each relative inventory
+    member to the installed and custody roots explicitly, retain target-created
+    inodes with a private hardlink, and return its structured result. Keep this
+    validator exact so a future shape change requires an intentional review.
+    """
+
+    try:
+        tree = ast.parse(source, filename="defenseclaw/bundle_refresh.py")
+    except (SyntaxError, ValueError) as exc:
+        raise CandidateError("0.8.5+ candidate wheel bundle transaction is invalid") from exc
+
+    def one_function(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        matches = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        ]
+        if len(matches) != 1:
+            raise CandidateError(f"0.8.5+ bundle transaction lacks one {name} helper")
+        return matches[0]
+
+    def calls(scope: ast.AST, name: str) -> list[ast.Call]:
+        return [
+            node
+            for node in ast.walk(scope)
+            if isinstance(node, ast.Call) and _ast_call_name(node) == name
+        ]
+
+    def references(node: ast.AST, name: str) -> bool:
+        return any(isinstance(item, ast.Name) and item.id == name for item in ast.walk(node))
+
+    def assignment(scope: ast.AST, name: str) -> list[ast.AST]:
+        values: list[ast.AST] = []
+        for node in ast.walk(scope):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == name for target in node.targets
+            ):
+                values.append(node.value)
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == name
+                and node.value is not None
+            ):
+                values.append(node.value)
+        return values
+
+    def child_path(value: ast.AST, root: str, child: str | None = None) -> bool:
+        return (
+            isinstance(value, ast.BinOp)
+            and isinstance(value.op, ast.Div)
+            and isinstance(value.left, ast.Name)
+            and value.left.id == root
+            and (
+                (child is None and isinstance(value.right, ast.Name))
+                or (
+                    child is not None
+                    and isinstance(value.right, ast.Constant)
+                    and value.right.value == child
+                )
+            )
+        )
+
+    parent: dict[ast.AST, ast.AST] = {}
+    for ancestor in ast.walk(tree):
+        for child in ast.iter_child_nodes(ancestor):
+            parent[child] = ancestor
+
+    def enclosing_loop(node: ast.AST) -> ast.For | None:
+        current = node
+        while current in parent:
+            current = parent[current]
+            if isinstance(current, ast.For):
+                return current
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return None
+        return None
+
+    def loop_iterates(loop: ast.For | None, inventory: str) -> bool:
+        if loop is None:
+            return False
+        iterator = loop.iter
+        if isinstance(iterator, ast.Call) and _ast_call_name(iterator) == "sorted":
+            if len(iterator.args) != 1 or iterator.keywords:
+                return False
+            iterator = iterator.args[0]
+        return references(iterator, inventory)
+
+    # The bridge reader has a hard 4 MiB cap; the target must share it.
+    bounds = assignment(tree, "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES")
+    if len(bounds) != 1 or ast.unparse(bounds[0]) not in {"4 * 1024 * 1024", "4194304"}:
+        raise CandidateError("0.8.5+ bundle transaction lacks the bridge metadata size bound")
+
+    serializer = one_function("_serialize_windows_security")
+    serializer_source = ast.unparse(serializer)
+    for fragment in (
+        "base64.b64encode(security.owner).decode('ascii')",
+        "base64.b64encode(security.dacl).decode('ascii')",
+        "security.dacl_protected",
+    ):
+        if fragment not in serializer_source:
+            raise CandidateError(
+                "0.8.5+ bundle Windows owner/DACL bytes are not canonically serialized"
+            )
+
+    fsync_chain = one_function("_fsync_directory_chain")
+    if not (
+        calls(fsync_chain, "_fsync_directory")
+        and any(isinstance(node, ast.While) for node in ast.walk(fsync_chain))
+        and references(fsync_chain, "stop")
+    ):
+        raise CandidateError("0.8.5+ bundle directory fsync custody is incomplete")
+
+    # Restart authority must reach durable private storage before `down`.
+    prepare = one_function("_prepare_local_observability_backup_custody")
+    intent_dicts = [
+        node
+        for node in ast.walk(prepare)
+        if isinstance(node, ast.Dict)
+        and {
+            key.value for key in node.keys if isinstance(key, ast.Constant)
+        }
+        == {"schema_version", "target_manifest_sha256", "restart_required"}
+    ]
+    intent_writes = calls(prepare, "_atomic_write_bytes")
+    if len(intent_dicts) != 1 or len(intent_writes) != 1:
+        raise CandidateError("0.8.5+ bundle restart intent is not durably published")
+    intent_values = {
+        key.value: value
+        for key, value in zip(intent_dicts[0].keys, intent_dicts[0].values, strict=True)
+        if isinstance(key, ast.Constant)
+    }
+    intent_write = intent_writes[0]
+    if not (
+        isinstance(intent_values.get("schema_version"), ast.Constant)
+        and intent_values["schema_version"].value == 1
+        and references(intent_values["target_manifest_sha256"], "target_manifest_sha256")
+        and references(intent_values["restart_required"], "restart_required")
+        and references(intent_write.args[0], "_LOCAL_OBSERVABILITY_RESTART_INTENT")
+        and any(keyword.arg == "mode" and ast.unparse(keyword.value) == "384" for keyword in intent_write.keywords)
+    ):
+        raise CandidateError("0.8.5+ bundle restart intent lacks exact private authority")
+
+    upgrade = one_function("upgrade_local_observability_stack")
+    prepare_calls = calls(upgrade, "_prepare_local_observability_backup_custody")
+    stop_calls = calls(upgrade, "subprocess.run")
+    activation_calls = calls(upgrade, "_activate_local_observability_manifest")
+    if not (
+        len(prepare_calls) == len(stop_calls) == len(activation_calls) == 1
+        and prepare_calls[0].lineno < stop_calls[0].lineno < activation_calls[0].lineno
+        and any(
+            keyword.arg == "restart_required" and references(keyword.value, "was_running")
+            for keyword in prepare_calls[0].keywords
+        )
+        and references(activation_calls[0], "backup_root")
+    ):
+        raise CandidateError("0.8.5+ bundle restart intent is not committed before stop")
+
+    transaction = one_function("_activate_local_observability_manifest")
+    was_running = [
+        argument
+        for argument in (*transaction.args.args, *transaction.args.kwonlyargs)
+        if argument.arg == "was_running"
+    ]
+    if not (
+        len(was_running) == 1
+        and isinstance(was_running[0].annotation, ast.Name)
+        and was_running[0].annotation.id == "bool"
+    ):
+        raise CandidateError("0.8.5+ bundle transaction restart state is not boolean-bound")
+
+    metadata_dicts = []
+    expected_fields = {
+        "schema_version",
+        "managed_paths",
+        "existing_paths",
+        "old_sha256",
+        "old_modes",
+        "created_sha256",
+        "old_windows_security",
+        "restart_required",
+    }
+    for node in ast.walk(transaction):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = {
+            key.value for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if keys & {"managed_paths", "restart_required"}:
+            metadata_dicts.append(node)
+    if len(metadata_dicts) != 1:
+        raise CandidateError("0.8.5+ bundle transaction must define one rollback metadata object")
+    metadata = metadata_dicts[0]
+    values = {
+        key.value: value
+        for key, value in zip(metadata.keys, metadata.values, strict=True)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    if set(values) != expected_fields or len(metadata.keys) != len(expected_fields):
+        raise CandidateError("0.8.5+ bundle rollback metadata lacks exact schema-2 custody")
+    if not isinstance(values["schema_version"], ast.Constant) or values["schema_version"].value != 2:
+        raise CandidateError("0.8.5+ bundle rollback metadata is not schema version 2")
+    for field in ("managed_paths", "existing_paths"):
+        value = values[field]
+        if not (
+            isinstance(value, ast.Call)
+            and _ast_call_name(value) == "sorted"
+            and len(value.args) == 1
+            and references(value.args[0], field)
+        ):
+            raise CandidateError(f"0.8.5+ bundle {field} is not exact")
+    for field in ("old_sha256", "old_modes", "created_sha256", "old_windows_security"):
+        if not isinstance(values[field], ast.Name) or values[field].id != field:
+            raise CandidateError(f"0.8.5+ bundle {field} is not bound to exact custody")
+    if not isinstance(values["restart_required"], ast.Name) or values["restart_required"].id != "was_running":
+        raise CandidateError("0.8.5+ bundle rollback metadata lacks boolean restart_required")
+
+    metadata_writes = [
+        call
+        for call in calls(transaction, "_atomic_write_bytes")
+        if any(
+            isinstance(node, ast.Constant) and node.value == "refresh-backup.json"
+            for node in ast.walk(call)
+        )
+    ]
+    if len(metadata_writes) != 1 or len(calls(transaction, "_atomic_write_bytes")) != 1:
+        raise CandidateError("0.8.5+ bundle transaction has ambiguous metadata publication")
+    metadata_write = metadata_writes[0]
+    metadata_line = metadata_write.lineno
+    serialized = assignment(transaction, "serialized_metadata")
+    if not (
+        len(serialized) == 1
+        and _ast_call_name(serialized[0].func.value) == "json.dumps"
+        if isinstance(serialized[0], ast.Call)
+        and isinstance(serialized[0].func, ast.Attribute)
+        and isinstance(serialized[0].func.value, ast.Call)
+        else False
+    ):
+        raise CandidateError("0.8.5+ bundle transaction does not serialize exact metadata")
+    serialized_source = ast.unparse(serialized[0])
+    if not (
+        "json.dumps(backup_metadata, sort_keys=True)" in serialized_source
+        and ".encode('utf-8')" in serialized_source
+        and references(metadata_write, "serialized_metadata")
+    ):
+        raise CandidateError("0.8.5+ bundle transaction does not publish exact schema-2 metadata")
+    size_guards = [
+        node
+        for node in ast.walk(transaction)
+        if isinstance(node, ast.If)
+        and node.lineno < metadata_line
+        and references(node.test, "serialized_metadata")
+        and references(node.test, "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES")
+        and any(isinstance(child, ast.Raise) for child in ast.walk(node))
+    ]
+    expected_bound = "0 < len(serialized_metadata) <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES"
+    if len(size_guards) != 1 or expected_bound not in ast.unparse(size_guards[0].test):
+        raise CandidateError("0.8.5+ bundle serialized metadata is not bounded")
+
+    for binding, leaf in {
+        "backup_managed": "managed",
+        "backup_created": "created",
+        "backup_retired": "retired",
+    }.items():
+        values_for_binding = assignment(transaction, binding)
+        mkdirs = [call for call in calls(transaction, "_mkdir_private") if references(call, binding)]
+        syncs = [
+            call
+            for call in calls(transaction, "_fsync_directory_chain")
+            if references(call, binding) and references(call, "backup_root")
+        ]
+        if not (
+            len(values_for_binding) == 1
+            and child_path(values_for_binding[0], "backup_root", leaf)
+            and len(mkdirs) == 1
+            and len(syncs) == 1
+            and mkdirs[0].lineno < syncs[0].lineno < metadata_line
+        ):
+            raise CandidateError(f"0.8.5+ bundle {leaf} rollback custody is incomplete")
+
+    backup_copies = calls(transaction, "shutil.copy2")
+    if len(backup_copies) != 1:
+        raise CandidateError("0.8.5+ bundle transaction lacks one bounded backup copy loop")
+    backup_copy = backup_copies[0]
+    backup_loop = enclosing_loop(backup_copy)
+    if not (
+        loop_iterates(backup_loop, "existing_paths")
+        and len(backup_copy.args) == 2
+        and references(backup_copy.args[0], "path")
+        and references(backup_copy.args[1], "backup_path")
+        and len(backup_copy.keywords) == 1
+        and backup_copy.keywords[0].arg == "follow_symlinks"
+        and isinstance(backup_copy.keywords[0].value, ast.Constant)
+        and backup_copy.keywords[0].value.value is False
+    ):
+        raise CandidateError("0.8.5+ bundle backup copy is not path-safe or exact")
+    backup_loop_source = ast.unparse(backup_loop)
+    for fragment in (
+        "path = destination / relative",
+        "backup_path = backup_managed / relative",
+        "_fsync_file(backup_path)",
+        "_fsync_directory_chain(backup_path.parent, stop=backup_root)",
+        "old_sha256[relative] = _sha256_file(backup_path)",
+        "old_modes[relative] = stat.S_IMODE(source_before.st_mode)",
+        "_rollback_source_snapshot_unchanged(source_before, source_after)",
+        "_sha256_file(path) != old_sha256[relative]",
+        "old_windows_security[relative] = _serialize_windows_security(native_security)",
+    ):
+        if fragment not in backup_loop_source:
+            raise CandidateError("0.8.5+ bundle existing backup custody is incomplete")
+    windows_capture = calls(backup_loop, "windows_acl.capture_path")
+    if len(windows_capture) != 2 or not all(references(call, "path") for call in windows_capture):
+        raise CandidateError("0.8.5+ bundle Windows security is not captured exactly")
+    windows_guard = parent.get(windows_capture[0])
+    while windows_guard is not None and windows_guard is not backup_loop and not isinstance(windows_guard, ast.If):
+        windows_guard = parent.get(windows_guard)
+    if not isinstance(windows_guard, ast.If) or ast.unparse(windows_guard.test) != "os.name == 'nt'":
+        raise CandidateError("0.8.5+ bundle Windows security is not platform-exact")
+
+    atomic_copies = calls(transaction, "_atomic_copy_file")
+    if len(atomic_copies) != 2:
+        raise CandidateError("0.8.5+ bundle transaction has ambiguous copy mutation")
+    claim_copy = next((call for call in atomic_copies if call.lineno < metadata_line), None)
+    publish_copy = next((call for call in atomic_copies if call.lineno > metadata_line), None)
+    claim_loop = enclosing_loop(claim_copy) if claim_copy is not None else None
+    publish_loop = enclosing_loop(publish_copy) if publish_copy is not None else None
+    if not (
+        claim_copy is not None
+        and loop_iterates(claim_loop, "created_paths")
+        and references(claim_copy, "stage")
+        and references(claim_copy, "created_claim")
+        and "created_claim = backup_created / relative" in ast.unparse(claim_loop)
+        and "_fsync_file(created_claim)" in ast.unparse(claim_loop)
+        and "_fsync_directory_chain(created_claim.parent, stop=backup_root)" in ast.unparse(claim_loop)
+        and "created_sha256[relative] = _sha256_file(created_claim)" in ast.unparse(claim_loop)
+    ):
+        raise CandidateError("0.8.5+ bundle target-created claims lack exact durable custody")
+    if not (
+        publish_copy is not None
+        and loop_iterates(publish_loop, "existing_paths")
+        and references(publish_loop.iter, "target_paths")
+        and references(publish_copy, "stage")
+        and references(publish_copy, "destination_path")
+    ):
+        raise CandidateError("0.8.5+ bundle existing publication is not exact")
+
+    links = calls(transaction, "os.link")
+    if len(links) != 1 or links[0].lineno < metadata_line:
+        raise CandidateError("0.8.5+ bundle target-created claims lack one no-replace publication")
+    link_loop = enclosing_loop(links[0])
+    if not (
+        loop_iterates(link_loop, "created_paths")
+        and references(links[0].args[0], "created_claim")
+        and references(links[0].args[1], "destination_path")
+        and "created_claim = backup_created / relative" in ast.unparse(link_loop)
+        and "destination_path = destination / relative" in ast.unparse(link_loop)
+        and "_fsync_directory(destination_path.parent)" in ast.unparse(link_loop)
+    ):
+        raise CandidateError("0.8.5+ bundle target-created publication is not claim-bound")
+
+    removals = calls(transaction, "_remove_managed_bundle_file")
+    if len(removals) != 1 or removals[0].lineno < metadata_line:
+        raise CandidateError("0.8.5+ bundle retired-file mutation lacks rollback authority")
+    first_publication = min(publish_copy.lineno, links[0].lineno, removals[0].lineno)
+    mutation_starts = [
+        node
+        for node in ast.walk(transaction)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "mutation_started" for target in node.targets)
+        and isinstance(node.value, ast.Constant)
+        and node.value.value is True
+    ]
+    if len(mutation_starts) != 1 or not metadata_line < mutation_starts[0].lineno < first_publication:
+        raise CandidateError("0.8.5+ bundle rollback metadata is not durable before first mutation")
+
+    rollback_calls = calls(transaction, "_restore_local_observability_backup")
+    if len(rollback_calls) != 1 or not all(
+        references(rollback_calls[0], name)
+        for name in (
+            "backup_managed",
+            "backup_created",
+            "backup_retired",
+            "managed_paths",
+            "existing_paths",
+            "old_sha256",
+            "old_modes",
+            "created_sha256",
+            "old_windows_security_native",
+        )
+    ):
+        raise CandidateError("0.8.5+ bundle activation failure lacks exact schema-2 replay")
+    cleanup = calls(transaction, "_remove_local_observability_stage")
+    if len(cleanup) != 2:
+        raise CandidateError("0.8.5+ bundle stage cleanup is not total")
+
+    forbidden = {
+        "os.replace",
+        "os.rename",
+        "os.unlink",
+        "os.remove",
+        "shutil.rmtree",
+    }
+    if any(_ast_call_name(call) in forbidden for call in ast.walk(transaction) if isinstance(call, ast.Call)):
+        raise CandidateError("0.8.5+ bundle transaction bypasses reviewed publication primitives")
+
+
+def _validate_hard_cut_bundle_transaction(source: str) -> None:
+    """Require durable rollback authority before every 0.8.5+ mutation."""
+
+    # Retain strict mutation coverage for the compact release-test fixture,
+    # while validating the path-safe production implementation with its own
+    # equally closed contract.
+    if "def _stage_local_observability_manifest(" in source:
+        _validate_runtime_hard_cut_bundle_transaction(source)
+    else:
+        _validate_fixture_hard_cut_bundle_transaction(source)
+
+
 def _validate_wheel(path: Path, version: str) -> None:
     metadata_name = f"defenseclaw-{version}.dist-info/METADATA"
     try:
@@ -2618,6 +3074,199 @@ def _copy_exact(source: Path, destination: Path, names: tuple[str, ...]) -> None
         shutil.copy2(source / name, destination / name)
 
 
+def _canonical_json(document: Any) -> str:
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
+
+def _release_identity_documents(
+    version: str,
+    commit: str,
+    *,
+    source_tree: str | None,
+    bridge_commit: str | None,
+    bridge_tree: str | None,
+    bridge_checksums_sha256: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    fields = {
+        "source_tree": source_tree,
+        "bridge_commit": bridge_commit,
+        "bridge_tree": bridge_tree,
+        "bridge_checksums_sha256": bridge_checksums_sha256,
+    }
+    if tuple(map(int, version.split("."))) < (0, 8, 5):
+        supplied = sorted(name for name, value in fields.items() if value is not None)
+        if supplied:
+            raise CandidateError(
+                f"release {version} forbids hard-cut provenance fields: {supplied!r}"
+            )
+        return None, None
+
+    missing = sorted(name for name, value in fields.items() if value is None)
+    if missing:
+        raise CandidateError(
+            f"release {version} requires hard-cut provenance fields: {missing!r}"
+        )
+    for name in ("source_tree", "bridge_commit", "bridge_tree"):
+        value = fields[name]
+        if not isinstance(value, str) or not COMMIT_RE.fullmatch(value):
+            raise CandidateError(f"{name} must be a full lowercase SHA-1, got {value!r}")
+    if not isinstance(bridge_checksums_sha256, str) or not SHA256_RE.fullmatch(
+        bridge_checksums_sha256
+    ):
+        raise CandidateError(
+            "bridge_checksums_sha256 must be a full lowercase SHA-256, "
+            f"got {bridge_checksums_sha256!r}"
+        )
+
+    identity = _reviewed_source_install_identity(version)
+    bridge = {
+        "version": "0.8.4",
+        "commit": bridge_commit,
+        "tree": bridge_tree,
+        "checksums_sha256": bridge_checksums_sha256,
+    }
+    source_map = {
+        "schema_version": RELEASE_SOURCE_MAP_SCHEMA_VERSION,
+        "release_version": version,
+        "source_commit": commit,
+        "source_tree": source_tree,
+        "policy_mode": "same_as_release_source",
+        "policy_commit": commit,
+        "policy_tree": source_tree,
+        "source_install_identity": identity,
+        "bridge": bridge,
+    }
+    source_map_sha256 = hashlib.sha256(
+        _canonical_json(source_map).encode("utf-8")
+    ).hexdigest()
+    provenance = {
+        "schema_version": RELEASE_PROVENANCE_SCHEMA_VERSION,
+        "release_version": version,
+        "source_commit": commit,
+        "source_tree": source_tree,
+        "policy_commit": commit,
+        "policy_tree": source_tree,
+        "release_source_map_sha256": source_map_sha256,
+        "source_install_identity": identity,
+        "bridge": bridge,
+    }
+    return source_map, provenance
+
+
+def _validate_release_identity(
+    dist: Path,
+    version: str,
+    commit: str,
+) -> dict[str, Any] | None:
+    source_map_path = dist / RELEASE_SOURCE_MAP_FILENAME
+    provenance_path = dist / RELEASE_PROVENANCE_FILENAME
+    if tuple(map(int, version.split("."))) < (0, 8, 5):
+        for path in (source_map_path, provenance_path):
+            if path.exists() or path.is_symlink():
+                raise CandidateError(f"release {version} must not contain {path.name}")
+        return None
+
+    source_map = _read_json_object(source_map_path, "release source map")
+    provenance = _read_json_object(provenance_path, "release provenance")
+    expected_map_keys = {
+        "schema_version",
+        "release_version",
+        "source_commit",
+        "source_tree",
+        "policy_mode",
+        "policy_commit",
+        "policy_tree",
+        "source_install_identity",
+        "bridge",
+    }
+    expected_provenance_keys = {
+        "schema_version",
+        "release_version",
+        "source_commit",
+        "source_tree",
+        "policy_commit",
+        "policy_tree",
+        "release_source_map_sha256",
+        "source_install_identity",
+        "bridge",
+    }
+    identity_keys = {
+        "schema_version",
+        "source_release",
+        "source_install_compatibility_epoch",
+        "runtime_config_version",
+    }
+    bridge_keys = {"version", "commit", "tree", "checksums_sha256"}
+    if set(source_map) != expected_map_keys:
+        raise CandidateError("release source map does not use the closed schema-1 field set")
+    if set(provenance) != expected_provenance_keys:
+        raise CandidateError("release provenance does not use the closed schema-1 field set")
+    if source_map.get("schema_version") != RELEASE_SOURCE_MAP_SCHEMA_VERSION:
+        raise CandidateError("release source map schema_version mismatch")
+    if provenance.get("schema_version") != RELEASE_PROVENANCE_SCHEMA_VERSION:
+        raise CandidateError("release provenance schema_version mismatch")
+    if source_map.get("release_version") != version or provenance.get("release_version") != version:
+        raise CandidateError("release identity version mismatch")
+    if source_map.get("source_commit") != commit or provenance.get("source_commit") != commit:
+        raise CandidateError("release identity source_commit mismatch")
+    if source_map.get("policy_mode") != "same_as_release_source":
+        raise CandidateError("release source map policy_mode mismatch")
+
+    for document, label in ((source_map, "release source map"), (provenance, "release provenance")):
+        identity = document.get("source_install_identity")
+        bridge = document.get("bridge")
+        if not isinstance(identity, dict) or set(identity) != identity_keys:
+            raise CandidateError(f"{label} source identity is not closed")
+        if not isinstance(bridge, dict) or set(bridge) != bridge_keys:
+            raise CandidateError(f"{label} bridge identity is not closed")
+        if identity != _reviewed_source_install_identity(version):
+            raise CandidateError(f"{label} source-install identity mismatch")
+        if bridge.get("version") != "0.8.4":
+            raise CandidateError(f"{label} bridge version mismatch")
+        for name in ("source_commit", "source_tree", "policy_commit", "policy_tree"):
+            value = document.get(name)
+            if not isinstance(value, str) or not COMMIT_RE.fullmatch(value):
+                raise CandidateError(f"{label} {name} is not a canonical lowercase SHA-1")
+        for name in ("commit", "tree"):
+            value = bridge.get(name)
+            if not isinstance(value, str) or not COMMIT_RE.fullmatch(value):
+                raise CandidateError(f"{label} bridge {name} is not a canonical lowercase SHA-1")
+        digest = bridge.get("checksums_sha256")
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise CandidateError(f"{label} bridge checksums digest is not canonical")
+        if document.get("policy_commit") != document.get("source_commit"):
+            raise CandidateError(f"{label} policy commit must equal its release source")
+        if document.get("policy_tree") != document.get("source_tree"):
+            raise CandidateError(f"{label} policy tree must equal its release source")
+
+    shared = (
+        "release_version",
+        "source_commit",
+        "source_tree",
+        "policy_commit",
+        "policy_tree",
+        "source_install_identity",
+        "bridge",
+    )
+    if any(source_map.get(name) != provenance.get(name) for name in shared):
+        raise CandidateError("release source map and provenance identities differ")
+
+    try:
+        source_map_bytes = source_map_path.read_bytes()
+        provenance_text = provenance_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CandidateError(f"could not read release identity assets: {exc}") from exc
+    if source_map_bytes != _canonical_json(source_map).encode("utf-8"):
+        raise CandidateError("release source map JSON is not canonical or changed")
+    if provenance_text != _canonical_json(provenance):
+        raise CandidateError("release provenance JSON is not canonical or changed")
+    if provenance.get("release_source_map_sha256") != hashlib.sha256(
+        source_map_bytes
+    ).hexdigest():
+        raise CandidateError("release provenance does not authenticate its source map")
+    return provenance
+
+
 def assemble(
     runtime_dir: Path,
     macos_dir: Path,
@@ -2625,11 +3274,24 @@ def assemble(
     version: str,
     commit: str,
     macos_verification_status: str,
+    *,
+    source_tree: str | None = None,
+    bridge_commit: str | None = None,
+    bridge_tree: str | None = None,
+    bridge_checksums_sha256: str | None = None,
 ) -> None:
     _validate_version(version)
     _validate_commit(commit)
     macos_verification_status = _validate_macos_verification_status(
         macos_verification_status
+    )
+    source_map, provenance = _release_identity_documents(
+        version,
+        commit,
+        source_tree=source_tree,
+        bridge_commit=bridge_commit,
+        bridge_tree=bridge_tree,
+        bridge_checksums_sha256=bridge_checksums_sha256,
     )
     if root.exists():
         raise CandidateError(f"candidate output already exists: {root}")
@@ -2651,6 +3313,15 @@ def assemble(
     _copy_exact(macos_dir, dist, macos_names)
     _copy_resolver_assets(dist, version)
     _validate_resolver_assets(dist, version)
+    if source_map is not None and provenance is not None:
+        (dist / RELEASE_SOURCE_MAP_FILENAME).write_text(
+            _canonical_json(source_map),
+            encoding="utf-8",
+        )
+        (dist / RELEASE_PROVENANCE_FILENAME).write_text(
+            _canonical_json(provenance),
+            encoding="utf-8",
+        )
 
     notes = runtime_dir / "CHANGELOG.md"
     if notes.is_file() and not notes.is_symlink():
@@ -2720,6 +3391,7 @@ def seal(root: Path, version: str, commit: str) -> None:
         raise CandidateError(f"candidate metadata mismatch: got {metadata!r}")
 
     dist = root / "dist"
+    _validate_release_identity(dist, version, commit)
     names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
@@ -2771,6 +3443,7 @@ def verify(root: Path, version: str, commit: str) -> None:
         raise CandidateError("release candidate source-install identity mismatch")
 
     dist = root / "dist"
+    _validate_release_identity(dist, version, commit)
     expected_names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, expected_names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
@@ -2897,6 +3570,10 @@ def _parser() -> argparse.ArgumentParser:
     assemble_parser.add_argument("--version", required=True)
     assemble_parser.add_argument("--commit", required=True)
     assemble_parser.add_argument("--macos-verification-status", required=True)
+    assemble_parser.add_argument("--source-tree")
+    assemble_parser.add_argument("--bridge-commit")
+    assemble_parser.add_argument("--bridge-tree")
+    assemble_parser.add_argument("--bridge-checksums-sha256")
 
     seal_parser = subparsers.add_parser("seal")
     seal_parser.add_argument("--root", type=Path, required=True)
@@ -2956,6 +3633,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.version,
                 args.commit,
                 args.macos_verification_status,
+                source_tree=args.source_tree,
+                bridge_commit=args.bridge_commit,
+                bridge_tree=args.bridge_tree,
+                bridge_checksums_sha256=args.bridge_checksums_sha256,
             )
             print(f"release candidate assembled: {args.root}")
         elif args.command == "seal":

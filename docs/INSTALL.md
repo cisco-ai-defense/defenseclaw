@@ -600,6 +600,13 @@ defenseclaw setup gateway --remote --ssm-param /prod/openclaw/token --ssm-region
 
 Configure Splunk integration for audit export and observability.
 
+Under `config_version: 8`, each selected Splunk pipeline becomes an independent
+entry in `observability.destinations`: HEC is logs-only and Splunk O11y uses
+OTLP capabilities. An enabled destination with no explicit `send`/`routes`
+exports every bucket and signal that kind supports under the unredacted `none`
+profile. Use `defenseclaw observability plan` to review the effective route and
+select a redacting profile before exporting across a less-trusted boundary.
+
 ```bash
 defenseclaw setup splunk
 ```
@@ -700,7 +707,7 @@ tested source versions.
 
 Support is platform-specific. POSIX release gates cover the reviewed global
 matrix through `0.4.0`; the native Windows matrix currently covers only
-`0.8.0` through `0.8.3`. A Windows source older than `0.8.0` therefore fails
+`0.8.0` through `0.8.4`. A Windows source older than `0.8.0` therefore fails
 closed and prints those exact supported Windows sources—global POSIX coverage
 must not be treated as a Windows upgrade claim.
 
@@ -761,10 +768,12 @@ validation is complete, and inspect them before manual cleanup.
 The bridge commits a private phase-two recovery journal and fixed mutator
 lease before stopping services. Wheel, migration, bundle, and service child
 processes inherit that lease, so an abrupt controller or host interruption
-cannot race rollback. Re-run the release-owned resolver: it waits for any
-surviving child, bootstraps the retained authenticated `0.8.4` wheel without
-trusting a partial target install, restores exact bridge state, proves bridge
-health, and only then retries.
+cannot race rollback.
+
+Re-run that same resolver in latest mode, without a version override.
+It waits for any surviving child, bootstraps the retained authenticated `0.8.4`
+wheel without trusting a partial target install, restores exact bridge state,
+proves bridge health, and only then retries.
 
 Once the bridge is installed, its fresh CLI controller performs the target
 phase: preflight artifact verification, config backup,
@@ -812,7 +821,9 @@ with its built-in command. Before backup or service stop, it authenticates and
 privately acquires the exact published `0.8.4` wheel and gateway needed for
 rollback. A `0.8.3`-or-older controller cannot learn the two-process bridge
 handoff retroactively, so those hosts must use the authenticated current
-release-owned resolver in latest mode.
+release-owned resolver in latest mode. That resolver carries a
+0.8.3-or-older host through any required bridge and into the latest release as
+one transaction.
 
 ```bash
 # A coherent installed 0.8.4 bridge securely self-acquires rollback custody
@@ -853,6 +864,27 @@ release-owned resolver materializes them privately. The conventional `.whl`,
 extracting, or package-installing either form is not a supported manual path;
 use the resolver so the bridge and rollback contract cannot be skipped.
 
+#### 0.8.5 hard cut and the 0.8.4 bridge
+
+An installed `0.8.3` or older controller must not install `0.8.5` directly.
+The normal one-command path uses the authenticated resolver asset owned by the
+target release. Follow the complete Sigstore and SHA-256 bootstrap in the
+[CLI Reference](CLI.md#upgrade), or run `./scripts/upgrade.sh --yes` from an
+authenticated checkout of that release. Do not stream an unauthenticated
+network response into a shell.
+
+On Windows, run the matching signed `scripts/upgrade.ps1` resolver. It detects
+the installed version before stopping anything, verifies and installs `0.8.4`,
+proves fresh `0.8.4` health, then starts the `0.8.5` hard cut under that fresh
+controller. Only versions declared in the published-baseline matrix auto-hop.
+Other sources fail closed and print the exact bridge-first path.
+
+An explicit `0.8.3 → 0.8.5` request is intentionally rejected before backup,
+service stop, or installed-file mutation. Fresh installers also refuse to
+overwrite an existing installation. No package-manager or manual artifact-copy
+path may replace an existing hard-cut installation unless it invokes this same
+resolver contract.
+
 ### What gets upgraded
 
 | Component | Updated by upgrade | Notes |
@@ -863,14 +895,16 @@ use the resolver so the bridge and rollback contract cannot be skipped.
 | Config files | Preserved | Backed up before upgrade, migrations patch if needed |
 | Policies | Preserved | Backed up; not overwritten |
 
-### Rollback
+### Rollback and interrupted recovery
 
-The release-owned resolver restores the authenticated bridge automatically if
-the hard-cut phase fails. It preserves the pending recovery journal across a
-crash. Re-run that same resolver in latest mode, without a version override; it
-completes recovery before it detects a new target or continues.
+The staged resolver automatically restores the prior source if the bridge phase
+fails, or restores the authenticated `0.8.4` gateway, CLI, configuration,
+environment, migration cursor, and managed bundle if the hard-cut phase fails.
+Durable recovery journals make the same rollback resume before version/config
+detection after a crash or reboot. Success is emitted only after a fresh,
+version-bound health check.
 
-For operator inspection, timestamped backups remain under:
+Timestamped backups remain available for inspection and support escalation:
 
 ```bash
 # Backups are saved to ~/.defenseclaw/backups/upgrade-<timestamp>/

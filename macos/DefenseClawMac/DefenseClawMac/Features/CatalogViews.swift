@@ -345,14 +345,25 @@ struct ToolsView: View {
     }
 
     private func load() async {
+        let installationGeneration = appState.installationGeneration
         do {
             let cliItems = try await CatalogCLI.tools(using: appState.cli)
-            items = cliItems.isEmpty ? await appState.audit.toolOverrideRows() : cliItems
+            guard installationGeneration == appState.installationGeneration else { return }
+            let freshItems: [ToolItem]
+            if cliItems.isEmpty {
+                freshItems = await appState.audit.toolOverrideRows()
+                guard installationGeneration == appState.installationGeneration else { return }
+            } else {
+                freshItems = cliItems
+            }
+            items = freshItems
             error = nil
         } catch {
+            let failure = error.localizedDescription
             let fallback = await appState.audit.toolOverrideRows()
+            guard installationGeneration == appState.installationGeneration else { return }
             items = fallback
-            self.error = fallback.isEmpty ? error.localizedDescription : nil
+            self.error = fallback.isEmpty ? failure : nil
         }
         loaded = true
     }
@@ -449,6 +460,11 @@ private struct CatalogCommandSheet: View {
                       systemImage: "exclamationmark.shield")
                     .font(.caption)
                     .foregroundStyle(invocation.destructive ? Cisco.red : Cisco.orange)
+                if let reason = appState.installationReadOnlyReason {
+                    Label(reason, systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
@@ -460,6 +476,10 @@ private struct CatalogCommandSheet: View {
                         .buttonStyle(.borderedProminent)
                         .tint(invocation.destructive ? Cisco.red : Cisco.blue)
                         .keyboardShortcut(.defaultAction)
+                        .disabled(
+                            invocation.requiresConfirmation
+                                && !appState.installationMutationsAllowed
+                        )
                 } else if phase == .done {
                     Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
                 }
@@ -488,6 +508,7 @@ private struct CatalogCommandSheet: View {
             let result = await appState.runCommand(
                 title: invocation.title,
                 arguments: invocation.arguments,
+                mutation: invocation.requiresConfirmation,
                 category: "catalog",
                 origin: "Catalog",
                 refreshOnSuccess: true
@@ -588,6 +609,7 @@ private struct CatalogInstallSheet: View {
     let onReview: (CatalogInvocation) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
     @State private var target = ""
     @State private var connector = "all"
     @State private var force = false
@@ -612,6 +634,11 @@ private struct CatalogInstallSheet: View {
                 Toggle("Apply configured enforcement policy after scanning", isOn: $applyPolicy)
             }
             .formStyle(.grouped)
+            if let reason = appState.installationReadOnlyReason {
+                Label(reason, systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             HStack {
                 Spacer()
@@ -620,7 +647,7 @@ private struct CatalogInstallSheet: View {
                     .buttonStyle(.borderedProminent)
                     .tint(Cisco.blue)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedTarget.isEmpty)
+                    .disabled(trimmedTarget.isEmpty || !appState.installationMutationsAllowed)
             }
         }
         .padding(18)

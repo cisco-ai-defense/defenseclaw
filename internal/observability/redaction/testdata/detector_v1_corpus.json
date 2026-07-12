@@ -1,0 +1,37 @@
+{
+  "catalog_version": 1,
+  "required_categories": ["positive", "near_miss", "boundary", "unicode_adjacent", "oversized", "overlap"],
+  "generated_from_positive": ["boundary", "unicode_adjacent", "oversized", "overlap"],
+  "required_multiline_detectors": ["credentials.private_key", "credentials.authorization", "credentials.cookie"],
+  "cases": [
+    {"name":"api-token-positive","detector":"credentials.api_token","group":"credentials","category":"positive","input":"token AKIAAAAAAAAAAAAAAAAA end","match":"AKIAAAAAAAAAAAAAAAAA"},
+    {"name":"private-key-positive","detector":"credentials.private_key","group":"credentials","category":"positive","input":"-----BEGIN PRIVATE KEY-----\nQUJDRA==\n-----END PRIVATE KEY-----","match":"-----BEGIN PRIVATE KEY-----\nQUJDRA==\n-----END PRIVATE KEY-----"},
+    {"name":"authorization-positive","detector":"credentials.authorization","group":"credentials","category":"positive","input":"Authorization: Bearer reserved-fixture-value","match":"reserved-fixture-value"},
+    {"name":"cookie-positive","detector":"credentials.cookie","group":"credentials","category":"positive","input":"Cookie: theme=safe; session=reserved-cookie-value","match":"reserved-cookie-value"},
+    {"name":"connection-positive","detector":"credentials.connection_string","group":"credentials","category":"positive","input":"postgres://fixture:reserved-pass@example.test/db","match":"reserved-pass"},
+    {"name":"assignment-positive","detector":"secrets.assignment","group":"secrets","category":"positive","input":"password=reserved-assignment-value","match":"reserved-assignment-value"},
+    {"name":"entropy-positive","detector":"secrets.high_entropy","group":"secrets","category":"positive","input":"Aa0_Bb1-Cc2_Dd3-Ee4_Ff5-Gg6_Hh7","match":"Aa0_Bb1-Cc2_Dd3-Ee4_Ff5-Gg6_Hh7"},
+    {"name":"query-positive","detector":"secrets.url_query","group":"secrets","category":"positive","input":"https://example.test/path?mode=safe&token=reserved%2Dquery","match":"reserved%2Dquery"},
+    {"name":"cloud-positive","detector":"secrets.cloud_account_identifier","group":"secrets","category":"positive","input":"aws_account_id=123456789012","match":"123456789012"},
+    {"name":"email-positive","detector":"pii.email","group":"pii","category":"positive","input":"contact alice@example.test now","match":"alice@example.test"},
+    {"name":"telephone-positive","detector":"pii.telephone","group":"pii","category":"positive","input":"call 212-555-0100 now","match":"212-555-0100"},
+    {"name":"national-id-positive","detector":"pii.national_identifier","group":"pii","category":"positive","input":"id 321-54-9876 end","match":"321-54-9876"},
+    {"name":"payment-positive","detector":"pii.payment_card","group":"pii","category":"positive","input":"card 4242 4242 4242 4242 end","match":"4242 4242 4242 4242"},
+    {"name":"ip-positive","detector":"pii.ip_address","group":"pii","category":"positive","input":"address 192.0.2.1 end","match":"192.0.2.1"},
+
+    {"name":"api-token-near-miss","detector":"credentials.api_token","group":"credentials","category":"near_miss","input":"AKIAAAAAAAAAAAAAAAA","match":""},
+    {"name":"private-key-near-miss","detector":"credentials.private_key","group":"credentials","category":"near_miss","input":"-----BEGIN PUBLIC KEY-----\nQUJDRA==\n-----END PUBLIC KEY-----","match":""},
+    {"name":"authorization-near-miss","detector":"credentials.authorization","group":"credentials","category":"near_miss","input":"X-Authorization: Bearer fixture","match":""},
+    {"name":"cookie-near-miss","detector":"credentials.cookie","group":"credentials","category":"near_miss","input":"Cookie: theme=safe","match":""},
+    {"name":"connection-near-miss","detector":"credentials.connection_string","group":"credentials","category":"near_miss","input":"postgres://example.test/db","match":""},
+    {"name":"assignment-near-miss","detector":"secrets.assignment","group":"secrets","category":"near_miss","input":"password=${FIXTURE_PASSWORD}","match":""},
+    {"name":"entropy-near-miss","detector":"secrets.high_entropy","group":"secrets","category":"near_miss","input":"sampleexamplesampleexample","match":""},
+    {"name":"query-near-miss","detector":"secrets.url_query","group":"secrets","category":"near_miss","input":"https://example.test/path?mode=safe","match":""},
+    {"name":"cloud-near-miss","detector":"secrets.cloud_account_identifier","group":"secrets","category":"near_miss","input":"123456789012","match":""},
+    {"name":"email-near-miss","detector":"pii.email","group":"pii","category":"near_miss","input":"alice@example","match":""},
+    {"name":"telephone-near-miss","detector":"pii.telephone","group":"pii","category":"near_miss","input":"012-555-0100","match":""},
+    {"name":"national-id-near-miss","detector":"pii.national_identifier","group":"pii","category":"near_miss","input":"123-45-6789","match":""},
+    {"name":"payment-near-miss","detector":"pii.payment_card","group":"pii","category":"near_miss","input":"4242 4242-4242 4242","match":""},
+    {"name":"ip-near-miss","detector":"pii.ip_address","group":"pii","category":"near_miss","input":"192.168.001.1","match":""}
+  ]
+}

@@ -30,7 +30,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // revealHeader is the HTTP header callers set to opt into receiving
@@ -50,10 +49,10 @@ const revealHeader = "X-DefenseClaw-Reveal-PII"
 //   - log an audit event tagged "inspect-reveal" so the choice is
 //     discoverable by compliance review.
 //
-// The persistent-sink invariant is unaffected: SQLite, OTel, and
-// webhook payloads still receive redacted content even when a
-// caller supplies the header, because those paths don't consult
-// this flag.
+// Destination projection is unaffected: canonical telemetry keeps the source
+// facts and the unified v8 router applies each destination's selected redaction
+// profile independently. The response header changes only this HTTP response;
+// it cannot make a configured destination more or less restrictive.
 func wantsReveal(r *http.Request) bool {
 	return r.Header.Get(revealHeader) == "1"
 }
@@ -179,7 +178,7 @@ func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction stri
 // Surface gating is intentional — without it, OpenClaw operators
 // who set scanner_mode=remote AND configure cisco_ai_defense.api_key
 // would double-scan chat traffic (proxy lane + hook lane).
-func (a *APIServer) hookAIDInspect(toolName string, content string) *ScanVerdict {
+func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
 	if a == nil || a.ciscoInspector == nil {
 		return nil
 	}
@@ -198,7 +197,7 @@ func (a *APIServer) hookAIDInspect(toolName string, content string) *ScanVerdict
 	if toolName != "" && toolName != "message" {
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
-	return a.ciscoInspector.Inspect([]ChatMessage{{Role: "user", Content: body}})
+	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
 }
 
 // mergeWithAIDVerdict folds an AID ScanVerdict into an existing
@@ -311,14 +310,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		// --connector scoped); it is checked before the per-tool block/allow so
 		// a server-level block wins over a tool-level allow, and it fails closed
 		// + loud on a store lookup error.
-		if deny, server, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
-			if a.otel != nil {
-				a.otel.EmitPolicyDecision("admission", "blocked", req.Tool, "mcp", reason, map[string]string{
-					"mcp_server_name": server,
-					"connector":       req.Connector,
-					"runtime_surface": "inspect-tool",
-				})
-			}
+		if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
 			return &ToolInspectVerdict{
 				Action:     "block",
 				Severity:   "HIGH",
@@ -387,7 +379,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		// turn — operators with custom AID policies (e.g. block
 		// `createJiraIssue`, throttle `addComment`) want their rules to
 		// fire even when no DefenseClaw built-in pattern matched.
-		if aid := a.hookAIDInspect(toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
+		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
 			verdict = mergeWithAIDVerdict(nil, aid)
 		}
 	} else {
@@ -425,7 +417,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 			Confidence:       confidence,
 			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
 			Findings:         findingStrs,
-			DetailedFindings: ruleFindings,
+			DetailedFindings: append(ruleFindings, codeGuardRuleFindings(cgFindings)...),
 		}
 
 		// AID lane: also forward to Cisco AI Defense when the operator has
@@ -434,7 +426,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		// AID's classifier reads free-text content; the rule names give it
 		// useful context. The lane is silent when no AID client is wired
 		// or when ScanHookSurface=false.
-		if aid := a.hookAIDInspect(toolName, argsStr); aid != nil {
+		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil {
 			verdict = mergeWithAIDVerdict(verdict, aid)
 		}
 	}
@@ -565,12 +557,32 @@ func (a *APIServer) codeGuardOnlyVerdict(req *ToolInspectRequest, cgFindings []s
 		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
 	}
 	return &ToolInspectVerdict{
-		Action:     action,
-		Severity:   severity,
-		Confidence: 1.0,
-		Reason:     fmt.Sprintf("allow-listed tool %q: CodeGuard retained on write", req.Tool),
-		Findings:   findingStrs,
+		Action:           action,
+		Severity:         severity,
+		Confidence:       1.0,
+		Reason:           fmt.Sprintf("allow-listed tool %q: CodeGuard retained on write", req.Tool),
+		Findings:         findingStrs,
+		DetailedFindings: codeGuardRuleFindings(cgFindings),
 	}
+}
+
+func codeGuardRuleFindings(findings []scanner.Finding) []RuleFinding {
+	if len(findings) == 0 {
+		return nil
+	}
+	result := make([]RuleFinding, 0, len(findings))
+	for _, finding := range findings {
+		ruleID := firstNonEmpty(finding.RuleID, finding.ID)
+		if ruleID == "" || strings.TrimSpace(finding.Title) == "" {
+			continue
+		}
+		result = append(result, RuleFinding{
+			RuleID: ruleID, Title: finding.Title, Severity: string(finding.Severity),
+			Confidence: finding.Confidence, Tags: append([]string(nil), finding.Tags...),
+			ToolCapabilityClass: finding.ToolCapabilityClass,
+		})
+	}
+	return result
 }
 
 // inspectMessageContent scans outbound message content for secrets, PII,
@@ -603,7 +615,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		// Regex found nothing locally. Give the AID lane a turn —
 		// custom AID policies (e.g. organisation-specific PII rules)
 		// may match where the bundled regex pack didn't.
-		if aid := a.hookAIDInspect("message", content); aid != nil && aid.Action != "allow" && aid.Action != "" {
+		if aid := a.hookAIDInspect(ctx, "message", content); aid != nil && aid.Action != "allow" && aid.Action != "" {
 			verdict = mergeWithAIDVerdict(nil, aid)
 		}
 	} else {
@@ -633,7 +645,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		// configured. mergeWithAIDVerdict escalates strictness — AID block
 		// trumps regex alert, AID HIGH trumps regex MEDIUM, etc. Lane is a
 		// no-op when no client is wired.
-		if aid := a.hookAIDInspect("message", content); aid != nil {
+		if aid := a.hookAIDInspect(ctx, "message", content); aid != nil {
 			verdict = mergeWithAIDVerdict(verdict, aid)
 		}
 	}
@@ -799,7 +811,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), inspectScanTimeout)
+	scanTimeout := inspectScanTimeout
+	if a.inspectToolScanTimeout > 0 {
+		scanTimeout = a.inspectToolScanTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), scanTimeout)
 	defer cancel()
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> tool=%q args=%s content_len=%d direction=%s\n",
@@ -830,9 +846,17 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	case res := <-ch:
 		verdict = res.v
 	case <-ctx.Done():
-		fmt.Fprintf(os.Stderr, "[inspect] tool scan timeout after %s\n", time.Since(t0))
-		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
-		return
+		// Prefer a verdict that completed at the deadline boundary. Both
+		// channels can be ready when a CPU-starved handler is rescheduled;
+		// returning 504 in that case discards completed local policy work.
+		select {
+		case res := <-ch:
+			verdict = res.v
+		default:
+			fmt.Fprintf(os.Stderr, "[inspect] tool scan timeout after %s\n", time.Since(t0))
+			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+			return
+		}
 	}
 
 	verdict.applyMode(inspectMode(a.scannerCfg))
@@ -846,10 +870,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// the rule-id allow-list — we still route through the helper
 	// so any future reason-building logic that embeds literals
 	// picks up the scrub automatically.
+	safeFindings := make([]string, len(verdict.Findings))
+	for i, finding := range verdict.Findings {
+		safeFindings[i] = redaction.Reason(finding)
+	}
 	fmt.Fprintf(os.Stderr, "[inspect] <<< tool=%q action=%s raw_action=%s severity=%s mode=%s would_block=%v confidence=%.2f elapsed=%s reason=%q findings=%v\n",
 		req.Tool, verdict.Action, verdict.RawAction, verdict.Severity, verdict.Mode, verdict.WouldBlock,
 		verdict.Confidence, elapsed,
-		redaction.Reason(verdict.Reason), verdict.Findings)
+		redaction.Reason(verdict.Reason), safeFindings)
 
 	switch verdict.Action {
 	case "block":
@@ -879,20 +907,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	default:
 		auditAction = string(audit.ActionInspectToolAllow)
 	}
-	if a.otel != nil {
-		elapsedMs := float64(elapsed.Milliseconds())
-		tool := a.connectorName() + ":" + req.Tool
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
-		a.otel.RecordGuardrailEvaluation(context.Background(), a.connectorName()+":policy-rules", verdict.Action)
-		a.otel.RecordGuardrailLatency(context.Background(), a.connectorName()+":policy-rules", elapsedMs)
-		// Inspect span is emitted for its side effect on the span
-		// exporter — trace_id is now pulled from r.Context() by
-		// LogActionCtx (the gateway CorrelationMiddleware seeded
-		// the same trace id into both).
-		_ = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
-	}
-
+	connectorName := a.connectorName()
+	a.recordInspectMetricsV8(
+		r.Context(), connectorName, connectorName+":"+req.Tool,
+		verdict.Action, verdict.Severity, elapsed,
+	)
+	a.recordGuardrailMetricsV8(
+		r.Context(), connectorName, connectorName+":policy-rules", verdict.Action, elapsed,
+	)
 	targetType := "tool_call"
 	if strings.ToLower(req.Tool) == "message" {
 		switch strings.ToLower(req.Direction) {
@@ -907,23 +929,18 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
 		"/api/v1/inspect/tool:"+req.Tool, targetType, verdict, elapsed,
 		"emit_inspect_tool")
+	a.emitInspectTraceV8(r.Context(), req.Tool, targetType, verdict, elapsed, evalCtx)
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",
 		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction)
-	if req.Content != "" {
-		auditDetails = appendRawTelemetryDetails(auditDetails, "raw_content", []byte(req.Content))
-	}
-	if len(req.Args) > 0 {
-		auditDetails = appendRawTelemetryDetails(auditDetails, "raw_args", req.Args)
-	}
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
 
-	a.emitCodeGuardOTel(&req, verdict, elapsed)
+	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 
 	// Response-body redaction. By default every Evidence string in
 	// DetailedFindings and verdict.Reason are replaced with the
@@ -931,18 +948,20 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// simply GETs the verdict and logs it cannot accidentally echo
 	// user PII. Callers who need raw evidence for triage set
 	// X-DefenseClaw-Reveal-PII: 1; we record that fact in the
-	// audit store so every reveal is discoverable.
+	// canonical compliance history so every reveal is discoverable.
 	reveal := wantsReveal(r)
 	responseVerdict := verdict.sanitizeForResponse(reveal)
 	if reveal {
-		// Audit the reveal BEFORE exposing the raw reason. Even
-		// when the caller opts in to raw response PII, the
-		// audit-store row must still flow through the sink
-		// barrier so SQLite/Splunk never see the raw literal.
+		// Audit the reveal BEFORE exposing the raw response. The reveal
+		// occurrence is deliberately content-free: the preceding canonical
+		// guardrail/finding records already contain the source evidence and
+		// receive the destination's configured redaction projection. Copying
+		// that evidence into this mandatory compliance record would add no
+		// forensic value and could expose it through the mandatory floor.
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionInspectReveal), req.Tool,
-			fmt.Sprintf("severity=%s remote=%s reason=%s",
-				verdict.Severity, r.RemoteAddr,
-				redaction.ForSinkReason(verdict.Reason)))
+			fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
+				verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
+				len(verdict.DetailedFindings)))
 	}
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
@@ -1005,10 +1024,9 @@ func appendVerdictReason(reason, suffix string) string {
 // no-op on that metadata-only shape, but if a scanner ever embeds
 // a matched literal in f.Title the sink barrier scrubs it.
 //
-// The original verdict is left untouched so the audit log, OTel
-// spans, and any in-process observers still see the full data
-// (which those paths then route through their own ForSink*
-// helpers before persistence).
+// The original verdict is left untouched so canonical observability producers
+// retain the full source data. The unified runtime applies the selected
+// redaction profile independently for each destination after routing.
 func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdict {
 	if reveal {
 		return v
@@ -1026,9 +1044,16 @@ func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdic
 	return &cp
 }
 
-// emitCodeGuardOTel sends OTel signals when CodeGuard findings are present.
-func (a *APIServer) emitCodeGuardOTel(req *ToolInspectRequest, verdict *ToolInspectVerdict, elapsed time.Duration) {
-	if a.otel == nil {
+// emitCodeGuardTelemetry records CodeGuard evaluation metrics for every
+// supported write operation and emits the existing alert when a finding is
+// present. The alert is migrated independently from the generated metrics.
+func (a *APIServer) emitCodeGuardTelemetry(
+	ctx context.Context,
+	req *ToolInspectRequest,
+	verdict *ToolInspectVerdict,
+	elapsed time.Duration,
+) {
+	if a == nil || req == nil || verdict == nil {
 		return
 	}
 
@@ -1037,10 +1062,8 @@ func (a *APIServer) emitCodeGuardOTel(req *ToolInspectRequest, verdict *ToolInsp
 		return
 	}
 
-	elapsedMs := float64(elapsed.Milliseconds())
-
-	a.otel.RecordGuardrailEvaluation(context.Background(), "codeguard", verdict.Action)
-	a.otel.RecordGuardrailLatency(context.Background(), "codeguard", elapsedMs)
+	connectorName := a.connectorName()
+	a.recordGuardrailMetricsV8(ctx, connectorName, "codeguard", verdict.Action, elapsed)
 
 	hasCodeGuardFinding := false
 	for _, f := range verdict.Findings {
@@ -1055,20 +1078,8 @@ func (a *APIServer) emitCodeGuardOTel(req *ToolInspectRequest, verdict *ToolInsp
 	}
 
 	if verdict.Action == "block" || verdict.Action == "alert" {
-		var filePath string
-		var parsed map[string]interface{}
-		if err := json.Unmarshal(req.Args, &parsed); err == nil {
-			filePath, _ = parsed["path"].(string)
-		}
-
-		a.otel.EmitRuntimeAlert(
-			telemetry.AlertCodeGuardFinding,
-			verdict.Severity,
-			telemetry.SourceCodeGuard,
-			fmt.Sprintf("CodeGuard: %s", verdict.Reason),
-			map[string]string{"tool": req.Tool, "command": filePath},
-			map[string]string{"scanner": "codeguard", "action_taken": verdict.Action},
-			"", "",
+		a.recordSecurityAlertMetricV8(
+			ctx, connectorName, verdict.Severity, "codeguard-finding", "codeguard",
 		)
 	}
 }

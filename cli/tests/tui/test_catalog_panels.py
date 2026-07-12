@@ -387,10 +387,25 @@ def test_tools_refresh_scoped_display_counts_and_intents() -> None:
     assert panel.action_intent("b").args == ("tool", "block", "write_file@filesystem")
     assert panel.action_intent("u").args == ("tool", "unblock", "write_file@filesystem")
     assert panel.handle_key("u").intent.args == ("tool", "unblock", "write_file@filesystem")
-
     panel.select_row(1)
     assert panel.selected().display_scope == "(global)"
     assert panel.action_intent("i").args == ("tool", "status", "read_file")
+
+
+def test_tools_refresh_key_defers_store_read_to_shell_worker() -> None:
+    calls: list[str] = []
+
+    class Store:
+        def list_actions_by_type(self, target_type: str) -> list[object]:
+            calls.append(target_type)
+            return []
+
+    panel = ToolsPanelModel(Store())
+    action = panel.handle_key("r")
+
+    assert action.handled is True
+    assert action.reload_requested is True
+    assert calls == []
 
 
 def test_tools_connector_filter_shows_selected_connector_plus_global_fallback() -> None:

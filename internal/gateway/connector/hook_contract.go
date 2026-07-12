@@ -139,7 +139,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ContractID:              "claudecode-hooks-v1",
 		MinAgentVersion:         "2.1.144",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.claude/settings.json"},
 		ResponseFieldName:       "claude_code_output",
 		Events: []string{

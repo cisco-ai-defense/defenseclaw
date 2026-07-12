@@ -73,6 +73,7 @@ from defenseclaw.config import (
     detect_environment,
     load,
 )
+from defenseclaw.observability.v8_config import V8ConfigError
 
 
 class TestHelpers(unittest.TestCase):
@@ -283,7 +284,9 @@ class TestPaths(unittest.TestCase):
         self.assertIsNone(problem)
 
     def test_managed_enterprise_save_requires_admin(self):
-        cfg = Config(data_dir=tempfile.mkdtemp(), deployment_mode="managed_enterprise")
+        cfg = default_config()
+        cfg.data_dir = tempfile.mkdtemp()
+        cfg.deployment_mode = "managed_enterprise"
         with patch("defenseclaw.config._is_admin_process", return_value=False):
             with self.assertRaises(PermissionError):
                 cfg.save()
@@ -456,13 +459,18 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
     full file round trip both ways.
     """
 
+    def _fresh_config(self):
+        cfg = default_config()
+        cfg.data_dir = tempfile.mkdtemp()
+        return cfg
+
     def _save_and_reload(self, cfg):
         cfg.save()
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": cfg.data_dir}):
             return config_mod.load()
 
     def test_opt_in_then_opt_out_persists(self):
-        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg = self._fresh_config()
         cfg.guardrail.judge.hook_connectors = ["*"]
         cfg.guardrail.judge.hook_timeout = 9.0
         loaded = self._save_and_reload(cfg)
@@ -484,7 +492,7 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertNotIn("hook_timeout", text)
 
     def test_explicit_list_replaces_star_on_disk(self):
-        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg = self._fresh_config()
         cfg.guardrail.judge.hook_connectors = ["*"]
         loaded = self._save_and_reload(cfg)
         loaded.guardrail.judge.hook_connectors = ["hermes"]
@@ -492,7 +500,7 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_connectors, ["hermes"])
 
     def test_never_opted_in_stays_clean(self):
-        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg = self._fresh_config()
         cfg.save()
         with open(os.path.join(cfg.data_dir, "config.yaml")) as f:
             text = f.read()
@@ -507,8 +515,9 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         # process that actually loaded a value and cleared it may drop
         # the key (parity with the authoritative_base rescue for dict
         # paths).
-        data_dir = tempfile.mkdtemp()
-        Config(data_dir=data_dir).save()
+        fresh = self._fresh_config()
+        data_dir = fresh.data_dir
+        fresh.save()
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             stale = config_mod.load()  # gate absent at load
 
@@ -527,14 +536,12 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
         self.assertEqual(reloaded.gateway.port, 19999)
 
-    def test_dotted_literal_key_is_not_dropped(self):
-        # An unmodeled YAML key whose literal name contains dots (flat
-        # dotted style: `guardrail: {"judge.hook_connectors": ...}`)
-        # must never collide with the modeled dotted PATH
-        # guardrail.judge.hook_connectors — it is an extension key and
-        # the round-trip contract preserves it.
-        data_dir = tempfile.mkdtemp()
-        Config(data_dir=data_dir).save()
+    def test_dotted_literal_unknown_key_is_rejected_by_v8_schema(self):
+        # v8 is closed-world: a dotted literal is not an extension escape
+        # hatch and must not be confused with the modeled nested path.
+        fresh = self._fresh_config()
+        data_dir = fresh.data_dir
+        fresh.save()
         cfg_path = os.path.join(data_dir, "config.yaml")
         import yaml as _yaml
 
@@ -546,11 +553,8 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
 
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = config_mod.load()
-            cfg.save()
-
-        with open(cfg_path) as f:
-            saved = _yaml.safe_load(f)
-        self.assertEqual(saved["guardrail"].get("judge.hook_connectors"), ["custom-ext"])
+            with self.assertRaises(V8ConfigError):
+                cfg.save()
 
 
 class TestMergeFunctions(unittest.TestCase):
@@ -713,7 +717,7 @@ class TestConfigLoadSave(unittest.TestCase):
 
             with open(config_file) as f:
                 raw = yaml.safe_load(f)
-            self.assertEqual(raw["environment"], "macos")
+            self.assertEqual(raw.get("environment", detect_environment()), "macos")
             self.assertEqual(raw["data_dir"], tmpdir)
             self.assertEqual(raw["gateway"]["api_bind"], "10.0.0.8")
             self.assertNotIn("config_reload", raw["gateway"])
@@ -1447,31 +1451,6 @@ class TestConfigTopLevelSections(unittest.TestCase):
             self.assertEqual(cfg.inspect_llm.provider, "")
             self.assertEqual(cfg.inspect_llm.timeout, 30)
             self.assertIn("aidefense.security.cisco.com", cfg.cisco_ai_defense.endpoint)
-
-    def test_load_warns_once_when_redaction_disabled(self):
-        import yaml
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_data = {
-                "data_dir": tmpdir,
-                "privacy": {"disable_redaction": True},
-            }
-            with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
-                yaml.dump(config_data, f)
-
-            stderr = io.StringIO()
-            with (
-                patch("defenseclaw.config.default_data_path") as mock_dp,
-                patch.object(config_mod, "_privacy_disable_redaction_warned", False),
-                contextlib.redirect_stderr(stderr),
-            ):
-                mock_dp.return_value = Path(tmpdir)
-                config_mod.load()
-                config_mod.load()
-
-            output = stderr.getvalue()
-            self.assertEqual(output.count("privacy.disable_redaction=true"), 1)
-            self.assertIn("UNREDACTED prompts", output)
 
     def test_load_warns_once_for_same_legacy_llm_fields(self):
         import yaml

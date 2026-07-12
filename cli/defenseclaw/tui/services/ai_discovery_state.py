@@ -408,8 +408,8 @@ class AIDiscoveryPanelModel:
 
     def scan_intent(self) -> AIDiscoveryCommandIntent:
         return AIDiscoveryCommandIntent(
-            label="agent discover",
-            args=("agent", "discover"),
+            label="agent discovery scan",
+            args=("agent", "discovery", "scan"),
             hint="Starting AI discovery scan...",
         )
 
@@ -445,7 +445,7 @@ class AIDiscoveryPanelModel:
         if self.filter_text and not self.filtered:
             return "No matching signals."
         if not self.rows:
-            return "No AI agents detected yet. Run: defenseclaw agent discover"
+            return "No AI usage detected yet. Run: defenseclaw agent discovery scan"
         return ""
 
     def header_parts(self) -> tuple[str, ...]:

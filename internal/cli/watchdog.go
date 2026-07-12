@@ -35,7 +35,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 const (
@@ -45,6 +44,40 @@ const (
 )
 
 type watchdogState int
+
+type watchdogRecoveryRecorder interface {
+	RecordWatchdogRecovery(context.Context) error
+}
+
+type watchdogAPIRecoveryRecorder struct {
+	client *http.Client
+	url    string
+	token  string
+}
+
+func (recorder *watchdogAPIRecoveryRecorder) RecordWatchdogRecovery(ctx context.Context) error {
+	if recorder == nil || recorder.client == nil || ctx == nil ||
+		strings.TrimSpace(recorder.url) == "" || strings.TrimSpace(recorder.token) == "" {
+		return fmt.Errorf("watchdog: recovery recorder unavailable")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, recorder.url, strings.NewReader("{}"))
+	if err != nil {
+		return fmt.Errorf("watchdog: build recovery request")
+	}
+	req.Header.Set("Authorization", "Bearer "+recorder.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", "watchdog")
+	response, err := recorder.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("watchdog: recovery request failed")
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("watchdog: recovery request rejected")
+	}
+	return nil
+}
 
 const (
 	stateHealthy watchdogState = iota
@@ -104,9 +137,9 @@ func init() {
 }
 
 func runWatchdogForeground(_ *cobra.Command, _ []string) error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadRuntimeV8File(config.ConfigPath())
 	if err != nil {
-		cfg = config.DefaultConfig()
+		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
 	}
 
 	interval := time.Duration(cfg.Gateway.Watchdog.Interval) * time.Second
@@ -159,30 +192,18 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), watchdogShutdownSignals()...)
 	defer stop()
 
-	// The watchdog subcommand overrides rootCmd.PersistentPreRunE (see the
-	// empty stub on watchdogCmd) so the shared otelProvider is never
-	// initialized on this code path. Bring up a local provider here so the
-	// defenseclaw.watcher.restarts counter fires on recovery. NewProvider
-	// returns a disabled no-op when cfg.OTel.Enabled is false, keeping this
-	// safe for users who haven't opted into telemetry.
-	tel, telErr := telemetry.NewProvider(ctx, cfg, appVersion)
-	if telErr != nil {
-		fmt.Fprintf(os.Stderr, "[watchdog] warn: otel init failed: %v\n", telErr)
-		tel = nil
-	}
-	defer func() {
-		if tel != nil {
-			// Filter the "collector unreachable" flavours so a
-			// half-configured OTel block (the most common case) does
-			// not produce a stderr banner every time the watchdog
-			// exits. See isTransientOTelShutdownError for the rationale.
-			if err := tel.Shutdown(context.Background()); err != nil && !isTransientOTelShutdownError(err) {
-				fmt.Fprintf(os.Stderr, "[watchdog] warn: otel shutdown: %v\n", err)
-			}
+	var recoveryRecorder watchdogRecoveryRecorder
+	if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+		recoveryRecorder = &watchdogAPIRecoveryRecorder{
+			client: &http.Client{Timeout: 5 * time.Second},
+			url:    strings.TrimSuffix(healthURL, "/health") + "/api/v1/watchdog/recovery",
+			token:  token,
 		}
-	}()
+	} else {
+		fmt.Fprintln(os.Stderr, "[watchdog] warn: gateway token unavailable; recovery telemetry will not be recorded")
+	}
 
-	runWatchdogLoop(ctx, healthURL, interval, debounce, webhooks, tel)
+	runWatchdogLoop(ctx, healthURL, interval, debounce, webhooks, recoveryRecorder)
 	if webhooks != nil {
 		webhooks.Close()
 	}
@@ -208,10 +229,11 @@ func watchdogHealthURL(cfg *config.Config) string {
 	return fmt.Sprintf("http://%s:%d/health", apiBind, apiPort)
 }
 
-func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, webhooks *gateway.WebhookDispatcher, tel *telemetry.Provider) {
+func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, webhooks *gateway.WebhookDispatcher, recovery watchdogRecoveryRecorder) {
 	dataDir := config.DefaultDataPath()
 	current := loadWatchdogState(dataDir)
 	failCount := 0
+	pendingRecovery := false
 	if current != stateHealthy {
 		failCount = debounce // carry over so first healthy probe triggers recovery
 	}
@@ -234,18 +256,18 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
 					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
 					dispatchHealthEvent(webhooks, string(audit.ActionGatewayRecovered), "INFO", "Gateway recovered from "+current.String())
-					// The watchdog is the only surface that observes the
-					// full "down → healthy" transition from outside the
-					// sidecar process, so this is where the reconnection
-					// counter must fire. It complements the in-process
-					// bump on sidecar WS reconnects and gives operators a
-					// metric even when the sidecar itself was restarted.
-					if tel != nil {
-						tel.RecordWatcherRestart(ctx)
-					}
+					pendingRecovery = true
 				}
 				current = stateHealthy
 				saveWatchdogState(dataDir, current)
+				// The recovered sidecar owns the canonical v8 runtime. Keep
+				// retrying this narrow authenticated notification on healthy
+				// probes until its generated restart metric is acknowledged.
+				if pendingRecovery && recovery != nil {
+					if err := recovery.RecordWatchdogRecovery(ctx); err == nil {
+						pendingRecovery = false
+					}
+				}
 
 			case stateDegraded:
 				failCount++
@@ -464,7 +486,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	cfg, cfgErr := config.Load()
+	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
 	enabled := cfgErr == nil && cfg.Gateway.Watchdog.Enabled
 
 	info, err := readWatchdogPIDInfo(pidPath)

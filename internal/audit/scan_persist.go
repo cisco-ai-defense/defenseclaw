@@ -12,7 +12,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -77,9 +76,6 @@ func (s *Store) InsertScanFindings(scanID, target string, findings []scanner.Fin
 	for i := range findings {
 		f := &findings[i]
 		tagsJSON, _ := json.Marshal(f.Tags)
-		safeDescription := redaction.ForSinkString(f.Description)
-		safeLocation := redaction.ForSinkString(f.Location)
-		safeRemediation := redaction.ForSinkString(f.Remediation)
 
 		var line interface{}
 		if f.LineNumber != nil {
@@ -107,16 +103,19 @@ func (s *Store) InsertScanFindings(scanID, target string, findings []scanner.Fin
 			confidence = f.Confidence
 		}
 
-		id := uuid.New().String()
+		id := f.FindingOccurrenceID
+		if id == "" {
+			id = uuid.New().String()
+		}
 		_, err := s.db.Exec(`
 INSERT INTO scan_findings (
-  id, scan_id, scanner, target, rule_id, category, severity, title, description, location, line_number,
+  id, scan_id, scanner, target, rule_id, category, severity, title, description, evidence_summary, location, line_number,
   remediation, tags, timestamp,
   run_id, request_id, session_id, agent_id, agent_instance_id, sidecar_instance_id,
   schema_version, content_hash, generation, binary_version,
   data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, decision_path,
   confidence, evaluation_id
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			id,
 			scanID,
 			f.Scanner,
@@ -125,10 +124,11 @@ INSERT INTO scan_findings (
 			nullStr(f.Category),
 			string(f.Severity),
 			f.Title,
-			safeDescription,
-			safeLocation,
+			f.Description,
+			nullStr(f.EvidenceSummary),
+			f.Location,
 			line,
-			safeRemediation,
+			f.Remediation,
 			string(tagsJSON),
 			ts,
 			nullStr(meta.RunID),
@@ -159,19 +159,20 @@ INSERT INTO scan_findings (
 
 // ScanFindingRow is a scan_findings table projection for tests and APIs.
 type ScanFindingRow struct {
-	ID          string
-	ScanID      string
-	Scanner     string
-	Target      string
-	RuleID      sql.NullString
-	Category    sql.NullString
-	Severity    string
-	Title       sql.NullString
-	Description sql.NullString
-	Location    sql.NullString
-	LineNumber  sql.NullInt64
-	Remediation sql.NullString
-	Tags        sql.NullString
+	ID              string
+	ScanID          string
+	Scanner         string
+	Target          string
+	RuleID          sql.NullString
+	Category        sql.NullString
+	Severity        string
+	Title           sql.NullString
+	Description     sql.NullString
+	EvidenceSummary sql.NullString
+	Location        sql.NullString
+	LineNumber      sql.NullInt64
+	Remediation     sql.NullString
+	Tags            sql.NullString
 	// Confidence is the per-finding model/heuristic score (0.0-1.0).
 	// Populated for runtime detections (hooks, inspect, proxy
 	// guardrail, mid-stream); zero for classic scanner CLIs that
@@ -186,7 +187,7 @@ type ScanFindingRow struct {
 // ListScanFindings returns persisted findings for a scan_id.
 func (s *Store) ListScanFindings(scanID string) ([]ScanFindingRow, error) {
 	rows, err := s.db.Query(`
-SELECT id, scan_id, scanner, target, rule_id, category, severity, title, description, location, line_number,
+SELECT id, scan_id, scanner, target, rule_id, category, severity, title, description, evidence_summary, location, line_number,
        remediation, tags, confidence, evaluation_id
 FROM scan_findings WHERE scan_id = ? ORDER BY severity`, scanID)
 	if err != nil {
@@ -201,7 +202,7 @@ FROM scan_findings WHERE scan_id = ? ORDER BY severity`, scanID)
 		var evaluationID sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.ScanID, &r.Scanner, &r.Target, &r.RuleID, &r.Category,
-			&r.Severity, &r.Title, &r.Description, &r.Location, &r.LineNumber, &r.Remediation, &r.Tags,
+			&r.Severity, &r.Title, &r.Description, &r.EvidenceSummary, &r.Location, &r.LineNumber, &r.Remediation, &r.Tags,
 			&confidence, &evaluationID,
 		); err != nil {
 			return nil, fmt.Errorf("audit: scan finding row: %w", err)

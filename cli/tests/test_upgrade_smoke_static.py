@@ -23,6 +23,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SMOKE_BASELINES = (
+    "0.8.4",
     "0.8.3",
     "0.8.2",
     "0.8.1",

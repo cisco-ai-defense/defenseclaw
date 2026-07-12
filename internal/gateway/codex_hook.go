@@ -81,6 +81,7 @@ type codexHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	SourceReason string   `json:"-"`
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -92,7 +93,7 @@ type codexHookResponse struct {
 // callback immediately before evaluateCodexHook runs.
 //
 // The unified pipeline owns shared concerns (audit envelope refresh,
-// dispatch metric, dedup, trace propagation, OTel emissions) in
+// dispatch metric, dedup, trace propagation, v8 observability emissions) in
 // exactly one place now. See agent_hook.go and hook_profile_runtime.go
 // for the registry and shared-pipeline rationale. The evaluator
 // stamps the unified-pipeline correlation keys (resp.EvaluationID /
@@ -166,7 +167,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Connector: "codex",
 		})
 	case "PreToolUse", "PermissionRequest":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{
+		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{
 			Tool:          codexToolName(req),
 			Args:          codexToolArgs(req),
 			Direction:     "tool_call",
@@ -227,7 +228,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	// Emit per-rule findings FIRST so the notification + audit
 	// rows produced below can carry the resulting evaluation_id
 	// and top rule_ids — keeping the SIEM pivot key identical
-	// across audit log, gateway.jsonl, OS notification, and the
+	// across canonical logs, OS notification, and the
 	// HTTP response body.
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
@@ -356,6 +357,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 		Mode:              mode,
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
+		SourceReason:      reason,
 	}
 	resp.CodexOutput = codexOutput(event, action, rawAction, safeReason, additional)
 	return resp

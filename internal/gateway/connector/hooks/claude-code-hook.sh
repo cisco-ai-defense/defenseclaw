@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v6
+# defenseclaw-managed-hook v7
 # DefenseClaw Claude Code hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/claude-code/hook endpoint. Claude Code pipes
 # the structured JSON event to stdin and reads the response from stdout.
@@ -72,10 +72,6 @@ DEFENSECLAW_HOOK_CONNECTOR="claudecode"
 DEFENSECLAW_HOOK_NAME="claude-code-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
-fi
-
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: claudecode hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
@@ -84,6 +80,43 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   fi
   exit 0
 }
+
+# Cursor 2.4+ can import Claude Code hooks from ~/.claude/settings.json while
+# also running its native ~/.cursor/hooks.json hooks. Imported invocations are
+# still Cursor sessions: Cursor stamps their payload with cursor_version. If
+# DefenseClaw's Cursor hook is installed, let that native hook be the sole
+# telemetry and policy owner. Otherwise one Cursor action is emitted once as
+# cursor and again as claudecode. The selected model is independent of that
+# connector identity: choosing Opus inside Cursor must still attribute the
+# session to Cursor.
+#
+# Do not key this decision from CURSOR_* / editor environment variables: a
+# genuine Claude Code CLI launched from Cursor's terminal inherits those too.
+# The payload marker is injected by Cursor's hook runtime and is absent from a
+# genuine Claude Code hook request. Requiring both the connector-scoped Cursor
+# token and a live managed Cursor script proves that DefenseClaw configured the
+# native bridge that will handle the matching invocation. The script-marker
+# check matters because teardown intentionally leaves a v0 no-op tombstone (and
+# may leave the scoped token) for already-running host processes.
+CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)"
+if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; then
+  CURSOR_HOOK_MARKER=""
+  if [ -r "${HOOK_DIR}/cursor-hook.sh" ]; then
+    {
+      IFS= read -r _CURSOR_HOOK_LINE || true
+      IFS= read -r CURSOR_HOOK_MARKER || true
+    } < "${HOOK_DIR}/cursor-hook.sh"
+  fi
+  case "$CURSOR_HOOK_MARKER" in
+    "# defenseclaw-managed-hook v"[1-9]*) exit 0 ;;
+  esac
+fi
+unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
+
+if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
+fi
+
 API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked

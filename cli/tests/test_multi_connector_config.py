@@ -442,6 +442,8 @@ class TestLoadAndRoundTrip(unittest.TestCase):
         import yaml
 
         raw = {
+            "config_version": 8,
+            "observability": {},
             "guardrail": {
                 "enabled": True,
                 "connector": "antigravity",

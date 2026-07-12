@@ -264,7 +264,7 @@ aid_endpoint_for_env() {
   esac
 }
 
-# render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
+# render_config MODE PRIMARY API_PORT SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
 # Renders the full config.yaml. Pure stdout, no file writes.
 # Extra args after AID_ENDPOINT are the full connector list (primary + others).
 #
@@ -285,31 +285,37 @@ render_config() {
   local mode="$1"
   local primary="$2"
   local api_port="$3"
-  local disable_redaction="$4"
-  local support_dir="$5"
-  local aid_endpoint="$6"
-  shift 6
+  local support_dir="$4"
+  local aid_endpoint="$5"
+  shift 5
   local -a connectors=("$@")
   local runtime_dir="${support_dir}/runtime"
 
   cat <<EOF
-config_version: 6
+config_version: 8
 deployment_mode: managed_enterprise
 
 data_dir: "${runtime_dir}"
-audit_db: "${runtime_dir}/audit.db"
-judge_bodies_db: "${runtime_dir}/judge_bodies.db"
+
+observability:
+  local:
+    path: "${runtime_dir}/audit.db"
+    judge_bodies_path: "${runtime_dir}/judge_bodies.db"
+  # Managed installs retain the previous secure-by-default behavior. To
+  # change redaction, edit this profile (or add per-bucket overrides) and
+  # validate the complete v8 source before restarting the daemon.
+  defaults:
+    redaction_profile: sensitive
 
 gateway:
   api_bind: 127.0.0.1
   api_port: ${api_port}
-  # Pin device_key_file into RUNTIME_DIR (service-user writable) rather
+  # Pin device_key_file into RUNTIME_DIR rather
   # than letting the Go defaults compute it from DEFENSECLAW_HOME. The
   # plist sets DEFENSECLAW_HOME to SUPPORT_DIR so managed_enterprise
-  # trust checks accept every ancestor of config.yaml, but SUPPORT_DIR
-  # itself is root:defenseclaw 0750 (no group write) — leaving the
-  # default would send the daemon's first-boot write to
-  # \${SUPPORT_DIR}/device.key and crash it with "permission denied".
+  # trust checks accept every ancestor of config.yaml. Keeping mutable
+  # runtime state below the dedicated runtime directory also preserves
+  # the root-owned managed-install layout.
   device_key_file: "${runtime_dir}/device.key"
   # The skill/plugin/MCP watcher periodically re-scans agent component
   # directories and invokes the 'defenseclaw' python scanner binary.
@@ -321,9 +327,6 @@ gateway:
   # the enforced action path we're building. Turn it off.
   watcher:
     enabled: false
-
-privacy:
-  disable_redaction: ${disable_redaction}
 
 guardrail:
   enabled: true

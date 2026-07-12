@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "v7 correlation surface: agent.id × agent.instance_id × sidecar.instance_id, identity churn, on-demand agent discovery confidence, continuous AI inventory rollups, and per-connector header-presence rate.",
+  "description": "Canonical v8 correlation surface: agent.id × agent.instance_id × sidecar.instance_id, identity churn, on-demand agent discovery confidence, continuous AI inventory rollups, and per-connector identity-presence rate.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -50,7 +50,7 @@
         "name": "connector",
         "label": "Connector",
         "type": "custom",
-        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot,openhands,antigravity",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot,openhands,antigravity,opencode,omnigent",
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
@@ -112,6 +112,14 @@
           {
             "text": "antigravity",
             "value": "antigravity"
+          },
+          {
+            "text": "opencode",
+            "value": "opencode"
+          },
+          {
+            "text": "omnigent",
+            "value": "omnigent"
           }
         ],
         "skipUrlSync": false,
@@ -147,7 +155,7 @@
       },
       "targets": [
         {
-          "expr": "count(count by (connector, gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[5m]))) or vector(0)",
+          "expr": "count(max by (connector, gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[5m])) > time() - 300) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -156,7 +164,7 @@
     {
       "type": "stat",
       "title": "Active agent_instance_id (5m, Loki)",
-      "description": "Distinct defenseclaw_agent_instance_id values seen on gateway events in the last 5 minutes. agent_instance_id lives on log attributes (not on metric labels — keeps Prometheus cardinality bounded) so we read it from Loki. A single connector running multiple shells will show >1 here.",
+      "description": "Distinct defenseclaw.agent.instance_id values seen in canonical v8 log bodies during the last 5 minutes. The ID stays out of Prometheus labels to bound cardinality. A connector running multiple shells can show more than one instance.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -169,7 +177,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (defenseclaw_agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_agent_instance_id != \"\" [5m])))",
+          "expr": "count(sum by (agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_instance_id=\"{{.body_defenseclaw_agent_instance_id}}\" | agent_instance_id != \"\" [5m])))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -182,7 +190,7 @@
     {
       "type": "stat",
       "title": "Sidecar instances (5m)",
-      "description": "Distinct sidecar.instance_id values seen on gateway events. Should be exactly 1 unless you are running multiple sidecars on the same host.",
+      "description": "Distinct canonical correlation.sidecar_instance_id values seen in logs. This should be exactly one unless multiple sidecars share the host.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -195,7 +203,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (defenseclaw_sidecar_instance_id) (count_over_time({service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | defenseclaw_sidecar_instance_id != \"\" [5m])))",
+          "expr": "count(sum by (sidecar_instance_id) (count_over_time({service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | label_format sidecar_instance_id=\"{{.correlation_sidecar_instance_id}}\" | sidecar_instance_id != \"\" [5m])))",
           "refId": "A",
           "instant": true
         }
@@ -203,11 +211,11 @@
     },
     {
       "type": "stat",
-      "title": "Discovery runs (range)",
-      "description": "On-demand connector discovery reports accepted during the selected range.",
+      "title": "Discovery runs ($__range)",
+      "description": "Exact canonical agent.discovery.completed and agent.discovery.rejected summary events recorded during the selected range. This log count includes a first report even when Prometheus has not yet scraped two counter samples.",
       "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
+        "type": "loki",
+        "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 12,
@@ -217,16 +225,25 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_agent_discovery_runs_total[$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.](completed|rejected)\" [$__range])) or vector(0)",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "type": "stat",
       "title": "AI discovery active signals",
-      "description": "Most recent active-signal count from continuous AI visibility scans.",
+      "description": "Current active-signal count from the newest non-stale service instance per logical (source, privacy_mode). No data means no current discovery sample; 0 means the latest completed scan found no active signals.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -239,7 +256,7 @@
       },
       "targets": [
         {
-          "expr": "max(max_over_time(defenseclaw_ai_discovery_active_signals[$__range])) or vector(0)",
+          "expr": "sum(max by (source, privacy_mode) ((defenseclaw_ai_discovery_active_signals and (timestamp(defenseclaw_ai_discovery_active_signals) == on (source, privacy_mode) group_left max by (source, privacy_mode) (timestamp(defenseclaw_ai_discovery_active_signals)))) and (timestamp(defenseclaw_ai_discovery_active_signals) >= time() - 300)))",
           "refId": "A",
           "instant": true
         }
@@ -261,7 +278,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (ecosystem, name) (max_over_time(defenseclaw_ai_components_installs[$__range]))) or vector(0)",
+          "expr": "count(sum by (ecosystem, name) (last_over_time(defenseclaw_ai_components_installs[$__range])) > 0)",
           "refId": "A",
           "instant": true
         }
@@ -351,7 +368,7 @@
     {
       "type": "timeseries",
       "title": "Distinct agent.id observed (Loki, by gen_ai.agent.name)",
-      "description": "Loki-derived count of distinct `gen_ai_agent_id` values per connector observed in event logs. Populates only when LLM events flow through the sidecar. Sustained growth on the same `gen_ai_agent_name` = the connector is rotating its agent.id (instability — should be stable per install).",
+      "description": "Loki-derived count of distinct `gen_ai_agent_id` values grouped by agent name for the selected connector. Populates only when canonical events carry agent identity.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -364,8 +381,8 @@
       },
       "targets": [
         {
-          "expr": "count by (gen_ai_agent_name) (sum by (gen_ai_agent_name, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | gen_ai_agent_id != \"\" [$__interval])))",
-          "legendFormat": "{{gen_ai_agent_name}}",
+          "expr": "count by (agent_name) (sum by (agent_name, agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\", agent_id=\"{{.body_gen_ai_agent_id}}\" | agent_id != \"\" [$__interval])))",
+          "legendFormat": "{{agent_name}}",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -382,7 +399,7 @@
     {
       "type": "timeseries",
       "title": "Header-presence rate (Loki) — events with gen_ai.agent.id set",
-      "description": "Loki-derived: fraction of gateway log events (per connector via `gen_ai_agent_name`) that also carry `gen_ai_agent_id` (i.e. the `X-DefenseClaw-Agent-Id` header was honored end-to-end). 1.0 = healthy, below 1.0 = the connector is dropping identity on some calls.",
+      "description": "Loki-derived fraction of selected-connector canonical events that carry `gen_ai_agent_id`, grouped by agent name. 1.0 = all matching events retained an agent identity.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -395,8 +412,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | gen_ai_agent_id != \"\" [$__interval])) / sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" [$__interval]))",
-          "legendFormat": "{{gen_ai_agent_name}}",
+          "expr": "sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" | body_gen_ai_agent_id != \"\" [$__interval])) / sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" [$__interval]))",
+          "legendFormat": "{{agent_name}}",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -679,7 +696,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (signal_category) (max_over_time(defenseclaw_ai_discovery_signals_total[$__range]))",
+          "expr": "sum by (signal_category) (increase(defenseclaw_ai_discovery_signals_total[$__range]))",
           "legendFormat": "{{signal_category}}",
           "refId": "A"
         }
@@ -692,7 +709,7 @@
     },
     {
       "type": "table",
-      "title": "Top vendors / products (1h)",
+      "title": "Top vendors / products ($__range)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -705,7 +722,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (max_over_time(defenseclaw_ai_discovery_signals_total[$__range])))",
+          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (increase(defenseclaw_ai_discovery_signals_total[$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -723,7 +740,7 @@
               "service_namespace": true
             },
             "renameByName": {
-              "Value": "signals/1h"
+              "Value": "signals/$__range"
             }
           }
         }
@@ -800,7 +817,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | event_name=~\"defenseclaw[.](agent|ai)[.]discovery.*\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.].*|ai[.]discovery[.].*|ai_component[.].*\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -830,7 +847,7 @@
     {
       "type": "table",
       "title": "Observed agents — click Agent ID for Agent360",
-      "description": "One row per stable agent identity and current lifecycle state. New agents appear without dashboard provisioning changes.",
+      "description": "One row per stable agent identity with the latest observed timestamp and the identity and lineage labels exported by defenseclaw.agent.last_seen. Open Agent360 for lifecycle state, depth, execution, and event details.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -890,9 +907,7 @@
               "gen_ai_agent_name": "Name",
               "gen_ai_agent_type": "Type",
               "defenseclaw_agent_root_id": "Root Agent",
-              "defenseclaw_agent_parent_id": "Parent Agent",
-              "defenseclaw_agent_lifecycle_state": "State",
-              "defenseclaw_agent_depth": "Depth"
+              "defenseclaw_agent_parent_id": "Parent Agent"
             }
           }
         }
@@ -918,7 +933,7 @@
                 "value": [
                   {
                     "title": "${__value.text}",
-                    "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=gen_ai_agent_id",
+                    "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=gen_ai_agent_id&from=${__from}&to=${__to}",
                     "targetBlank": false
                   }
                 ]
@@ -942,7 +957,7 @@
                 "value": [
                   {
                     "title": "${__value.text}",
-                    "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=defenseclaw_agent_root_id",
+                    "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=defenseclaw_agent_root_id&from=${__from}&to=${__to}",
                     "targetBlank": false
                   }
                 ]

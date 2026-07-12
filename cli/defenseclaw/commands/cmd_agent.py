@@ -986,12 +986,6 @@ def discovery() -> None:
     ),
 )
 @click.option(
-    "--emit-otel/--no-emit-otel",
-    "emit_otel",
-    default=None,
-    help="Forward sanitized discovery telemetry through the sidecar (default: on).",
-)
-@click.option(
     "--allow-workspace-signatures/--no-allow-workspace-signatures",
     "allow_workspace_signatures",
     default=None,
@@ -1036,7 +1030,6 @@ def discovery_enable(
     include_package_manifests: bool | None,
     include_env_var_names: bool | None,
     include_network_domains: bool | None,
-    emit_otel: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     restart: bool,
@@ -1074,7 +1067,6 @@ def discovery_enable(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1287,7 +1279,6 @@ def discovery_status(
         "include_package_manifests": bool(ad.include_package_manifests),
         "include_env_var_names": bool(ad.include_env_var_names),
         "include_network_domains": bool(ad.include_network_domains),
-        "emit_otel": bool(ad.emit_otel),
     }
 
     live: dict[str, Any] = {"reachable": False, "enabled": None, "summary": None, "error": ""}
@@ -1490,13 +1481,9 @@ def discovery_setup(
         default=bool(ad.include_network_domains),
     )
 
-    # ----- Output ---------------------------------------------------------
+    # ----- Safety ---------------------------------------------------------
     click.echo()
-    ux.section("Output")
-    emit_otel = click.confirm(
-        "  Forward sanitized telemetry through the sidecar (OTel)?",
-        default=bool(ad.emit_otel),
-    )
+    ux.section("Safety")
     allow_workspace_signatures = click.confirm(
         "  Honor signature packs found inside scanned workspaces? "
         "(off is safer)",
@@ -1520,7 +1507,6 @@ def discovery_setup(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1720,7 +1706,6 @@ def _build_discovery_overrides(
     include_package_manifests: bool | None = None,
     include_env_var_names: bool | None = None,
     include_network_domains: bool | None = None,
-    emit_otel: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
 ) -> dict[str, Any]:
@@ -1758,8 +1743,6 @@ def _build_discovery_overrides(
         overrides["include_env_var_names"] = bool(include_env_var_names)
     if include_network_domains is not None:
         overrides["include_network_domains"] = bool(include_network_domains)
-    if emit_otel is not None:
-        overrides["emit_otel"] = bool(emit_otel)
     if allow_workspace_signatures is not None:
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
@@ -1972,7 +1955,7 @@ def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
 @pass_ctx
 def signatures_disable(app: AppContext, signature_id: str) -> None:
     """Disable one signature id in ai_discovery.disabled_signature_ids."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     if not normalized:
         raise click.ClickException("signature id must not be empty")
@@ -1989,7 +1972,7 @@ def signatures_disable(app: AppContext, signature_id: str) -> None:
 @pass_ctx
 def signatures_enable(app: AppContext, signature_id: str) -> None:
     """Re-enable one signature id previously disabled in config."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     if normalized in disabled:
@@ -2034,10 +2017,15 @@ def _require_loaded_config(app: AppContext):
     """
     cfg = getattr(app, "cfg", None)
     if cfg is not None:
+        if getattr(cfg, "_source_config_version", None) != 8:
+            raise click.ClickException(
+                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+            )
         return cfg
     from defenseclaw import config as cfg_mod
 
     try:
+        cfg_mod.require_v8_config()
         cfg = cfg_mod.load()
     except Exception as exc:
         raise click.ClickException(
@@ -3520,8 +3508,7 @@ def _render_component_show(
                 cells.append(str(loc.get("raw_path", "")))
             plain.append(" | ".join(cells))
         if not has_raw:
-            plain.append("(raw paths hidden — flip privacy.disable_redaction "
-                         "and ai_discovery.store_raw_local_paths to surface them)")
+            plain.append("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
         return "\n".join(plain) + "\n"
 
     from io import StringIO
@@ -3554,10 +3541,7 @@ def _render_component_show(
         table.add_row(*cells)
     console.print(table)
     if not has_raw:
-        console.print(
-            "(raw paths hidden — flip privacy.disable_redaction and "
-            "ai_discovery.store_raw_local_paths to surface them)"
-        )
+        console.print("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
     return stream.getvalue()
 
 

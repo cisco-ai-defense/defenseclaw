@@ -115,6 +115,22 @@ enum RuntimeInstallFilesystem {
         return markers.first(where: lexicalPathExists)
     }
 
+    /// First marker beneath the installation selected by InstallationContext.
+    /// The process-wide CLI/gateway paths are checked separately by
+    /// `existingManagedRuntimeMarker(home:)`; this covers a custom
+    /// DEFENSECLAW_HOME and an independently selected DEFENSECLAW_VENV without
+    /// following a final-component symlink.
+    static func existingSelectedRuntimeMarker(dataHome: String, venvDir: String) -> String? {
+        if lexicalPathExists(dataHome), !isLexicallyEmptyDirectory(dataHome) {
+            return dataHome
+        }
+        let defaultVenv = dataHome + "/.venv"
+        if venvDir != defaultVenv, lexicalPathExists(venvDir) {
+            return venvDir
+        }
+        return nil
+    }
+
     static func lexicalPathExists(_ path: String) -> Bool {
         var metadata = stat()
         return path.withCString { pointer in
@@ -465,6 +481,35 @@ enum RuntimeInstallFilesystem {
         return reservations
     }
 
+    /// Ensure an arbitrary absolute InstallationContext path through the same
+    /// pinned openat/mkdirat walk used for the standard per-user layout.
+    /// Standardization is required up front so the journal and activation
+    /// receipt bind one exact lexical path rather than an alias containing
+    /// `.` or `..` components.
+    static func ensureRealDirectoryPath(_ path: String) throws -> PathIdentity {
+        let standardized = URL(fileURLWithPath: path, isDirectory: true)
+            .standardizedFileURL.path
+        guard path.hasPrefix("/"), path == standardized else {
+            throw ActivationError.parentChanged(path)
+        }
+        if path == "/" {
+            guard isRealDirectory(path), let identity = pathIdentity(path) else {
+                throw ActivationError.parentChanged(path)
+            }
+            return identity
+        }
+        var components = URL(fileURLWithPath: path, isDirectory: true).pathComponents
+        guard components.first == "/" else {
+            throw ActivationError.parentChanged(path)
+        }
+        components.removeFirst()
+        let reservations = try ensureRealDirectoryTree(root: "/", components: components)
+        guard let reservation = reservations.last, reservation.path == path else {
+            throw ActivationError.parentChanged(path)
+        }
+        return reservation.identity
+    }
+
     /// Capture every staged inode and re-check every canonical target before
     /// activation. The subsequent renamex_np(RENAME_EXCL) calls repeat the
     /// absence guarantee atomically, so this read-only check is diagnostic and
@@ -706,7 +751,8 @@ enum RuntimeInstallFilesystem {
     static func recoverFreshInstallActivation(
         journalPath: String,
         dataHome: String,
-        binDir: String
+        binDir: String,
+        venvDir: String? = nil
     ) throws -> [String] {
         guard lexicalPathExists(journalPath) else { return [] }
         let journalParts = splitPath(journalPath)
@@ -735,6 +781,7 @@ enum RuntimeInstallFilesystem {
               validateFreshInstallJournalTargets(
                 journal.targets,
                 dataHome: dataHome,
+                venvDir: venvDir ?? dataHome + "/.venv",
                 binDir: binDir
               ) else {
             try? handle.close()
@@ -839,14 +886,19 @@ enum RuntimeInstallFilesystem {
     private static func validateFreshInstallJournalTargets(
         _ targets: [ActivationTarget],
         dataHome: String,
+        venvDir: String,
         binDir: String
     ) -> Bool {
+        let venv = splitPath(venvDir)
         let expected: [(destination: String, stageParent: String, stagePrefix: String)] = [
-            (dataHome + "/.venv", dataHome, ".venv.staging-"),
+            (venvDir, venv.parent, venv.leaf + ".staging-"),
             (binDir + "/defenseclaw-gateway", binDir, "defenseclaw-gateway.install-"),
             (binDir + "/defenseclaw", binDir, "defenseclaw.install-"),
         ]
-        guard targets.count == expected.count else { return false }
+        guard targets.count == expected.count,
+              !venv.leaf.isEmpty,
+              venvDir == URL(fileURLWithPath: venvDir).standardizedFileURL.path
+        else { return false }
         for (target, rule) in zip(targets, expected) {
             let staged = splitPath(target.stagedPath)
             let destination = splitPath(target.destinationPath)

@@ -23,11 +23,13 @@ can share the same database file.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import stat
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from defenseclaw.models import ActionEntry, ActionState, Counts, Event, TargetSnapshot
@@ -200,13 +202,36 @@ def _validate(field: str, value: str) -> None:
 
 
 class Store:
-    def __init__(self, db_path: str) -> None:
-        newly_created = self._db_will_be_created(db_path)
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        read_only: bool = False,
+        timeout: float = 5.0,
+    ) -> None:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("audit: SQLite timeout must be finite and non-negative")
+        busy_timeout_ms = int(timeout * 1000)
+
+        self.read_only = read_only
+        self._scan_results_has_retention_timestamp: bool | None = None
+        newly_created = not read_only and self._db_will_be_created(db_path)
+        connect_path = self._read_only_uri(db_path) if read_only else db_path
         self.db = sqlite3.connect(
-            db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=5.0,
+            connect_path,
+            detect_types=sqlite3.PARSE_DECLTYPES,
+            timeout=timeout,
+            uri=read_only,
         )
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=5000")
+        if read_only:
+            # ``mode=ro`` prevents file writes while ``query_only`` also
+            # rejects accidental mutations through writable attached DBs.
+            # In particular, do not run the journal-mode pragma here: a TUI
+            # reader must never attempt to change writer-owned journal state.
+            self.db.execute("PRAGMA query_only=ON")
+        else:
+            self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         # The audit DB stores audit events, scan results, findings, raw
         # scanner JSON, target paths, and action decisions, so it must be
         # private to the operator / service account. sqlite3.connect()
@@ -214,14 +239,44 @@ class Store:
         # world- or group-readable (F-0083). Pin the file to owner-only
         # (0600) and, for a DB we just created, drop world access on the
         # parent directory so a different local user cannot traverse to it.
-        self._harden_permissions(db_path, newly_created)
+        if not read_only:
+            self._harden_permissions(db_path, newly_created)
+
+    @classmethod
+    def open_read_only(cls, db_path: str, *, timeout: float = 0.1) -> Store:
+        """Open an existing audit database for latency-bounded UI reads.
+
+        The connection is deliberately not initialized or migrated. The
+        gateway/writable CLI store owns schema and journal configuration.
+        Create this Store in the worker thread that will use it because the
+        standard sqlite3 same-thread safety check remains enabled.
+        """
+
+        return cls(db_path, read_only=True, timeout=timeout)
+
+    @classmethod
+    def _read_only_uri(cls, db_path: str) -> str:
+        if not cls._is_disk_path(db_path):
+            raise ValueError("audit: read-only Store requires an on-disk database")
+        if db_path.startswith("file:"):
+            base, _, raw_query = db_path.partition("?")
+            query = [
+                item
+                for item in raw_query.split("&")
+                if item and not item.lower().startswith("mode=")
+            ]
+            query.append("mode=ro")
+            return f"{base}?{'&'.join(query)}"
+        return f"{Path(os.path.abspath(db_path)).as_uri()}?mode=ro"
 
     @staticmethod
     def _is_disk_path(db_path: str) -> bool:
         """True for an on-disk DB path (not an in-memory database)."""
         if not db_path or db_path == ":memory:":
             return False
-        if db_path.startswith("file:") and "mode=memory" in db_path:
+        if db_path.startswith("file:") and (
+            db_path.startswith("file::memory:") or "mode=memory" in db_path
+        ):
             return False
         return True
 
@@ -257,9 +312,12 @@ class Store:
             pass
 
     def init(self) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("audit: read-only Store cannot initialize schema")
         self.db.executescript(SCHEMA)
         self._ensure_run_id_columns()
         self._ensure_audit_connector_columns()
+        self._ensure_v8_alert_projection_schema()
         # Add the per-connector column + swap the actions uniqueness index to
         # (target_type, target_name, connector) BEFORE migrating the legacy
         # block/allow lists, so the INSERT OR REPLACE block-last-wins ordering
@@ -350,6 +408,41 @@ class Store:
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp "
             "ON audit_events(action, connector, timestamp DESC)"
+        )
+        self.db.commit()
+
+    def _ensure_v8_alert_projection_schema(self) -> None:
+        """Install the read-only v8 fields used by Python alert views.
+
+        The gateway remains the only writer for protected disposition state.
+        This exact additive shape lets a first-run CLI open the shared database
+        before the Go process without creating an incompatible placeholder.
+        """
+
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        for column in ("bucket", "event_name"):
+            if column not in columns:
+                self.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        self.db.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_bucket_timestamp
+                ON audit_events(bucket, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_audit_event_name_timestamp
+                ON audit_events(event_name, timestamp);
+            CREATE TABLE IF NOT EXISTS alert_acknowledgement_projection (
+                alert_id TEXT PRIMARY KEY,
+                disposition TEXT NOT NULL CHECK (disposition IN ('acknowledged','dismissed')),
+                actor TEXT NOT NULL,
+                disposition_at DATETIME NOT NULL,
+                projection_version INTEGER NOT NULL CHECK (projection_version > 0),
+                source TEXT NOT NULL CHECK (source IN ('modern','legacy_ack')),
+                source_event_id TEXT NOT NULL,
+                updated_at DATETIME NOT NULL
+            );
+            """
         )
         self.db.commit()
 
@@ -592,6 +685,25 @@ class Store:
             return int(
                 self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0
             )
+        if self._scan_results_supports_retention_timestamp():
+            cutoff_unix_nano = _datetime_unix_nano(since)
+            if -(2**63) <= cutoff_unix_nano <= (2**63) - 1:
+                # Current gateway schemas maintain this indexed integer from
+                # ``timestamp``. The second branch preserves correctness while
+                # a legacy database's additive timestamp backfill is running;
+                # the same index restricts that branch to NULL rows.
+                return int(
+                    self.db.execute(
+                        """SELECT
+                               (SELECT COUNT(*) FROM scan_results
+                                WHERE retention_timestamp_unix_nano >= ?)
+                             + (SELECT COUNT(*) FROM scan_results
+                                WHERE retention_timestamp_unix_nano IS NULL
+                                  AND datetime(timestamp) >= datetime(?))""",
+                        (cutoff_unix_nano, since.isoformat()),
+                    ).fetchone()[0]
+                    or 0
+                )
         return int(
             self.db.execute(
                 "SELECT COUNT(*) FROM scan_results WHERE datetime(timestamp) >= datetime(?)",
@@ -600,12 +712,29 @@ class Store:
             or 0
         )
 
+    def _scan_results_supports_retention_timestamp(self) -> bool:
+        cached = self._scan_results_has_retention_timestamp
+        if cached is not None:
+            return cached
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(scan_results)").fetchall()
+        }
+        supported = "retention_timestamp_unix_nano" in columns
+        self._scan_results_has_retention_timestamp = supported
+        return supported
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
                  AND action NOT LIKE 'dismiss%'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM alert_acknowledgement_projection AS projection
+                     WHERE projection.alert_id = audit_events.id
+                 )
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
@@ -620,7 +749,12 @@ class Store:
                       severity, run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
                  AND action NOT LIKE 'dismiss%'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM alert_acknowledgement_projection AS projection
+                     WHERE projection.alert_id = audit_events.id
+                 )
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -644,7 +778,12 @@ class Store:
                        )
                    )
                )
+                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
                  AND action NOT LIKE 'dismiss%'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM alert_acknowledgement_projection AS projection
+                     WHERE projection.alert_id = audit_events.id
+                 )
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -660,25 +799,6 @@ class Store:
         if row is None:
             return None
         return self._row_to_event(row)
-
-    def acknowledge_alerts(self, severity_filter: str = "all") -> int:
-        """Mirror internal/audit/store.go AcknowledgeAlerts — rows updated."""
-        if severity_filter in ("", "all"):
-            cur = self.db.execute(
-                """UPDATE audit_events SET severity = 'ACK'
-                   WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')""",
-            )
-        else:
-            cur = self.db.execute(
-                "UPDATE audit_events SET severity = 'ACK' WHERE severity = ?",
-                (severity_filter,),
-            )
-        self.db.commit()
-        return int(cur.rowcount or 0)
-
-    def dismiss_alerts_visible(self, severity_filter: str = "all") -> int:
-        """Clear visible alerts by downgrading severity (parity with acknowledge for SQLite schema)."""
-        return self.acknowledge_alerts(severity_filter)
 
     # -- Scan results --
 
@@ -972,7 +1092,11 @@ class Store:
             blocked_mcps=_count(q_mcp + "'block'"),
             allowed_mcps=_count(q_mcp + "'allow'"),
             alerts=_count(
-                "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
+                "SELECT COUNT(*) FROM audit_events "
+                "WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW') "
+                "AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed')) "
+                "AND NOT EXISTS (SELECT 1 FROM alert_acknowledgement_projection AS projection "
+                "WHERE projection.alert_id = audit_events.id)"
             ),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
             blocked_egress_calls=_count(
@@ -992,13 +1116,35 @@ class Store:
         def _count(sql: str) -> int:
             return self.db.execute(sql).fetchone()[0]
 
-        q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
-        q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        action_counts = self.db.execute(
+            """SELECT
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'skill'
+                        AND json_extract(actions_json, '$.install') = 'block'
+                       THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'skill'
+                        AND json_extract(actions_json, '$.install') = 'allow'
+                       THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'mcp'
+                        AND json_extract(actions_json, '$.install') = 'block'
+                       THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'mcp'
+                        AND json_extract(actions_json, '$.install') = 'allow'
+                       THEN 1 ELSE 0 END), 0)
+               FROM actions
+               WHERE target_type IN ('skill', 'mcp')"""
+        ).fetchone()
+        blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (
+            int(value or 0) for value in action_counts
+        )
         return Counts(
-            blocked_skills=_count(q_skill + "'block'"),
-            allowed_skills=_count(q_skill + "'allow'"),
-            blocked_mcps=_count(q_mcp + "'block'"),
-            allowed_mcps=_count(q_mcp + "'allow'"),
+            blocked_skills=blocked_skills,
+            allowed_skills=allowed_skills,
+            blocked_mcps=blocked_mcps,
+            allowed_mcps=allowed_mcps,
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
             blocked_egress_calls=_count(
                 "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
@@ -1154,6 +1300,21 @@ def _parse_ts(val: Any) -> datetime:
             except ValueError:
                 continue
     return datetime.now(timezone.utc)
+
+
+def _datetime_unix_nano(value: datetime) -> int:
+    """Convert a datetime to Unix nanoseconds without float precision loss."""
+
+    if value.tzinfo is None:
+        normalized = value.replace(tzinfo=timezone.utc)
+    else:
+        normalized = value.astimezone(timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = normalized - epoch
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
+        + delta.microseconds * 1_000
+    )
 
 
 def _current_run_id() -> str:

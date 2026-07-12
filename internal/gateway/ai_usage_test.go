@@ -47,9 +47,7 @@ func TestHandleAIUsageDisabled(t *testing.T) {
 func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
 	api.SetAIDiscoveryService(inventory.NewContinuousDiscoveryServiceWithOptions(
-		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir(), EmitOTel: false},
-		nil,
-		nil,
+		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir()},
 		nil,
 	))
 	body := `{
@@ -89,8 +87,6 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 			IncludeEnvVarNames:      false,
 			IncludeNetworkDomains:   false,
 			StoreRawLocalPaths:      true,
-			DisableRedaction:        false,
-			EmitOTel:                false,
 		},
 		[]inventory.AISignature{{
 			ID:          "raw-ai-config",
@@ -99,8 +95,6 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 			Category:    inventory.SignalWorkspaceArtifact,
 			ConfigPaths: []string{"~/.raw-ai/config.json"},
 		}},
-		nil,
-		nil,
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

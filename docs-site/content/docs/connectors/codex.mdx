@@ -25,6 +25,8 @@ defenseclaw setup codex --mode action  # block on policy hits via PreToolUse den
 
 `setup codex` is shorthand for `setup guardrail --connector codex`: it adds or reconfigures Codex, wires hooks + OTel + notify bridge, and can join an existing hook-connector roster when you choose **Add**. No proxy listener binds for Codex in either mode.
 
+Native logs, metrics, and traces use three Codex-scoped loopback endpoints under `/otlp/codex/<scoped-token>/v1/...`. Setup generates the OTLP credential in `~/.defenseclaw/hooks/.otlp-codex.token` with owner-only permissions. It is separate from both the gateway master token and the Codex hook credential, is accepted only for the Codex OTLP namespace over loopback, and is redacted from gateway route telemetry. `config.toml` contains no gateway or hook credential in an exporter header. Teardown removes the credential only after the managed Codex config is restored successfully; a later setup creates a new credential.
+
 #### What this command sets vs. leaves at defaults
 
 The three flags above explicitly set: connector, mode, and post-setup restart. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
@@ -39,7 +41,7 @@ The three flags above explicitly set: connector, mode, and post-setup restart. E
 | HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
 | Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
 | Verify after setup | on | `--no-verify` |
 
 See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
@@ -53,6 +55,7 @@ See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks">
       <File name="codex-hook.sh" />
+      <File name=".otlp-codex.token (owner-only scoped OTLP credential)" />
     </Folder>
   </Folder>
 </Files>

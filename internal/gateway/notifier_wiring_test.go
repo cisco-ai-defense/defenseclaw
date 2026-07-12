@@ -391,7 +391,7 @@ func TestHILTDispatch_RequestFiresApprovalPending(t *testing.T) {
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
 
-	m := NewHILTApprovalManager(client, nil, nil)
+	m := NewHILTApprovalManager(client)
 	m.TrackSession("session-A")
 
 	d, rec := newWiringDispatcher()

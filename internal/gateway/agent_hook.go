@@ -34,7 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -100,6 +100,16 @@ type agentHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	// SourceReason is retained only for canonical v8 routing. Reason remains
+	// the connector-safe response projection and is never reused as source.
+	SourceReason string `json:"-"`
+}
+
+func hookSourceReason(resp agentHookResponse) string {
+	if resp.SourceReason != "" {
+		return resp.SourceReason
+	}
+	return resp.Reason
 }
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
@@ -296,7 +306,7 @@ func (a *APIServer) finalizeAgentHook(
 		RawAction:    resp.RawAction,
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
-		Reason:       resp.Reason,
+		Reason:       hookSourceReason(resp),
 		WouldBlock:   resp.WouldBlock,
 		ElapsedMs:    elapsed.Milliseconds(),
 		BodyBytes:    int64(len(rawBody)),
@@ -309,9 +319,12 @@ func (a *APIServer) finalizeAgentHook(
 		env.Extra = map[string]string{"panic": "true"}
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
-	attachRawPayload(&env, rawBody)
 	safeSection("identity", func() {
 		a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
+		// These fields describe the already-active HTTP/hook span. They are
+		// independent of metric export and must remain available even when the
+		// destination collects traces but not metrics.
+		enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 	})
 
 	safeSection("health", func() {
@@ -327,86 +340,23 @@ func (a *APIServer) finalizeAgentHook(
 		}
 	})
 
-	safeSection("otel", func() {
-		if a.otel == nil {
-			return
-		}
-		result := "ok"
-		reason := normalizeHookReasonLabel(resp.Action, resp.WouldBlock)
-		if panicked {
-			result = "panic"
-			reason = "panic"
-		}
-		eventLabel := normalizeHookEventLabel(req.HookEventName)
-		decisionLabel := normalizeHookActionLabel(resp.Action)
-		rawActionLabel := normalizeHookActionLabel(resp.RawAction)
-		toolLabel := hookMetricToolLabel(connectorName, req.HookEventName)
-		// Dual emission of hook.* and inspect.* is intentional and
-		// load-bearing:
-		//
-		//   - defenseclaw.connector.hook.{invocations,latency,outcome}
-		//     split connector and event_type into separate dimensions
-		//     — that is the shape new dashboards (defenseclaw-overview,
-		//     -hitl, -policy-decisions) and PromQL alerts query.
-		//   - defenseclaw.inspect.{evaluations,latency} expose a
-		//     composite `tool=<connector>:<event>` label that the
-		//     legacy security / connectors / connector-detail
-		//     dashboards filter on (tool=~"$connector:.*"). Removing
-		//     these calls silently breaks every panel that uses that
-		//     filter, including the per-connector verdict breakdown
-		//     in defenseclaw-connector-detail.json.
-		//
-		// Keep both in sync; the inspect counters carry the same
-		// (action, severity, latency) information already captured by
-		// the hook counters, so a future migration can drop them only
-		// once every consuming dashboard has been re-pointed at the
-		// hook.* series.
-		a.otel.RecordConnectorHookInvocation(ctx, connectorName, eventLabel, result, reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(ctx, toolLabel, decisionLabel, resp.Severity)
-		a.otel.RecordInspectLatency(ctx, toolLabel, float64(elapsed.Milliseconds()))
-		a.otel.RecordHookOutcome(ctx, connectorName, eventLabel, decisionLabel, resp.Severity, resp.WouldBlock)
-		usage := extractHookPayloadTokenUsage(req.Payload)
-		a.otel.RecordHookTokenUsage(ctx, connectorName, usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, result, 1, int64(len(rawBody)),
-			fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d step_idx=%d enforced=%v rule_pack_dir=%s result=%s",
-				hookLogLabel(connectorName), eventLabel, hookLogLabel(req.ToolName), decisionLabel, rawActionLabel, resp.WouldBlock, hookLogLabel(resp.Mode), elapsed.Milliseconds(), env.StepIdx, env.Enforced, env.RulePackDir, result))
-		// DN2/C1: mirror the per-connector identity (step_idx/enforced/
-		// rule_pack_dir) onto the active span so the OTel sink reaches
-		// parity with the SQLite row and structured log.
-		enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+	safeSection("observability_v8", func() {
+		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	})
 
 	safeSection("audit", func() {
 		a.logConnectorHookAuditEnvelope(ctx, env)
 	})
 
-	// Emit one first-class, agent-scoped hook outcome after the shared audit
-	// envelope is finalized. The guardrail's EventVerdict records the scanner's
-	// decision, but it cannot say whether this connector actually received a
-	// block or whether action/connector capabilities downgraded it to an
-	// observe-mode would-block. This event carries that final answer and shares
-	// the exact execution/lifecycle identity used by the preceding and
-	// subsequent model/tool events, giving Agent360 a durable recovery path.
-	safeSection("hook_decision", func() {
-		a.emitHookDecisionEvent(ctx, req, resp, env)
-	})
 }
 
-// emitHookDecisionEvent materializes the final connector-facing decision as a
-// gatewaylog EventHookDecision. It deliberately does not update lifecycle
-// metrics or the phase cursor: a decision is an observation within the hook
-// operation, not an invented agent transition. The following hook event tells
-// us whether the agent retried, selected another tool, asked the model again,
-// or terminated.
-func (a *APIServer) emitHookDecisionEvent(
+func (a *APIServer) hookDecisionMeta(
 	ctx context.Context,
 	req agentHookRequest,
-	resp agentHookResponse,
-	env HookAuditEnvelope,
-) {
+) (llmEventMeta, string, bool) {
 	source := strings.TrimSpace(req.ConnectorName)
 	if source == "" {
-		return
+		return llmEventMeta{}, "", false
 	}
 
 	// Use the exact same deterministic normalization as the LLM/lifecycle
@@ -434,6 +384,18 @@ func (a *APIServer) emitHookDecisionEvent(
 		// before evaluation. Reuse its phase/sequence/operation identifiers
 		// so the decision nests beside that hook transition rather than
 		// looking like a second, synthetic phase change.
+		//
+		// Start events are the important exception to the ordinary merge
+		// rule: mergeHookSessionLifecycle intentionally preserves a newly
+		// rotated start execution. This decision path does not rotate an
+		// execution, however; it describes the same delivery the lifecycle
+		// emitter already recorded. The exact retained agent/session snapshot
+		// is therefore the source of truth. Without this assignment a
+		// SessionStart produced one execution ID on session_start and a second
+		// pre-rotation ID on hook_decision for the very same hook request.
+		if snapshot.ExecutionID != "" {
+			meta.ExecutionID = snapshot.ExecutionID
+		}
 		meta.Phase = firstNonEmpty(snapshot.Phase, meta.Phase)
 		meta.PreviousPhase = firstNonEmpty(snapshot.PreviousPhase, meta.PreviousPhase)
 		meta.OperationID = firstNonEmpty(snapshot.OperationID, meta.OperationID)
@@ -459,67 +421,7 @@ func (a *APIServer) emitHookDecisionEvent(
 		correlation.DestinationApp,
 		hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName),
 	)
-
-	result := strings.TrimSpace(env.Result)
-	if result == "" {
-		result = "ok"
-	}
-	if result != "ok" && result != "panic" {
-		result = "panic"
-	}
-
-	emitEvent(ctx, gatewaylog.Event{
-		EventType:           gatewaylog.EventHookDecision,
-		Severity:            deriveSeverity(resp.Severity),
-		RunID:               meta.RunID,
-		RequestID:           meta.RequestID,
-		SessionID:           meta.SessionID,
-		TurnID:              meta.TurnID,
-		Provider:            meta.Provider,
-		Model:               meta.Model,
-		AgentID:             meta.AgentID,
-		AgentName:           meta.AgentName,
-		AgentType:           meta.AgentType,
-		RootAgentID:         meta.RootAgentID,
-		ParentAgentID:       meta.ParentAgentID,
-		RootSessionID:       meta.RootSessionID,
-		ParentSessionID:     meta.ParentSessionID,
-		AgentLifecycleID:    meta.LifecycleID,
-		AgentExecutionID:    meta.ExecutionID,
-		AgentLifecycleEvent: meta.LifecycleEvent,
-		AgentLifecycleState: meta.LifecycleState,
-		AgentPhase:          meta.Phase,
-		AgentPreviousPhase:  meta.PreviousPhase,
-		AgentPhaseCode:      agentPhaseCodePointer(meta),
-		AgentSequence:       meta.Sequence,
-		AgentOperationID:    meta.OperationID,
-		AgentDepth:          agentDepthPointer(meta),
-		SessionSource:       meta.SessionSource,
-		SessionResumed:      boolPointer(meta.SessionResumed),
-		UserID:              meta.UserID,
-		UserName:            meta.UserName,
-		PolicyID:            meta.PolicyID,
-		DestinationApp:      meta.DestinationApp,
-		ToolName:            meta.ToolName,
-		ToolID:              meta.ToolID,
-		Connector:           source,
-		HookDecision: &gatewaylog.HookDecisionPayload{
-			Connector:    source,
-			Event:        req.HookEventName,
-			Result:       result,
-			Action:       normalizeHookActionLabel(resp.Action),
-			RawAction:    normalizeHookActionLabel(resp.RawAction),
-			Severity:     deriveSeverity(resp.Severity),
-			Mode:         hookLogLabel(resp.Mode),
-			WouldBlock:   resp.WouldBlock,
-			Enforced:     env.Enforced,
-			StepIdx:      env.StepIdx,
-			LatencyMs:    env.ElapsedMs,
-			Reason:       resp.Reason,
-			EvaluationID: resp.EvaluationID,
-			RuleIDs:      append([]string(nil), resp.RuleIDs...),
-		},
-	})
+	return meta, source, true
 }
 
 // renderAgentHookResponse projects the unified agentHookResponse
@@ -583,7 +485,7 @@ func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agent
 	}
 	// Surface the unified-pipeline correlation keys so hook scripts
 	// + downstream tooling can pivot HTTP responses on the same
-	// evaluation_id used by gateway.jsonl + the audit DB. Both
+	// evaluation_id used by canonical logs and the audit DB. Both
 	// fields are additive — pre-existing hook scripts that ignore
 	// unknown keys continue to parse the same shape.
 	if resp.EvaluationID != "" {
@@ -632,10 +534,9 @@ func hookOutputFieldName(connectorName string) string {
 // agentHookResponse JSON). rawBody is supplied only so the audit
 // envelope can compute BodyBytes; it is never reparsed.
 //
-// Telemetry: same shape as handleAgentHook —
-// RecordConnectorHookInvocation, RecordHookOutcome,
-// RecordHookTokenUsage, span enrichment, plus a structured audit
-// envelope persisted under audit.ActionConnectorHookSynthetic.
+// Telemetry: same generated v8 metric families as handleAgentHook,
+// active-span enrichment, plus a structured audit envelope persisted
+// under audit.ActionConnectorHookSynthetic.
 //
 // Why a DIFFERENT audit action? The caller (handleCodexNotify)
 // already persists the canonical `codex.notify.<sanitized-type>`
@@ -651,6 +552,13 @@ func hookOutputFieldName(connectorName string) string {
 // dashboards can filter synthetic events out of the "real" hook
 // traffic when needed (set by enrichAgentHookSpanSynthetic).
 func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName string, req agentHookRequest, rawBody []byte) agentHookResponse {
+	// The synthetic entry point receives the route identity separately. Make it
+	// authoritative before any lifecycle or telemetry producer observes the
+	// request; reduced fixtures and future bridges are not required to duplicate
+	// it inside agentHookRequest.
+	if strings.TrimSpace(connectorName) != "" {
+		req.ConnectorName = connectorName
+	}
 	ctx = enrichAgentHookContext(ctx, req)
 	profile := a.hookProfileForConnector(connectorName)
 	rawEventIDs := a.rememberHookRawEvents(req)
@@ -678,41 +586,6 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		}
 	}
 
-	if a.otel != nil {
-		result := "ok"
-		reason := normalizeHookReasonLabel(resp.Action, resp.WouldBlock)
-		if panicked {
-			result = "panic"
-			reason = "panic"
-		}
-		// Normalize every dimension at the metric/log boundary so a
-		// hostile or simply malformed payload (e.g. an oversized
-		// HookEventName, a unicode/control-character ToolName) cannot
-		// blow up cardinality on synthetic emissions the same way it
-		// can't on the regular hook path above. hookMetricToolLabel
-		// is the shared normalizer used by the regular path so the
-		// inspect.* tool label has identical shape across both paths
-		// — dashboards filtering on tool=~"$connector:.*" must not
-		// see two flavours of the same connector/event combo.
-		eventLabel := normalizeHookEventLabel(req.HookEventName)
-		decisionLabel := normalizeHookActionLabel(resp.Action)
-		rawActionLabel := normalizeHookActionLabel(resp.RawAction)
-		toolLabel := hookMetricToolLabel(connectorName, req.HookEventName)
-		a.otel.RecordConnectorHookInvocation(ctx, connectorName, eventLabel, result, reason, float64(elapsed.Milliseconds()))
-		// Mirror the regular hook path: emit both hook.* (new
-		// dashboards) and inspect.* (legacy dashboards). See the
-		// equivalent block in handleAgentHook for the rationale —
-		// the dual emission is the documented contract.
-		a.otel.RecordInspectEvaluation(ctx, toolLabel, decisionLabel, resp.Severity)
-		a.otel.RecordInspectLatency(ctx, toolLabel, float64(elapsed.Milliseconds()))
-		a.otel.RecordHookOutcome(ctx, connectorName, eventLabel, decisionLabel, resp.Severity, resp.WouldBlock)
-		usage := extractHookPayloadTokenUsage(req.Payload)
-		a.otel.RecordHookTokenUsage(ctx, connectorName, usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, result, 1, int64(len(rawBody)),
-			fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d synthetic=true result=%s",
-				hookLogLabel(connectorName), eventLabel, hookLogLabel(req.ToolName), decisionLabel, rawActionLabel, resp.WouldBlock, hookLogLabel(resp.Mode), elapsed.Milliseconds(), result))
-	}
-
 	// Persist the synthetic envelope under a distinct audit action
 	// so the canonical caller row count stays intact while SIEM /
 	// dashboards still see the synthesized Stop event. See the
@@ -733,7 +606,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		RawAction:           resp.RawAction,
 		Severity:            resp.Severity,
 		Mode:                resp.Mode,
-		Reason:              resp.Reason,
+		Reason:              hookSourceReason(resp),
 		WouldBlock:          resp.WouldBlock,
 		ElapsedMs:           elapsed.Milliseconds(),
 		BodyBytes:           int64(len(rawBody)),
@@ -744,16 +617,16 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
 		Extra:               mergeHookEnvelopeExtra(extra, hookCompatibilityExtra(profile)),
 	}
-	attachRawPayload(&env, rawBody)
 	a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
+	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+	a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	a.logConnectorHookAuditEnvelope(ctx, env)
 	return resp
 }
 
 // enrichAgentHookSpanSynthetic stamps a defenseclaw.hook.synthetic
-// attribute on the active span so dashboards built on top of
-// RecordConnectorHookInvocation can split "real" hook POSTs from
-// notify-bridge synthetic Stop events. Kept as a separate helper so
+// attribute on the active span so trace queries can split "real" hook
+// POSTs from notify-bridge synthetic Stop events. Kept as a separate helper so
 // the existing enrichAgentHookSpan signature does not grow a
 // boolean parameter (every existing call site would otherwise need
 // updating).
@@ -904,43 +777,6 @@ func hookLogLabel(value string) string {
 	return out
 }
 
-// hookPanicRawPayloadCap is the byte cap applied to env.RawPayload
-// when redaction is globally disabled (DEFENSECLAW_DISABLE_REDACTION=1).
-// 64 KiB is large enough to cover any realistic prompt + tool-call
-// payload but small enough that a 10 MiB hostile POST cannot amplify
-// through json.Marshal → strconv.Quote → SQLite insert → every audit
-// sink. Bytes beyond the cap are dropped and a SHA-256 hash of the
-// full body + the truncated-size marker land in env.Extra so SIEM
-// rules can still detect "same body, replayed" and operators can
-// verify the upstream body via tracing if needed.
-const hookPanicRawPayloadCap = 64 * 1024
-
-// attachRawPayload conditionally attaches the request body to the
-// audit envelope, applying the M3 cap so a hostile or malformed
-// payload cannot turn one POST into a multi-megabyte SQLite row.
-// Only runs when redaction.DisableAll() returned true (operator
-// explicitly disabled all redaction); otherwise raw bodies must not
-// reach persistent storage at all.
-func attachRawPayload(env *HookAuditEnvelope, body []byte) {
-	if env == nil || len(body) == 0 {
-		return
-	}
-	if !redaction.DisableAll() {
-		return
-	}
-	if len(body) <= hookPanicRawPayloadCap {
-		env.RawPayload = string(body)
-		return
-	}
-	if env.Extra == nil {
-		env.Extra = map[string]string{}
-	}
-	env.RawPayload = string(body[:hookPanicRawPayloadCap])
-	env.Extra["raw_payload_truncated"] = "true"
-	env.Extra["raw_payload_full_bytes"] = strconv.Itoa(len(body))
-	env.Extra["raw_payload_sha256"] = hashRawPayloadHex(body)
-}
-
 func hookCompatibilityExtra(profile connector.HookProfile) map[string]string {
 	extra := map[string]string{}
 	if profile.ContractID != "" {
@@ -1012,8 +848,8 @@ func hashRawPayloadHex(body []byte) string {
 //     the panic source).
 //   - returns a SAFE fail-open agentHookResponse:
 //     action=allow, raw_action=allow, severity=WARN, would_block=true,
-//     mode="unknown" (the evaluator that resolves mode never
-//     ran), reason carries a stable "defenseclaw internal
+//     mode is recovered from the effective connector configuration
+//     (the standalone response helper starts at "unknown"), reason carries a stable "defenseclaw internal
 //     evaluator error" string so operator log greps can find the
 //     row, additional_context carries an operator-facing hint.
 //
@@ -1042,6 +878,7 @@ func (a *APIServer) safeEvaluateHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
+			resp.Mode = a.agentHookMode(connectorName)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1065,6 +902,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
+			resp.Mode = a.agentHookMode(connectorName)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1088,17 +926,16 @@ func safeHookPanicResponse(connectorName, eventName string, _ any) agentHookResp
 	}
 }
 
-// handleHookPanic centralises the side-effects of a recovered hook
-// panic: metric increment, stderr log with stack, optional EventError
-// emission via Provider.emitPanicRecovered (already wired into
-// RecordPanic). Safe to call with nil otel / nil logger; both
-// branches are nil-guarded.
+// handleHookPanic centralises the side-effects of a recovered hook panic. The
+// stack remains local on stderr; generated v8 telemetry receives only the
+// bounded panic counter and durable content-free health transition.
 func (a *APIServer) handleHookPanic(ctx context.Context, connectorName, eventName string, recovered any) {
 	stack := debug.Stack()
 	fmt.Fprintf(os.Stderr, "[gateway] PANIC recovered in hook evaluator connector=%s event=%s value=%v\n%s\n",
 		connectorName, eventName, recovered, stack)
-	if a != nil && a.otel != nil {
-		a.otel.RecordPanic(ctx, gatewaylog.SubsystemGateway)
+	if a != nil {
+		metricRuntime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+		recordGatewayPanicV8(ctx, a.observabilityV8RuntimeEmitter(), metricRuntime)
 	}
 }
 
@@ -1123,8 +960,7 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// codex-notify path is the canonical case) takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
 	// Stamp the connector identity onto the audit envelope so every
-	// downstream surface (audit rows via applyEnvelope, gateway.jsonl
-	// events via stampEventCorrelation, sinks/Splunk) can filter by
+	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is
 	// authoritative on multi-connector installs.
 	if conn := strings.TrimSpace(req.ConnectorName); conn != "" {
@@ -1134,7 +970,6 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 			ctx = audit.ContextWithEnvelope(ctx, env)
 		}
 	}
-	enrichHTTPSpanFromContext(ctx)
 	return ctx
 }
 
@@ -1232,6 +1067,10 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 		reason = "would_block"
 	}
 	reason = normalizeHookReasonLabel(reason, false)
+	effectiveAction := normalizeHookActionLabel(resp.Action)
+	rawAction := normalizeHookActionLabel(resp.RawAction)
+	mode := hookDecisionV8Mode(resp.Mode)
+	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "NONE"))
 	attrs := []attribute.KeyValue{
 		attribute.String("defenseclaw.connector", req.ConnectorName),
 		attribute.String("defenseclaw.connector.source", req.ConnectorName),
@@ -1241,11 +1080,24 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 		attribute.String("defenseclaw.telemetry.source", "hook"),
 		attribute.String("defenseclaw.hook.event", normalizeHookEventLabel(req.HookEventName)),
 		attribute.String("defenseclaw.tool.name", hookLogLabel(req.ToolName)),
-		attribute.String("defenseclaw.decision", normalizeHookActionLabel(resp.Action)),
-		attribute.String("defenseclaw.raw_action", normalizeHookActionLabel(resp.RawAction)),
+		attribute.String("defenseclaw.decision", effectiveAction),
+		attribute.String("defenseclaw.raw_action", rawAction),
 		attribute.Bool("defenseclaw.would_block", resp.WouldBlock),
 		attribute.String("defenseclaw.mode", hookLogLabel(resp.Mode)),
 		attribute.Int64("defenseclaw.duration_ms", elapsed.Milliseconds()),
+		// Canonical v8 names accompany the local-observability aliases above.
+		// Only bounded metadata is attached here; the full reason, evaluation,
+		// and rule identifiers stay in the centrally projected generated log.
+		attribute.String("defenseclaw.guardrail.raw_action", rawAction),
+		attribute.String("defenseclaw.guardrail.effective_action", effectiveAction),
+		attribute.String("defenseclaw.guardrail.mode", mode),
+		attribute.Bool("defenseclaw.guardrail.would_block", resp.WouldBlock),
+		attribute.Bool("defenseclaw.guardrail.enforced", effectiveAction == "block"),
+		attribute.String("defenseclaw.guardrail.reason", reason),
+		attribute.Float64("defenseclaw.guardrail.latency_ms", max(float64(elapsed.Milliseconds()), 0)),
+	}
+	if severity.Valid && severity.Present {
+		attrs = append(attrs, attribute.String("defenseclaw.security.severity", string(severity.Severity)))
 	}
 	if req.SessionID != "" {
 		attrs = append(attrs, attribute.String("gen_ai.conversation.id", req.SessionID))
@@ -1596,7 +1448,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	case isGenericToolInspectionEvent(req.HookEventName):
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: req.ToolName, Args: req.ToolArgs, Direction: "tool_call", Connector: req.ConnectorName, MCPServerName: payloadString(req.Payload, "mcp_server_name")})
+		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: req.ToolName, Args: req.ToolArgs, Direction: "tool_call", Connector: req.ConnectorName, MCPServerName: payloadString(req.Payload, "mcp_server_name")})
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
@@ -1826,7 +1678,7 @@ func (a *APIServer) agentHookEnabled(name string) bool {
 
 func (a *APIServer) agentHookMode(name string) string {
 	mode := "observe"
-	if a.scannerCfg != nil {
+	if a != nil && a.scannerCfg != nil {
 		hookCfg := a.scannerCfg.ConnectorHookConfig(name)
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || strings.EqualFold(mode, "inherit") {
@@ -1943,6 +1795,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		Mode:              mode,
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
+		SourceReason:      reason,
 	}
 	if profile.Respond != nil {
 		out := profile.Respond(connector.HookRespondInput{

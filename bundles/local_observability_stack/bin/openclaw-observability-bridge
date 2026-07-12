@@ -196,12 +196,14 @@ http_probe() {
 
 wait_for_ready() {
   local deadline=$(( SECONDS + WAIT_BUDGET ))
-  local otlp_ok="false"
+  local collector_ok="false"
   local grafana_ok="false"
   local prom_ok="false"
+  local tempo_ok="false"
+  local loki_ok="false"
   while (( SECONDS < deadline )); do
-    if [[ "${otlp_ok}" != "true" ]] && tcp_probe "127.0.0.1" 4317; then
-      otlp_ok="true"
+    if [[ "${collector_ok}" != "true" ]] && http_probe "http://127.0.0.1:13133/"; then
+      collector_ok="true"
     fi
     if [[ "${grafana_ok}" != "true" ]] && http_probe "http://127.0.0.1:3000/api/health"; then
       grafana_ok="true"
@@ -209,13 +211,19 @@ wait_for_ready() {
     if [[ "${prom_ok}" != "true" ]] && http_probe "http://127.0.0.1:9090/-/ready"; then
       prom_ok="true"
     fi
-    if [[ "${otlp_ok}" == "true" && "${grafana_ok}" == "true" && "${prom_ok}" == "true" ]]; then
+    if [[ "${tempo_ok}" != "true" ]] && http_probe "http://127.0.0.1:3200/ready"; then
+      tempo_ok="true"
+    fi
+    if [[ "${loki_ok}" != "true" ]] && http_probe "http://127.0.0.1:3100/ready"; then
+      loki_ok="true"
+    fi
+    if [[ "${collector_ok}" == "true" && "${grafana_ok}" == "true" && "${prom_ok}" == "true" && "${tempo_ok}" == "true" && "${loki_ok}" == "true" ]]; then
       return 0
     fi
     sleep 1
   done
-  printf 'readiness timeout after %ss: otlp=%s grafana=%s prometheus=%s\n' \
-    "${WAIT_BUDGET}" "${otlp_ok}" "${grafana_ok}" "${prom_ok}" >&2
+  printf 'readiness timeout after %ss: collector=%s grafana=%s prometheus=%s tempo=%s loki=%s\n' \
+    "${WAIT_BUDGET}" "${collector_ok}" "${grafana_ok}" "${prom_ok}" "${tempo_ok}" "${loki_ok}" >&2
   return 1
 }
 

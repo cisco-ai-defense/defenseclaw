@@ -14,7 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Reads ~/.defenseclaw/config.yaml — the same source of truth the TUI uses.
+// Reads the InstallationContext-selected config.yaml — the same source of
+// truth the CLI/TUI use.
 // Minimal YAML subset parser (nested block mappings, scalars, simple lists),
 // sufficient for the keys the app consumes. Writes never go through this
 // store; they go via the gateway (/config/patch) or the defenseclaw CLI.
@@ -403,30 +404,24 @@ enum SecureFileWriter {
 }
 
 actor ConfigStore {
-    static let dataDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".defenseclaw")
-
-    /// Cheap change signature over config.yaml + .env (mtime/size) so the
-    /// pulse can re-resolve the gateway token and config when either file
-    /// changes out-of-band (token rotation, setup commands, the TUI).
-    static var diskSignature: String {
-        [configURL, dataDirectory.appendingPathComponent(".env")].map { url in
-            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-            let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-            let size = (attrs?[.size] as? Int) ?? 0
-            return "\(url.lastPathComponent):\(mtime):\(size)"
-        }.joined(separator: "|")
-    }
-    static let configURL = dataDirectory.appendingPathComponent("config.yaml")
-    static let auditDBURL = dataDirectory.appendingPathComponent("audit.db")
-    static let gatewayJSONLURL = dataDirectory.appendingPathComponent("gateway.jsonl")
-    static let gatewayLogURL = dataDirectory.appendingPathComponent("gateway.log")
-    static let watchdogLogURL = dataDirectory.appendingPathComponent("watchdog.log")
-
+    private(set) var context: InstallationContext
     private(set) var config = DefenseClawConfig()
 
+    init(context: InstallationContext) {
+        self.context = context
+    }
+
+    /// Rebinding clears the last-good snapshot. Carrying a token or endpoint
+    /// from the previous installation across a path change would be worse than
+    /// briefly showing the new installation as unavailable.
+    func rebind(to context: InstallationContext) {
+        guard self.context != context else { return }
+        self.context = context
+        config = DefenseClawConfig()
+    }
+
     var installPresent: Bool {
-        FileManager.default.fileExists(atPath: Self.configURL.path)
+        FileManager.default.fileExists(atPath: context.configURL.path)
     }
 
     /// KEY=VALUE pairs from ~/.defenseclaw/.env — written by the Go gateway on
@@ -434,7 +429,7 @@ actor ConfigStore {
     /// into os.environ before resolving the token; a GUI app inherits no shell
     /// environment, so we read the file directly. Process env still wins.
     private func loadDotEnv() -> [String: String] {
-        let url = Self.dataDirectory.appendingPathComponent(".env")
+        let url = context.environmentURL
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [:] }
         var out: [String: String] = [:]
         for rawLine in text.split(separator: "\n") {
@@ -467,11 +462,12 @@ actor ConfigStore {
 
     @discardableResult
     func reload() -> DefenseClawConfig {
-        guard let text = try? String(contentsOf: Self.configURL, encoding: .utf8) else {
+        let configURL = context.configURL
+        guard let text = try? String(contentsOf: configURL, encoding: .utf8) else {
             // A temporary permission/read race must not wipe the last-good
             // token and endpoint. Reset only when the config was actually
             // removed (the normal first-run/uninstall state).
-            if FileManager.default.fileExists(atPath: Self.configURL.path) {
+            if FileManager.default.fileExists(atPath: configURL.path) {
                 config.loadError = "config.yaml exists but could not be read as UTF-8; using the last-good configuration"
                 return config
             }

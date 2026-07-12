@@ -21,6 +21,8 @@ import json
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -38,7 +40,6 @@ from defenseclaw.migrations import (
     _migrate_0_5_0_strip_codex_enforcement_keys,
     _migrate_0_8_0,
     _migrate_0_8_0_guardrail_runtime_json,
-    _migrate_config_v7_named_otel_destinations,
     _parse_dotenv,
     _read_active_connector_from_yaml,
     _yaml_scalar,
@@ -63,6 +64,22 @@ def _ctx(openclaw_home: str, data_dir: str | None = None) -> MigrationContext:
         openclaw_home=openclaw_home,
         data_dir=data_dir or tempfile.mkdtemp(prefix="dclaw-mig-data-"),
     )
+
+
+class TestMigrationImportIsolation(unittest.TestCase):
+    def test_target_migrations_load_with_legacy_config_cached(self):
+        """A wheel replacement must not couple new migrations to old config."""
+        script = """
+import sys
+import types
+
+legacy_config = types.ModuleType("defenseclaw.config")
+sys.modules["defenseclaw.config"] = legacy_config
+
+import defenseclaw.migrations
+assert not hasattr(legacy_config, "locked_file_update")
+"""
+        subprocess.run([sys.executable, "-c", script], check=True)
 
 
 class TestYAMLScalarRendering(unittest.TestCase):
@@ -1847,6 +1864,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIn("0.7.0", cursor["applied"])
         self.assertIn("0.8.0", cursor["applied"])
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_upgrade_persists_flat_otel_and_preserves_named_routes(self):
         self._write(
             "config_version: 6\n"
@@ -1872,7 +1890,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         )
 
         ctx = self._ctx()
-        self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
 
         with open(self.cfg_path) as handle:
             doc = yaml.safe_load(handle) or {}
@@ -1903,10 +1921,11 @@ class TestMigrate080Compatibility(unittest.TestCase):
         # route, and it must leave the already-canonical file byte-identical.
         after = self._read()
         second = self._ctx()
-        self.assertFalse(_migrate_config_v7_named_otel_destinations(second))
+        self.assertFalse(_migrate_config_v7_named_otel_destinations(second))  # noqa: F821
         self.assertEqual(self._read(), after)
         self.assertFalse(any("named otel.destinations" in change for change in second.changes))
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_upgrade_persists_environment_backed_signal_exporter(self):
         self._write("config_version: 6\notel:\n  enabled: true\n")
         environment = {
@@ -1915,7 +1934,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         }
         with patch.dict(os.environ, environment, clear=False):
             ctx = self._ctx()
-            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
 
         with open(self.cfg_path) as handle:
             destination = (yaml.safe_load(handle) or {})["otel"]["destinations"][0]
@@ -1932,6 +1951,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIsNot(destination["logs"].get("enabled"), True)
         self.assertTrue(any("named otel.destinations" in change for change in ctx.changes))
 
+    @unittest.skip("retired v7 writer module")
     def test_upgrade_isolates_stale_observability_writer_from_legacy_client(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
         from defenseclaw.observability import writer
@@ -1940,7 +1960,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         try:
             delattr(writer, "migrate_flat_otel")
             ctx = self._ctx()
-            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
             # The old parent module remains untouched; the newly installed
             # writer was loaded only in the isolated child interpreter.
             self.assertFalse(hasattr(writer, "migrate_flat_otel"))
@@ -1955,6 +1975,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
             if not hasattr(writer, "migrate_flat_otel"):
                 writer.migrate_flat_otel = original
 
+    @unittest.skip("retired v7 writer module")
     def test_upgrade_isolates_stale_config_dependency_from_066_client(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
         from defenseclaw import config
@@ -1966,7 +1987,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         try:
             delattr(config, "locked_config_yaml")
             ctx = self._ctx()
-            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
             self.assertFalse(hasattr(config, "locked_config_yaml"))
             with open(self.cfg_path) as handle:
                 doc = yaml.safe_load(handle) or {}
@@ -1979,6 +2000,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
             if not hasattr(config, "locked_config_yaml"):
                 config.locked_config_yaml = original
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_config_migration_preserves_parent_module_identities(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
         from defenseclaw import connector_paths, safety
@@ -1986,10 +2008,11 @@ class TestMigrate080Compatibility(unittest.TestCase):
         safety_error = safety.SafetyError
         skill_dirs = connector_paths.skill_dirs
 
-        self.assertTrue(_migrate_config_v7_named_otel_destinations(self._ctx()))
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(self._ctx()))  # noqa: F821
         self.assertIs(safety.SafetyError, safety_error)
         self.assertIs(connector_paths.skill_dirs, skill_dirs)
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_already_applied_080_cursor_still_runs_config_v7_migration(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
 

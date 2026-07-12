@@ -94,7 +94,7 @@ func TestRunActiveGuardrailPublishesScopedTokenFailure(t *testing.T) {
 			},
 		},
 		health: NewSidecarHealth(),
-		router: NewEventRouter(nil, nil, nil, false, nil),
+		router: NewEventRouter(nil, nil, nil, false),
 	}
 
 	err := s.runActiveGuardrail(context.Background())
@@ -330,6 +330,9 @@ func TestStartMultiHookConfigGuards_StartsOnePerSuccessfulConnector(t *testing.T
 	reg.RegisterBuiltin(&bootStubConnector{stubConnector: stubConnector{name: "codex"}})
 	reg.RegisterBuiltin(&bootStubConnector{stubConnector: stubConnector{name: "cursor"}})
 
+	// Cancellation makes the long-running loop return immediately after its
+	// synchronous bootstrap, so assertions inspect durable state without a
+	// machine-speed-dependent readiness deadline.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	guards, err := s.startMultiHookConfigGuards(ctx, reg, []string{"codex", "cursor"}, "tok", "127.0.0.1:0", "127.0.0.1:0")
@@ -571,19 +574,24 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 			},
 		},
 		health: NewSidecarHealth(),
-		router: NewEventRouter(nil, nil, nil, false, nil),
+		router: NewEventRouter(nil, nil, nil, false),
 	}
 
+	// Cancellation makes the long-running loop return immediately after its
+	// synchronous bootstrap, so assertions inspect durable state without a
+	// machine-speed-dependent readiness deadline.
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.runGuardrail(ctx) }()
-	waitForGuardrailState(t, s, errCh, StateStarting)
 	cancel()
-	requireGuardrailExitCleanly(t, errCh)
+	if err := s.runGuardrail(ctx); err != nil {
+		t.Fatalf("runGuardrail: %v", err)
+	}
 
 	assertPathMissing(t, codexConfig)
 	assertPathMissing(t, filepath.Join(dir, "hooks", "codex-hook.sh"))
 	snap := s.health.Snapshot()
+	if snap.Guardrail.State != StateStarting {
+		t.Fatalf("guardrail state = %s, want %s", snap.Guardrail.State, StateStarting)
+	}
 	if got := snap.Guardrail.Details["lifecycle_manager"]; got != "enterprise_hook_guardian" {
 		t.Fatalf("lifecycle_manager = %v, want enterprise_hook_guardian", got)
 	}
@@ -619,21 +627,23 @@ func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.
 			},
 		},
 		health: NewSidecarHealth(),
-		router: NewEventRouter(nil, nil, nil, false, nil),
+		router: NewEventRouter(nil, nil, nil, false),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.runGuardrailMulti(ctx) }()
-	waitForGuardrailState(t, s, errCh, StateStarting)
 	cancel()
-	requireGuardrailExitCleanly(t, errCh)
+	if err := s.runGuardrailMulti(ctx); err != nil {
+		t.Fatalf("runGuardrailMulti: %v", err)
+	}
 
 	assertPathMissing(t, codexConfig)
 	assertPathMissing(t, claudeSettings)
 	assertPathMissing(t, filepath.Join(dir, "hooks", "codex-hook.sh"))
 	assertPathMissing(t, filepath.Join(dir, "hooks", "claudecode-hook.sh"))
 	snap := s.health.Snapshot()
+	if snap.Guardrail.State != StateStarting {
+		t.Fatalf("guardrail state = %s, want %s", snap.Guardrail.State, StateStarting)
+	}
 	if got := snap.Guardrail.Details["lifecycle_manager"]; got != "enterprise_hook_guardian" {
 		t.Fatalf("lifecycle_manager = %v, want enterprise_hook_guardian", got)
 	}
@@ -659,37 +669,6 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 	}
 	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex", "claudecode"}); ok {
 		t.Fatal("partial guardian authorization reported full connector coverage")
-	}
-}
-
-func waitForGuardrailState(t *testing.T, s *Sidecar, errCh <-chan error, want SubsystemState) {
-	t.Helper()
-	deadline := time.After(3 * time.Second)
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case err := <-errCh:
-			t.Fatalf("guardrail exited before state %s: %v", want, err)
-		case <-deadline:
-			t.Fatalf("timed out waiting for guardrail state %s; snapshot=%+v", want, s.health.Snapshot().Guardrail)
-		case <-tick.C:
-			if s.health.Snapshot().Guardrail.State == want {
-				return
-			}
-		}
-	}
-}
-
-func requireGuardrailExitCleanly(t *testing.T, errCh <-chan error) {
-	t.Helper()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("guardrail returned error after cancellation: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("guardrail did not exit after cancellation")
 	}
 }
 

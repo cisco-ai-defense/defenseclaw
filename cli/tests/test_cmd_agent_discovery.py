@@ -68,6 +68,7 @@ def _make_ctx(*, enabled: bool = False, connector: str = "openclaw",
         store_raw_local_paths=False,
     )
     cfg = SimpleNamespace(
+        _source_config_version=8,
         ai_discovery=ai_cfg,
         guardrail=SimpleNamespace(connector=connector),
         claw=SimpleNamespace(mode=connector),
@@ -463,8 +464,9 @@ class RequireLoadedConfigTests(unittest.TestCase):
     def test_lazy_loads_cfg_when_app_cfg_is_none(self):
         app = AppContext()
         self.assertIsNone(app.cfg)
-        sentinel = SimpleNamespace(name="loaded")
-        with patch("defenseclaw.config.load", return_value=sentinel) as load_mock:
+        sentinel = SimpleNamespace(name="loaded", _source_config_version=8)
+        with patch("defenseclaw.config.require_v8_config"), \
+                patch("defenseclaw.config.load", return_value=sentinel) as load_mock:
             result = cmd_agent._require_loaded_config(app)
         load_mock.assert_called_once()
         # Lazy-load also caches on the AppContext so subsequent calls
@@ -503,7 +505,8 @@ class DiscoveryEnableLazyConfigTests(unittest.TestCase):
         self.assertIsNone(app.cfg)
         loaded = _make_ctx(enabled=False).cfg
 
-        with patch("defenseclaw.config.load", return_value=loaded), \
+        with patch("defenseclaw.config.require_v8_config"), \
+                patch("defenseclaw.config.load", return_value=loaded), \
                 patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
                 patch.object(cmd_agent, "_trigger_post_enable_scan") as scan_mock:
             result = runner.invoke(
@@ -653,7 +656,6 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
                     "--max-files-per-scan", "500",
                     "--max-file-bytes", "262144",
                     "--no-include-shell-history",
-                    "--no-emit-otel",
                     "--allow-workspace-signatures",
                 ],
                 obj=app,
@@ -665,7 +667,6 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
         self.assertEqual(ad.max_files_per_scan, 500)
         self.assertEqual(ad.max_file_bytes, 262144)
         self.assertFalse(ad.include_shell_history)
-        self.assertFalse(ad.emit_otel)
         self.assertTrue(ad.allow_workspace_signatures)
 
     def test_rejects_out_of_range_scan_interval(self):
@@ -746,15 +747,14 @@ class DiscoverySetupTests(unittest.TestCase):
     #  9. package_man   (y/N)
     # 10. env_var_names (y/N)
     # 11. network_doms  (y/N)
-    # 12. emit_otel     (y/N)
-    # 13. allow_workspace_signatures (y/N)
-    # 14. store_raw_local_paths      (y/N)
-    # 15. final confirm "Save and apply?"  (only when --yes absent and there's a diff)
+    # 12. allow_workspace_signatures (y/N)
+    # 13. store_raw_local_paths      (y/N)
+    # 14. final confirm "Save and apply?"  (only when --yes absent and there's a diff)
 
     def _all_defaults(self) -> str:
-        # 14 prompts before the final confirm; --yes elides the final
+        # 13 prompts before the final confirm; --yes elides the final
         # one. Empty lines mean "accept default".
-        return "\n" * 14
+        return "\n" * 13
 
     def test_all_defaults_no_op(self):
         runner = CliRunner()
@@ -778,8 +778,8 @@ class DiscoverySetupTests(unittest.TestCase):
     def test_changes_scan_interval_only(self):
         runner = CliRunner()
         app = _make_ctx(enabled=True)
-        # Sequence: enable=Y, mode=Enter, interval=15, then 12 more Enters.
-        stdin = "y\n\n15\n" + "\n" * 11
+        # Sequence: enable=Y, mode=Enter, interval=15, then 10 more Enters.
+        stdin = "y\n\n15\n" + "\n" * 10
         with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
                 patch.object(cmd_agent, "_trigger_post_enable_scan") as scan_mock:
             result = runner.invoke(
@@ -793,7 +793,6 @@ class DiscoverySetupTests(unittest.TestCase):
         # All the unchanged knobs must remain untouched — proves the
         # diff-only applier doesn't clobber default-yes booleans.
         self.assertTrue(app.cfg.ai_discovery.include_shell_history)
-        self.assertTrue(app.cfg.ai_discovery.emit_otel)
         self.assertEqual(app.cfg.ai_discovery.scan_roots, ["~"])
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
@@ -803,9 +802,9 @@ class DiscoverySetupTests(unittest.TestCase):
         runner = CliRunner()
         app = _make_ctx(enabled=True)
         # enable=Y, mode=Enter, interval=Enter, process=Enter, roots=",",
-        # then 10 more Enters. The wizard MUST detect the empty
+        # then 8 more Enters. The wizard MUST detect the empty
         # post-normalization list and revert.
-        stdin = "y\n\n\n\n,\n" + "\n" * 9
+        stdin = "y\n\n\n\n,\n" + "\n" * 8
         with patch("defenseclaw.commands.cmd_setup._restart_services"), \
                 patch.object(cmd_agent, "_trigger_post_enable_scan"):
             result = runner.invoke(

@@ -19,6 +19,7 @@ from defenseclaw.envvars import (
     ALLOWED_CATEGORIES,
     ALLOWED_SECURITY_IMPACT,
     CATEGORY_SECURITY_OPT_OUT,
+    _validate_entry,
     active_security_overrides,
     load_registry,
 )
@@ -84,6 +85,14 @@ class RegistryStructureTests(unittest.TestCase):
         """Every HIGH-impact security-opt-out MUST be surfaced in
         doctor — that's literally the point of the registry."""
         for e in self.registry.entries:
+            if e.deprecated:
+                if e.category == CATEGORY_SECURITY_OPT_OUT and e.security_impact == "high":
+                    self.assertTrue(
+                        e.surface_in_doctor or e.migration_only,
+                        f"{e.name}: deprecated high-impact opt-out must be "
+                        "migration-only or surface_in_doctor",
+                    )
+                continue
             if e.category != CATEGORY_SECURITY_OPT_OUT:
                 continue
             if e.security_impact == "high":
@@ -91,6 +100,16 @@ class RegistryStructureTests(unittest.TestCase):
                     e.surface_in_doctor,
                     f"{e.name}: high-impact security opt-out must surface_in_doctor",
                 )
+
+    def test_boolean_metadata_rejects_string_lookalikes(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        registry_path = root / "internal" / "envvars" / "registry.json"
+        entry = json.loads(registry_path.read_text())["entries"][0]
+        for field_name in ("deprecated", "migration_only", "surface_in_doctor"):
+            with self.subTest(field_name=field_name):
+                malformed = {**entry, field_name: "false"}
+                with self.assertRaisesRegex(ValueError, rf"{field_name} must be a boolean"):
+                    _validate_entry(malformed, registry_path)
 
 
 class IsActiveTests(unittest.TestCase):
@@ -134,33 +153,6 @@ class IsActiveTests(unittest.TestCase):
         self.assertFalse(self.disable_redaction.is_active({"DEFENSECLAW_DISABLE_REDACTION": "no"}))
 
 
-class SchemaValidationInverseTests(unittest.TestCase):
-    """``DEFENSECLAW_SCHEMA_VALIDATION`` is special: setting it to
-    anything other than ``on`` activates the bypass (this is how the
-    Go code reads it, see internal/gateway/sidecar.go:243)."""
-
-    def setUp(self) -> None:
-        self.sv = load_registry().get("DEFENSECLAW_SCHEMA_VALIDATION")
-        assert self.sv is not None
-
-    def test_unset_is_inactive(self) -> None:
-        self.assertFalse(self.sv.is_active({}))
-
-    def test_on_is_inactive(self) -> None:
-        # "on" means the default (validation enabled) — therefore NOT
-        # an active bypass.
-        self.assertFalse(self.sv.is_active({"DEFENSECLAW_SCHEMA_VALIDATION": "on"}))
-
-    def test_off_is_active(self) -> None:
-        self.assertTrue(self.sv.is_active({"DEFENSECLAW_SCHEMA_VALIDATION": "off"}))
-
-    def test_any_other_value_is_active(self) -> None:
-        # Mirroring Go-side semantics: anything other than "on" or
-        # empty disables the gate.
-        self.assertTrue(self.sv.is_active({"DEFENSECLAW_SCHEMA_VALIDATION": "false"}))
-        self.assertTrue(self.sv.is_active({"DEFENSECLAW_SCHEMA_VALIDATION": "disabled"}))
-
-
 class ActiveSecurityOverridesTests(unittest.TestCase):
     """Integration-style: simulate operator env, assert active list."""
 
@@ -169,14 +161,14 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
         env: dict[str, str] = {}
         self.assertEqual(active_security_overrides(env), [])
 
-    def test_disable_redaction_appears(self) -> None:
+    def test_deprecated_migration_input_does_not_appear(self) -> None:
         env = {"DEFENSECLAW_DISABLE_REDACTION": "1"}
         names = [e.name for e in active_security_overrides(env)]
-        self.assertIn("DEFENSECLAW_DISABLE_REDACTION", names)
+        self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", names)
 
     def test_two_overrides_returns_two(self) -> None:
         env = {
-            "DEFENSECLAW_DISABLE_REDACTION": "1",
+            "DEFENSECLAW_ALLOW_CGNAT": "1",
             "DEFENSECLAW_CODEX_LOOPBACK_TRUST": "1",
         }
         names = [e.name for e in active_security_overrides(env)]
@@ -184,7 +176,7 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
             sorted(names),
             sorted(
                 [
-                    "DEFENSECLAW_DISABLE_REDACTION",
+                    "DEFENSECLAW_ALLOW_CGNAT",
                     "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
                 ]
             ),

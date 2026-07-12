@@ -411,23 +411,13 @@ def build_readiness_checks(
             ),
         )
 
-    audit_sinks = _get_path(cfg, "audit_sinks", ()) or ()
-    if bool(_get_path(cfg, "otel.enabled", False)) or len(audit_sinks) > 0:
-        checks.append(ReadinessCheck("Observability / Audit Sinks", "Telemetry or audit sink configured.", "pass"))
-    else:
-        checks.append(
-            ReadinessCheck(
-                "Observability / Audit Sinks",
-                "No OTel exporter or audit sink is configured.",
-                "warn",
-                _intent(
-                    "defenseclaw",
-                    ("setup", "local-observability", "status"),
-                    "setup local-observability status",
-                    "setup",
-                ),
-            ),
+    checks.append(
+        ReadinessCheck(
+            "Observability v8",
+            "Canonical routing is active; local SQLite collection is mandatory.",
+            "pass",
         )
+    )
 
     if bool(_get_path(cfg, "asset_policy.enabled", False)) and _registry_required_but_empty(cfg):
         checks.append(
@@ -1064,7 +1054,6 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
 
 _BOOL_FIELD_KEYS = frozenset(
     {
-        "privacy.disable_redaction",
         "notifications.enabled",
         "notifications.block_enforced",
         "notifications.block_would_block",
@@ -1104,7 +1093,6 @@ _BOOL_FIELD_KEYS = frozenset(
         "ai_discovery.include_package_manifests",
         "ai_discovery.include_env_var_names",
         "ai_discovery.include_network_domains",
-        "ai_discovery.emit_otel",
         "ai_discovery.store_raw_local_paths",
         "gateway.watcher.enabled",
         "gateway.watcher.skill.enabled",
@@ -1113,8 +1101,6 @@ _BOOL_FIELD_KEYS = frozenset(
         "gateway.watcher.plugin.take_action",
         "gateway.watcher.mcp.take_action",
         "gateway.watchdog.enabled",
-        "otel.enabled",
-        "otel.logs.emit_individual_findings",
         "watch.auto_block",
         "watch.allow_list_bypass_scan",
         "watch.rescan_enabled",
@@ -1161,10 +1147,6 @@ _INT_FIELD_KEYS = frozenset(
         "ai_discovery.max_file_bytes",
         "gateway.watchdog.interval",
         "gateway.watchdog.debounce",
-        "otel.metrics.export_interval_s",
-        "otel.batch.max_export_batch_size",
-        "otel.batch.scheduled_delay_ms",
-        "otel.batch.max_queue_size",
         "watch.debounce_ms",
         "watch.rescan_interval_min",
         "cisco_ai_defense.timeout_ms",
@@ -1187,6 +1169,6 @@ _CSV_FIELD_KEYS = frozenset(
     }
 )
 
-_KV_CSV_FIELD_KEYS = frozenset({"otel.resource.attributes"})
+_KV_CSV_FIELD_KEYS: frozenset[str] = frozenset()
 
 _TRISTATE_FIELD_KEYS = frozenset({"openshell.auto_pair", "openshell.host_networking"})

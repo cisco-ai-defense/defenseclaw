@@ -1,0 +1,303 @@
+schema_version: 1
+cases:
+  - name: minimal-empty-observability
+    valid: true
+    source: |
+      config_version: 8
+      observability: {}
+
+  - name: absent-observability
+    valid: true
+    source: |
+      config_version: 8
+
+  - name: capability-default-otlp
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            enabled: false
+            endpoint: https://collector.example.test
+
+  - name: explicit-console-logs
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: console
+            kind: console
+            send: {signals: [logs], buckets: [platform.health]}
+
+  - name: queue-only-jsonl-boundaries
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: jsonl
+            kind: jsonl
+            path: /tmp/defenseclaw.jsonl
+            batch: {max_queue_size: 65536, max_queue_bytes: 268435456}
+
+  - name: queue-only-console-small-count
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: console
+            kind: console
+            batch: {max_queue_size: 1, max_queue_bytes: 4198400}
+
+  - name: push-byte-domains-are-independent
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: archive
+            kind: http_jsonl
+            endpoint: https://archive.example.test/events
+            batch:
+              max_queue_size: 512
+              max_queue_bytes: 4198400
+              max_export_batch_size: 512
+              max_export_batch_bytes: 4263936
+              scheduled_delay_ms: 1
+
+  - name: push-batch-maximums
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: archive
+            kind: http_jsonl
+            endpoint: https://archive.example.test/events
+            batch:
+              max_queue_size: 65536
+              max_queue_bytes: 268435456
+              max_export_batch_size: 8192
+              max_export_batch_bytes: 67108864
+              scheduled_delay_ms: 600000
+
+  - name: galileo-traces-only
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: galileo
+            kind: otlp
+            preset: galileo
+            enabled: false
+            endpoint: https://collector.example.test/v1/traces
+
+  - name: custom-detector-groups
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        redaction_profiles:
+          soc:
+            extends: sensitive
+            detectors: [pii, credentials, secrets]
+            field_classes: {content: detect, credential: remove, path: hash}
+
+  - name: duplicate-top-level-key
+    valid: false
+    source: |
+      config_version: 8
+      observability: {}
+      observability: {}
+
+  - name: yaml-alias
+    valid: false
+    source: |
+      config_version: 8
+      source: &source {}
+      observability: *source
+
+  - name: yaml-merge
+    valid: false
+    source: |
+      config_version: 8
+      source: &source {}
+      observability:
+        <<: *source
+
+  - name: unknown-observability-field
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        mystery: true
+
+  - name: legacy-otel-block
+    valid: false
+    source: |
+      config_version: 8
+      otel: {}
+
+  - name: unknown-detector-group
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        redaction_profiles:
+          invalid:
+            extends: sensitive
+            detectors: [biometrics]
+
+  - name: unsupported-console-traces
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: console
+            kind: console
+            send: {signals: [traces], buckets: [agent.lifecycle]}
+
+  - name: jsonl-rejects-push-batch-fields
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: jsonl
+            kind: jsonl
+            path: /tmp/defenseclaw.jsonl
+            batch: {max_queue_size: 2048, scheduled_delay_ms: 1000}
+
+  - name: prometheus-rejects-batch
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: metrics
+            kind: prometheus
+            listen: 127.0.0.1:9464
+            path: /metrics
+            batch: {max_queue_size: 2048, max_queue_bytes: 67108864}
+
+  - name: push-batch-count-exceeds-queue-count
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: archive
+            kind: http_jsonl
+            endpoint: https://archive.example.test/events
+            batch: {max_queue_size: 10, max_export_batch_size: 11}
+
+  - name: queue-bytes-over-maximum
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: console
+            kind: console
+            batch: {max_queue_bytes: 268435457}
+
+  - name: export-batch-bytes-over-maximum
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: archive
+            kind: http_jsonl
+            endpoint: https://archive.example.test/events
+            batch: {max_export_batch_bytes: 67108865}
+
+  - name: grpc-signal-path-override
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: logs
+            kind: otlp
+            protocol: grpc
+            endpoint: collector.example.test:4317
+            signal_overrides:
+              logs: {path: /custom/logs}
+            send: {signals: [logs], buckets: ['*']}
+
+  - name: http-signal-path-must-be-absolute
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: v1/traces}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: resource-home-path-is-prohibited
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        resource:
+          attributes:
+            defenseclaw.claw.home_dir: /Users/operator/private
+
+  - name: unknown-profile-reference
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        buckets:
+          model.io: {redaction_profile: undefined}
+
+  - name: trace-family-limit-too-low
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        trace_policy:
+          limits: {max_attributes_per_span: 31}
+
+  - name: duplicate-destination-name
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - {name: duplicate, kind: console}
+          - {name: duplicate, kind: console}
+
+  - name: blocked-private-export-endpoint
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: archive
+            kind: http_jsonl
+            endpoint: https://10.1.2.3/events
+
+  - name: float-config-version
+    valid: false
+    source: |
+      config_version: 8.0
+
+  - name: non-finite-number
+    valid: false
+    source: |
+      config_version: 8
+      llm:
+        timeout: .nan

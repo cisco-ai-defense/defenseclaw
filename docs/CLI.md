@@ -42,7 +42,8 @@ Use `<binary> --help` for any command.
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 | `setup galileo [status\|test\|enable\|disable\|remove]` | Configure real-time Galileo Cloud/self-hosted OTLP traces; test uses the live gateway path by default |
-| `setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP and audit-sink destinations; preview or repair the automatic flat-OTel upgrade migration |
+| `setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus destinations |
+| `observability plan` | Show the masked effective v8 collection, local SQLite, destination capability/routes, redaction, retention, and warning plan |
 | `setup local-observability up\|down\|status` | Manage the bundled OTel Collector + Grafana stack |
 
 Observability destination names are identities: a new `--name` appends a route;
@@ -90,15 +91,15 @@ set the global default. `guardrail status` is read-only and takes no
 | `agent usage [--refresh] [--json] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--limit N]` | Show continuous AI visibility inventory from the sidecar. The default view groups repeated observations of the same product, SDK/component, or local model and rolls their categories/detectors into compact list columns. Local-model rows display model ID, installed/loaded status, and format when available. `--detail` falls back to per-signal rows; `--state`/`--category`/`--product` filter the table; `--component` also matches local model IDs by case-insensitive substring; `gone` signals are hidden unless `--show-gone` (or `--state gone`) is passed; `--by-detector` restores detector-level rows; `--json` is the unfiltered raw payload for tooling. |
 | `agent processes [--refresh] [--json] [--limit N]` | List AI processes the sidecar currently observes (PID, PPID, user, uptime, comm, vendor/product). Sourced from the `runtime` block on each process-detector signal. |
 | `agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE] [--min-identity 0..1] [--min-presence 0..1] [--limit N]` | Show the deduped AI components/SDK rollup (one row per `(ecosystem, name)`) with versions, install counts, two-axis confidence (identity + presence) and the detector set. `--min-identity`/`--min-presence` filter on the Bayesian engine output for fast triage. |
-| `agent components show NAME [--ecosystem ECO] [--json]` | Print every per-install location for one component: detector, state, workspace hash, basename, evidence quality, match kind, last-seen. Raw paths only surface when both `privacy.disable_redaction=true` and `ai_discovery.store_raw_local_paths=true`. |
+| `agent components show NAME [--ecosystem ECO] [--json]` | Print every per-install location for one component: detector, state, workspace hash, basename, evidence quality, match kind, last-seen. Exported raw paths depend on the v8 field-class/redaction profile selected for that destination. |
 | `agent components history NAME [--ecosystem ECO] [--limit N] [--json]` | Print the confidence trend (most-recent-first) for one component, sourced from the SQLite `ai_confidence_snapshots` history. |
 | `agent confidence explain NAME [--ecosystem ECO] [--json]` | Print the per-evidence factor breakdown the engine used to compute identity + presence: detector, evidence id, match kind, quality, specificity/recency, likelihood ratio, log-odds delta, and the percentage-point shift each factor contributed. |
 | `agent confidence policy show [--source merged\|default] [--json]` | Print the active confidence policy YAML. `merged` (default) is what the engine actually loaded; `default` is the embedded baseline so you can diff against your override. |
 | `agent confidence policy default [--json]` | Print the embedded default policy — typically piped to `~/.defenseclaw/confidence_policy.yaml` as a starting point for an override. |
 | `agent confidence policy validate PATH [--json]` | Dry-run a candidate policy file against the sidecar's loader + validator. Exits non-zero on failure with the same diagnostic the loader would print at boot. |
-| `agent discovery enable [--mode] [--scan-roots] [--scan-interval-min N] [--process-interval-s N] [--max-files-per-scan N] [--max-file-bytes N] [--include-shell-history/--no-include-shell-history] [--include-package-manifests/--no-...] [--include-env-var-names/--no-...] [--include-network-domains/--no-...] [--emit-otel/--no-emit-otel] [--allow-workspace-signatures/--no-...] [--store-raw-local-paths/--no-...] [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Flip `ai_discovery.enabled=true`, save config, bounce the gateway, and trigger a first scan in one step. Re-running on an already-enabled install with new tuning flags applies the diff and bounces the sidecar (audit logs as `ai_discovery-update`). |
+| `agent discovery enable [--mode] [--scan-roots] [--scan-interval-min N] [--process-interval-s N] [--max-files-per-scan N] [--max-file-bytes N] [--include-shell-history/--no-include-shell-history] [--include-package-manifests/--no-...] [--include-env-var-names/--no-...] [--include-network-domains/--no-...] [--allow-workspace-signatures/--no-...] [--store-raw-local-paths/--no-...] [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Flip `ai_discovery.enabled=true`, save config, bounce the gateway, and trigger a first scan in one step. Re-running on an already-enabled install with new tuning flags applies the diff and bounces the sidecar (recorded as `ai_discovery-update` in canonical local history). |
 | `agent discovery disable [--restart/--no-restart] [--yes]` | Flip `ai_discovery.enabled=false`, save config, and bounce the gateway so the service stops |
-| `agent discovery setup [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Walk an interactive wizard for every `ai_discovery.*` knob (mode, scan/process intervals, scan roots, file caps, detection sources, OTel, signature/path privacy). Each prompt defaults to the current config value so pressing Enter on every step is a no-op. |
+| `agent discovery setup [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Walk an interactive wizard for every current `ai_discovery.*` knob (mode, scan/process intervals, scan roots, file caps, detection sources, and signature/path privacy). Destination routing is owned separately by observability v8. Each prompt defaults to the current config value so pressing Enter on every step is a no-op. |
 | `agent discovery status [--json]` | Show on-disk + live AI discovery state and warn on drift between the two |
 | `agent discovery scan [--json]` | Trigger one immediate AI discovery scan via the sidecar (`POST /api/v1/ai-usage/scan`) and render a one-line summary. Returns an actionable error when the sidecar is disabled (HTTP 503) pointing at `agent discovery enable`. |
 | `agent signatures list \| validate \| install \| disable \| enable` | Manage AI discovery signature packs |
@@ -124,10 +125,12 @@ model-binary contents; small Ollama manifest JSON is the bounded exception.
 Inference and model-control API routes are never called.
 
 The local usage API retains model IDs for operator display and filtering.
-Outbound gateway events, OTel logs, and webhooks apply the normal redaction
-policy: extended model metadata is omitted unless
-`privacy.disable_redaction=true`, and raw paths additionally require
-`ai_discovery.store_raw_local_paths=true`. Authenticated Lemonade discovery uses
+Outbound canonical records follow each v8 destination's field-class redaction
+profile. Normal discovery sanitization omits extended model metadata, model
+basenames, and path hashes while retaining an installation-scoped HMAC lifecycle
+pseudonym. Raw paths additionally require
+`ai_discovery.store_raw_local_paths=true` and a selected v8 projection that
+preserves the `path` field class. Authenticated Lemonade discovery uses
 only `LEMONADE_API_KEY` after the configured origin passes a credential-free
 `/live` check; it never sends `LEMONADE_ADMIN_API_KEY`, and credentials are never
 printed or emitted. The API pass
@@ -520,6 +523,12 @@ same-filesystem custody directory; the timestamped backup records its path in
 `phase1-state/retained-quarantines.json`. Do not remove either one until the
 restored release and any retained evidence have been inspected.
 
+A first-hop bridge failure similarly restores the exact old gateway, whole
+managed CLI environment, migration-touched state, prior running state, and
+version-bound health before the resolver returns nonzero. A hard-cut failure
+restores and health-checks the retained `0.8.4` CLI, gateway, config,
+environment, cursor, and managed bundle before reporting rollback.
+
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run while an authenticated upgrade advances across the release boundary
 that owns them. An authenticated same-version request is a no-op: it does not
@@ -529,23 +538,28 @@ legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
 `agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
 by 0.2.0's guardrail setup) while preserving plugin registration.
 
-The upgrade runner also applies configuration schema v7 independently of the
-release cursor: a legacy flat OTel exporter becomes one named
-`otel.destinations[]` route beside any routes already configured. This
-shape-based pass also covers hosts whose published 0.8.x migration cursor was
-already marked. It preserves transport, TLS, batching, signals, and process-wide
-sampling/log policy, and writes a one-time pre-migration backup. The gateway has
-a write-free in-memory fallback so an interrupted migration can still start.
+The upgrade runner applies the required configuration-v8 observability migration
+through the same release cursor. It converts supported v7 `otel`, `audit_sinks`,
+SQLite/JSONL/console, Galileo, and global redaction settings into one validated
+`observability` graph, preserving narrower effective collection/routing/privacy
+behavior and local Agent360 compatibility. It backs up and atomically replaces
+the source, promotes inline observability secrets to locked environment
+references, refreshes owned local dashboard assets without resetting volumes,
+and then checks health. No separate plan/apply step is required. The v8 gateway
+does not rewrite v7 configuration at startup or run both formats in parallel;
+a required migration failure restores the source and does not start v8 against
+the v7 file.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
 - `--version VERSION` — upgrade to a specific release (default: latest)
-- `--allow-unverified` — unsafe override for releases whose checksum manifest
-  is missing, unsigned, incomplete, or otherwise unverifiable; applies only to
-  legacy releases older than `0.8.4`
+- `--allow-unverified` — legacy-only unsafe override. It cannot bypass the
+  signed manifest, checksum, bridge, or migration requirements for `0.8.4+`.
 
-Release `0.8.4` and later require `cosign` and the protected release-workflow
-identity. `--allow-unverified` cannot bypass that requirement.
+`0.8.4+` upgrades require local `cosign` and the exact release-workflow identity;
+missing provenance verification fails before service stop or installed mutation.
+Install it first (`brew install cosign` on macOS, or the official Sigstore package
+for your platform).
 
 **Known recovery paths:**
 
@@ -554,8 +568,9 @@ identity. `--allow-unverified` cannot bypass that requirement.
 | `0.8.4` | Run `defenseclaw upgrade --yes`. A coherent bridge controller authenticates and privately acquires its exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. |
 | A source listed for its platform in `release/upgrade-baselines.json` | Install `cosign`, then run the current release-owned shell or PowerShell resolver without `--version`. It performs `source → 0.8.4 → fresh controller → latest` as one command. |
 | `0.8.0` or `0.8.1` | Install `cosign` before invoking the resolver. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
-| Windows older than `0.8.0` | The native Windows published-baseline matrix currently covers `0.8.0`–`0.8.3` only. The resolver fails closed before stopping services and prints those exact supported Windows sources. |
+| Windows older than `0.8.0` | The native Windows published-baseline matrix currently covers `0.8.0`–`0.8.4` only. The resolver fails closed before stopping services and prints those exact supported Windows sources. |
 | A source outside the published matrix, including assetless `0.7.0`, `0.2.x`, or historical `0.3.x` releases | No tested in-place path is inferred. Remain on the current version and contact support for a source-specific, state-aware recovery plan. Do not uninstall, overwrite state, or force an intermediate hop. |
+| Direct `0.8.3 → 0.8.5` request | Refused before service stop or installed mutation. Remove the explicit target and use the release-owned resolver. |
 
 **Examples:**
 
@@ -665,6 +680,7 @@ From a checkout of the current release, invoke the resolver in latest mode:
 
 ```bash
 ./scripts/upgrade.sh --yes
+./scripts/upgrade.sh --plan
 ```
 
 The release wheel, gateway archive, and local installers are not independent

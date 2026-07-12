@@ -70,6 +70,42 @@ INSTALLER_FILES = (
     "scripts/install.ps1",
 )
 
+OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
+    "docs-site/components/command-generator.tsx",
+    "docs-site/content/docs/command-generator.mdx",
+    "docs-site/content/docs/setup/guardrail/index.mdx",
+    "docs-site/content/docs/connectors/openclaw.mdx",
+    "docs-site/content/docs/connectors/zeptoclaw.mdx",
+    "docs-site/content/docs/connectors/claudecode.mdx",
+    "docs-site/content/docs/connectors/codex.mdx",
+    "docs-site/content/docs/connectors/geminicli.mdx",
+    "docs-site/content/docs/setup/index.mdx",
+    "bundles/local_observability_stack/prometheus/rules/alerts.yml",
+    "scripts/install-dev.sh",
+    "docs-site/content/docs/reference/configuration.mdx",
+)
+
+OBSERVABILITY_V8_WORKFLOW_GUIDES = (
+    "docs-site/components/command-generator.tsx",
+    "docs-site/content/docs/command-generator.mdx",
+    "docs-site/content/docs/setup/guardrail/index.mdx",
+    "docs-site/content/docs/setup/index.mdx",
+    "bundles/local_observability_stack/prometheus/rules/alerts.yml",
+)
+
+OBSERVABILITY_V8_CONNECTOR_GUIDES = (
+    "docs-site/content/docs/connectors/openclaw.mdx",
+    "docs-site/content/docs/connectors/zeptoclaw.mdx",
+    "docs-site/content/docs/connectors/claudecode.mdx",
+    "docs-site/content/docs/connectors/codex.mdx",
+    "docs-site/content/docs/connectors/geminicli.mdx",
+)
+
+OBSERVABILITY_V8_JSONL_GUIDES = {
+    "docs-site/content/docs/setup/index.mdx": "kind: jsonl",
+    "docs-site/content/docs/reference/configuration.mdx": "kind: jsonl",
+}
+
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
@@ -1410,9 +1446,9 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
             {
                 "schema_version": 2,
                 "checkout_root": str(ROOT.resolve()),
-                "source_release": "0.8.4",
-                "source_install_compatibility_epoch": 1,
-                "runtime_config_version": 7,
+                "source_release": "0.8.5",
+                "source_install_compatibility_epoch": 2,
+                "runtime_config_version": 8,
                 "gateway_sha256": gateway_digest,
             },
             indent=2,
@@ -1457,6 +1493,7 @@ def test_source_gateway_claim_allows_rebuild_but_rejects_installed_tampering(
         "extensions/defenseclaw/package-lock.json",
         "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
         "internal/config/config.go",
+        "internal/config/observability_v8_types.go",
         "release/source-install-identity.json",
     ):
         destination = repo / relative
@@ -1769,7 +1806,7 @@ def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops(
     assert "native Windows matrix currently covers only" in install
     assert "Windows source older than `0.8.0`" in install
     assert "Windows older than `0.8.0`" in cli
-    assert "`0.8.0`–`0.8.3` only" in cli
+    assert "`0.8.0`–`0.8.4` only" in cli
     assert "Explicitly upgrade to `0.8.4`" not in cli
     assert "reach tested baseline `0.4.0`" not in cli
     assert "Upgrading from 0.2.0 to an artifact-backed release" not in install
@@ -1926,3 +1963,105 @@ def test_install_docs_track_current_release() -> None:
         assert CURRENT_RELEASE in snippet, f"{rel} must pin at least one installer version"
         for stale in STALE_RELEASES:
             assert stale not in snippet, f"{rel} still expects stale install snippet version {stale}"
+
+
+def test_current_observability_docs_do_not_advertise_retired_redaction_controls() -> None:
+    retired_guidance = (
+        "--disable-redaction",
+        "--enable-redaction",
+        "setup redaction",
+        "privacy.disable_redaction",
+        "disableRedaction",
+    )
+    for rel in OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES:
+        text = (ROOT / rel).read_text()
+        for retired in retired_guidance:
+            assert retired not in text, f"{rel} still advertises retired control: {retired}"
+
+    guardrail_reference = (ROOT / "docs-site/content/docs/setup/guardrail/index.mdx").read_text()
+    assert "Legacy v7 JSONL export" in guardrail_reference
+
+
+def test_current_observability_guidance_explains_v8_redaction_workflow() -> None:
+    required_workflow = (
+        "observability.destinations[].routes[].selector.buckets",
+        "observability.redaction_profiles",
+        "defenseclaw config validate",
+        "defenseclaw config show --effective --section observability",
+        "defenseclaw observability plan",
+        "defenseclaw-gateway restart",
+    )
+    for rel in OBSERVABILITY_V8_WORKFLOW_GUIDES:
+        text = (ROOT / rel).read_text()
+        for expected in required_workflow:
+            assert expected in text, f"{rel} is missing v8 redaction guidance: {expected}"
+
+    for rel in OBSERVABILITY_V8_CONNECTOR_GUIDES:
+        text = (ROOT / rel).read_text()
+        assert "observability.destinations[].routes[].selector.buckets" in text
+        assert "observability.redaction_profiles" in text
+
+
+def test_current_observability_docs_describe_jsonl_as_explicit_optional_destination() -> None:
+    for rel, expected_wording in OBSERVABILITY_V8_JSONL_GUIDES.items():
+        lines = [line for line in (ROOT / rel).read_text().splitlines() if "gateway.jsonl" in line]
+        assert lines, f"{rel} must retain its scoped gateway.jsonl guidance"
+        for line in lines:
+            normalized = line.lower()
+            assert "optional" in normalized, f"{rel} treats gateway.jsonl as implicit: {line}"
+            assert expected_wording.lower() in normalized, f"{rel} omits the expected JSONL destination wording: {line}"
+
+
+def test_dev_installer_only_offers_jsonl_tail_when_the_destination_exists() -> None:
+    text = (ROOT / "scripts/install-dev.sh").read_text()
+    existence_check = 'if [[ -f "${HOME}/.defenseclaw/gateway.jsonl" ]]'
+    tail_command = "tail -f ~/.defenseclaw/gateway.jsonl"
+    enablement = "add an explicit kind: jsonl destination to create it"
+    assert existence_check in text
+    assert tail_command in text
+    assert enablement in text
+    assert text.index(existence_check) < text.index(tail_command) < text.index(enablement)
+
+
+def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
+    text = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text()
+    command_start = text.index("## Auxiliary configuration commands")
+    reference_start = text.index("## Deployment and policy references")
+    matrix_start = text.index("## Interactive vs non-interactive")
+    command_cards = text[command_start:reference_start]
+    reference_cards = text[reference_start:matrix_start]
+    assert 'title="Redaction profiles"' not in command_cards
+    assert 'title="Redaction profiles"' in reference_cards
+    assert "not\nadditional `defenseclaw setup` verbs" in reference_cards
+
+
+def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> None:
+    text = (ROOT / "docs-site/content/docs/connectors/zeptoclaw.mdx").read_text()
+    for expected in (
+        'title="Treat local event history as sensitive data"',
+        "observability.local.retention_days",
+        "retains 90 days",
+        "observability.defaults.redaction_profile",
+        "also governs SQLite",
+        "only that export trust boundary",
+    ):
+        assert expected in text
+
+
+def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
+    text = (ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx").read_text()
+    assert "  defaults:\n    redaction_profile: sensitive" in text
+
+
+def test_readme_observability_edit_workflow_is_fail_fast() -> None:
+    text = (ROOT / "README.md").read_text()
+    expected = "\n".join(
+        (
+            "defenseclaw config validate && \\",
+            "defenseclaw config show --effective --section observability && \\",
+            "defenseclaw observability plan && \\",
+            "defenseclaw-gateway restart && \\",
+            "defenseclaw doctor",
+        )
+    )
+    assert expected in text

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -109,7 +110,9 @@ func TestHandleCodeScan_MissingPath(t *testing.T) {
 }
 
 func TestHandleCodeScan_NonexistentPath(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	api := testAPIServerWithConfig(t, "action")
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 	body := `{"path": "/nonexistent/does/not/exist.py"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/scan/code", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -118,6 +121,21 @@ func TestHandleCodeScan_NonexistentPath(t *testing.T) {
 
 	if w.Result().StatusCode != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Result().StatusCode)
+	}
+	metrics := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawScanErrors,
+	)
+	if len(metrics) != 1 || metrics[0].CanonicalRecord().Source() != observability.SourceScanner {
+		t.Fatalf("generated scan error metrics=%v", metrics)
+	}
+	for key, want := range map[string]any{
+		"defenseclaw.scan.scanner":       "codeguard",
+		"defenseclaw.metric.target_type": "code",
+		"defenseclaw.metric.error_type":  "not_found",
+	} {
+		if metrics[0].Attributes()[key] != want {
+			t.Fatalf("scan error %s=%v want=%v attributes=%v", key, metrics[0].Attributes()[key], want, metrics[0].Attributes())
+		}
 	}
 }
 

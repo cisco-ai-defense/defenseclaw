@@ -220,12 +220,12 @@ dc_block_prompt() {
 
 # dc_run_probe <label> <prompt> — run the agent (via the driver's agent_run
 # callback, which is responsible for bounding itself with dc_timeout) and
-# return the gateway.jsonl line count captured immediately before the run so
+# return the canonical SQLite row cursor captured immediately before the run so
 # callers can scope "fired during this probe" assertions. Echoes the
 # before-count. agent_run's stdout/stderr is tee'd to a per-probe log.
 dc_run_probe() {
   local label="$1" prompt="$2" before code log_dir log_file status_file probe_id
-  before="$(dc_gateway_jsonl_count)"
+  before="$(dc_event_cursor)"
   dc_log "probe[${label}]: running agent"
   log_dir="${DC_E2E_PROBE_LOG_DIR:-${TMPDIR:-/tmp}}"
   mkdir -p "${log_dir}"
@@ -239,7 +239,7 @@ dc_run_probe() {
     dc_warn "probe[${label}]: agent run exited ${code} or timed out (see ${log_file})"
   fi
   printf '%s\n' "${code}" > "${status_file}"
-  sleep 2  # let the gateway flush JSONL/audit rows
+  dc_wait_for_connector_event "${DC_E2E_CONNECTOR}" "${before}" || true
   printf '%s' "${before}"
 }
 

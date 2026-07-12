@@ -198,7 +198,7 @@ The gateway has no streaming or query HTTP endpoint — read history through the
 
 ```bash
 defenseclaw-gateway audit export --output audit.jsonl     # JSONL of audit_events
-tail -f ~/.defenseclaw/gateway.jsonl | jq                  # Live tail of the JSONL fallback
+tail -f ~/.defenseclaw/gateway.jsonl | jq                  # Optional configured v8 JSONL destination
 defenseclaw alerts                                          # Recent alerts (paginated)
 defenseclaw tui                                             # Live dashboard
 ```
@@ -242,7 +242,7 @@ The gateway accepts OTLP-HTTP from connectors (Codex, Gemini CLI native OTLP) an
 | `POST` | `/v1/logs` | Ingest OTLP logs. |
 | `POST` | `/v1/metrics` | Ingest OTLP metrics. |
 | `POST` | `/v1/traces` | Ingest OTLP traces. |
-| `POST` | `/otlp/{token}/...` | Same three signals, but the token rides in the URL path instead of a header. Useful for OTLP exporters (Gemini CLI's `settings.json`) that can't set arbitrary HTTP headers. |
+| `POST` | `/otlp/{source}/{token}/v1/{signal}` | Connector-scoped logs, metrics, or traces. The token rides in the URL path, is accepted only for its source namespace over loopback, and is removed from route telemetry. Used by Codex and Gemini CLI. |
 
 See [`internal/gateway/otel_ingest.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/otel_ingest.go) for the parsing details and [Local observability](/docs/observability/local-observability) for the operator setup.
 

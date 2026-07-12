@@ -222,7 +222,7 @@ class TestPolicyActivate(PolicyCommandTestBase):
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
-        self.assertTrue(raw["watch"]["rescan_enabled"])
+        self.assertTrue(raw.get("watch", {}).get("rescan_enabled", True))
         self.assertEqual(raw["watch"]["rescan_interval_min"], 30)
 
     def test_activate_nonexistent(self):

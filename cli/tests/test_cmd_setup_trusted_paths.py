@@ -27,6 +27,7 @@ import os
 import sys
 import tempfile
 import unittest
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -423,6 +424,62 @@ class TrustedPathsCliTests(unittest.TestCase):
             dotenv = cmd_setup._load_dotenv(os.path.join(tmp, ".env"))
             self.assertNotIn(newdir, dotenv.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""))
 
+    def test_remove_holds_dotenv_lock_through_config_save_and_rollback_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            dotenv_path = os.path.join(tmp, ".env")
+            save_entered = Event()
+            release_save = Event()
+            writer_done = Event()
+            results: list[object] = []
+            errors: list[BaseException] = []
+            original_save = app.cfg._save_locked
+
+            def paused_save(path: str) -> None:
+                save_entered.set()
+                if not release_save.wait(5):
+                    raise TimeoutError("test did not release config save")
+                original_save(path)
+
+            def remove() -> None:
+                try:
+                    results.append(self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app))
+                except BaseException as error:
+                    errors.append(error)
+
+            def write_secret() -> None:
+                try:
+                    cmd_setup._save_secret_to_dotenv("DEFENSECLAW_CONCURRENT_SECRET", "preserved", tmp)
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    writer_done.set()
+
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                cmd_setup._write_dotenv(dotenv_path, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": newdir})
+                with patch.object(app.cfg, "_save_locked", side_effect=paused_save):
+                    remove_thread = Thread(target=remove, daemon=True)
+                    remove_thread.start()
+                    self.assertTrue(save_entered.wait(5), "remove did not reach config save")
+                    writer_thread = Thread(target=write_secret, daemon=True)
+                    writer_thread.start()
+                    self.assertFalse(writer_done.wait(0.2), "concurrent writer bypassed the dotenv lock")
+                    release_save.set()
+                    remove_thread.join(5)
+                    writer_thread.join(5)
+
+            self.assertFalse(remove_thread.is_alive(), "remove deadlocked on nested config lock")
+            self.assertFalse(writer_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].exit_code, 0, msg=results[0].output)
+            dotenv = cmd_setup._load_dotenv(dotenv_path)
+            self.assertEqual(dotenv["DEFENSECLAW_CONCURRENT_SECRET"], "preserved")
+            self.assertNotIn(newdir, dotenv.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""))
+
     def test_remove_validates_legacy_dotenv_before_config_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
@@ -446,14 +503,16 @@ class TrustedPathsCliTests(unittest.TestCase):
             with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
                 self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
                 dotenv_path = os.path.join(tmp, ".env")
-                original = f"# preserve me\nOTHER='quoted value'\nDEFENSECLAW_TRUSTED_BIN_PREFIXES={resolved}\n".encode()
+                original = (
+                    f"# preserve me\nOTHER='quoted value'\nDEFENSECLAW_TRUSTED_BIN_PREFIXES={resolved}\n".encode()
+                )
                 with open(dotenv_path, "wb") as handle:
                     handle.write(original)
                 os.chmod(dotenv_path, 0o640)
                 config_path = os.path.join(tmp, "config.yaml")
                 with open(config_path, "rb") as handle:
                     config_before = handle.read()
-                with patch.object(app.cfg, "save", side_effect=OSError("config save failed")):
+                with patch.object(app.cfg, "_save_locked", side_effect=OSError("config save failed")):
                     result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
             self.assertNotEqual(result.exit_code, 0)
             with open(dotenv_path, "rb") as handle:
@@ -488,7 +547,7 @@ class TrustedPathsCliTests(unittest.TestCase):
                         handle.write(b"partial")
                     raise OSError("dotenv write failed")
 
-                with patch.object(cmd_setup, "_write_dotenv", side_effect=partial_write):
+                with patch.object(cmd_setup, "_write_dotenv_locked", side_effect=partial_write):
                     result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
             self.assertNotEqual(result.exit_code, 0)
             with open(dotenv_path, "rb") as handle:

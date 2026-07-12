@@ -296,11 +296,42 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     connector_mode_warnings: list[dict] = []
 
     new_config = not os.path.exists(cfg_mod.config_path())
+    if not new_config:
+        try:
+            cfg_mod.require_v8_config()
+        except cfg_mod.ConfigVersionError:
+            cfg = cfg_mod.default_config()
+            setup.append(
+                StepResult(
+                    "Config",
+                    "fail",
+                    "configuration schema v8 is required",
+                    "defenseclaw upgrade",
+                )
+            )
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw upgrade"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
     try:
         cfg = cfg_mod.load()
     except Exception:
         cfg = cfg_mod.default_config()
+        cfg_mod.prepare_fresh_v8_config(cfg)
         new_config = True
+    else:
+        # Loading an absent file returns the normal default dataclass rather
+        # than raising. Mark that never-persisted object as a fresh v8 source
+        # before the first mutation; ordinary Config.save deliberately rejects
+        # unversioned/legacy objects after the hard cutover.
+        if new_config and getattr(cfg, "_source_config_version", 0) == 0:
+            cfg_mod.prepare_fresh_v8_config(cfg)
 
     cfg.environment = cfg_mod.detect_environment()
     if profile == "action":
@@ -328,7 +359,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         store.init()
     except Exception as exc:  # broad: sqlite/file errors need to surface
         setup.append(StepResult("Audit DB", "fail", str(exc), "defenseclaw doctor --fix"))
-    logger = Logger(store, cfg.splunk)
+    # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
+    # first-run against v8 must use the live owner and must not silently drop
+    # ordinary v8 setup mutations.
+    logger = (
+        Logger.no_runtime()
+        if new_config or getattr(cfg, "_source_config_version", None) != 8
+        else Logger.from_config(cfg)
+    )
 
     try:
         bootstrap = bootstrap_env(cfg, logger)
@@ -574,8 +612,7 @@ def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
         connector = warning.get("connector", "")
         label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
         detail = (
-            f"requested action, configured observe: "
-            f"{warning.get('reason', 'connector version could not be verified')}"
+            f"requested action, configured observe: {warning.get('reason', 'connector version could not be verified')}"
         )
         steps.append(
             StepResult(
@@ -617,9 +654,7 @@ def _apply_first_run_choices(
             if _normalize_connector(str(key)) == wanted:
                 selected_override = pc
                 break
-        cfg.guardrail.connectors = {
-            connector: selected_override or PerConnectorGuardrailConfig()
-        }
+        cfg.guardrail.connectors = {connector: selected_override or PerConnectorGuardrailConfig()}
     else:
         cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
@@ -629,15 +664,11 @@ def _apply_first_run_choices(
     if options.with_judge:
         cfg.guardrail.judge.enabled = True
         cfg.guardrail.judge.hook_connectors = (
-            list(options.judge_hook_connectors)
-            if options.judge_hook_connectors is not None
-            else ["*"]
+            list(options.judge_hook_connectors) if options.judge_hook_connectors is not None else ["*"]
         )
         if not cfg.guardrail.detection_strategy or cfg.guardrail.detection_strategy == "regex_only":
             cfg.guardrail.detection_strategy = "regex_judge"
-        completion_strategy = (
-            getattr(cfg.guardrail, "detection_strategy_completion", "") or ""
-        ).strip().lower()
+        completion_strategy = (getattr(cfg.guardrail, "detection_strategy_completion", "") or "").strip().lower()
         if completion_strategy in ("", "regex_only"):
             cfg.guardrail.detection_strategy_completion = "regex_judge"
     else:
@@ -1121,8 +1152,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         try:
             config_text = Path(path).read_text(encoding="utf-8")
             configured = all(
-                marker in config_text
-                for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+                marker in config_text for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
             )
         except (OSError, UnicodeError):
             configured = False

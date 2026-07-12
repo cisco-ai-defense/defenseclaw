@@ -81,7 +81,7 @@ def _fixed_event():
 
 def _write_cfg(tmpdir: str, webhooks: list[dict] | None = None) -> None:
     cfg_path = os.path.join(tmpdir, "config.yaml")
-    data: dict = {}
+    data: dict = {"config_version": 8, "observability": {}}
     if webhooks is not None:
         data["webhooks"] = webhooks
     with open(cfg_path, "w") as f:

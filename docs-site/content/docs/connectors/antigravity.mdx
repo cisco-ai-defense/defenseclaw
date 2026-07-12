@@ -13,7 +13,7 @@ The Antigravity connector wires DefenseClaw into Google's [Antigravity CLI](http
 
 <Video
   src="antigravity"
-  caption="Three scenarios end-to-end against the same agy session: (1) benign `echo` flows through with action=allow / severity=NONE; (2) `cat ~/.ssh/known_hosts` lands on PATH-SSH-DIR HIGH → DefenseClaw returns decision=ask → agy surfaces its native approval prompt and the operator declines; (3) writing a Stripe secret to `.env` matches SEC-STRIPE + PATH-ENV-FILE CRITICAL → DefenseClaw returns decision=deny → agy refuses without prompting. Each verdict appears live in the Splunk pane on the left, including the unmasked `sk_live_…` value because privacy.disable_redaction=true for the demo."
+  caption="Three scenarios end-to-end against the same agy session: (1) a benign command flows through with action=allow / severity=NONE; (2) a sensitive-file read lands on a HIGH finding → DefenseClaw returns decision=ask → agy surfaces its native approval prompt and the operator declines; (3) writing a synthetic secret to an environment file matches a CRITICAL finding → DefenseClaw returns decision=deny → agy refuses without prompting. Each verdict appears live in the Splunk pane on the left. This historical demo used an unredacted destination projection; current v8 deployments select an explicit redaction profile per destination or route."
 />
 
 <Callout type="info">

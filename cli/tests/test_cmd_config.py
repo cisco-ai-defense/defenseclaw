@@ -22,12 +22,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands import cmd_config
 from defenseclaw.config import default_config
+from defenseclaw.config_inspect import ConfigInspectError
 
 
 class _IsolatedHome:
@@ -73,23 +75,38 @@ class ValidateConfigTests(unittest.TestCase):
     def test_invalid_yaml_reports_parse_error(self):
         with _IsolatedHome() as env:
             # Guaranteed YAML parse error (dangling unclosed bracket).
-            env.config_path.write_text("guardrail:\n  port: [oops\n", encoding="utf-8")
-            res = cmd_config.validate_config()
+            env.config_path.write_text(
+                "config_version: 8\nguardrail:\n  port: [oops\n",
+                encoding="utf-8",
+            )
+            with patch.object(
+                cmd_config,
+                "inspect_v8_config",
+                side_effect=ConfigInspectError("invalid YAML source"),
+            ):
+                res = cmd_config.validate_config()
             self.assertFalse(res.ok)
-            self.assertTrue(res.parse_error)
+            self.assertTrue(any("invalid YAML" in error for error in res.errors))
 
     def test_out_of_range_port_is_error(self):
         with _IsolatedHome() as env:
             env.config_path.write_text(
                 # Minimal, but enough to parse. Everything not listed
                 # takes its dataclass default via the loader.
+                "config_version: 8\n"
+                "observability: {}\n"
                 "guardrail:\n"
                 "  port: 99999\n"
                 "  mode: observe\n"
                 "  scanner_mode: local\n",
                 encoding="utf-8",
             )
-            res = cmd_config.validate_config()
+            with patch.object(
+                cmd_config,
+                "inspect_v8_config",
+                side_effect=ConfigInspectError("guardrail.port: must be between 1 and 65535"),
+            ):
+                res = cmd_config.validate_config()
             self.assertFalse(res.ok)
             self.assertTrue(any("guardrail.port" in e for e in res.errors),
                             msg=f"errors were: {res.errors}")
@@ -97,19 +114,28 @@ class ValidateConfigTests(unittest.TestCase):
     def test_bad_scanner_mode_is_error(self):
         with _IsolatedHome() as env:
             env.config_path.write_text(
+                "config_version: 8\n"
+                "observability: {}\n"
                 "guardrail:\n"
                 "  mode: observe\n"
                 "  port: 4000\n"
                 "  scanner_mode: bogus\n",
                 encoding="utf-8",
             )
-            res = cmd_config.validate_config()
+            with patch.object(
+                cmd_config,
+                "inspect_v8_config",
+                side_effect=ConfigInspectError("guardrail.scanner_mode: unsupported value"),
+            ):
+                res = cmd_config.validate_config()
             self.assertFalse(res.ok)
             self.assertTrue(any("scanner_mode" in e for e in res.errors))
 
     def test_gateway_port_clash_is_warning_not_error(self):
         with _IsolatedHome() as env:
             env.config_path.write_text(
+                "config_version: 8\n"
+                "observability: {}\n"
                 "guardrail:\n"
                 "  mode: observe\n"
                 "  port: 4000\n"
@@ -119,11 +145,16 @@ class ValidateConfigTests(unittest.TestCase):
                 "  api_port: 7070\n",
                 encoding="utf-8",
             )
-            res = cmd_config.validate_config()
-            # Port clash is advisory — don't fail CI over it; just warn.
+            with patch.object(
+                cmd_config,
+                "inspect_v8_config",
+                return_value=SimpleNamespace(valid=True),
+            ):
+                res = cmd_config.validate_config()
+            # The canonical Go validator owns any advisory diagnostics. The
+            # Python command must accept its valid decision without trying to
+            # reimplement config semantics.
             self.assertTrue(res.ok, msg=f"errors: {res.errors}")
-            self.assertTrue(any("api_port" in w for w in res.warnings),
-                            msg=f"warnings: {res.warnings}")
 
 
 class ConfigShowTests(unittest.TestCase):

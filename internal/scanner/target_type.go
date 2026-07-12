@@ -114,7 +114,7 @@ func NormalizeVerdictEnum(verdict string) string {
 		return "clean"
 	case "warn", "warning", "medium", "low":
 		return "warn"
-	case "block", "fail", "critical", "high", "reject":
+	case "block", "blocked", "fail", "failed", "critical", "high", "reject", "rejected":
 		return "block"
 	default:
 		return "clean"

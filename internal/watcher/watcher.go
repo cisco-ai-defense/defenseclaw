@@ -26,15 +26,15 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // InstallType distinguishes between skill and MCP install events.
@@ -108,13 +108,15 @@ type InstallWatcher struct {
 	logger     *audit.Logger
 	shell      *sandbox.OpenShell
 	opa        *policy.Engine
-	otel       *telemetry.Provider
 	webhooks   WebhookDispatcher
 	debounce   time.Duration
 	onAdmit    OnAdmission
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
+
+	observabilityV8Mu sync.RWMutex
+	observabilityV8   ObservabilityV8Runtime
 
 	policyFileMu     sync.Mutex
 	policyFileHashes map[string]string   // path → sha256 hex of file contents (policy / list YAML watch)
@@ -136,9 +138,9 @@ func (w *InstallWatcher) newScanner(evt InstallEvent) scanner.Scanner {
 }
 
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
-// to the built-in Go admission logic. The otel parameter may be nil when
-// telemetry is disabled.
-func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, otel *telemetry.Provider, onAdmit OnAdmission) *InstallWatcher {
+// to the built-in Go admission logic. Watcher observability is exclusively
+// emitted through the audit logger's generated v8 runtime.
+func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
@@ -151,18 +153,12 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		logger:           logger,
 		shell:            shell,
 		opa:              opa,
-		otel:             otel,
 		debounce:         debounce,
 		onAdmit:          onAdmit,
 		pending:          make(map[string]time.Time),
 		policyFileHashes: make(map[string]string),
 		policyListSnap:   make(map[string][]string),
 	}
-}
-
-// SetOTelProvider attaches the OTel provider for watcher metrics.
-func (w *InstallWatcher) SetOTelProvider(p *telemetry.Provider) {
-	w.otel = p
 }
 
 // SetWebhookDispatcher attaches a webhook dispatcher for outbound notifications.
@@ -202,9 +198,6 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
-	if w.opa != nil && w.otel != nil {
-		w.opa.SetOTelProvider(w.otel)
-	}
 	go w.watchPolicyListsAndYAML(ctx)
 
 	if w.cfg.Watch.RescanEnabled {
@@ -230,13 +223,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !w.isDirectChildDir(event.Name) {
 				continue
 			}
-			if w.otel != nil {
-				evtType := "create"
-				if event.Op&fsnotify.Rename != 0 {
-					evtType = "rename"
-				}
-				w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String(), "")
+			evtType := "create"
+			if event.Op&fsnotify.Rename != 0 {
+				evtType = "rename"
 			}
+			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String(), "")
 			w.mu.Lock()
 			if _, exists := w.pending[event.Name]; !exists {
 				w.pending[event.Name] = time.Now()
@@ -247,9 +238,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if w.otel != nil {
-				w.otel.RecordWatcherError(ctx)
-			}
+			w.recordWatcherError(ctx)
 			fmt.Fprintf(os.Stderr, "[watch] fsnotify error: %v\n", err)
 
 		case <-ticker.C:
@@ -323,21 +312,21 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	pe := enforce.NewPolicyEngine(w.store)
 	targetType := string(evt.Type)
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
-	ctx, admSpan := enforce.StartAdmissionDecideSpan(ctx, targetType, evt.Name, policyID)
+	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID)
 	// SLO timer: measure watcher-detection → admission-decision wall
 	// time so every run feeds defenseclaw.slo.block.latency. Blocked
 	// verdicts drive the <2000ms SLO dashboard; allowed/clean still
 	// populate the histogram so operators can compare distributions.
 	admissionStart := time.Now()
 	defer func() {
-		enforce.EndAdmissionDecideSpan(admSpan, string(res.Verdict), res.Reason, policyID, nil)
-		if w.otel != nil {
-			w.otel.RecordBlockSLO(ctx, targetType, float64(time.Since(admissionStart).Milliseconds()))
-		}
+		_ = admissionTrace.end(res)
+		w.recordBlockSLO(ctx, targetType, float64(time.Since(admissionStart).Milliseconds()))
 	}()
 
-	_ = w.logger.LogAction(string(audit.ActionInstallDetected), evt.Path,
-		fmt.Sprintf("type=%s name=%s", targetType, evt.Name))
+	w.logAssetDiscovered(
+		ctx, evt,
+		fmt.Sprintf("type=%s name=%s", targetType, evt.Name), "detected",
+	)
 
 	// Avarice F-2867: an explicit operator allow that recorded a
 	// source_path MUST NOT auto-allow a different on-disk asset
@@ -349,14 +338,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			_ = w.logger.LogAction("install-allow-path-mismatch", evt.Path,
 				fmt.Sprintf("type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
 					targetType, evt.Name, existing.SourcePath, evt.Path))
-			if w.otel != nil {
-				w.otel.EmitPolicyDecision("admission", "allow-path-mismatch", evt.Name, targetType,
-					"allow entry pinned to different source_path; failing closed (F-2867)",
-					map[string]string{
-						"allowed_path":   existing.SourcePath,
-						"presented_path": evt.Path,
-					})
-			}
 			w.enforceBlock(ctx, evt)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{
@@ -381,14 +362,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		RuntimeSurface: "watcher",
 	})
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
-		if w.otel != nil {
-			w.otel.EmitPolicyDecision("asset-policy", assetDecision.Action, evt.Name, targetType, assetDecision.Reason, map[string]string{
-				"source":          assetDecision.Source,
-				"registry_status": assetDecision.RegistryStatus,
-				"runtime_surface": "watcher",
-				"would_block":     fmt.Sprintf("%t", assetDecision.WouldBlock),
-			})
-		}
 		if assetDecision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
@@ -414,9 +387,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			case "blocked":
 				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 					fmt.Sprintf("type=%s reason=blocked", targetType))
-				if w.otel != nil {
-					w.otel.EmitPolicyDecision("admission", "blocked", evt.Name, targetType, out.Reason, nil)
-				}
 				w.enforceBlock(ctx, evt)
 				w.recordAdmission(ctx, "blocked", targetType)
 				res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
@@ -424,9 +394,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			case "rejected":
 				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 					fmt.Sprintf("type=%s reason=policy-rejected", targetType))
-				if w.otel != nil {
-					w.otel.EmitPolicyDecision("admission", "rejected", evt.Name, targetType, out.Reason, nil)
-				}
 				w.enforceBlock(ctx, evt)
 				w.recordAdmission(ctx, "rejected", targetType)
 				res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason}
@@ -434,9 +401,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			case "allowed":
 				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 					fmt.Sprintf("type=%s reason=allow-listed", targetType))
-				if w.otel != nil {
-					w.otel.EmitPolicyDecision("admission", "allowed", evt.Name, targetType, out.Reason, nil)
-				}
 				w.recordAdmission(ctx, "allowed", targetType)
 				res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 				return res
@@ -502,9 +466,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
-		if w.otel != nil {
-			w.otel.RecordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
-		}
+		w.recordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
 		// Avarice F-3187: a scanner error must NOT leave the
 		// freshly-detected install in place. The legacy code
 		// recorded `scan-error` and returned without quarantine,
@@ -531,7 +493,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
-		_ = w.logger.LogScanWithVerdict(result, "blocked")
+		_ = w.logScan(ctx, evt, result, "blocked")
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "blocked", targetType)
 		res = AdmissionResult{
@@ -545,12 +507,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
-		_ = w.logger.LogScanWithVerdict(result, "allowed")
-		if w.otel != nil {
-			w.otel.EmitPolicyDecision("admission", "allowed", evt.Name, targetType, reason, map[string]string{
-				"scanner": s.Name(),
-			})
-		}
+		_ = w.logScan(ctx, evt, result, "allowed")
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{
 			Event: evt, Verdict: VerdictAllowed, Reason: reason,
@@ -578,22 +535,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		out, evalErr := w.opa.Evaluate(ctx, input)
 		if evalErr == nil {
-			if w.otel != nil {
-				if out.Verdict == "rejected" || out.Verdict == "blocked" {
-					w.otel.EmitPolicyDecision("admission", out.Verdict, evt.Name, targetType, out.Reason, map[string]string{
-						"scanner":      s.Name(),
-						"max_severity": string(result.MaxSeverity()),
-					})
-				}
-				if out.Verdict == "clean" || out.Verdict == "warning" {
-					w.otel.EmitPolicyDecision("admission", out.Verdict, evt.Name, targetType, out.Reason, map[string]string{
-						"scanner":      s.Name(),
-						"max_severity": string(result.MaxSeverity()),
-					})
-				}
-			}
 			w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-			_ = w.logger.LogScanWithVerdict(result, out.Verdict)
+			_ = w.logScan(ctx, evt, result, out.Verdict)
 			w.recordAdmission(ctx, out.Verdict, targetType)
 			res = AdmissionResult{
 				Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
@@ -622,7 +565,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		ScanResult: scanInput,
 	}, fallbackProfile)
 	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-	_ = w.logger.LogScanWithVerdict(result, out.Verdict)
+	_ = w.logScan(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
 	res = AdmissionResult{
 		Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
@@ -695,6 +638,17 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 		_ = w.logger.LogAction(string(audit.ActionInstallWarning), evt.Path,
 			fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, result.MaxSeverity(), scannerName))
 	}
+}
+
+func (w *InstallWatcher) logAssetDiscovered(
+	ctx context.Context,
+	evt InstallEvent,
+	details, reason string,
+) {
+	_ = w.logger.LogAssetDiscoveredCtx(ctx, evt.Path, details, audit.AssetLifecycleInput{
+		AssetID: evt.Name, AssetType: string(evt.Type), TargetPath: evt.Path,
+		Reason: reason, Initiator: "watcher",
+	})
 }
 
 func coalesce(vals ...string) string {
@@ -796,10 +750,10 @@ func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 		se := enforce.NewSkillEnforcer(w.cfg.QuarantineDir)
 		dest, err := se.Quarantine(evt.Path)
 		if err != nil {
-			w.emitQuarantineFailure(ctx, gatewaylog.ErrCodeFSMoveFailed, evt.Path, err)
+			w.emitQuarantineFailure(ctx, evt.Path, err)
 			return
 		}
-		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt.Path, dest)
+		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, dest)
 	case InstallMCP:
 		me := enforce.NewMCPEnforcer(w.shell)
 		_ = me.BlockEndpoint(evt.Name)
@@ -807,42 +761,42 @@ func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 		pe := enforce.NewPluginEnforcer(w.cfg.QuarantineDir, w.shell)
 		dest, err := pe.Quarantine(evt.Path)
 		if err != nil {
-			w.emitQuarantineFailure(ctx, gatewaylog.ErrCodeFSMoveFailed, evt.Path, err)
+			w.emitQuarantineFailure(ctx, evt.Path, err)
 			return
 		}
-		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt.Path, dest)
+		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, dest)
 	}
 }
 
-func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, code gatewaylog.ErrorCode, path string, err error) {
-	if w.otel != nil {
-		w.otel.EmitGatewayEvent(gatewaylog.Event{
-			Timestamp: time.Now().UTC(),
-			EventType: gatewaylog.EventError,
-			Severity:  gatewaylog.SeverityHigh,
-			Error: &gatewaylog.ErrorPayload{
-				Subsystem: string(gatewaylog.SubsystemQuarantine),
-				Code:      string(code),
-				Message:   "quarantine filesystem move failed",
-				Cause:     err.Error(),
-			},
-		})
-		w.otel.RecordQuarantineAction(ctx, "move_in", "error")
-	} else {
-		fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", path, err)
+func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, path string, err error) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
 	}
+	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", path, err)
 }
 
-func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, srcPath, destPath string) {
-	if w.otel != nil {
-		w.otel.RecordQuarantineAction(ctx, "move_in", "ok")
-	}
-	_ = w.logger.LogEvent(audit.Event{
+func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {
+	event := audit.Event{
 		Action:   string(action),
-		Target:   srcPath,
+		Target:   evt.Path,
 		Actor:    "defenseclaw",
 		Details:  fmt.Sprintf("dest=%s", destPath),
 		Severity: "INFO",
+	}
+	if action != audit.ActionQuarantine {
+		_ = w.logger.LogEventCtx(ctx, event)
+		return
+	}
+	_ = w.logger.LogEnforcementQuarantineApplied(ctx, event, audit.EnforcementQuarantineAppliedInput{
+		EnforcementID:   uuid.NewString(),
+		RequestedAction: "quarantine",
+		EffectiveAction: "quarantine",
+		Initiator:       "defenseclaw",
+		ResultingState:  "quarantined",
+		AssetID:         evt.Name,
+		AssetType:       evt.Type.String(),
+		SourcePath:      evt.Path,
+		DestinationPath: destPath,
 	})
 }
 
@@ -875,9 +829,81 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 }
 
 func (w *InstallWatcher) recordAdmission(ctx context.Context, decision, targetType string) {
-	if w.otel != nil {
-		w.otel.RecordAdmissionDecision(ctx, decision, targetType, "watcher")
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordAdmissionDecisionMetric(ctx, decision, targetType, "watcher")
 	}
+}
+
+func (w *InstallWatcher) recordWatcherEvent(
+	ctx context.Context,
+	eventType, targetType, connector string,
+) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordWatcherEventMetric(ctx, eventType, targetType, connector)
+	}
+}
+
+func (w *InstallWatcher) recordWatcherError(ctx context.Context) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordWatcherErrorMetric(ctx)
+	}
+}
+
+func (w *InstallWatcher) recordBlockSLO(ctx context.Context, targetType string, latencyMS float64) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordBlockSLOMetric(ctx, targetType, latencyMS)
+	}
+}
+
+func (w *InstallWatcher) recordScanError(
+	ctx context.Context,
+	scannerName, targetType, errorType string,
+) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordWatcherScanErrorMetric(ctx, scannerName, targetType, errorType)
+	}
+}
+
+func (w *InstallWatcher) logScan(
+	ctx context.Context,
+	evt InstallEvent,
+	result *scanner.ScanResult,
+	verdict string,
+) error {
+	if w == nil || w.logger == nil {
+		return fmt.Errorf("watcher: v8 scan logger is unavailable")
+	}
+	return w.logger.LogScanWithCorrelation(
+		ctx, result, verdict,
+		watcherScanCorrelation(ctx, "", w.eventConnector(evt)),
+	)
+}
+
+func watcherScanCorrelation(
+	ctx context.Context,
+	runID, connector string,
+) audit.ScanCorrelation {
+	envelope := audit.EnvelopeFromContext(ctx)
+	if runID == "" {
+		runID = envelope.RunID
+	}
+	correlation := audit.ScanCorrelation{
+		RunID: runID, RequestID: envelope.RequestID, SessionID: envelope.SessionID,
+		TraceID: envelope.TraceID, AgentID: envelope.AgentID, AgentName: envelope.AgentName,
+		AgentInstanceID: envelope.AgentInstanceID, Connector: connector,
+		EvaluationID: watcherAdmissionEvaluationID(ctx),
+	}
+	spanContext := trace.SpanContextFromContext(ctx)
+	if spanContext.IsValid() {
+		if correlation.TraceID == "" {
+			correlation.TraceID = spanContext.TraceID().String()
+			correlation.SpanID = spanContext.SpanID().String()
+		}
+		if correlation.TraceID == spanContext.TraceID().String() && correlation.SpanID == "" {
+			correlation.SpanID = spanContext.SpanID().String()
+		}
+	}
+	return correlation
 }
 
 func watcherConnectorName(cfg *config.Config) string {

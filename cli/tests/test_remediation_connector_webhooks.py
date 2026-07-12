@@ -22,20 +22,11 @@ from __future__ import annotations
 import json
 import os
 import stat
-import urllib.error
-import urllib.request
-from email.message import Message
-from io import BytesIO
-from urllib.response import addinfourl
 
 import click
 import pytest
 from defenseclaw.commands.cmd_agent import _resolve_gateway_target
 from defenseclaw.commands.cmd_config import _config_to_masked_dict
-from defenseclaw.commands.cmd_setup_observability import (
-    _write_atomically,
-    probe_splunk_hec,
-)
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import _validate_api_url
 from defenseclaw.commands.cmd_setup_webhook import _view_to_dict
 from defenseclaw.config import OTelDestinationConfig, WebhookConfig, default_config
@@ -233,68 +224,6 @@ def test_f0181_webhook_url_redaction():
     rendered = _view_to_dict(view)
     assert "secret" not in rendered["url"]
     assert rendered["url"] == "https://hooks.slack.com/***"
-
-
-# ---------------------------------------------------------------------------
-# F-0184 — the Splunk HEC probe must refuse 3xx redirects so the
-# Authorization: Splunk <token> header is never forwarded to the redirect
-# target.
-# ---------------------------------------------------------------------------
-def test_f0184_hec_probe_refuses_redirect(tmp_path, monkeypatch):
-    (tmp_path / "config.yaml").write_text(
-        "audit_sinks:\n"
-        "  - name: hec\n"
-        "    splunk_hec:\n"
-        "      endpoint: http://hec-origin.test/services/collector/event\n"
-        "      token_env: DC_F0184_TOKEN\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("DC_F0184_TOKEN", "F0184_SPLUNK_SECRET")
-
-    calls: list[dict[str, str]] = []
-
-    def fake_http_open(self, req):  # noqa: ANN001
-        calls.append(
-            {
-                "url": req.full_url,
-                "authorization": req.headers.get("Authorization", ""),
-            }
-        )
-        headers = Message()
-        headers["Location"] = "http://attacker.test/leak"
-        resp = addinfourl(BytesIO(b""), headers, req.full_url, code=302)
-        resp.msg = "Found"
-        return resp
-
-    monkeypatch.setattr(urllib.request.HTTPHandler, "http_open", fake_http_open)
-
-    ok, message = probe_splunk_hec(str(tmp_path), "hec", timeout=5.0)
-
-    assert ok is False
-    assert "302" in message
-    # The origin was hit exactly once; the redirect to the attacker host was
-    # never followed (so the token was not replayed off-origin).
-    assert len(calls) == 1
-    assert calls[0]["url"] == "http://hec-origin.test/services/collector/event"
-    assert all("attacker.test" not in c["url"] for c in calls)
-
-
-# ---------------------------------------------------------------------------
-# F-0186 — _write_atomically must write 0600 via mkstemp and not follow a
-# predictable "<cfg>.tmp" symlink.
-# ---------------------------------------------------------------------------
-def test_f0186_write_atomically_is_0600_and_ignores_tmp_symlink(tmp_path):
-    cfg_path = tmp_path / "config.yaml"
-    sentinel = tmp_path / "sentinel.txt"
-    sentinel.write_text("SENTINEL", encoding="utf-8")
-    os.symlink(sentinel, str(cfg_path) + ".tmp")
-
-    _write_atomically(str(cfg_path), {"data_dir": str(tmp_path)})
-
-    mode = stat.S_IMODE(os.stat(cfg_path).st_mode)
-    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
-    assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
-    assert "data_dir:" in cfg_path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

@@ -91,14 +91,15 @@ type claudeCodeHookResponse struct {
 	// RuleIDs are the top detection rule_ids that drove this
 	// verdict (capped at 8). Lets operators correlate a block
 	// without joining against scan_findings. Additive.
-	RuleIDs []string `json:"rule_ids,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
+	SourceReason string   `json:"-"`
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
 // handleAgentHook("claudecode"); the profile-runtime registry invokes
 // the connector-specific evaluator kept below. The pipeline's shared
 // concerns — audit envelope refresh, dispatch metric, dedup, trace
-// propagation, OTel emissions — live in exactly one place
+// propagation, and v8 observability emissions — live in exactly one place
 // (handleAgentHook) so per-connector handlers cannot drift apart on
 // any of those signals. The evaluator stamps the unified-pipeline
 // correlation keys (resp.EvaluationID / resp.RuleIDs) on its return
@@ -132,7 +133,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode", MCPServerName: req.MCPServerName})
+		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode", MCPServerName: req.MCPServerName})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
@@ -346,6 +347,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 		Mode:              mode,
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
+		SourceReason:      reason,
 	}
 	resp.ClaudeCodeOutput = claudeCodeOutput(req, action, rawAction, safeReason, additional)
 	return resp

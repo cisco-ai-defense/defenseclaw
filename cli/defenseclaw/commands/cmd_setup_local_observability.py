@@ -52,16 +52,6 @@ from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import local_observability_bridge_bin
 
 _PRESET_ID = "local-otlp"
-# Generic-OTLP preset id used to mint the matching ``audit_sinks`` entry
-# (``otlp_logs`` kind). Kept distinct from ``_PRESET_ID`` because the
-# writer's ``target_override`` contract only honours the generic preset.
-_AUDIT_SINK_PRESET_ID = "otlp"
-# Stable name for the audit-sink entry the writer adds/updates when
-# ``up`` is invoked with ``--with-audit-sink`` (default). A stable name
-# means re-invoking ``up`` updates the existing entry in place rather
-# than appending a duplicate, and ``down --disable-config`` knows what
-# to flip off.
-_AUDIT_SINK_NAME = "local-otlp-logs"
 _DEFAULT_SIGNALS: tuple[str, ...] = ("traces", "metrics", "logs")
 _STACK_PORTS: tuple[tuple[int, str], ...] = (
     (3000, "Grafana"),
@@ -144,7 +134,7 @@ def local_observability(ctx: click.Context) -> None:
     is_flag=True,
     help=(
         "Do not write config.yaml. Useful for 'just start the containers' "
-        "flows where a different preset already owns the otel: block."
+        "flows where a different canonical destination already owns routing."
     ),
 )
 @click.option(
@@ -156,25 +146,13 @@ def local_observability(ctx: click.Context) -> None:
     "--signals",
     default=",".join(_DEFAULT_SIGNALS),
     show_default=True,
-    help="Comma-separated OTel signals to enable (traces,metrics,logs).",
+    help="Comma-separated canonical signals to enable (traces,metrics,logs).",
 )
 @click.option(
     "--service-name",
     default="defenseclaw",
     show_default=True,
-    help="Value to stamp into otel.resource.attributes.service.name.",
-)
-@click.option(
-    "--with-audit-sink/--no-audit-sink",
-    "with_audit_sink",
-    default=True,
-    show_default=True,
-    help=(
-        "Also add/refresh an audit_sinks[otlp_logs] entry pointing at "
-        "the same loopback OTLP endpoint so the gateway's Sinks row "
-        "reports RUNNING. Pass --no-audit-sink to leave audit_sinks "
-        "untouched (e.g. when a different SIEM owns the audit pipeline)."
-    ),
+    help="Value to stamp into observability.resource.attributes.service.name.",
 )
 @click.option(
     "--refresh-bundle/--no-refresh-bundle",
@@ -212,7 +190,6 @@ def up_cmd(
     endpoint: str | None,
     signals: str,
     service_name: str,
-    with_audit_sink: bool,
     refresh_bundle: bool,
     refresh_config: bool,
 ) -> None:
@@ -236,41 +213,24 @@ def up_cmd(
     otlp_endpoint = endpoint or str(contract.get("otlp_endpoint") or "127.0.0.1:4317")
     otlp_protocol = str(contract.get("otlp_protocol") or "grpc")
 
-    sink_applied = False
+    logs_enabled = False
     if not no_config:
+        selected_signals = _parse_signals(signals)
         _apply_local_otlp_config(
             app,
             endpoint=otlp_endpoint,
             protocol=otlp_protocol,
-            signals=_parse_signals(signals),
+            signals=selected_signals,
             service_name=service_name,
         )
         click.echo(
-            f"  {ux.bold('Config updated:')} otel.enabled=true, endpoint={otlp_endpoint}"
+            f"  {ux.bold('Config updated:')} "
+            f"observability.destinations[local-observability], endpoint={otlp_endpoint}"
         )
 
-        if with_audit_sink:
-            try:
-                _apply_local_otlp_audit_sink(
-                    app,
-                    endpoint=otlp_endpoint,
-                    protocol=otlp_protocol,
-                )
-                sink_applied = True
-                click.echo(
-                    f"  {ux.bold('Config updated:')} "
-                    f"audit_sinks[{_AUDIT_SINK_NAME}].enabled=true, kind=otlp_logs"
-                )
-            except ValueError as exc:
-                # Don't fail the whole ``up`` flow if the audit sink
-                # write hits a validation error (e.g. an operator
-                # already authored a hand-edited sink with the same
-                # name and a conflicting kind). Surface a warning so
-                # the operator can fix it without losing the otel:
-                # exporter wiring we just established.
-                ux.warn(f"skipped audit_sinks[{_AUDIT_SINK_NAME}] write — {exc}")
+        logs_enabled = "logs" in selected_signals
 
-    _print_stack_summary(contract, audit_sink_enabled=sink_applied, cfg=app.cfg)
+    _print_stack_summary(contract, logs_enabled=logs_enabled, cfg=app.cfg)
 
     if app.logger:
         app.logger.log_action(
@@ -278,7 +238,7 @@ def up_cmd(
             "stack",
             (
                 f"action=up endpoint={otlp_endpoint} protocol={otlp_protocol} "
-                f"audit_sink={'true' if sink_applied else 'false'}"
+                f"logs={'true' if logs_enabled else 'false'}"
             ),
         )
 
@@ -292,7 +252,7 @@ def up_cmd(
 @click.option(
     "--disable-config",
     is_flag=True,
-    help="Also flip otel.enabled=false in config.yaml.",
+    help="Also disable the canonical local-observability destination.",
 )
 @pass_ctx
 def down_cmd(app: AppContext, disable_config: bool) -> None:
@@ -300,51 +260,24 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
     bridge = _resolve_bridge(app.cfg.data_dir)
     _run_bridge(bridge, ["down"])
 
-    sink_disabled = False
     if disable_config:
-        from defenseclaw.observability import set_destination_enabled
+        from defenseclaw.commands.cmd_setup_observability import (
+            _require_v8_operator_status,
+            _set_v8_destination_enabled,
+        )
 
-        try:
-            set_destination_enabled("local-observability", False, app.cfg.data_dir)
-            click.echo(
-                f"  {ux.bold('Config updated:')} "
-                "otel.destinations[local-observability].enabled=false"
-            )
-        except ValueError as exc:
-            # Configurations created before named fan-out used the flat
-            # ``otel:`` exporter. Preserve the old ``down`` behavior until
-            # the next setup mutation migrates that exporter automatically.
-            try:
-                set_destination_enabled("otel", False, app.cfg.data_dir)
-                click.echo(f"  {ux.bold('Config updated:')} otel.enabled=false")
-            except ValueError:
-                click.echo(f"  warning: could not disable otel block: {exc}")
-
-        # Best-effort: also flip off the matching audit sink we
-        # planted in ``up``. We only disable, never delete, so an
-        # operator who has tweaked the entry (e.g. min_severity)
-        # keeps their edits across an up/down cycle.
-        try:
-            set_destination_enabled(_AUDIT_SINK_NAME, False, app.cfg.data_dir)
-            click.echo(
-                f"  {ux.bold('Config updated:')} "
-                f"audit_sinks[{_AUDIT_SINK_NAME}].enabled=false"
-            )
-            sink_disabled = True
-        except ValueError:
-            # Sink not present (e.g. up was run with --no-audit-sink,
-            # or the operator removed it manually). Silent — the
-            # whole point of "down --disable-config" is best-effort.
-            pass
+        _require_v8_operator_status(app.cfg.data_dir)
+        _set_v8_destination_enabled(app.cfg.data_dir, "local-observability", False, "")
+        click.echo(
+            f"  {ux.bold('Config updated:')} "
+            "observability.destinations[local-observability].enabled=false"
+        )
 
     if app.logger:
         app.logger.log_action(
             ACTION_SETUP_LOCAL_OBSERVABILITY,
             "stack",
-            (
-                "action=down "
-                f"audit_sink_disabled={'true' if sink_disabled else 'false'}"
-            ),
+            "action=down",
         )
 
 
@@ -622,63 +555,42 @@ def _apply_local_otlp_config(
     signals: tuple[str, ...],
     service_name: str,
 ) -> None:
-    """Write/refresh the ``otel:`` block via the shared observability writer."""
-    from defenseclaw.observability import apply_preset
+    """Write one unified canonical v8 destination."""
+    from defenseclaw.commands.cmd_setup_observability import (
+        _add_v8_destination,
+        _require_v8_operator_status,
+    )
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.presets import PRESETS
+    from defenseclaw.observability.v8_writer import mutate_v8_config
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
-    apply_preset(
-        _PRESET_ID,
+    _require_v8_operator_status(app.cfg.data_dir)
+    _add_v8_destination(
+        app.cfg.data_dir,
+        PRESETS[_PRESET_ID],
         {
             "endpoint": endpoint,
-            # ``protocol`` is declared on the preset; callers can still
-            # force http here for SDKs that can't speak grpc locally.
             "protocol": protocol,
             "insecure": "true",
             "service_name": service_name,
         },
-        app.cfg.data_dir,
         name="local-observability",
         enabled=True,
-        signals=signals,  # type: ignore[arg-type]
+        signals=signals,
+        token_value=None,
+        target=None,
+        dry_run=False,
     )
-    _reload_cfg_from_data_dir(app)
-
-
-def _apply_local_otlp_audit_sink(
-    app: AppContext,
-    *,
-    endpoint: str,
-    protocol: str,
-) -> None:
-    """Add or refresh the ``audit_sinks[otlp_logs]`` entry that mirrors
-    the local OTLP exporter, so the gateway's Sinks subsystem reports
-    RUNNING out of the box.
-
-    The audit pipeline is *separate* from the gateway's OTel exporter:
-    ``otel:`` carries gateway self-telemetry (traces / metrics / logs
-    of the sidecar itself) while ``audit_sinks[]`` fans out the
-    in-process audit log (security events, policy verdicts, scanner
-    findings) to a SIEM / log backend. Wiring both at the same loopback
-    endpoint is the dev-convenience default — operators with a real
-    SIEM in front of audit will pass ``--no-audit-sink``.
-
-    We use the generic ``otlp`` preset with ``target_override`` because
-    the ``local-otlp`` preset is otel-only (its writer path doesn't
-    build sink entries) and the ``otlp`` preset already handles the
-    ``otlp_logs`` shape.
-    """
-    from defenseclaw.observability import apply_preset
-
-    apply_preset(
-        _AUDIT_SINK_PRESET_ID,
-        {
-            "endpoint": endpoint,
-            "protocol": protocol,
-            "insecure": "true",
-        },
-        app.cfg.data_dir,
-        name=_AUDIT_SINK_NAME,
-        enabled=True,
-        target_override="audit_sinks",
+    mutate_v8_config(
+        config_path_for_data_dir(app.cfg.data_dir),
+        [
+            V8YAMLMutation.set(
+                ("observability", "resource", "attributes", "service.name"),
+                service_name,
+            )
+        ],
+        data_dir=app.cfg.data_dir,
     )
     _reload_cfg_from_data_dir(app)
 
@@ -906,7 +818,7 @@ def _parse_signals(raw: str) -> tuple[str, ...]:
 
 
 def _print_stack_summary(
-    contract: dict[str, Any], *, audit_sink_enabled: bool = False, cfg: Any = None,
+    contract: dict[str, Any], *, logs_enabled: bool = False, cfg: Any = None,
 ) -> None:
     click.echo()
     ux.section("Local observability stack is up")
@@ -917,15 +829,14 @@ def _print_stack_summary(
     click.echo(f"    {ux.bold('OTLP gRPC:')}  {contract.get('otlp_endpoint', '127.0.0.1:4317')}")
     click.echo(f"    {ux.bold('OTLP HTTP:')}  {contract.get('otlp_http_endpoint', '127.0.0.1:4318')}")
     click.echo()
-    if audit_sink_enabled:
+    if logs_enabled:
         ux.ok(
-            f"Audit sink:  {_AUDIT_SINK_NAME} (otlp_logs) "
-            "→ same OTLP endpoint, gateway 'Sinks' row will report RUNNING."
+            "Logs:        canonical v8 logs enabled on local-observability "
+            "(security, lifecycle, audit, and health families)."
         )
     else:
         ux.subhead(
-            "Audit sink:  not configured (--no-audit-sink / --no-config). "
-            "The gateway 'Sinks' row stays DISABLED until an audit sink is added."
+            "Logs:        not configured (--no-config or logs omitted from --signals)."
         )
     click.echo()
     print_redaction_status_hint(cfg)

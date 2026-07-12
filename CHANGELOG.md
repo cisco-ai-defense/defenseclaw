@@ -14,6 +14,38 @@ default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
 deleted.
 
+### Observability v8
+
+- Replaces separate `otel`, `audit_sinks`, and global redaction policy with one
+  strict `config_version: 8` `observability` graph for bucket collection,
+  mandatory local SQLite history, redaction profiles, routing, retention,
+  sampling, metric policy, and every optional destination.
+- Fresh v8 is full fidelity: all registered logs, traces, and metrics collect;
+  local SQLite stores every collected log unredacted; and an enabled destination
+  with omitted `send`/`routes` exports every reviewed bucket and every signal its
+  kind supports under profile `none`. General OTLP sends logs/traces/metrics,
+  logs-only kinds send logs, Prometheus sends metrics, and Galileo sends traces.
+- Adds centralized per-destination field-class profiles (`none`, `sensitive`,
+  `content`, `strict`, and custom detect/whole/hash/remove policy), ordered
+  first-match routes, and independent queue/health/accounting for multi-backend
+  fan-out.
+- Preserves the full root-agent/subagent/turn/workflow/model/tool lifecycle and
+  the `local-observability-v1` Agent360/dashboard contract while expanding the
+  generated `galileo-rich-v2` trace projection.
+- `defenseclaw upgrade` automatically backs up, converts, validates, and
+  atomically activates supported v7 configuration. It preserves narrower v7
+  signal/routing/redaction behavior, promotes inline observability secrets to
+  locked environment references, refreshes owned local-dashboard assets without
+  resetting volumes, and rolls back a failed required conversion. No separate
+  migration apply command is required; the v8 gateway does not rewrite v7 config
+  at startup or run both formats in parallel.
+
+Breaking change: fresh-v8 telemetry is unredacted by default, and legacy
+`otel`, `audit_sinks`, `privacy.disable_redaction`, and associated ambient OTel
+policy variables are not accepted as v8 runtime policy. Review
+`defenseclaw observability plan` before enabling a destination across a trust
+boundary.
+
 ### Packaging / upgrade hotfix
 
 - Kept `cisco-ai-mcp-scanner` as a core dependency and relaxed

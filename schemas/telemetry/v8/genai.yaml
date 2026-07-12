@@ -1,0 +1,4982 @@
+schema_version: 1
+domain: genai
+attributes:
+- id: defenseclaw.bucket
+  type: string
+  brief: Primary v8 collection bucket
+  examples:
+  - model.io
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - agent.lifecycle
+      - ai.discovery
+      - asset.lifecycle
+      - asset.scan
+      - compliance.activity
+      - diagnostic
+      - enforcement.action
+      - guardrail.evaluation
+      - model.io
+      - network.egress
+      - platform.health
+      - security.finding
+      - telemetry.ingest
+      - tool.activity
+    notes: closed bucket catalog
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.span.family
+  type: string
+  brief: Stable span-family routing identity
+  examples:
+  - span.model.chat
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    notes: registered family
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.span.family_schema_version
+  type: uint32
+  brief: Per-family schema version
+  examples:
+  - 1
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 1
+      max: 4294967295
+    notes: positive integer
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.source
+  type: string
+  brief: Stable producer identity
+  examples:
+  - gateway
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    notes: registered source
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.connector.source
+  type: string
+  brief: Connector identity when known
+  examples:
+  - codex
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    notes: registered connector
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.config.generation
+  type: int64
+  brief: Immutable runtime generation
+  examples:
+  - 12
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: nonnegative integer
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.trace.schema_version
+  type: string
+  brief: Canonical DefenseClaw trace schema version
+  examples:
+  - defenseclaw-trace-v1
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - defenseclaw-trace-v1
+    notes: closed trace schema version bound by the semantic profile
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.semantic_profile
+  type: string
+  brief: Canonical DefenseClaw semantic profile
+  examples:
+  - defenseclaw-genai-rich-v1
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - defenseclaw-genai-rich-v1
+    notes: closed semantic profile selected by the registry
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.link.relation
+  type: string
+  brief: Canonical relation carried by a trace link
+  examples:
+  - caused_by
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - caused_by
+      - resumes
+      - derived_from
+      - correlates_with
+    notes: closed relation vocabulary shared by registered span families
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.outcome
+  type: string
+  brief: Canonical observed outcome
+  examples:
+  - completed
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - allowed
+      - applied
+      - approved
+      - attempted
+      - blocked
+      - cancelled
+      - completed
+      - denied
+      - failed
+      - no_change
+      - partial
+      - quarantined
+      - redacted
+      - rejected
+      - released
+      - revoked
+      - skipped
+      - terminated
+      - timed_out
+      - validated
+    notes: canonical outcome enum
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.run.id
+  type: string
+  brief: Gateway/sidecar run identity
+  examples:
+  - run-01J
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.operation.id
+  type: string
+  brief: Bounded operation identity
+  examples:
+  - op-01J
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.request.id
+  type: string
+  brief: Request identity
+  examples:
+  - req-01J
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.turn.id
+  type: string
+  brief: Turn identity
+  examples:
+  - turn-01J
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.type
+  type: string
+  brief: Canonical bounded connector-reported agent implementation or runtime type; topology and root/subagent role use separate lifecycle fields.
+  examples:
+  - codex
+  - copilot-cli
+  - coding-agent
+  - diagnostic
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: connector-reported NFC string with a bounded byte length; never inferred from root/subagent topology
+  introduced_in: telemetry-registry-v1
+- id: gen_ai.agent.type
+  type: string
+  brief: 'Deprecated PR #403 projection alias preserving the exact connector-reported implementation/runtime meaning of defenseclaw.agent.type; absent from the pinned OTel GenAI registry.'
+  examples:
+  - codex
+  - copilot-cli
+  - coding-agent
+  - diagnostic
+  stability: deprecated
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: exact projection of defenseclaw.agent.type
+  introduced_in: telemetry-registry-v1
+  deprecated_in: telemetry-registry-v1
+  removed_in: telemetry-registry-v2
+  alias_of: defenseclaw.agent.type
+  projection_only: true
+  legacy_bindings:
+  - source: 'PR #403 current runtime and agent lifecycle schemas'
+    disposition: generated_compatibility_alias
+    details:
+      canonical: defenseclaw.agent.type
+      projections:
+      - galileo-rich-v2
+      - local-observability-v1
+      - generated current-schema compatibility views
+- id: defenseclaw.agent.instance_id
+  type: string
+  brief: Concrete agent instance
+  examples:
+  - agent-instance-1
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.root.id
+  type: string
+  brief: Logical root agent
+  examples:
+  - root-agent
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.parent.id
+  type: string
+  brief: Immediate delegating agent
+  examples:
+  - parent-agent
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.lineage.provenance
+  type: string
+  brief: Whether logical root, parent, and depth lineage was reported by the connector or inferred by DefenseClaw.
+  examples:
+  - reported
+  - inferred
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - reported
+      - inferred
+    notes: reported|inferred; absent when no lineage claim is made
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.session.root.id
+  type: string
+  brief: Root upstream session
+  examples:
+  - root-session
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.session.parent.id
+  type: string
+  brief: Parent upstream session
+  examples:
+  - parent-session
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: nonempty bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.lifecycle.id
+  type: string
+  brief: Stable lifecycle identity
+  examples:
+  - lifecycle-0123456789abcdef
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: lifecycle-[0-9a-f]{16}
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.execution.id
+  type: string
+  brief: Execution attempt identity
+  examples:
+  - execution-0123456789abcdef
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: execution-[0-9a-f]{16}
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.depth
+  type: int64
+  brief: Delegation depth
+  examples:
+  - 1
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 64
+    notes: integer 0..64
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.lifecycle.event
+  type: string
+  brief: Lifecycle event
+  examples:
+  - turn_start
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed lifecycle event
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.lifecycle.state
+  type: string
+  brief: Lifecycle state
+  examples:
+  - active
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed lifecycle state
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.lifecycle.transition
+  type: string
+  brief: Lifecycle transition
+  examples:
+  - active_to_completed
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: registered transition
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.phase
+  type: string
+  brief: Current lifecycle phase
+  examples:
+  - model
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - session
+      - planning
+      - model
+      - tool
+      - approval
+      - waiting
+      - responding
+      - maintenance
+      - completed
+      - failed
+      - interrupted
+      - observed
+    notes: closed phase value bound to agent-phase-v1
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.phase.previous
+  type: string
+  brief: Previous lifecycle phase
+  examples:
+  - planning
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - session
+      - planning
+      - model
+      - tool
+      - approval
+      - waiting
+      - responding
+      - maintenance
+      - completed
+      - failed
+      - interrupted
+      - observed
+    notes: closed phase value bound to agent-phase-v1
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.phase.code
+  type: int64
+  brief: Immutable phase code
+  examples:
+  - 3
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 1
+      max: 12
+    notes: integer 1..12
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.sequence
+  type: int64
+  brief: Sequence within execution
+  examples:
+  - 7
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: monotonic nonnegative
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.stream.mode
+  type: string
+  brief: Agent stream mode
+  examples:
+  - streaming
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed stream mode
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.session.source
+  type: string
+  brief: Session source
+  examples:
+  - resume
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - startup
+      - resume
+      - clear
+      - compact
+    notes: startup|resume|clear|compact
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.session.resumed
+  type: boolean
+  brief: Whether execution resumed
+  examples:
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: boolean
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.destination.app
+  type: string
+  brief: Destination application
+  examples:
+  - github
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    notes: registered application
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.telemetry.canary
+  type: boolean
+  brief: Canary marker
+  examples:
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: boolean
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.telemetry.canary.operation
+  type: string
+  brief: Closed runtime-pipeline canary operation
+  examples:
+  - runtime-pipeline-test
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - runtime-pipeline-test
+    notes: closed canary operation vocabulary
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.telemetry.canary.destination
+  type: string
+  brief: Stable destination token targeted by a runtime-pipeline canary
+  examples:
+  - otlp-primary
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[a-z0-9][a-z0-9_.-]{0,127}$'
+    notes: bounded stable destination token
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.user.name
+  type: string
+  brief: Redactable user display identity
+  examples:
+  - operator
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: NFC bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.telemetry.input.reported
+  type: boolean
+  brief: Producer reported input
+  examples:
+  - false
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: boolean
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.telemetry.output.reported
+  type: boolean
+  brief: Producer reported output
+  examples:
+  - false
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: boolean
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.telemetry.tokens.reported
+  type: boolean
+  brief: Producer reported token usage
+  examples:
+  - false
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: boolean
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.reported_cost.present
+  type: boolean
+  brief: Whether the connector explicitly supplied a cumulative agent/session cost in USD; false means unavailable and true includes a reported zero.
+  examples:
+  - false
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Exact availability state from the source payload; never inferred from model pricing or a default numeric value.
+  introduced_in: telemetry-registry-v1
+  legacy_bindings:
+  - source: 'PR #403 gateway envelope agent_reported_cost_present'
+    disposition: canonicalized_without_semantic_change
+    details:
+      legacy_json_field: agent_reported_cost_present
+      reported_zero_is_present: true
+      absent_is_not_zero: true
+- id: defenseclaw.agent.reported_cost.usd
+  type: double
+  brief: Latest connector-reported cumulative cost in USD for the current agent/session observation.
+  examples:
+  - 0.0
+  - 1.25
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1.7976931348623157e+308
+    notes: Finite nonnegative cumulative USD reported by the connector; DefenseClaw never estimates it.
+  introduced_in: telemetry-registry-v1
+  legacy_bindings:
+  - source: 'PR #403 gateway envelope agent_reported_cost_usd and Agent360 gauge'
+    disposition: canonicalized_without_semantic_change
+    details:
+      legacy_json_field: agent_reported_cost_usd
+      metric_identity: defenseclaw.agent.reported_cost
+      aggregation: latest cumulative total per agent/session identity
+  - source: openinference-semantic-conventions-v0.1.30
+    disposition: compatibility_projection_only_when_scope_is_proven_identical
+    details:
+      candidate_alias: llm.cost.total
+      default_projection: omitted
+      reason: An LLM-operation total is not necessarily the cumulative agent/session total; adapters must prove identical scope and currency before projecting the same value.
+- id: defenseclaw.tool.id
+  type: string
+  brief: Stable connector-reported tool identity distinct from an individual tool call ID.
+  examples:
+  - tool-shell
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: Preserve only an explicitly reported bounded tool identity; never derive it from tool name or call ID.
+  introduced_in: telemetry-registry-v1
+  legacy_bindings:
+  - source: 'PR #403 gateway envelope tool_id'
+    disposition: canonicalized_without_semantic_change
+    details:
+      legacy_json_field: tool_id
+- id: code
+  type: string
+  brief: Bounded schema/error code metric label
+  examples:
+  - UNKNOWN_FIELD
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: registered bounded code
+  introduced_in: telemetry-registry-v1
+- id: guardrail.connector
+  type: string
+  brief: Bounded connector derived from a connector-scoped guardrail scanner
+  examples:
+  - codex
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: registered connector or omitted
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.input.state
+  type: string
+  brief: input projection state
+  examples:
+  - partially_redacted
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - not_reported
+      - preserved
+      - partially_redacted
+      - whole_redacted
+      - truncated
+      - failed_closed
+    notes: not_reported|preserved|partially_redacted|whole_redacted|truncated|failed_closed
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.input.original_bytes
+  type: int64
+  brief: input original byte count
+  examples:
+  - 128
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.input.hash
+  type: string
+  brief: input policy-permitted keyed hash
+  examples:
+  - hmac-sha256:abcd
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: digest-v1
+    notes: versioned keyed digest
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.input.mime_type
+  type: string
+  brief: Canonical bounded MIME type for input content when reported.
+  examples:
+  - application/json
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: lowercase registered media type without unbounded parameters
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.output.state
+  type: string
+  brief: output projection state
+  examples:
+  - partially_redacted
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - not_reported
+      - preserved
+      - partially_redacted
+      - whole_redacted
+      - truncated
+      - failed_closed
+    notes: not_reported|preserved|partially_redacted|whole_redacted|truncated|failed_closed
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.output.original_bytes
+  type: int64
+  brief: output original byte count
+  examples:
+  - 128
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.output.hash
+  type: string
+  brief: output policy-permitted keyed hash
+  examples:
+  - hmac-sha256:abcd
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: digest-v1
+    notes: versioned keyed digest
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.output.mime_type
+  type: string
+  brief: Canonical bounded MIME type for output content when reported.
+  examples:
+  - application/json
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: lowercase registered media type without unbounded parameters
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.tool_arguments.state
+  type: string
+  brief: tool_arguments projection state
+  examples:
+  - partially_redacted
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - not_reported
+      - preserved
+      - partially_redacted
+      - whole_redacted
+      - truncated
+      - failed_closed
+    notes: not_reported|preserved|partially_redacted|whole_redacted|truncated|failed_closed
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.tool_arguments.original_bytes
+  type: int64
+  brief: tool_arguments original byte count
+  examples:
+  - 128
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.tool_arguments.hash
+  type: string
+  brief: tool_arguments policy-permitted keyed hash
+  examples:
+  - hmac-sha256:abcd
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: digest-v1
+    notes: versioned keyed digest
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.tool_result.state
+  type: string
+  brief: tool_result projection state
+  examples:
+  - partially_redacted
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - not_reported
+      - preserved
+      - partially_redacted
+      - whole_redacted
+      - truncated
+      - failed_closed
+    notes: not_reported|preserved|partially_redacted|whole_redacted|truncated|failed_closed
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.tool_result.original_bytes
+  type: int64
+  brief: tool_result original byte count
+  examples:
+  - 128
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.content.tool_result.hash
+  type: string
+  brief: tool_result policy-permitted keyed hash
+  examples:
+  - hmac-sha256:abcd
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: digest-v1
+    notes: versioned keyed digest
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.request.id
+  type: string
+  brief: Model request ID
+  examples:
+  - model-req-1
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.response.id
+  type: string
+  brief: Model response ID
+  examples:
+  - model-resp-1
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.attempt
+  type: int64
+  brief: Model attempt
+  examples:
+  - 1
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.retry_count
+  type: int64
+  brief: Retry count
+  examples:
+  - 0
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.queue_ms
+  type: double
+  brief: Queue duration ms
+  examples:
+  - 2.5
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.upstream_ms
+  type: double
+  brief: Upstream duration ms
+  examples:
+  - 121.0
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.first_token_ms
+  type: double
+  brief: First-token duration ms
+  examples:
+  - 34.2
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.streaming
+  type: boolean
+  brief: Whether response streamed
+  examples:
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.cancelled
+  type: boolean
+  brief: Whether response was cancelled
+  examples:
+  - false
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.timeout_class
+  type: string
+  brief: Stable timeout class
+  examples:
+  - upstream
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.model.tool_call_count
+  type: int64
+  brief: Reported tool-call count
+  examples:
+  - 1
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.provider
+  type: string
+  brief: Tool provider class
+  examples:
+  - mcp
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.skill_key
+  type: string
+  brief: Skill/catalog key
+  examples:
+  - security-scan
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.dangerous
+  type: boolean
+  brief: Dangerous operation classification
+  examples:
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.exit_code
+  type: int64
+  brief: Tool exit code
+  examples:
+  - 0
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: -2147483648
+      max: 2147483647
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.status
+  type: string
+  brief: Tool status
+  examples:
+  - completed
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.args_length
+  type: int64
+  brief: Argument bytes
+  examples:
+  - 64
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.tool.output_length
+  type: int64
+  brief: Result bytes
+  examples:
+  - 512
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.retrieval.source.id
+  type: string
+  brief: Retrieval source ID
+  examples:
+  - docs
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.retrieval.source.type
+  type: string
+  brief: Retrieval source type
+  examples:
+  - vector
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.retrieval.result_count
+  type: int64
+  brief: Retrieval result count
+  examples:
+  - 5
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.retrieval.top_k
+  type: int64
+  brief: Requested top-k
+  examples:
+  - 10
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.retrieval.score.min
+  type: double
+  brief: Minimum score
+  examples:
+  - 0.43
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: -1.0e+308
+      max: 1.0e+308
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.retrieval.score.max
+  type: double
+  brief: Maximum score
+  examples:
+  - 0.98
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: -1.0e+308
+      max: 1.0e+308
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.workflow.name
+  type: string
+  brief: Workflow identity
+  examples:
+  - agent-turn
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: ^[a-z0-9][a-z0-9_.-]{0,127}$
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v1
+- id: scanner
+  type: string
+  brief: Bounded compatibility metric label scanner.
+  examples:
+  - skill-scanner
+  - mcp-scanner
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: target_type
+  type: string
+  brief: Bounded compatibility metric label target_type.
+  examples:
+  - skill
+  - mcp
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: verdict
+  type: string
+  brief: Bounded compatibility metric label verdict.
+  examples:
+  - clean
+  - warning
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: severity
+  type: string
+  brief: Bounded compatibility metric label severity.
+  examples:
+  - CRITICAL
+  - HIGH
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: tool.provider
+  type: string
+  brief: Bounded compatibility metric label tool.provider.
+  examples:
+  - skill
+  - builtin
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: dangerous
+  type: boolean
+  brief: Bounded compatibility metric label dangerous.
+  examples:
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: exit_code
+  type: int64
+  brief: Bounded compatibility metric label exit_code.
+  examples:
+  - 0
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: -2147483648
+      max: 2147483647
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: result
+  type: string
+  brief: Bounded compatibility metric label result.
+  examples:
+  - approved
+  - denied
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: auto
+  type: boolean
+  brief: Bounded compatibility metric label auto.
+  examples:
+  - false
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: connector
+  type: string
+  brief: Bounded compatibility metric label connector.
+  examples:
+  - openclaw
+  - zeptoclaw
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: event_type
+  type: string
+  brief: Bounded compatibility metric label event_type.
+  examples:
+  - prompt
+  - tool_call
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: reason
+  type: string
+  brief: Bounded compatibility metric label reason.
+  examples:
+  - allow
+  - block
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: model
+  type: string
+  brief: Bounded compatibility metric label model.
+  examples:
+  - example
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: kind
+  type: string
+  brief: Bounded compatibility metric label kind.
+  examples:
+  - prompt
+  - completion
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: action
+  type: string
+  brief: Bounded compatibility metric label action.
+  examples:
+  - allow
+  - block
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: would_block
+  type: boolean
+  brief: Bounded compatibility metric label would_block.
+  examples:
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: signal
+  type: string
+  brief: Bounded compatibility metric label signal.
+  examples:
+  - logs
+  - metrics
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: source
+  type: string
+  brief: Bounded compatibility metric label source.
+  examples:
+  - openclaw
+  - zeptoclaw
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: type
+  type: string
+  brief: Bounded compatibility metric label type.
+  examples:
+  - example
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: status
+  type: string
+  brief: Bounded compatibility metric label status.
+  examples:
+  - example
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: alert.type
+  type: string
+  brief: Bounded compatibility metric label alert.type.
+  examples:
+  - dangerous-command
+  - guardrail-flag
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: alert.severity
+  type: string
+  brief: Bounded compatibility metric label alert.severity.
+  examples:
+  - CRITICAL
+  - HIGH
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: alert.source
+  type: string
+  brief: Bounded compatibility metric label alert.source.
+  examples:
+  - local-pattern
+  - local-guardrail
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: guardrail.scanner
+  type: string
+  brief: Bounded compatibility metric label guardrail.scanner.
+  examples:
+  - ai-defense
+  - skill-scanner
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: guardrail.action_taken
+  type: string
+  brief: Bounded compatibility metric label guardrail.action_taken.
+  examples:
+  - log
+  - warn
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: policy.domain
+  type: string
+  brief: Bounded compatibility metric label policy.domain.
+  examples:
+  - admission
+  - firewall
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: policy.verdict
+  type: string
+  brief: Bounded compatibility metric label policy.verdict.
+  examples:
+  - allow
+  - deny
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: policy.status
+  type: string
+  brief: Bounded compatibility metric label policy.status.
+  examples:
+  - success
+  - failed
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: subsystem
+  type: string
+  brief: Bounded compatibility metric label subsystem.
+  examples:
+  - example
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: closed metric-label vocabulary
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.phase.from
+  type: string
+  brief: Previous canonical agent phase
+  examples:
+  - planning
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - session
+      - planning
+      - model
+      - tool
+      - approval
+      - waiting
+      - responding
+      - maintenance
+      - completed
+      - failed
+      - interrupted
+      - observed
+    notes: closed phase value bound to agent-phase-v1
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.phase.to
+  type: string
+  brief: Resulting canonical agent phase
+  examples:
+  - completed
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - session
+      - planning
+      - model
+      - tool
+      - approval
+      - waiting
+      - responding
+      - maintenance
+      - completed
+      - failed
+      - interrupted
+      - observed
+    notes: closed phase value bound to agent-phase-v1
+  introduced_in: telemetry-registry-v1
+groups:
+- id: scope.core
+  type: attribute_group
+  brief: Canonical DefenseClaw instrumentation-scope semantic identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.trace.schema_version
+    requirement_level: required
+  - ref: defenseclaw.semantic_profile
+    requirement_level: required
+  body_fields: []
+- id: link.core
+  type: attribute_group
+  brief: Canonical typed relation carried by every trace link.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.link.relation
+    requirement_level: required
+  body_fields: []
+- id: span.core
+  type: attribute_group
+  brief: Universal DefenseClaw span identity and outcome.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.bucket
+    requirement_level: required
+  - ref: defenseclaw.span.family
+    requirement_level: required
+  - ref: defenseclaw.span.family_schema_version
+    requirement_level: required
+  - ref: defenseclaw.source
+    requirement_level: required
+  - ref: defenseclaw.connector.source
+    requirement_level: conditional
+    conditional: connector-known-v1
+  - ref: defenseclaw.config.generation
+    requirement_level: required
+  - ref: defenseclaw.run.id
+    requirement_level: recommended
+  - ref: defenseclaw.operation.id
+    requirement_level: recommended
+  - ref: defenseclaw.outcome
+    requirement_level: conditional
+    conditional: operation-terminal-v1
+  body_fields: []
+- id: telemetry.canary
+  type: attribute_group
+  brief: Optional, fail-closed marker and target metadata for runtime-pipeline canary spans.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.telemetry.canary
+    requirement_level: optional
+  - ref: defenseclaw.telemetry.canary.operation
+    requirement_level: conditional
+    conditional: telemetry-canary-enabled-v1
+  - ref: defenseclaw.telemetry.canary.destination
+    requirement_level: optional
+    conditional: telemetry-canary-enabled-v1
+  body_fields: []
+- id: correlation.request
+  type: attribute_group
+  brief: Request and turn correlation.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.request.id
+    requirement_level: recommended
+  - ref: defenseclaw.turn.id
+    requirement_level: recommended
+  - ref: defenseclaw.operation.id
+    requirement_level: recommended
+  - ref: defenseclaw.run.id
+    requirement_level: recommended
+  body_fields: []
+- id: correlation.interaction
+  type: attribute_group
+  brief: Source-reported request, turn, user-principal, policy, and destination context shared by runtime spans.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - correlation.request
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.policy.id
+    requirement_level: recommended
+  - ref: defenseclaw.policy.version
+    requirement_level: recommended
+  - ref: defenseclaw.destination.app
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    legacy_bindings:
+    - source: 'PR #403 gateway envelope request_id, turn_id, user_id, user_name, policy_id, and destination_app'
+      disposition: preserved_as_optional_source_reported_context
+      details:
+        fabrication: forbidden
+        aliases:
+          request_id: defenseclaw.request.id
+          turn_id: defenseclaw.turn.id
+          user_id: user.id
+          user_name: defenseclaw.user.name
+          policy_id: defenseclaw.policy.id
+          destination_app: defenseclaw.destination.app
+- id: correlation.model.identity
+  type: attribute_group
+  brief: Optional source-reported provider, requested/returned model, and provider request/response identity without model-content fields.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  - ref: gen_ai.response.model
+    requirement_level: recommended
+  - ref: gen_ai.response.id
+    requirement_level: recommended
+  - ref: defenseclaw.model.request.id
+    requirement_level: recommended
+  - ref: defenseclaw.model.response.id
+    requirement_level: recommended
+  body_fields: []
+- id: correlation.tool.identity
+  type: attribute_group
+  brief: Optional source-reported stable tool, call, provider, skill, and destination identity without arguments or results.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.tool.id
+    requirement_level: recommended
+  - ref: gen_ai.tool.name
+    requirement_level: recommended
+  - ref: gen_ai.tool.type
+    requirement_level: recommended
+  - ref: gen_ai.tool.call.id
+    requirement_level: recommended
+  - ref: defenseclaw.tool.provider
+    requirement_level: recommended
+  - ref: defenseclaw.tool.skill_key
+    requirement_level: recommended
+  - ref: defenseclaw.destination.app
+    requirement_level: recommended
+  body_fields: []
+- id: cost.agent.reported
+  type: attribute_group
+  brief: Honest connector-reported cumulative agent/session cost state and value.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.agent.reported_cost.present
+    requirement_level: required
+  - ref: defenseclaw.agent.reported_cost.usd
+    requirement_level: conditional
+    conditional: agent-reported-cost-available-v1
+  body_fields: []
+  x-defenseclaw:
+    legacy_bindings:
+    - source: 'PR #403 runtime cost extraction and PR #412 Agent360'
+      disposition: preserved_with_fail_closed_availability_relation
+      details:
+        state_attribute: defenseclaw.agent.reported_cost.present
+        condition_source: defenseclaw.agent.reported_cost.present
+        value_attribute: defenseclaw.agent.reported_cost.usd
+        invariant: The generated builder derives the condition directly from the state attribute; true requires a finite nonnegative value and false forbids the value.
+        reported_zero_is_present: true
+        estimation: forbidden
+- id: correlation.agent
+  type: attribute_group
+  brief: 'PR #403 agent, session, lifecycle, execution, phase and ordering correlation.'
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: defenseclaw.agent.type
+    requirement_level: recommended
+  - ref: defenseclaw.agent.instance_id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.parent.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lineage.provenance
+    requirement_level: recommended
+  - ref: defenseclaw.session.root.id
+    requirement_level: recommended
+  - ref: defenseclaw.session.parent.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.depth
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.event
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.state
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase.previous
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase.code
+    requirement_level: recommended
+  - ref: defenseclaw.agent.sequence
+    requirement_level: recommended
+  - ref: defenseclaw.session.source
+    requirement_level: recommended
+  - ref: defenseclaw.session.resumed
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    legacy_bindings:
+    - source: 'PR #403 runtime schemas'
+      disposition: preserved
+      details:
+        lifecycle_pattern: lifecycle-[0-9a-f]{16}
+        execution_pattern: execution-[0-9a-f]{16}
+        parent_fields: delegation, not OTel parentage
+- id: lifecycle.agent
+  type: attribute_group
+  brief: Required lifecycle observation and immutable phase mapping.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - correlation.agent
+  attributes:
+  - ref: gen_ai.conversation.id
+    requirement_level: required
+  - ref: gen_ai.agent.id
+    requirement_level: required
+  - ref: defenseclaw.agent.root.id
+    requirement_level: required
+  - ref: defenseclaw.session.root.id
+    requirement_level: required
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: required
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: required
+  - ref: defenseclaw.agent.lifecycle.event
+    requirement_level: required
+  - ref: defenseclaw.agent.lifecycle.state
+    requirement_level: required
+  - ref: defenseclaw.agent.depth
+    requirement_level: required
+  body_fields: []
+  x-defenseclaw:
+    legacy_bindings:
+    - source: schemas/otel/agent-lifecycle-event.schema.json
+      disposition: preserved
+      details:
+        events:
+        - session_start
+        - session_end
+        - subagent_start
+        - subagent_stop
+        - turn_start
+        - turn_end
+        - tool_start
+        - tool_end
+        - compact_start
+        - compact_end
+        - event
+        states:
+        - active
+        - completed
+        - failed
+        - interrupted
+        - observed
+        phase_codes:
+          '1': session
+          '2': planning
+          '3': model
+          '4': tool
+          '5': approval
+          '6': waiting
+          '7': responding
+          '8': maintenance
+          '9': completed
+          '10': failed
+          '11': interrupted
+          '12': observed
+        code_zero: unknown/unrecognized only
+        intentional_corrections:
+        - source: PR #403 Galileo projection fixture
+          invalid_fixture:
+            phase: model
+            previous_phase: turn
+            code: 4
+          corrected_fixture:
+            phase: model
+            previous_phase: planning
+            code: 3
+          reason: The fixture contradicted the immutable phase catalog; it was not a compatibility alias.
+- id: compatibility.local_observability.agent360
+  type: attribute_group
+  brief: 'PR #412 Agent360 spanmetrics dimensions, buckets, names, and cadence.'
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.operation.name
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: defenseclaw.agent.type
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.parent.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.event
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.state
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase.previous
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase.code
+    requirement_level: recommended
+  - ref: connector
+    requirement_level: recommended
+  - ref: gen_ai.tool.name
+    requirement_level: recommended
+  - ref: defenseclaw.destination.app
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    legacy_bindings:
+    - source: 'PR #412 bundles/local_observability_stack/otel-collector/config.yaml'
+      disposition: preserved
+      details:
+        profile: local-observability-v1
+        namespace: defenseclaw.agent.span
+        duration_buckets:
+        - 5ms
+        - 10ms
+        - 25ms
+        - 50ms
+        - 100ms
+        - 250ms
+        - 500ms
+        - 1s
+        - 2s
+        - 5s
+        - 10s
+        - 30s
+        - 1m
+        - 5m
+        metrics_flush_interval: 15s
+        application_metric_export_interval: 60s
+        temporality: application delta; local collector cumulative
+        prometheus_series:
+        - defenseclaw_agent_span_calls_total
+        - defenseclaw_agent_span_duration_milliseconds_bucket
+        - defenseclaw_agent_span_duration_milliseconds_sum
+        - defenseclaw_agent_span_duration_milliseconds_count
+        legacy_dimension_aliases:
+          defenseclaw.agent.type: gen_ai.agent.type
+        dimensions_cache_size: 10000
+        resource_metrics_cache_size: 1000
+        metrics_expiration: 24h
+        high_cardinality_exception: gen_ai.agent.id and gen_ai.agent.name are local spanmetrics compatibility dimensions only, bounded by the named cache and expiry; they remain forbidden on canonical metric families
+- id: content.input
+  type: attribute_group
+  brief: Projected input and honest availability state.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.input.messages
+    requirement_level: recommended
+  - ref: defenseclaw.telemetry.input.reported
+    requirement_level: required
+  - ref: defenseclaw.content.input.state
+    requirement_level: required
+  - ref: defenseclaw.content.input.original_bytes
+    requirement_level: recommended
+  - ref: defenseclaw.content.input.hash
+    requirement_level: recommended
+  - ref: defenseclaw.content.input.mime_type
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    legacy_bindings:
+    - source: openinference-semantic-conventions-v0.1.30
+      disposition: generated_compatibility_projection
+      details:
+        canonical_content: gen_ai.input.messages
+        canonical_mime_type: defenseclaw.content.input.mime_type
+        aliases:
+          input.value: gen_ai.input.messages
+          input.mime_type: defenseclaw.content.input.mime_type
+        privacy_rule: aliases derive from the same destination-redacted canonical value and can never be less restrictive
+- id: content.output
+  type: attribute_group
+  brief: Projected output and honest availability state.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.output.messages
+    requirement_level: recommended
+  - ref: defenseclaw.telemetry.output.reported
+    requirement_level: required
+  - ref: defenseclaw.content.output.state
+    requirement_level: required
+  - ref: defenseclaw.content.output.original_bytes
+    requirement_level: recommended
+  - ref: defenseclaw.content.output.hash
+    requirement_level: recommended
+  - ref: defenseclaw.content.output.mime_type
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    legacy_bindings:
+    - source: openinference-semantic-conventions-v0.1.30
+      disposition: generated_compatibility_projection
+      details:
+        canonical_content: gen_ai.output.messages
+        canonical_mime_type: defenseclaw.content.output.mime_type
+        aliases:
+          output.value: gen_ai.output.messages
+          output.mime_type: defenseclaw.content.output.mime_type
+        privacy_rule: aliases derive from the same destination-redacted canonical value and can never be less restrictive
+- id: error.core
+  type: attribute_group
+  brief: Stable OTel error contract.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: error.type
+    requirement_level: conditional
+    conditional: technical-failure-v1
+  body_fields: []
+- id: genai.agent
+  type: attribute_group
+  brief: Pinned OTel GenAI agent fields.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.operation.name
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: defenseclaw.agent.type
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+  body_fields: []
+- id: genai.model
+  type: attribute_group
+  brief: Pinned model request, response, usage and missing-data fields.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.operation.name
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  - ref: gen_ai.response.model
+    requirement_level: recommended
+  - ref: gen_ai.response.id
+    requirement_level: recommended
+  - ref: gen_ai.request.max_tokens
+    requirement_level: recommended
+  - ref: gen_ai.request.temperature
+    requirement_level: recommended
+  - ref: gen_ai.request.top_p
+    requirement_level: recommended
+  - ref: gen_ai.response.finish_reasons
+    requirement_level: recommended
+  - ref: gen_ai.usage.input_tokens
+    requirement_level: recommended
+  - ref: gen_ai.usage.output_tokens
+    requirement_level: recommended
+  - ref: defenseclaw.model.request.id
+    requirement_level: recommended
+  - ref: defenseclaw.model.response.id
+    requirement_level: recommended
+  - ref: defenseclaw.model.attempt
+    requirement_level: recommended
+  - ref: defenseclaw.model.retry_count
+    requirement_level: recommended
+  - ref: defenseclaw.model.queue_ms
+    requirement_level: recommended
+  - ref: defenseclaw.model.upstream_ms
+    requirement_level: recommended
+  - ref: defenseclaw.model.first_token_ms
+    requirement_level: recommended
+  - ref: defenseclaw.model.streaming
+    requirement_level: recommended
+  - ref: defenseclaw.model.cancelled
+    requirement_level: recommended
+  - ref: defenseclaw.model.timeout_class
+    requirement_level: recommended
+  - ref: defenseclaw.model.tool_call_count
+    requirement_level: recommended
+  - ref: defenseclaw.telemetry.tokens.reported
+    requirement_level: recommended
+  body_fields: []
+- id: genai.tool
+  type: attribute_group
+  brief: Pinned tool operation/call fields and safe execution metadata.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.operation.name
+    requirement_level: recommended
+  - ref: gen_ai.tool.name
+    requirement_level: recommended
+  - ref: gen_ai.tool.type
+    requirement_level: recommended
+  - ref: gen_ai.tool.call.id
+    requirement_level: recommended
+  - ref: gen_ai.tool.call.arguments
+    requirement_level: recommended
+  - ref: gen_ai.tool.call.result
+    requirement_level: recommended
+  - ref: defenseclaw.tool.id
+    requirement_level: recommended
+  - ref: defenseclaw.tool.provider
+    requirement_level: recommended
+  - ref: defenseclaw.tool.skill_key
+    requirement_level: recommended
+  - ref: defenseclaw.tool.dangerous
+    requirement_level: recommended
+  - ref: defenseclaw.tool.exit_code
+    requirement_level: recommended
+  - ref: defenseclaw.tool.status
+    requirement_level: recommended
+  - ref: defenseclaw.tool.args_length
+    requirement_level: recommended
+  - ref: defenseclaw.tool.output_length
+    requirement_level: recommended
+  - ref: defenseclaw.destination.app
+    requirement_level: recommended
+  body_fields: []
+- id: genai.retrieval
+  type: attribute_group
+  brief: Retrieval semantics and safe result metadata.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: db.operation.name
+    requirement_level: recommended
+  - ref: db.collection.name
+    requirement_level: recommended
+  - ref: defenseclaw.retrieval.source.id
+    requirement_level: recommended
+  - ref: defenseclaw.retrieval.source.type
+    requirement_level: recommended
+  - ref: defenseclaw.retrieval.result_count
+    requirement_level: recommended
+  - ref: defenseclaw.retrieval.top_k
+    requirement_level: recommended
+  - ref: defenseclaw.retrieval.score.min
+    requirement_level: recommended
+  - ref: defenseclaw.retrieval.score.max
+    requirement_level: recommended
+  body_fields: []
+- id: body.agent.lifecycle
+  type: body_group
+  brief: Agent lifecycle durable-log body.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - lifecycle.agent
+  - correlation.interaction
+  - correlation.model.identity
+  - correlation.tool.identity
+  - cost.agent.reported
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.agent.lifecycle.event
+    requirement_level: required
+  - ref: defenseclaw.agent.lifecycle.state
+    requirement_level: required
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: required
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: required
+- id: body.model.io
+  type: body_group
+  brief: Model I/O body with honest reported flags.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - correlation.interaction
+  - correlation.agent
+  - content.input
+  - content.output
+  - genai.model
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.telemetry.input.reported
+    requirement_level: required
+  - ref: defenseclaw.telemetry.output.reported
+    requirement_level: required
+  - ref: defenseclaw.telemetry.tokens.reported
+    requirement_level: required
+- id: body.tool.activity
+  type: body_group
+  brief: Tool activity body with projected arguments and result.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - correlation.interaction
+  - correlation.agent
+  - genai.tool
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.telemetry.input.reported
+    requirement_level: required
+  - ref: defenseclaw.telemetry.output.reported
+    requirement_level: required
+- id: event.model.stream.first_token
+  type: span_event
+  brief: Bounded model.stream.first_token milestone.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.model.first_token_ms
+    requirement_level: recommended
+  - ref: defenseclaw.model.attempt
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    route_selector: false
+- id: event.model.retry
+  type: span_event
+  brief: Bounded model.retry milestone.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.model.attempt
+    requirement_level: recommended
+  - ref: defenseclaw.model.retry_count
+    requirement_level: recommended
+  - ref: error.type
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    route_selector: false
+- id: event.content.redacted
+  type: span_event
+  brief: Bounded content.redacted milestone.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.bucket
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    route_selector: false
+- id: event.content.truncated
+  type: span_event
+  brief: Bounded content.truncated milestone.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.bucket
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    route_selector: false
+- id: span.agent.invoke
+  type: span
+  brief: Canonical span.agent.invoke bounded operation.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - span.core
+  - telemetry.canary
+  - correlation.interaction
+  - correlation.agent
+  - correlation.model.identity
+  - correlation.tool.identity
+  - cost.agent.reported
+  - content.input
+  - content.output
+  - error.core
+  - genai.agent
+  attributes:
+  - ref: defenseclaw.agent.type
+    requirement_level: required
+  body_fields: []
+  span:
+    name_pattern: invoke_agent {defenseclaw.agent.type}
+    kinds:
+    - INTERNAL
+    - CLIENT
+    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    - cancelled
+    - completed
+    - denied
+    - failed
+    - partial
+    - rejected
+    - terminated
+    - timed_out
+    route_selector: true
+    events:
+    - guardrail.decision
+    - hook.decision
+    - content.redacted
+    - content.truncated
+    link_relations:
+    - caused_by
+    - resumes
+    - derived_from
+    - correlates_with
+    compatibility_profiles:
+    - galileo-rich-v2
+    - openinference-v1
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 and current telemetry schemas'
+      disposition: preserved
+      details:
+        missing_data: never fabricate absent values
+- id: span.workflow.run
+  type: span
+  brief: Canonical span.workflow.run bounded operation.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - span.core
+  - correlation.interaction
+  - correlation.agent
+  - correlation.model.identity
+  - correlation.tool.identity
+  - cost.agent.reported
+  - content.input
+  - content.output
+  - error.core
+  attributes:
+  - ref: defenseclaw.workflow.name
+    requirement_level: required
+  body_fields: []
+  span:
+    name_pattern: workflow {defenseclaw.workflow.name}
+    kinds:
+    - INTERNAL
+    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    - cancelled
+    - completed
+    - denied
+    - failed
+    - partial
+    - rejected
+    - skipped
+    - terminated
+    - timed_out
+    route_selector: true
+    events:
+    - guardrail.decision
+    - content.redacted
+    - content.truncated
+    link_relations:
+    - caused_by
+    - resumes
+    - derived_from
+    - correlates_with
+    compatibility_profiles:
+    - galileo-rich-v2
+    - openinference-v1
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 and current telemetry schemas'
+      disposition: preserved_with_required_typed_derivation
+      details:
+        missing_data: never fabricate absent values
+        workflow_name:
+          canonical_source: defenseclaw.workflow.name
+          normalization: identifier-v1 with max_utf8_bytes 128 and pattern ^[a-z0-9][a-z0-9_.-]{0,127}$
+          producer_requirement: explicitly supplied before projection
+          rendered_span_name: workflow {defenseclaw.workflow.name}
+          missing_or_invalid: reject projection
+          reverse_parse_rendered_name: forbidden
+- id: span.model.chat
+  type: span
+  brief: Canonical span.model.chat bounded operation.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - span.core
+  - telemetry.canary
+  - correlation.interaction
+  - correlation.agent
+  - cost.agent.reported
+  - content.input
+  - content.output
+  - error.core
+  - genai.model
+  attributes:
+  - ref: gen_ai.request.model
+    requirement_level: required
+  body_fields: []
+  span:
+    name_pattern: chat {gen_ai.request.model}
+    kinds:
+    - CLIENT
+    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    - cancelled
+    - completed
+    - denied
+    - failed
+    - partial
+    - rejected
+    - timed_out
+    route_selector: true
+    events:
+    - model.stream.first_token
+    - model.retry
+    - guardrail.decision
+    - content.redacted
+    - content.truncated
+    link_relations:
+    - caused_by
+    - resumes
+    - derived_from
+    - correlates_with
+    compatibility_profiles:
+    - galileo-rich-v2
+    - openinference-v1
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 and current telemetry schemas'
+      disposition: preserved
+      details:
+        missing_data: never fabricate absent values
+- id: span.model.embeddings
+  type: span
+  brief: Canonical span.model.embeddings bounded operation.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - span.core
+  - correlation.request
+  - correlation.agent
+  - content.input
+  - content.output
+  - error.core
+  - genai.model
+  attributes:
+  - ref: gen_ai.request.model
+    requirement_level: required
+  body_fields: []
+  span:
+    name_pattern: embeddings {gen_ai.request.model}
+    kinds:
+    - CLIENT
+    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    - cancelled
+    - completed
+    - denied
+    - failed
+    - rejected
+    - timed_out
+    route_selector: true
+    events:
+    - model.retry
+    - guardrail.decision
+    - content.redacted
+    - content.truncated
+    link_relations:
+    - caused_by
+    - resumes
+    - derived_from
+    - correlates_with
+    compatibility_profiles:
+    - openinference-v1
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 and current telemetry schemas'
+      disposition: preserved
+      details:
+        missing_data: never fabricate absent values
+- id: span.tool.execute
+  type: span
+  brief: Canonical span.tool.execute bounded operation.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - span.core
+  - correlation.interaction
+  - correlation.agent
+  - cost.agent.reported
+  - content.input
+  - content.output
+  - error.core
+  - genai.tool
+  attributes:
+  - ref: gen_ai.tool.name
+    requirement_level: required
+  body_fields: []
+  span:
+    name_pattern: execute_tool {gen_ai.tool.name}
+    kinds:
+    - INTERNAL
+    - CLIENT
+    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    - cancelled
+    - completed
+    - denied
+    - failed
+    - partial
+    - rejected
+    - timed_out
+    route_selector: true
+    events:
+    - tool.flagged
+    - approval.requested
+    - approval.resolved
+    - guardrail.decision
+    - enforcement.requested
+    - content.redacted
+    - content.truncated
+    link_relations:
+    - caused_by
+    - resumes
+    - derived_from
+    - correlates_with
+    compatibility_profiles:
+    - galileo-rich-v2
+    - openinference-v1
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 and current telemetry schemas'
+      disposition: preserved
+      details:
+        missing_data: never fabricate absent values
+- id: span.retrieval.search
+  type: span
+  brief: Canonical span.retrieval.search bounded operation.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - span.core
+  - correlation.request
+  - correlation.agent
+  - content.input
+  - content.output
+  - error.core
+  - genai.retrieval
+  attributes:
+  - ref: defenseclaw.retrieval.source.id
+    requirement_level: required
+  body_fields: []
+  span:
+    name_pattern: retrieve {defenseclaw.retrieval.source.id}
+    kinds:
+    - CLIENT
+    - INTERNAL
+    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    - cancelled
+    - completed
+    - denied
+    - failed
+    - partial
+    - rejected
+    - timed_out
+    route_selector: true
+    events:
+    - guardrail.decision
+    - content.redacted
+    - content.truncated
+    link_relations:
+    - caused_by
+    - resumes
+    - derived_from
+    - correlates_with
+    compatibility_profiles:
+    - galileo-rich-v2
+    - openinference-v1
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 and current telemetry schemas'
+      disposition: preserved
+      details:
+        missing_data: never fabricate absent values
+- id: log.model.call.failed
+  type: log
+  brief: Canonical model.call.failed log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.model.io
+  attributes: []
+  body_fields: []
+  log:
+    event_name: model.call.failed
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - cancelled
+    - failed
+    - rejected
+    - timed_out
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.model.request
+  type: log
+  brief: Canonical model.request log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.model.io
+  attributes: []
+  body_fields: []
+  log:
+    event_name: model.request
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.model.response
+  type: log
+  brief: Canonical model.response log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.model.io
+  attributes: []
+  body_fields: []
+  log:
+    event_name: model.response
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.model.stream.completed
+  type: log
+  brief: Canonical model.stream.completed log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.model.io
+  attributes: []
+  body_fields: []
+  log:
+    event_name: model.stream.completed
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.tool.invocation.blocked
+  type: log
+  brief: Canonical tool.invocation.blocked log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.tool.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: tool.invocation.blocked
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.tool.invocation.completed
+  type: log
+  brief: Canonical tool.invocation.completed log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.tool.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: tool.invocation.completed
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.tool.invocation.failed
+  type: log
+  brief: Canonical tool.invocation.failed log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.tool.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: tool.invocation.failed
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - cancelled
+    - failed
+    - rejected
+    - timed_out
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.tool.invocation.requested
+  type: log
+  brief: Canonical tool.invocation.requested log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.tool.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: tool.invocation.requested
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.tool.invocation.started
+  type: log
+  brief: Canonical tool.invocation.started log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.tool.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: tool.invocation.started
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: internal/observability/event_registry.go
+      disposition: preserved
+- id: log.compat.compact_end
+  type: log
+  brief: Canonical compact_end log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: compact_end
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - cancelled
+    - completed
+    - failed
+    - no_change
+    - partial
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.compact_start
+  type: log
+  brief: Canonical compact_start log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: compact_start
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.event
+  type: log
+  brief: Canonical event log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: event
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.session_end
+  type: log
+  brief: Canonical session_end log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: session_end
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - cancelled
+    - completed
+    - failed
+    - terminated
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.session_start
+  type: log
+  brief: Canonical session_start log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: session_start
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.subagent_start
+  type: log
+  brief: Canonical subagent_start log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: subagent_start
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.subagent_stop
+  type: log
+  brief: Canonical subagent_stop log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: subagent_stop
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - cancelled
+    - completed
+    - failed
+    - terminated
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.tool_end
+  type: log
+  brief: Canonical tool_end log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.tool.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: tool_end
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    - cancelled
+    - completed
+    - denied
+    - failed
+    - partial
+    - rejected
+    - skipped
+    - timed_out
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.tool_start
+  type: log
+  brief: Canonical tool_start log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.tool.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: tool_start
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.turn_end
+  type: log
+  brief: Canonical turn_end log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: turn_end
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - cancelled
+    - completed
+    - failed
+    - terminated
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: log.compat.turn_start
+  type: log
+  brief: Canonical turn_start log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.agent.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: turn_start
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: 'PR #403 lifecycle vocabulary'
+      disposition: preserved
+- id: metric.defenseclaw.agent.discovery.duration
+  type: metric
+  brief: Wall-clock duration of the CLI local agent discovery scan.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.cache_hit
+    requirement_level: recommended
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.discovery.duration
+    instrument_type: histogram
+    value_type: double
+    unit: ms
+    description: Wall-clock duration of the CLI local agent discovery scan.
+    temporality: delta
+    boundaries: []
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.cache_hit
+        label: cache_hit
+      - ref: defenseclaw.metric.result
+        label: result
+      - ref: defenseclaw.metric.source
+        label: source
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.discovery.errors
+  type: metric
+  brief: Version probe or discovery errors by connector and bounded reason.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.metric.reason
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.discovery.errors
+    instrument_type: counter
+    value_type: int64
+    unit: '{error}'
+    description: Version probe or discovery errors by connector and bounded reason.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.metric.reason
+        label: reason
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.discovery.installed
+  type: metric
+  brief: Latest discovered installed state for each connector (1 installed, 0 not installed).
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.discovery.installed
+    instrument_type: gauge
+    value_type: int64
+    unit: '1'
+    description: Latest discovered installed state for each connector (1 installed, 0 not installed).
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.discovery.runs
+  type: metric
+  brief: On-demand local agent discovery reports accepted by the sidecar, by source/cache/result.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.cache_hit
+    requirement_level: recommended
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.discovery.runs
+    instrument_type: counter
+    value_type: int64
+    unit: '{run}'
+    description: On-demand local agent discovery reports accepted by the sidecar, by source/cache/result.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.cache_hit
+        label: cache_hit
+      - ref: defenseclaw.metric.result
+        label: result
+      - ref: defenseclaw.metric.source
+        label: source
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.discovery.signals
+  type: metric
+  brief: Per-connector install signals reported by agent discovery.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.metric.has_binary
+    requirement_level: recommended
+  - ref: defenseclaw.metric.has_config
+    requirement_level: recommended
+  - ref: defenseclaw.metric.installed
+    requirement_level: recommended
+  - ref: defenseclaw.metric.probe_status
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.discovery.signals
+    instrument_type: counter
+    value_type: int64
+    unit: '{signal}'
+    description: Per-connector install signals reported by agent discovery.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.metric.has_binary
+        label: has_binary
+      - ref: defenseclaw.metric.has_config
+        label: has_config
+      - ref: defenseclaw.metric.installed
+        label: installed
+      - ref: defenseclaw.metric.probe_status
+        label: probe_status
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.last_seen
+  type: metric
+  brief: Unix seconds when an agent lifecycle transition was last observed.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.parent.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: defenseclaw.session.root.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: defenseclaw.agent.type
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.last_seen
+    instrument_type: gauge
+    value_type: double
+    unit: s
+    description: Unix seconds when an agent lifecycle transition was last observed.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.agent.type
+        label: gen_ai.agent.type
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.lifecycle.transitions
+  type: metric
+  brief: Agent lifecycle transitions by stable identity, execution, event, and state.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.agent.depth
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.event
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.state
+    requirement_level: recommended
+  - ref: defenseclaw.agent.parent.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: defenseclaw.session.root.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: defenseclaw.agent.type
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.lifecycle.transitions
+    instrument_type: counter
+    value_type: int64
+    unit: '{transition}'
+    description: Agent lifecycle transitions by stable identity, execution, event, and state.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.agent.type
+        label: gen_ai.agent.type
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.phase.current
+  type: metric
+  brief: Current execution phase encoded as a stable integer for state timelines.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.phase.current
+    instrument_type: gauge
+    value_type: int64
+    unit: '1'
+    description: Current execution phase encoded as a stable integer for state timelines.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.phase.transitions
+  type: metric
+  brief: Directed execution phase transitions by stable agent identity and execution.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase.from
+    requirement_level: recommended
+  - ref: defenseclaw.agent.phase.to
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.phase.transitions
+    instrument_type: counter
+    value_type: int64
+    unit: '{transition}'
+    description: Directed execution phase transitions by stable agent identity and execution.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.reported_cost
+  type: metric
+  brief: Latest upstream-reported cumulative agent cost in USD; absent when the connector does not report cost.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.reported_cost
+    instrument_type: gauge
+    value_type: double
+    unit: USD
+    description: Latest upstream-reported cumulative agent cost in USD; absent when the connector does not report cost.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.agent.token.usage
+  type: metric
+  brief: Connector-reported input and output tokens attributed to an agent tree.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.agent.execution.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.lifecycle.id
+    requirement_level: recommended
+  - ref: defenseclaw.agent.root.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  - ref: gen_ai.token.type
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.agent.token.usage
+    instrument_type: counter
+    value_type: int64
+    unit: '{token}'
+    description: Connector-reported input and output tokens attributed to an agent tree.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: gen_ai.token.type
+        label: kind
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+    - source: 'PR #412 Agent360'
+      disposition: preserved
+      details:
+        prometheus_projection: local-observability-v1
+        missing_values: never fabricated
+- id: metric.defenseclaw.codex.notify
+  type: metric
+  brief: Codex notify events received via the notify-bridge shim, labelled by type/status
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.status
+    requirement_level: recommended
+  - ref: defenseclaw.metric.type
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.codex.notify
+    instrument_type: counter
+    value_type: int64
+    unit: '{event}'
+    description: Codex notify events received via the notify-bridge shim, labelled by type/status
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.result
+        label: result
+      - ref: defenseclaw.metric.status
+        label: status
+      - ref: defenseclaw.metric.type
+        label: type
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.codex.notify.malformed
+  type: metric
+  brief: Codex notify payloads that failed to parse
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.type
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.codex.notify.malformed
+    instrument_type: counter
+    value_type: int64
+    unit: '{event}'
+    description: Codex notify payloads that failed to parse
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.type
+        label: type
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.connector.hook.invocations
+  type: metric
+  brief: Connector hook invocations observed by the gateway.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.metric.event_type
+    requirement_level: recommended
+  - ref: defenseclaw.metric.reason
+    requirement_level: recommended
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.connector.hook.invocations
+    instrument_type: counter
+    value_type: int64
+    unit: '{hook}'
+    description: Connector hook invocations observed by the gateway.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.metric.event_type
+        label: event_type
+      - ref: defenseclaw.metric.reason
+        label: reason
+      - ref: defenseclaw.metric.result
+        label: result
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.connector.hook.latency
+  type: metric
+  brief: Connector hook handler latency.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.metric.event_type
+    requirement_level: recommended
+  - ref: defenseclaw.metric.reason
+    requirement_level: recommended
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.connector.hook.latency
+    instrument_type: histogram
+    value_type: double
+    unit: ms
+    description: Connector hook handler latency.
+    temporality: delta
+    boundaries:
+    - 1
+    - 2
+    - 5
+    - 10
+    - 25
+    - 50
+    - 100
+    - 250
+    - 500
+    - 1000
+    - 2500
+    - 5000
+    - 10000
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.metric.event_type
+        label: event_type
+      - ref: defenseclaw.metric.reason
+        label: reason
+      - ref: defenseclaw.metric.result
+        label: result
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.connector.hook.outcome
+  type: metric
+  brief: Connector hook outcomes labelled by action, severity, and would_block.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.action
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.metric.event_type
+    requirement_level: recommended
+  - ref: defenseclaw.security.severity
+    requirement_level: recommended
+  - ref: defenseclaw.metric.would_block
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.connector.hook.outcome
+    instrument_type: counter
+    value_type: int64
+    unit: '{decision}'
+    description: Connector hook outcomes labelled by action, severity, and would_block.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.action
+        label: action
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.metric.event_type
+        label: event_type
+      - ref: defenseclaw.security.severity
+        label: severity
+      - ref: defenseclaw.metric.would_block
+        label: would_block
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.connector.hook.tokens
+  type: metric
+  brief: Token usage attributable to connector hook invocations. Split by kind=prompt|completion|total.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.metric.kind
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.connector.hook.tokens
+    instrument_type: counter
+    value_type: int64
+    unit: '{token}'
+    description: Token usage attributable to connector hook invocations. Split by kind=prompt|completion|total.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.metric.kind
+        label: kind
+      - ref: gen_ai.request.model
+        label: model
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 2
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.connector.hook.unified_dispatch
+  type: metric
+  brief: Count of hook invocations routed through the unified hook collector, by connector.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.connector.hook.unified_dispatch
+    instrument_type: counter
+    value_type: int64
+    unit: '{invocation}'
+    description: Count of hook invocations routed through the unified hook collector, by connector.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.gateway.forwarded_headers
+  type: metric
+  brief: Inbound HTTP headers forwarded from the agent to the upstream LLM provider (path=chat-completions|passthrough, result=ok|rejected_invalid|rejected_overflow)
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.path
+    requirement_level: recommended
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.gateway.forwarded_headers
+    instrument_type: counter
+    value_type: int64
+    unit: '{header}'
+    description: Inbound HTTP headers forwarded from the agent to the upstream LLM provider (path=chat-completions|passthrough, result=ok|rejected_invalid|rejected_overflow)
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.path
+        label: path
+      - ref: defenseclaw.metric.result
+        label: result
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.llm_bridge.latency
+  type: metric
+  brief: LiteLLM bridge call latency (Python subprocess)
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  - ref: defenseclaw.metric.status
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.llm_bridge.latency
+    instrument_type: histogram
+    value_type: double
+    unit: ms
+    description: LiteLLM bridge call latency (Python subprocess)
+    temporality: delta
+    boundaries: []
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.status
+        label: status
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.openshell.exit
+  type: metric
+  brief: OpenShell subprocess exits by command and exit code
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.command
+    requirement_level: recommended
+  - ref: defenseclaw.tool.exit_code
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.openshell.exit
+    instrument_type: counter
+    value_type: int64
+    unit: '{exit}'
+    description: OpenShell subprocess exits by command and exit code
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.command
+        label: command
+      - ref: defenseclaw.tool.exit_code
+        label: exit_code
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.stream.bytes_sent
+  type: metric
+  brief: Bytes sent on an SSE/stream before close
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: http.route
+    requirement_level: recommended
+  - ref: defenseclaw.outcome
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.stream.bytes_sent
+    instrument_type: histogram
+    value_type: int64
+    unit: By
+    description: Bytes sent on an SSE/stream before close
+    temporality: delta
+    boundaries: []
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.outcome
+        label: outcome
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.stream.duration_ms
+  type: metric
+  brief: Wall-clock duration of an SSE/stream from open to close
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: http.route
+    requirement_level: recommended
+  - ref: defenseclaw.outcome
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.stream.duration_ms
+    instrument_type: histogram
+    value_type: double
+    unit: ms
+    description: Wall-clock duration of an SSE/stream from open to close
+    temporality: delta
+    boundaries: []
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.outcome
+        label: outcome
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.stream.lifecycle
+  type: metric
+  brief: SSE/stream lifecycle transitions (open/close) per route/outcome
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: http.route
+    requirement_level: recommended
+  - ref: defenseclaw.outcome
+    requirement_level: recommended
+  - ref: defenseclaw.metric.transition
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.stream.lifecycle
+    instrument_type: counter
+    value_type: int64
+    unit: '{transition}'
+    description: SSE/stream lifecycle transitions (open/close) per route/outcome
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.outcome
+        label: outcome
+      - ref: defenseclaw.metric.transition
+        label: transition
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.tool.calls
+  type: metric
+  brief: Total tool calls observed
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.dangerous
+    requirement_level: recommended
+  - ref: gen_ai.tool.name
+    requirement_level: recommended
+  - ref: defenseclaw.tool.provider
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.tool.calls
+    instrument_type: counter
+    value_type: int64
+    unit: '{call}'
+    description: Total tool calls observed
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.dangerous
+        label: dangerous
+      - ref: defenseclaw.tool.provider
+        label: tool.provider
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.tool.duration
+  type: metric
+  brief: Tool call duration distribution
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.tool.name
+    requirement_level: recommended
+  - ref: defenseclaw.tool.provider
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.tool.duration
+    instrument_type: histogram
+    value_type: double
+    unit: ms
+    description: Tool call duration distribution
+    temporality: delta
+    boundaries: []
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.tool.provider
+        label: tool.provider
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.defenseclaw.tool.errors
+  type: metric
+  brief: Tool calls that returned non-zero exit codes
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.tool.exit_code
+    requirement_level: recommended
+  - ref: gen_ai.tool.name
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.tool.errors
+    instrument_type: counter
+    value_type: int64
+    unit: '{error}'
+    description: Tool calls that returned non-zero exit codes
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.tool.exit_code
+        label: exit_code
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.gen_ai.client.operation.duration
+  type: metric
+  brief: GenAI operation duration.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: gen_ai.operation.name
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: gen_ai.client.operation.duration
+    instrument_type: histogram
+    value_type: double
+    unit: s
+    description: GenAI operation duration.
+    temporality: delta
+    boundaries:
+    - 0.01
+    - 0.02
+    - 0.04
+    - 0.08
+    - 0.16
+    - 0.32
+    - 0.64
+    - 1.28
+    - 2.56
+    - 5.12
+    - 10.24
+    - 20.48
+    - 40.96
+    - 81.92
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+- id: metric.gen_ai.client.token.usage
+  type: metric
+  brief: Number of input and output tokens used.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: gen_ai.agent.id
+    requirement_level: recommended
+  - ref: gen_ai.agent.name
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+  - ref: gen_ai.operation.name
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  - ref: gen_ai.token.type
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: gen_ai.client.token.usage
+    instrument_type: histogram
+    value_type: double
+    unit: '{token}'
+    description: Number of input and output tokens used.
+    temporality: delta
+    boundaries:
+    - 1
+    - 4
+    - 16
+    - 64
+    - 256
+    - 1024
+    - 4096
+    - 16384
+    - 65536
+    - 262144
+    - 1048576
+    - 4194304
+    - 16777216
+    - 67108864
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
+producer_identity_sets: []
+producer_mappings: []
+attribute_extensions:
+- ref: db.collection.name
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: preserve only a bounded policy-eligible collection identity; otherwise omit or project a safe reference
+- ref: db.operation.name
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: lowercase registered database operation token
+- ref: error.type
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: stable bounded error type; never copy exception messages or arbitrary provider text
+- ref: gen_ai.agent.id
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: preserve a nonempty bounded producer identifier; canonical metrics forbid it and local-observability spanmetrics applies its explicit bounded cache and expiry exception
+- ref: gen_ai.agent.name
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: NFC bounded producer name; canonical metrics forbid it and local-observability spanmetrics alone applies its explicit bounded cache and expiry exception
+- ref: gen_ai.conversation.id
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: preserve a nonempty bounded upstream conversation identifier; never fabricate from adjacency or use as a metric label
+- ref: user.id
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: preserve only an explicitly reported bounded user-principal identifier; never derive it from a display name or administrative principal
+- ref: gen_ai.input.messages
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    notes: preserve typed message order and roles within item and byte limits; destination redaction precedes every alias projection
+- ref: gen_ai.operation.name
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - chat
+      - create_agent
+      - create_memory
+      - create_memory_store
+      - delete_memory
+      - delete_memory_store
+      - embeddings
+      - execute_tool
+      - generate_content
+      - invoke_agent
+      - invoke_workflow
+      - plan
+      - retrieval
+      - search_memory
+      - text_completion
+      - update_memory
+      - upsert_memory
+    notes: pinned closed GenAI operation vocabulary
+- ref: gen_ai.output.messages
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    notes: preserve typed message order and roles within item and byte limits; destination redaction precedes every alias projection
+- ref: gen_ai.provider.name
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: lowercase bounded provider token from the pinned convention
+- ref: gen_ai.request.max_tokens
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: nonnegative producer-reported request value; omit when not reported
+- ref: gen_ai.request.model
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    notes: NFC bounded requested model identity; never infer from response data
+- ref: gen_ai.request.temperature
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: -1.0e+308
+      max: 1.0e+308
+    notes: finite producer-reported request value; omit when not reported
+- ref: gen_ai.request.top_p
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1.0
+    notes: finite producer-reported request value; omit when not reported
+- ref: gen_ai.response.finish_reasons
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: bounded ordered list of provider-reported finish-reason tokens
+- ref: gen_ai.response.id
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: preserve a nonempty bounded provider response identifier; omit when not reported and never use as a metric label
+- ref: gen_ai.response.model
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    notes: NFC bounded provider-reported response model identity; omit when not reported
+- ref: gen_ai.tool.call.arguments
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    notes: preserve typed or serialized arguments within content limits; centrally redact before destination projection
+- ref: gen_ai.tool.call.id
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: preserve a nonempty bounded producer tool-call identifier; never derive from arguments or use as a metric label
+- ref: gen_ai.tool.call.result
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    notes: preserve typed or serialized result within content limits; centrally redact before destination projection
+- ref: gen_ai.tool.name
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    notes: NFC bounded tool name; canonical metrics use only registered bounded projections and span names use a normalized bounded form
+- ref: gen_ai.tool.type
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: pinned bounded tool-type token
+- ref: gen_ai.usage.input_tokens
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: nonnegative provider-reported token count; omit rather than synthesize zero
+- ref: gen_ai.usage.output_tokens
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: nonnegative provider-reported token count; omit rather than synthesize zero
+- ref: gen_ai.token.type
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - input
+      - output
+      - cacheRead
+      - cacheCreation
+    notes: registered token type; cacheRead and cacheCreation preserve the existing Claude Code and local-observability label contract without relabelling cache tokens as input

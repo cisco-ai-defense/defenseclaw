@@ -520,8 +520,6 @@ func TestDeterministicHash(t *testing.T) {
 // hand-authored, ship-controlled labels.
 func TestForSinkReason_TrustedAIDPrefix(t *testing.T) {
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
-	SetDisableAll(false)
-	t.Cleanup(func() { SetDisableAll(false) })
 	cases := []struct {
 		in   string
 		want string
@@ -547,8 +545,6 @@ func TestForSinkReason_TrustedAIDPrefix(t *testing.T) {
 // "Cisco AI Defense: sk-ant-<literal secret>" from riding through.
 func TestForSinkReason_TrustedAIDPrefix_RejectsBadShapes(t *testing.T) {
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
-	SetDisableAll(false)
-	t.Cleanup(func() { SetDisableAll(false) })
 	badShapes := []string{
 		"Cisco AI Defense: sk-ant-api03-secret-KEY_XYZ!!!", // '!' rejected
 		"Cisco AI Defense: /etc/passwd content leaked",     // '/' rejected
