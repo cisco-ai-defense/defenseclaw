@@ -59,7 +59,8 @@ agent_install() {
 agent_run() {
   local prompt="$1"
   # DefenseClaw's PreToolUse deny still overrides this auto-approval flag.
-  dc_timeout 180 "${AGY_BIN}" --print --dangerously-skip-permissions "${prompt}"
+  # agy treats every argument after --print as prompt text, so flags go first.
+  dc_timeout 180 "${AGY_BIN}" --dangerously-skip-permissions --print "${prompt}"
 }
 
 dc_driver_main antigravity
