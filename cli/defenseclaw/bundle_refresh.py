@@ -469,10 +469,14 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
 def _restore_local_observability_backup(
     destination: Path,
     backup_managed: Path,
+    backup_created: Path,
+    backup_retired: Path,
     managed_paths: set[str],
     existing_paths: set[str],
     old_digests: dict[str, str],
     old_modes: dict[str, int],
+    created_digests: dict[str, str],
+    old_windows_security: dict[str, object],
 ) -> None:
     """Restore the transaction's exact managed-file inventory."""
 
@@ -480,10 +484,14 @@ def _restore_local_observability_backup(
         _restore_local_observability_backup_by_path(
             destination,
             backup_managed,
+            backup_created,
+            backup_retired,
             managed_paths,
             existing_paths,
             old_digests,
             old_modes,
+            created_digests,
+            old_windows_security,
         )
         return
 
@@ -491,39 +499,75 @@ def _restore_local_observability_backup(
     try:
         backup_root_descriptor = _open_rollback_root_descriptor(backup_managed)
         try:
-            for relative in sorted(managed_paths):
-                parts = _rollback_path_parts(relative)
-                parent_descriptor = _open_rollback_parent(
-                    root_descriptor,
-                    parts[:-1],
-                    create=relative in existing_paths,
-                )
-                if parent_descriptor is None:
-                    continue
+            created_root_descriptor = -1
+            retired_root_descriptor = -1
+            created_claims: dict[str, int] = {}
+            try:
+                if created_digests:
+                    created_root_descriptor = _open_rollback_root_descriptor(backup_created)
+                    retired_root_descriptor = _open_rollback_root_descriptor(backup_retired)
+                    created_claims = _open_created_rollback_claims_at(
+                        created_root_descriptor,
+                        created_digests,
+                    )
                 try:
-                    if relative in existing_paths:
-                        backup_parent_descriptor = _open_rollback_parent(
-                            backup_root_descriptor,
+                    for relative in sorted(managed_paths):
+                        parts = _rollback_path_parts(relative)
+                        parent_descriptor = _open_rollback_parent(
+                            root_descriptor,
                             parts[:-1],
-                            create=False,
+                            create=relative in existing_paths,
                         )
-                        if backup_parent_descriptor is None:
-                            raise OSError("backup member missing")
+                        if parent_descriptor is None:
+                            continue
                         try:
-                            _restore_rollback_file_at(
-                                backup_parent_descriptor,
-                                parts[-1],
-                                parent_descriptor,
-                                parts[-1],
-                                old_modes[relative],
-                                old_digests[relative],
-                            )
+                            if relative in existing_paths:
+                                backup_parent_descriptor = _open_rollback_parent(
+                                    backup_root_descriptor,
+                                    parts[:-1],
+                                    create=False,
+                                )
+                                if backup_parent_descriptor is None:
+                                    raise OSError("backup member missing")
+                                try:
+                                    _restore_rollback_file_at(
+                                        backup_parent_descriptor,
+                                        parts[-1],
+                                        parent_descriptor,
+                                        parts[-1],
+                                        old_modes[relative],
+                                        old_digests[relative],
+                                    )
+                                finally:
+                                    os.close(backup_parent_descriptor)
+                            else:
+                                retired_parent_descriptor = _open_rollback_parent(
+                                    retired_root_descriptor,
+                                    parts[:-1],
+                                    create=True,
+                                )
+                                assert retired_parent_descriptor is not None
+                                try:
+                                    _retire_rollback_file_at(
+                                        parent_descriptor,
+                                        parts[-1],
+                                        retired_parent_descriptor,
+                                        parts[-1],
+                                        created_claims[relative],
+                                        created_digests[relative],
+                                    )
+                                finally:
+                                    os.close(retired_parent_descriptor)
                         finally:
-                            os.close(backup_parent_descriptor)
-                    else:
-                        _remove_rollback_file_at(parent_descriptor, parts[-1])
+                            os.close(parent_descriptor)
                 finally:
-                    os.close(parent_descriptor)
+                    for descriptor in created_claims.values():
+                        os.close(descriptor)
+            finally:
+                if created_root_descriptor >= 0:
+                    os.close(created_root_descriptor)
+                if retired_root_descriptor >= 0:
+                    os.close(retired_root_descriptor)
         finally:
             os.close(backup_root_descriptor)
     finally:
@@ -533,10 +577,14 @@ def _restore_local_observability_backup(
 def _restore_local_observability_backup_by_path(
     destination: Path,
     backup_managed: Path,
+    backup_created: Path,
+    backup_retired: Path,
     managed_paths: set[str],
     existing_paths: set[str],
     old_digests: dict[str, str],
     old_modes: dict[str, int],
+    created_digests: dict[str, str],
+    old_windows_security: dict[str, object],
 ) -> None:
     """Fail closed around symlinks and reparse points without POSIX dirfds."""
 
@@ -544,15 +592,29 @@ def _restore_local_observability_backup_by_path(
         _restore_local_observability_backup_windows(
             destination,
             backup_managed,
+            backup_created,
+            backup_retired,
             managed_paths,
             existing_paths,
             old_digests,
             old_modes,
+            created_digests,
+            old_windows_security,
         )
         return
 
     root_chain = [(destination, _rollback_directory_info(destination))]
     backup_root_chain = [(backup_managed, _rollback_directory_info(backup_managed))]
+    created_root_chain: list[tuple[Path, os.stat_result]] = []
+    retired_root_chain: list[tuple[Path, os.stat_result]] = []
+    if created_digests:
+        created_root_chain = [(backup_created, _rollback_directory_info(backup_created))]
+        retired_root_chain = [(backup_retired, _rollback_directory_info(backup_retired))]
+        _validate_created_rollback_claims_by_path(
+            backup_created,
+            created_root_chain,
+            created_digests,
+        )
     for relative in sorted(managed_paths):
         parts = _rollback_path_parts(relative)
         parent_chain = _open_rollback_parent_by_path(
@@ -580,29 +642,54 @@ def _restore_local_observability_backup_by_path(
                 old_digests[relative],
             )
         else:
-            destination_info = _rollback_file_info(destination_path, missing_ok=True)
-            if destination_info is None:
-                continue
-            _revalidate_rollback_directory_chain(parent_chain)
-            _revalidate_rollback_file(destination_path, destination_info)
-            destination_path.unlink()
-            _revalidate_rollback_directory_chain(parent_chain)
-            if _rollback_file_info(destination_path, missing_ok=True) is not None:
-                raise OSError("local observability rollback managed file reappeared")
+            claim_parent_chain = _open_rollback_parent_by_path(
+                created_root_chain,
+                parts[:-1],
+                create=False,
+            )
+            if claim_parent_chain is None:
+                raise OSError("target-created rollback claim is missing")
+            retired_parent_chain = _open_rollback_parent_by_path(
+                retired_root_chain,
+                parts[:-1],
+                create=True,
+            )
+            assert retired_parent_chain is not None
+            _retire_rollback_file_by_path(
+                destination_path,
+                parent_chain,
+                claim_parent_chain[-1][0] / parts[-1],
+                claim_parent_chain,
+                retired_parent_chain[-1][0] / parts[-1],
+                retired_parent_chain,
+                created_digests[relative],
+            )
 
 
 def _restore_local_observability_backup_windows(
     destination: Path,
     backup_managed: Path,
+    backup_created: Path,
+    backup_retired: Path,
     managed_paths: set[str],
     existing_paths: set[str],
     old_digests: dict[str, str],
     old_modes: dict[str, int],
+    created_digests: dict[str, str],
+    old_windows_security: dict[str, object],
 ) -> None:
     """Restore below native, non-delete-sharing Windows directory leases."""
 
-    from defenseclaw import windows_acl
+    _ = backup_retired
 
+    created_root_chain: list[tuple[Path, os.stat_result]] = []
+    if created_digests:
+        created_root_chain = [(backup_created, _rollback_directory_info(backup_created))]
+        _validate_created_rollback_claims_by_path(
+            backup_created,
+            created_root_chain,
+            created_digests,
+        )
     for relative in sorted(managed_paths):
         parts = _rollback_path_parts(relative)
         with ExitStack() as leases:
@@ -631,17 +718,25 @@ def _restore_local_observability_backup_windows(
                     parent_chain,
                     old_modes[relative],
                     old_digests[relative],
+                    old_windows_security[relative],
                 )
                 continue
 
-            destination_info = _rollback_file_info(destination_path, missing_ok=True)
-            if destination_info is None:
-                continue
-            # The exact-leaf delete is safe without another path-chain stat:
-            # every ancestor lease remains held until this ExitStack unwinds.
-            windows_acl.delete_regular_file_by_handle(str(destination_path))
-            if _rollback_file_info(destination_path, missing_ok=True) is not None:
-                raise OSError("local observability rollback managed file reappeared")
+            claim_parent_chain = _open_windows_rollback_parent(
+                backup_created,
+                parts[:-1],
+                create=False,
+                leases=leases,
+            )
+            if claim_parent_chain is None:
+                raise OSError("target-created rollback claim is missing")
+            _remove_windows_rollback_file_by_path(
+                destination_path,
+                parent_chain,
+                claim_parent_chain[-1][0] / parts[-1],
+                claim_parent_chain,
+                created_digests[relative],
+            )
 
 
 def _open_windows_rollback_parent(
@@ -1035,6 +1130,7 @@ def _restore_rollback_file_by_path(
     destination_parent_chain: list[tuple[Path, os.stat_result]],
     mode: int,
     expected_digest: str,
+    windows_security: object | None = None,
 ) -> None:
     """Stage and authenticate fallback rollback bytes before publication."""
 
@@ -1069,6 +1165,7 @@ def _restore_rollback_file_by_path(
                 destination_before,
                 mode,
                 expected_digest,
+                windows_security,
             )
             return
         create_flags = (
@@ -1170,6 +1267,7 @@ def _restore_windows_rollback_file_by_path(
     destination_before: os.stat_result | None,
     mode: int,
     expected_digest: str,
+    expected_security: object | None,
 ) -> None:
     """Use a protected Windows DACL before staging the first rollback byte."""
 
@@ -1192,6 +1290,8 @@ def _restore_windows_rollback_file_by_path(
         raise OSError("backup member changed during restore")
     if hashlib.sha256(payload).hexdigest() != expected_digest:
         raise OSError("backup member digest mismatch")
+    if expected_security is None:
+        raise OSError("backup member lacks exact Windows security metadata")
 
     from defenseclaw import windows_acl
 
@@ -1200,12 +1300,21 @@ def _restore_windows_rollback_file_by_path(
         raise OSError("rollback temporary path collision")
     created = False
     try:
-        security = windows_acl.private_security_for_directory(str(destination_path.parent))
-        windows_acl.write_new_file(str(temporary_path), bytes(payload), security)
         created = True
-        # Windows authorization is restored as a native protected DACL. Do
-        # not translate the retained POSIX mode through a path-based chmod:
-        # that both loses ACE semantics and would reopen a leaf-race window.
+        # write_new_file protects the disposable staging object before its
+        # first payload byte. Reapply the exact retained owner, DACL, and
+        # protection state while it is still unpublished, then verify those
+        # native bytes through the same descriptor that authenticates the
+        # staged payload.
+        windows_acl.write_new_file(
+            str(temporary_path),
+            bytes(payload),
+            expected_security,
+        )
+        windows_acl.apply_path(str(temporary_path), expected_security)
+        if windows_acl.capture_path(str(temporary_path)) != expected_security:
+            raise OSError("rollback temporary owner/DACL mismatch")
+        # A POSIX mode cannot encode Windows ACE order or inheritance state.
         _ = mode
         temporary_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         temporary_descriptor = os.open(temporary_path, temporary_flags)
@@ -1216,7 +1325,14 @@ def _restore_windows_rollback_file_by_path(
                 raise OSError("rollback temporary identity changed")
             if _sha256_descriptor(temporary_descriptor) != expected_digest:
                 raise OSError("rollback temporary digest changed")
+            if windows_acl.capture_fd(temporary_descriptor) != expected_security:
+                raise OSError("rollback temporary owner/DACL changed")
             os.fsync(temporary_descriptor)
+            if windows_acl.capture_fd(temporary_descriptor) != expected_security:
+                raise OSError("rollback temporary owner/DACL changed")
+            staged_after = os.fstat(temporary_descriptor)
+            if not _rollback_source_snapshot_unchanged(staged_info, staged_after):
+                raise OSError("rollback temporary changed before publish")
         finally:
             os.close(temporary_descriptor)
 
@@ -1245,6 +1361,36 @@ def _restore_windows_rollback_file_by_path(
         restored_info = _rollback_file_info(destination_path, missing_ok=False)
         if restored_info is None or not os.path.samestat(staged_info, restored_info):
             raise OSError("restored member identity changed during publish")
+        restored_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        restored_descriptor = os.open(destination_path, restored_flags)
+        try:
+            restored_before = os.fstat(restored_descriptor)
+            restored_security_before = windows_acl.capture_fd(restored_descriptor)
+            if (
+                not os.path.samestat(staged_info, restored_before)
+                or _sha256_descriptor(restored_descriptor) != expected_digest
+                or restored_security_before != expected_security
+                or windows_acl.capture_fd(restored_descriptor) != expected_security
+            ):
+                raise OSError("restored member bytes or owner/DACL mismatch")
+            restored_after = os.fstat(restored_descriptor)
+            if not _rollback_source_snapshot_unchanged(restored_before, restored_after):
+                raise OSError("restored member changed during final verification")
+            restored_named_final = _rollback_file_info(
+                destination_path,
+                missing_ok=False,
+            )
+            if restored_named_final is None or not _rollback_source_snapshot_unchanged(
+                restored_after,
+                restored_named_final,
+            ):
+                raise OSError("restored member identity changed after verification")
+        finally:
+            os.close(restored_descriptor)
     finally:
         if created:
             try:
@@ -1257,17 +1403,590 @@ def _restore_windows_rollback_file_by_path(
                 pass
 
 
-def _remove_rollback_file_at(parent_descriptor: int, destination_name: str) -> None:
-    """Durably unlink one target-created managed entry without following it."""
+def _open_created_rollback_claim_at(
+    root_descriptor: int,
+    relative: str,
+    expected_digest: str,
+) -> int:
+    """Open one private retained hardlink that proves target ownership."""
 
+    parts = _rollback_path_parts(relative)
+    parent_descriptor = _open_rollback_parent(
+        root_descriptor,
+        parts[:-1],
+        create=False,
+    )
+    if parent_descriptor is None:
+        raise OSError("target-created rollback claim is missing")
+    descriptor = -1
     try:
-        info = os.stat(destination_name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except FileNotFoundError:
+        descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+        before = os.fstat(descriptor)
+        named = os.stat(
+            parts[-1],
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or not os.path.samestat(before, named)
+        ):
+            raise OSError("target-created rollback claim is unsafe")
+        if _sha256_descriptor(descriptor) != expected_digest:
+            raise OSError("target-created rollback claim digest mismatch")
+        after = os.fstat(descriptor)
+        if not _rollback_source_snapshot_unchanged(before, after):
+            raise OSError("target-created rollback claim changed during verification")
+        return descriptor
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(parent_descriptor)
+
+
+def _open_created_rollback_claims_at(
+    root_descriptor: int,
+    created_digests: dict[str, str],
+) -> dict[str, int]:
+    claims: dict[str, int] = {}
+    try:
+        for relative, expected_digest in sorted(created_digests.items()):
+            claims[relative] = _open_created_rollback_claim_at(
+                root_descriptor,
+                relative,
+                expected_digest,
+            )
+        return claims
+    except BaseException:
+        for descriptor in claims.values():
+            os.close(descriptor)
+        raise
+
+
+def _rename_no_replace_at(
+    source_parent_descriptor: int,
+    source_name: str,
+    destination_parent_descriptor: int,
+    destination_name: str,
+) -> None:
+    """Atomically rename across bound directories without replacing a leaf."""
+
+    import ctypes
+    import errno
+    import sys
+
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        function = library.renameatx_np
+        flag = 0x4  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        function = library.renameat2
+        flag = 0x1  # RENAME_NOREPLACE
+    else:
+        raise OSError("target-created retirement is unsupported on this platform")
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    if function(
+        source_parent_descriptor,
+        os.fsencode(source_name),
+        destination_parent_descriptor,
+        os.fsencode(destination_name),
+        flag,
+    ) == 0:
         return
-    if stat.S_ISDIR(info.st_mode):
-        raise OSError("unexpected directory at managed file path")
-    os.unlink(destination_name, dir_fd=parent_descriptor)
-    os.fsync(parent_descriptor)
+    code = ctypes.get_errno()
+    if code == errno.EEXIST:
+        raise FileExistsError(code, "retirement destination already exists")
+    if code == errno.ENOENT:
+        raise FileNotFoundError(code, "retirement source disappeared")
+    raise OSError(code, "atomic target-created retirement failed")
+
+
+def _open_retirement_member_at(parent_descriptor: int, name: str) -> int | None:
+    try:
+        named_before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(named_before.st_mode):
+        raise OSError("unsafe target-created retirement member was preserved")
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OSError("unsafe target-created retirement member was preserved") from exc
+    try:
+        opened = os.fstat(descriptor)
+        named_after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(named_after.st_mode)
+            or not os.path.samestat(opened, named_before)
+            or not os.path.samestat(opened, named_after)
+        ):
+            raise OSError("target-created retirement member changed while opening")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _opened_retirement_matches_claim(
+    descriptor: int,
+    claim_descriptor: int,
+    expected_digest: str,
+) -> bool:
+    member_before = os.fstat(descriptor)
+    claim_before = os.fstat(claim_descriptor)
+    if not os.path.samestat(member_before, claim_before):
+        return False
+    if _sha256_descriptor(descriptor) != expected_digest:
+        raise OSError("target-created retirement claim digest changed")
+    member_after = os.fstat(descriptor)
+    claim_after = os.fstat(claim_descriptor)
+    if (
+        not _rollback_source_snapshot_unchanged(member_before, member_after)
+        or not _rollback_source_snapshot_unchanged(claim_before, claim_after)
+        or not os.path.samestat(member_after, claim_after)
+    ):
+        raise OSError("target-created retirement claim changed during verification")
+    return True
+
+
+def _restore_raced_retirement_at(
+    source_parent_descriptor: int,
+    source_name: str,
+    retired_parent_descriptor: int,
+    retired_name: str,
+    retired_descriptor: int,
+    claim_descriptor: int,
+    expected_digest: str,
+) -> bool:
+    """Put a raced foreign leaf back at its public name without clobbering."""
+
+    expected = os.fstat(retired_descriptor)
+    try:
+        _rename_no_replace_at(
+            retired_parent_descriptor,
+            retired_name,
+            source_parent_descriptor,
+            source_name,
+        )
+    except FileExistsError as exc:
+        raise OSError("raced target-created replacement and canonical path were preserved") from exc
+    except FileNotFoundError:
+        _commit_completed_retirement_at(
+            source_parent_descriptor,
+            source_name,
+            retired_parent_descriptor,
+            retired_name,
+            claim_descriptor,
+            expected_digest,
+            expect_retired_claim=False,
+        )
+        return True
+    restored_descriptor = _open_retirement_member_at(source_parent_descriptor, source_name)
+    remaining_retired = _open_retirement_member_at(retired_parent_descriptor, retired_name)
+    try:
+        if restored_descriptor is None or remaining_retired is not None:
+            raise OSError("raced target-created replacement restore could not be verified")
+        restored_before = os.fstat(restored_descriptor)
+        if not os.path.samestat(expected, restored_before):
+            raise OSError("raced target-created replacement restore could not be verified")
+        # Persist the foreign object itself before either directory entry is
+        # reported durable. A writer racing this fsync must not let rollback
+        # claim that the exact restored snapshot was preserved.
+        os.fsync(restored_descriptor)
+        restored_after = os.fstat(restored_descriptor)
+        restored_named = _rollback_file_info_at(
+            source_parent_descriptor,
+            source_name,
+            missing_ok=False,
+        )
+        if (
+            restored_named is None
+            or not _rollback_source_snapshot_unchanged(restored_before, restored_after)
+            or not _rollback_source_snapshot_unchanged(restored_after, restored_named)
+        ):
+            raise OSError("raced target-created replacement changed during restore")
+        os.fsync(retired_parent_descriptor)
+        os.fsync(source_parent_descriptor)
+    finally:
+        if restored_descriptor is not None:
+            os.close(restored_descriptor)
+        if remaining_retired is not None:
+            os.close(remaining_retired)
+    raise OSError("raced target-created replacement was restored and preserved")
+
+
+def _assert_completed_retirement_at(
+    source_parent_descriptor: int,
+    source_name: str,
+    retired_parent_descriptor: int,
+    retired_name: str,
+    claim_descriptor: int,
+    expected_digest: str,
+    *,
+    expect_retired_claim: bool,
+) -> None:
+    source_descriptor = _open_retirement_member_at(source_parent_descriptor, source_name)
+    retired_descriptor = _open_retirement_member_at(retired_parent_descriptor, retired_name)
+    try:
+        if source_descriptor is not None:
+            raise OSError("canonical target-created path reappeared during retirement")
+        if expect_retired_claim:
+            if retired_descriptor is None or not _opened_retirement_matches_claim(
+                retired_descriptor,
+                claim_descriptor,
+                expected_digest,
+            ):
+                raise OSError("retired target-created claim changed before durability")
+        elif retired_descriptor is not None:
+            raise OSError("target-created retirement path appeared concurrently")
+        elif os.fstat(claim_descriptor).st_nlink != 1:
+            # With both deterministic public/retired names absent, the
+            # retained private claim must be the inode's sole remaining link.
+            # A larger count proves the canonical object escaped under an
+            # untracked name; zero proves even retained custody was unlinked.
+            raise OSError("target-created rollback claim escaped deterministic custody")
+    finally:
+        if source_descriptor is not None:
+            os.close(source_descriptor)
+        if retired_descriptor is not None:
+            os.close(retired_descriptor)
+
+
+def _commit_completed_retirement_at(
+    source_parent_descriptor: int,
+    source_name: str,
+    retired_parent_descriptor: int,
+    retired_name: str,
+    claim_descriptor: int,
+    expected_digest: str,
+    *,
+    expect_retired_claim: bool,
+) -> None:
+    _assert_completed_retirement_at(
+        source_parent_descriptor,
+        source_name,
+        retired_parent_descriptor,
+        retired_name,
+        claim_descriptor,
+        expected_digest,
+        expect_retired_claim=expect_retired_claim,
+    )
+    os.fsync(retired_parent_descriptor)
+    os.fsync(source_parent_descriptor)
+    _assert_completed_retirement_at(
+        source_parent_descriptor,
+        source_name,
+        retired_parent_descriptor,
+        retired_name,
+        claim_descriptor,
+        expected_digest,
+        expect_retired_claim=expect_retired_claim,
+    )
+
+
+def _finish_rollback_retirement_at(
+    source_parent_descriptor: int,
+    source_name: str,
+    retired_parent_descriptor: int,
+    retired_name: str,
+    claim_descriptor: int,
+    expected_digest: str,
+) -> bool:
+    """Classify a deterministic retirement after a first attempt or crash."""
+
+    source_descriptor = _open_retirement_member_at(source_parent_descriptor, source_name)
+    retired_descriptor = _open_retirement_member_at(retired_parent_descriptor, retired_name)
+    try:
+        if retired_descriptor is None:
+            if source_descriptor is None:
+                _commit_completed_retirement_at(
+                    source_parent_descriptor,
+                    source_name,
+                    retired_parent_descriptor,
+                    retired_name,
+                    claim_descriptor,
+                    expected_digest,
+                    expect_retired_claim=False,
+                )
+                return True
+            return False
+        retired_is_claim = _opened_retirement_matches_claim(
+            retired_descriptor,
+            claim_descriptor,
+            expected_digest,
+        )
+        if retired_is_claim:
+            if source_descriptor is None:
+                _commit_completed_retirement_at(
+                    source_parent_descriptor,
+                    source_name,
+                    retired_parent_descriptor,
+                    retired_name,
+                    claim_descriptor,
+                    expected_digest,
+                    expect_retired_claim=True,
+                )
+                return True
+            raise OSError("retired target-created claim is complete but canonical path reappeared")
+        if source_descriptor is None:
+            if _restore_raced_retirement_at(
+                source_parent_descriptor,
+                source_name,
+                retired_parent_descriptor,
+                retired_name,
+                retired_descriptor,
+                claim_descriptor,
+                expected_digest,
+            ):
+                return True
+        raise OSError("target-created retirement collision was preserved")
+    finally:
+        if source_descriptor is not None:
+            os.close(source_descriptor)
+        if retired_descriptor is not None:
+            os.close(retired_descriptor)
+
+
+def _retire_rollback_file_at(
+    source_parent_descriptor: int,
+    source_name: str,
+    retired_parent_descriptor: int,
+    retired_name: str,
+    claim_descriptor: int,
+    expected_digest: str,
+) -> None:
+    """Durably retire only the exact target-created claim; never unlink it."""
+
+    if _finish_rollback_retirement_at(
+        source_parent_descriptor,
+        source_name,
+        retired_parent_descriptor,
+        retired_name,
+        claim_descriptor,
+        expected_digest,
+    ):
+        return
+    source_descriptor = _open_retirement_member_at(source_parent_descriptor, source_name)
+    try:
+        if source_descriptor is None or not _opened_retirement_matches_claim(
+            source_descriptor,
+            claim_descriptor,
+            expected_digest,
+        ):
+            raise OSError("target-created managed file changed and was preserved")
+        try:
+            _rename_no_replace_at(
+                source_parent_descriptor,
+                source_name,
+                retired_parent_descriptor,
+                retired_name,
+            )
+        except (FileExistsError, FileNotFoundError):
+            # Re-read both deterministic names. This covers a concurrent move
+            # as well as a retry after the rename reached disk but its caller
+            # was killed before observing the return value.
+            pass
+    finally:
+        if source_descriptor is not None:
+            os.close(source_descriptor)
+    if not _finish_rollback_retirement_at(
+        source_parent_descriptor,
+        source_name,
+        retired_parent_descriptor,
+        retired_name,
+        claim_descriptor,
+        expected_digest,
+    ):
+        raise OSError("target-created retirement did not reach a durable terminal state")
+
+
+def _open_created_rollback_claim_by_path(
+    claim_path: Path,
+    claim_parent_chain: list[tuple[Path, os.stat_result]],
+    expected_digest: str,
+) -> int:
+    _revalidate_rollback_directory_chain(claim_parent_chain)
+    named_before = _rollback_file_info(claim_path, missing_ok=False)
+    try:
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            descriptor = windows_acl.open_regular_read_fd_shared_delete(
+                str(claim_path),
+            )
+        else:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(claim_path, flags)
+    except OSError as exc:
+        raise OSError("target-created rollback claim is unavailable") from exc
+    try:
+        before = os.fstat(descriptor)
+        if named_before is None or not os.path.samestat(before, named_before):
+            raise OSError("target-created rollback claim changed while opening")
+        if _sha256_descriptor(descriptor) != expected_digest:
+            raise OSError("target-created rollback claim digest mismatch")
+        after = os.fstat(descriptor)
+        _revalidate_rollback_directory_chain(claim_parent_chain)
+        named_after = _rollback_file_info(claim_path, missing_ok=False)
+        if (
+            named_after is None
+            or not _rollback_source_snapshot_unchanged(before, after)
+            or not os.path.samestat(before, named_after)
+        ):
+            raise OSError("target-created rollback claim changed during verification")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _validate_created_rollback_claims_by_path(
+    backup_created: Path,
+    root_chain: list[tuple[Path, os.stat_result]],
+    created_digests: dict[str, str],
+) -> None:
+    for relative, expected_digest in sorted(created_digests.items()):
+        parts = _rollback_path_parts(relative)
+        parent_chain = _open_rollback_parent_by_path(
+            root_chain,
+            parts[:-1],
+            create=False,
+        )
+        if parent_chain is None:
+            raise OSError("target-created rollback claim is missing")
+        descriptor = _open_created_rollback_claim_by_path(
+            backup_created.joinpath(*parts),
+            parent_chain,
+            expected_digest,
+        )
+        os.close(descriptor)
+
+
+def _retire_rollback_file_by_path(
+    destination_path: Path,
+    destination_parent_chain: list[tuple[Path, os.stat_result]],
+    claim_path: Path,
+    claim_parent_chain: list[tuple[Path, os.stat_result]],
+    retired_path: Path,
+    retired_parent_chain: list[tuple[Path, os.stat_result]],
+    expected_digest: str,
+) -> None:
+    claim_descriptor = _open_created_rollback_claim_by_path(
+        claim_path,
+        claim_parent_chain,
+        expected_digest,
+    )
+    destination_parent_descriptor = -1
+    retired_parent_descriptor = -1
+    try:
+        _revalidate_rollback_directory_chain(destination_parent_chain)
+        _revalidate_rollback_directory_chain(retired_parent_chain)
+        _rollback_file_info(destination_path, missing_ok=True)
+        _rollback_file_info(retired_path, missing_ok=True)
+        destination_parent_descriptor = _open_rollback_root_descriptor(destination_path.parent)
+        retired_parent_descriptor = _open_rollback_root_descriptor(retired_path.parent)
+        _retire_rollback_file_at(
+            destination_parent_descriptor,
+            destination_path.name,
+            retired_parent_descriptor,
+            retired_path.name,
+            claim_descriptor,
+            expected_digest,
+        )
+        _revalidate_rollback_directory_chain(destination_parent_chain)
+        _revalidate_rollback_directory_chain(retired_parent_chain)
+    finally:
+        if destination_parent_descriptor >= 0:
+            os.close(destination_parent_descriptor)
+        if retired_parent_descriptor >= 0:
+            os.close(retired_parent_descriptor)
+        os.close(claim_descriptor)
+
+
+def _mark_windows_handle_for_delete(api, handle: int) -> None:
+    """Apply delete disposition to the same native handle we authenticated."""
+
+    import ctypes
+
+    from defenseclaw import windows_acl
+
+    delete = ctypes.c_ubyte(1)
+    if not api._set_file_information(  # noqa: SLF001 - bridge for the 0.8.4 API
+        handle,
+        windows_acl._FILE_DISPOSITION_INFO_CLASS,  # noqa: SLF001
+        ctypes.byref(delete),
+        ctypes.sizeof(delete),
+    ):
+        error = ctypes.get_last_error()
+        raise windows_acl.WindowsAclError(error, "FileDispositionInfo failed")
+
+
+def _remove_windows_rollback_file_by_path(
+    destination_path: Path,
+    destination_parent_chain: list[tuple[Path, os.stat_result]],
+    claim_path: Path,
+    claim_parent_chain: list[tuple[Path, os.stat_result]],
+    expected_digest: str,
+) -> None:
+    """Bind, authenticate, and delete one exact Windows target-created file."""
+
+    from defenseclaw import windows_acl
+
+    claim_descriptor = _open_created_rollback_claim_by_path(
+        claim_path,
+        claim_parent_chain,
+        expected_digest,
+    )
+    api = windows_acl._get_api()  # noqa: SLF001 - 0.8.4 compatibility bridge
+    handle = None
+    try:
+        if _rollback_file_info(destination_path, missing_ok=True) is None:
+            return
+        try:
+            handle = api._open_regular_mutator(str(destination_path))  # noqa: SLF001
+        except OSError as exc:
+            raise OSError("target-created managed file is unsafe and was preserved") from exc
+        # _open_regular_mutator deliberately omits FILE_SHARE_DELETE. Once it
+        # returns, the canonical leaf cannot be renamed or replaced before the
+        # disposition is applied to this same handle.
+        _revalidate_rollback_directory_chain(destination_parent_chain)
+        current = _rollback_file_info(destination_path, missing_ok=False)
+        claim_info = os.fstat(claim_descriptor)
+        if current is None or not os.path.samestat(current, claim_info):
+            raise OSError("target-created managed file changed and was preserved")
+        _mark_windows_handle_for_delete(api, handle)
+    finally:
+        if handle is not None:
+            api.close_handle(handle)
+        os.close(claim_descriptor)
+    _fsync_directory(destination_path.parent)
+    if _rollback_file_info(destination_path, missing_ok=True) is not None:
+        raise OSError("local observability rollback managed file reappeared")
 
 
 def _sha256_descriptor(descriptor: int) -> str:

@@ -27,9 +27,10 @@
       * <home>\bin\defenseclaw-gateway.exe  (the Go gateway/sidecar binary)
       * <home>\bin\defenseclaw.cmd          (shim to the CLI in the venv)
 
-    and adds that bin dir to the user PATH. Only Python + uv are required; no Go,
-    Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
-    by the cross-platform CLI via `defenseclaw init` / `quickstart`.
+    and prints explicit, operator-owned steps for adding that bin dir to the User
+    PATH; it does not mutate persistent PATH state. Only Python + uv are required;
+    no Go, Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is
+    done by the cross-platform CLI via `defenseclaw init` / `quickstart`.
 
     Layout matches scripts/install.sh and the managed upgrade path: binaries
     land in %USERPROFILE%\.local\bin and the CLI venv lives in
@@ -66,7 +67,10 @@ param(
     [Parameter(DontShow = $true)][switch]$TestMode,
     [Parameter(DontShow = $true)][switch]$InjectFailureBeforeShim,
     [Parameter(DontShow = $true)][switch]$InjectConcurrentShimBeforePublish,
-    [Parameter(DontShow = $true)][switch]$InjectPolicyCleanupFailure
+    [Parameter(DontShow = $true)][switch]$InjectPolicyCleanupFailure,
+    [Parameter(DontShow = $true)][switch]$InjectPolicyCustodyMoveBeforeCleanup,
+    [Parameter(DontShow = $true)][switch]$InjectFailureAfterFreshDirectoryMove,
+    [Parameter(DontShow = $true)][string]$NativePrivateDirectorySelfTestRoot = ""
 )
 
 Set-StrictMode -Version Latest
@@ -81,7 +85,7 @@ try {
     # Property is read-only / unavailable on this host; ignore.
 }
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# -- Configuration ------------------------------------------------------------
 
 $Repo = "cisco-ai-defense/defenseclaw"
 $DefenseClawHome = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
@@ -103,18 +107,21 @@ $script:GatewayArchiveInnerSha256 = ""
 $script:GatewayBinarySha256 = ""
 $script:FreshInstallAttemptActive = $false
 $script:FreshInstallClaims = $null
-$script:FreshInstallOriginalUserPath = $null
-$script:FreshInstallPublishedUserPath = $null
 $script:FreshInstallOriginalProcessPath = $null
 $script:FreshInstallPublishedProcessPath = $null
+$script:PrivateDirectoryClaims = @{}
+$script:RollbackSafetyLedger = @{}
+$script:FreshDirectoryFaultMode = ""
+$script:FreshDirectoryFaultTarget = ""
+$script:FreshDirectoryFaultDisplaced = ""
 
-# Fresh-install cleanup must never turn a pathname check followed by
-# Remove-Item into authority to delete a different object.  These native
-# claims pin the exact Windows file ID without FILE_SHARE_DELETE.  Rollback
-# marks that same opened object for deletion; a concurrently substituted path
-# therefore survives.  Directory-tree rollback takes an identity snapshot
-# before deleting any child and refuses changed/new entries by leaving the
-# claimed root (and its residue) in place.
+# Cleanup must never turn a pathname check into authority to delete a different
+# object. Fresh-payload claims pin the exact Windows file ID without
+# FILE_SHARE_DELETE. Private-directory creation claims remain open with
+# share-delete but no DELETE access; cleanup acquires a second no-share-delete
+# handle and proceeds only when its identity matches the retained creation
+# claim. Directory-tree rollback snapshots identities before deleting children
+# and leaves changed/new residue in place.
 $freshInstallClaimSource = @'
 using System;
 using System.Collections.Generic;
@@ -126,14 +133,23 @@ using Microsoft.Win32.SafeHandles;
 namespace DefenseClaw.Install.FreshV1 {
     public sealed class FreshPathClaim : IDisposable {
         private const uint DELETE = 0x00010000;
+        private const uint SYNCHRONIZE = 0x00100000;
+        private const uint FILE_LIST_DIRECTORY = 0x00000001;
+        private const uint FILE_TRAVERSE = 0x00000020;
         private const uint FILE_READ_ATTRIBUTES = 0x00000080;
         private const uint FILE_SHARE_READ = 0x00000001;
         private const uint FILE_SHARE_WRITE = 0x00000002;
+        private const uint FILE_SHARE_DELETE = 0x00000004;
         private const uint OPEN_EXISTING = 3;
+        private const uint FILE_CREATE = 2;
+        private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
         private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
         private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
         private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
         private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+        private const uint FILE_DIRECTORY_FILE = 0x00000001;
+        private const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020;
+        private const uint OBJ_CASE_INSENSITIVE = 0x00000040;
         private const int FILE_DISPOSITION_INFO_CLASS = 4;
         private const int ERROR_FILE_NOT_FOUND = 2;
         private const int ERROR_PATH_NOT_FOUND = 3;
@@ -169,6 +185,29 @@ namespace DefenseClaw.Install.FreshV1 {
         private struct FILE_DISPOSITION_INFO {
             [MarshalAs(UnmanagedType.Bool)]
             public bool DeleteFile;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct UNICODE_STRING {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr Buffer;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct OBJECT_ATTRIBUTES {
+            public int Length;
+            public IntPtr RootDirectory;
+            public IntPtr ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor;
+            public IntPtr SecurityQualityOfService;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_STATUS_BLOCK {
+            public IntPtr Status;
+            public UIntPtr Information;
         }
 
         private sealed class TreeEntry {
@@ -211,17 +250,38 @@ namespace DefenseClaw.Install.FreshV1 {
             string newFileName,
             uint flags);
 
+        [DllImport("ntdll.dll")]
+        private static extern int NtCreateFile(
+            out IntPtr fileHandle,
+            uint desiredAccess,
+            ref OBJECT_ATTRIBUTES objectAttributes,
+            out IO_STATUS_BLOCK ioStatusBlock,
+            IntPtr allocationSize,
+            uint fileAttributes,
+            uint shareAccess,
+            uint createDisposition,
+            uint createOptions,
+            IntPtr eaBuffer,
+            uint eaLength);
+
+        [DllImport("ntdll.dll")]
+        private static extern uint RtlNtStatusToDosError(int status);
+
         private SafeFileHandle handle;
         private readonly uint volume;
         private readonly ulong index;
         private readonly bool directory;
+        private readonly bool deleteAccess;
         private readonly string path;
+        private static string testMoveOutSource;
+        private static string testMoveOutDestination;
 
         private FreshPathClaim(
             string claimedPath,
             SafeFileHandle claimedHandle,
             BY_HANDLE_FILE_INFORMATION information,
-            bool expectedDirectory) {
+            bool expectedDirectory,
+            bool claimedDeleteAccess) {
             bool observedDirectory = (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             bool observedReparse = (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
             if (observedDirectory != expectedDirectory || observedReparse) {
@@ -235,6 +295,7 @@ namespace DefenseClaw.Install.FreshV1 {
             volume = information.VolumeSerialNumber;
             index = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
             directory = expectedDirectory;
+            deleteAccess = claimedDeleteAccess;
         }
 
         public string PathValue { get { return path; } }
@@ -245,7 +306,122 @@ namespace DefenseClaw.Install.FreshV1 {
         public static FreshPathClaim Open(string path, bool directory, bool deleteAccess) {
             SafeFileHandle opened = OpenHandle(path, directory, deleteAccess, false);
             BY_HANDLE_FILE_INFORMATION information = Information(opened, path);
-            return new FreshPathClaim(path, opened, information, directory);
+            return new FreshPathClaim(path, opened, information, directory, deleteAccess);
+        }
+
+        public static FreshPathClaim OpenIfExists(
+            string path,
+            bool directory,
+            bool deleteAccess) {
+            SafeFileHandle opened = OpenHandle(path, directory, deleteAccess, true);
+            if (opened == null) {
+                return null;
+            }
+            BY_HANDLE_FILE_INFORMATION information = Information(opened, path);
+            return new FreshPathClaim(path, opened, information, directory, deleteAccess);
+        }
+
+        // Create relative to an exact real parent handle and return the handle from the
+        // FILE_CREATE operation.  There is no pathname re-open window in which a
+        // same-user process can substitute a different directory and inherit the
+        // installer's later cleanup authority.
+        public static FreshPathClaim CreatePrivateDirectory(
+            string path,
+            byte[] securityDescriptor) {
+            if (securityDescriptor == null || securityDescriptor.Length == 0) {
+                throw new ArgumentException("private directory security descriptor is empty");
+            }
+            string full = Path.GetFullPath(path).TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+            string parentPath = Path.GetDirectoryName(full);
+            string leaf = Path.GetFileName(full);
+            if (String.IsNullOrEmpty(parentPath) || String.IsNullOrEmpty(leaf) ||
+                leaf == "." || leaf == ".." ||
+                leaf.IndexOf(Path.DirectorySeparatorChar) >= 0 ||
+                leaf.IndexOf(Path.AltDirectorySeparatorChar) >= 0) {
+                throw new InvalidOperationException(
+                    "private directory path has no safe parent/leaf: " + path);
+            }
+
+            SafeFileHandle parent = OpenParentHandle(parentPath);
+            IntPtr nameBuffer = IntPtr.Zero;
+            IntPtr nameStructure = IntPtr.Zero;
+            GCHandle descriptorPin = default(GCHandle);
+            bool parentPinned = false;
+            IntPtr rawCreated = IntPtr.Zero;
+            try {
+                BY_HANDLE_FILE_INFORMATION parentInformation = Information(parent, parentPath);
+                bool parentIsDirectory =
+                    (parentInformation.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                bool parentIsReparse =
+                    (parentInformation.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+                if (!parentIsDirectory || parentIsReparse) {
+                    throw new InvalidOperationException(
+                        "private directory parent must be a real directory: " + parentPath);
+                }
+                int nameBytes = System.Text.Encoding.Unicode.GetByteCount(leaf);
+                if (nameBytes > ushort.MaxValue - 2) {
+                    throw new PathTooLongException("private directory leaf is too long");
+                }
+                nameBuffer = Marshal.StringToHGlobalUni(leaf);
+                UNICODE_STRING name = new UNICODE_STRING();
+                name.Length = (ushort)nameBytes;
+                name.MaximumLength = (ushort)(nameBytes + 2);
+                name.Buffer = nameBuffer;
+                nameStructure = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
+                Marshal.StructureToPtr(name, nameStructure, false);
+                descriptorPin = GCHandle.Alloc(securityDescriptor, GCHandleType.Pinned);
+                parent.DangerousAddRef(ref parentPinned);
+
+                OBJECT_ATTRIBUTES attributes = new OBJECT_ATTRIBUTES();
+                attributes.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES));
+                attributes.RootDirectory = parent.DangerousGetHandle();
+                attributes.ObjectName = nameStructure;
+                attributes.Attributes = OBJ_CASE_INSENSITIVE;
+                attributes.SecurityDescriptor = descriptorPin.AddrOfPinnedObject();
+                attributes.SecurityQualityOfService = IntPtr.Zero;
+                IO_STATUS_BLOCK statusBlock;
+                int status = NtCreateFile(
+                    out rawCreated,
+                    SYNCHRONIZE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                    ref attributes,
+                    out statusBlock,
+                    IntPtr.Zero,
+                    FILE_ATTRIBUTE_NORMAL,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    FILE_CREATE,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                    IntPtr.Zero,
+                    0);
+                if (status < 0) {
+                    int error = unchecked((int)RtlNtStatusToDosError(status));
+                    throw new Win32Exception(
+                        error,
+                        "could not atomically create private install directory: " + full);
+                }
+                SafeFileHandle created = new SafeFileHandle(rawCreated, true);
+                rawCreated = IntPtr.Zero;
+                BY_HANDLE_FILE_INFORMATION information = Information(created, full);
+                return new FreshPathClaim(full, created, information, true, false);
+            } finally {
+                if (rawCreated != IntPtr.Zero && rawCreated != new IntPtr(-1)) {
+                    new SafeFileHandle(rawCreated, true).Dispose();
+                }
+                if (parentPinned) {
+                    parent.DangerousRelease();
+                }
+                if (descriptorPin.IsAllocated) {
+                    descriptorPin.Free();
+                }
+                if (nameStructure != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(nameStructure);
+                }
+                if (nameBuffer != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(nameBuffer);
+                }
+                parent.Dispose();
+            }
         }
 
         public static FreshPathClaim TransitionOpenedFileCustody(
@@ -264,7 +440,7 @@ namespace DefenseClaw.Install.FreshV1 {
                 throw new InvalidOperationException(
                     "fresh-install file changed while entering rollback custody and was preserved: " + path);
             }
-            return new FreshPathClaim(path, retained, observed, directory);
+            return new FreshPathClaim(path, retained, observed, directory, true);
         }
 
         public static bool DeleteOpenedFileExact(SafeFileHandle opened) {
@@ -290,12 +466,45 @@ namespace DefenseClaw.Install.FreshV1 {
                 "could not atomically publish fresh-install directory: " + destination);
         }
 
+        public static void ConfigureTestMoveOutAfterSnapshot(
+            string source,
+            string destination) {
+            if (String.IsNullOrWhiteSpace(source) ||
+                String.IsNullOrWhiteSpace(destination)) {
+                throw new ArgumentException("test move-out paths must be non-empty");
+            }
+            testMoveOutSource = Path.GetFullPath(source);
+            testMoveOutDestination = Path.GetFullPath(destination);
+        }
+
+        public static void ClearTestMoveOutAfterSnapshot() {
+            testMoveOutSource = null;
+            testMoveOutDestination = null;
+        }
+
+        private static void InvokeTestMoveOutAfterSnapshot() {
+            string source = testMoveOutSource;
+            string destination = testMoveOutDestination;
+            ClearTestMoveOutAfterSnapshot();
+            if (String.IsNullOrEmpty(source)) {
+                return;
+            }
+            if (!MoveFileEx(source, destination, MOVEFILE_WRITE_THROUGH)) {
+                int error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                    error,
+                    "could not inject a snapshotted-child move-out");
+            }
+        }
+
         private static SafeFileHandle OpenHandle(
             string path,
             bool directory,
             bool deleteAccess,
             bool allowMissing) {
-            uint access = FILE_READ_ATTRIBUTES | (deleteAccess ? DELETE : 0);
+            uint access = FILE_READ_ATTRIBUTES |
+                (directory ? FILE_TRAVERSE : 0) |
+                (deleteAccess ? DELETE : 0);
             uint flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
             SafeFileHandle opened = CreateFile(
                 Path.GetFullPath(path),
@@ -314,6 +523,28 @@ namespace DefenseClaw.Install.FreshV1 {
                 return null;
             }
             throw new Win32Exception(error, "could not bind fresh-install path: " + path);
+        }
+
+        private static SafeFileHandle OpenParentHandle(string path) {
+            // Relative NtCreateFile binds the child to this exact directory even
+            // if its pathname changes. Share-delete is required so this short-
+            // lived handle can coexist with an ancestor FreshPathClaim that
+            // already holds DELETE access; the child creation handle supplies
+            // the creation identity used for all later cleanup authority.
+            SafeFileHandle opened = CreateFile(
+                Path.GetFullPath(path),
+                FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (!opened.IsInvalid) {
+                return opened;
+            }
+            int error = Marshal.GetLastWin32Error();
+            opened.Dispose();
+            throw new Win32Exception(error, "could not bind private directory parent: " + path);
         }
 
         private static BY_HANDLE_FILE_INFORMATION Information(
@@ -361,6 +592,9 @@ namespace DefenseClaw.Install.FreshV1 {
             if (directory) {
                 throw new InvalidOperationException("file rollback received a directory claim");
             }
+            if (!deleteAccess) {
+                throw new InvalidOperationException("file rollback claim lacks DELETE access");
+            }
             bool deleted = MarkDelete(handle, false);
             Dispose();
             return deleted;
@@ -369,6 +603,9 @@ namespace DefenseClaw.Install.FreshV1 {
         public bool DeleteEmptyDirectoryExact() {
             if (!directory) {
                 throw new InvalidOperationException("directory rollback received a file claim");
+            }
+            if (!deleteAccess) {
+                throw new InvalidOperationException("directory rollback claim lacks DELETE access");
             }
             bool deleted = MarkDelete(handle, true);
             if (deleted) {
@@ -429,9 +666,13 @@ namespace DefenseClaw.Install.FreshV1 {
             if (!directory) {
                 throw new InvalidOperationException("tree rollback received a file claim");
             }
+            if (!deleteAccess) {
+                throw new InvalidOperationException("tree rollback claim lacks DELETE access");
+            }
             List<TreeEntry> entries = new List<TreeEntry>();
             long bytes = 0;
             SnapshotDirectory(path, 1, entries, ref bytes);
+            InvokeTestMoveOutAfterSnapshot();
             entries.Sort(delegate(TreeEntry left, TreeEntry right) {
                 int depthOrder = right.Depth.CompareTo(left.Depth);
                 if (depthOrder != 0) {
@@ -446,7 +687,7 @@ namespace DefenseClaw.Install.FreshV1 {
                     true,
                     true);
                 if (current == null) {
-                    continue;
+                    return false;
                 }
                 try {
                     BY_HANDLE_FILE_INFORMATION information = Information(current, entry.Path);
@@ -528,40 +769,268 @@ function Assert-PrivateDirectoryAcl {
     }
 }
 
+function Start-RollbackSafetyBoundary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Boundary,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Identity = "unavailable"
+    )
+    $full = [IO.Path]::GetFullPath($Path)
+    foreach ($existingToken in @($script:RollbackSafetyLedger.Keys)) {
+        $existing = $script:RollbackSafetyLedger[$existingToken]
+        if ($existing.Boundary -ceq $Boundary -and
+            [string]::Equals(
+                $existing.Path,
+                $full,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -and
+            $existing.Identity -ceq $Identity) {
+            return [string]$existingToken
+        }
+    }
+    $token = [guid]::NewGuid().ToString("N")
+    $script:RollbackSafetyLedger[$token] = [pscustomobject]@{
+        Boundary = $Boundary
+        Path = $full
+        Identity = $Identity
+    }
+    return $token
+}
+
+function Update-RollbackSafetyBoundary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Token,
+        [string]$Path = "",
+        [string]$Identity = ""
+    )
+    if (-not $script:RollbackSafetyLedger.ContainsKey($Token)) { return }
+    $entry = $script:RollbackSafetyLedger[$Token]
+    if ($Path) { $entry.Path = [IO.Path]::GetFullPath($Path) }
+    if ($Identity) { $entry.Identity = $Identity }
+}
+
+function Complete-RollbackSafetyBoundary {
+    param([Parameter(Mandatory = $true)][string]$Token)
+    [void]$script:RollbackSafetyLedger.Remove($Token)
+}
+
 function New-PrivateDirectory {
     param([string]$Path)
-    if (Test-InstallMarker -Path $Path) { Die "Private install path already exists: $Path" }
+    $full = [IO.Path]::GetFullPath($Path)
+    if (Test-InstallMarker -Path $full) { Die "Private install path already exists: $full" }
     $acl = New-PrivateDirectoryAcl
-    $created = $false
+    $registrationSafety = Start-RollbackSafetyBoundary `
+        -Boundary "private-directory-registration" `
+        -Path $full
+    $claim = $null
+    $registered = $false
     try {
-        if ($PSVersionTable.PSEdition -eq "Core") {
-            $directory = New-Object IO.DirectoryInfo($Path)
-            [IO.FileSystemAclExtensions]::Create($directory, $acl)
-        } else {
-            # Windows PowerShell 5.1 exposes the equivalent ACL-at-create-time
-            # overload directly on Directory.
-            [void][IO.Directory]::CreateDirectory($Path, $acl)
+        $claim = [DefenseClaw.Install.FreshV1.FreshPathClaim]::CreatePrivateDirectory(
+            $full,
+            $acl.GetSecurityDescriptorBinaryForm()
+        )
+        Update-RollbackSafetyBoundary `
+            -Token $registrationSafety `
+            -Identity $claim.Identity
+        if ($script:FreshDirectoryFaultMode -ceq "pre-registration" -and
+            [string]::Equals(
+                $full,
+                [IO.Path]::GetFullPath($script:FreshDirectoryFaultTarget),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            Die "Injected private-directory fault before claim registration: $full"
         }
-        $created = $true
-        Assert-PrivateDirectoryAcl -Path $Path -Expected $acl
-        if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
-            Die "Private install directory was not empty immediately after creation: $Path"
+        $script:PrivateDirectoryClaims[$full] = [pscustomobject]@{
+            Path = $full
+            Identity = $claim.Identity
+            Native = $claim
+            CleanupMode = "Tree"
+        }
+        $registered = $true
+        $claim = $null
+        Complete-RollbackSafetyBoundary -Token $registrationSafety
+        Assert-PrivateDirectoryAcl -Path $full -Expected $acl
+        if (@(Get-ChildItem -LiteralPath $full -Force).Count -ne 0) {
+            Die "Private install directory was not empty immediately after creation: $full"
         }
     } catch {
-        if ($created -and (Test-Path -LiteralPath $Path -PathType Container)) {
-            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        $creationFailure = $_
+        $cleanupFailure = ""
+        if ($registered) {
+            try {
+                Remove-PrivateDirectory -Path $full -RequireEmpty
+            } catch {
+                $cleanupFailure = [string]$_.Exception.Message
+            }
+        } elseif ($claim) {
+            $cleanupClaim = $null
+            $retired = $false
+            try {
+                $cleanupClaim = [DefenseClaw.Install.FreshV1.FreshPathClaim]::OpenIfExists(
+                    $full,
+                    $true,
+                    $true
+                )
+                if ($cleanupClaim -and $cleanupClaim.Identity -ceq $claim.Identity) {
+                    if ($cleanupClaim.DeleteEmptyDirectoryExact()) {
+                        $claim.Dispose()
+                        $claim = $null
+                        $retired = $true
+                    }
+                }
+            } catch {
+                # Registration failed before the creation claim could enter the
+                # custody table. Preserve any object whose exact identity cannot
+                # be retired through its still-open creation handle.
+                $cleanupFailure = [string]$_.Exception.Message
+            } finally {
+                if ($cleanupClaim) { $cleanupClaim.Dispose() }
+            }
+            if (-not $retired -and -not $cleanupFailure) {
+                $cleanupFailure = "creation-bound directory could not be proven at its canonical path"
+            }
         }
-        throw
+        if ($cleanupFailure) {
+            Die (
+                "$([string]$creationFailure.Exception.Message)`n" +
+                "Private install directory cleanup was incomplete; creation-bound custody " +
+                "remains unretired. Its canonical binding and current location are " +
+                "unverified. Last expected path: '$full'. Last cleanup error: $cleanupFailure"
+            )
+        }
+        throw $creationFailure
+    } finally {
+        if ($claim) { $claim.Dispose() }
     }
-    return [IO.Path]::GetFullPath($Path)
+    return $full
+}
+
+function Get-PrivateDirectoryClaimKeys {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $full = [IO.Path]::GetFullPath($Path)
+    $prefix = $full + [IO.Path]::DirectorySeparatorChar
+    return @(
+        $script:PrivateDirectoryClaims.Keys |
+            Where-Object {
+                [string]::Equals($_, $full, [StringComparison]::OrdinalIgnoreCase) -or
+                $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+            } |
+            Sort-Object -Property Length -Descending
+    )
+}
+
+function Release-PrivateDirectoryClaim {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $full = [IO.Path]::GetFullPath($Path)
+    if (-not $script:PrivateDirectoryClaims.ContainsKey($full)) { return }
+    $entry = $script:PrivateDirectoryClaims[$full]
+    [void]$script:PrivateDirectoryClaims.Remove($full)
+    $entry.Native.Dispose()
+}
+
+function Move-PrivateDirectoryClaimRegistration {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $sourceFull = [IO.Path]::GetFullPath($Source)
+    $destinationFull = [IO.Path]::GetFullPath($Destination)
+    if (-not $script:PrivateDirectoryClaims.ContainsKey($sourceFull)) {
+        Die "Private install directory has no creation claim to transfer: $sourceFull"
+    }
+    if ($script:PrivateDirectoryClaims.ContainsKey($destinationFull)) {
+        Die "Private install directory claim destination already exists: $destinationFull"
+    }
+    $entry = $script:PrivateDirectoryClaims[$sourceFull]
+    $entry.Path = $destinationFull
+    $entry.CleanupMode = "EmptyDirectory"
+    $script:PrivateDirectoryClaims[$destinationFull] = $entry
+    [void]$script:PrivateDirectoryClaims.Remove($sourceFull)
+}
+
+function Remove-PrivateDirectoryClaimAt {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClaimKey,
+        [Parameter(Mandatory = $true)][string]$CandidatePath,
+        [switch]$RequireEmpty
+    )
+    $claimKeyFull = [IO.Path]::GetFullPath($ClaimKey)
+    $candidateFull = [IO.Path]::GetFullPath($CandidatePath)
+    $expectedIdentity = if ($script:PrivateDirectoryClaims.ContainsKey($claimKeyFull)) {
+        [string]$script:PrivateDirectoryClaims[$claimKeyFull].Identity
+    } else {
+        "unavailable"
+    }
+    $cleanupSafety = Start-RollbackSafetyBoundary `
+        -Boundary "private-directory-cleanup" `
+        -Path $candidateFull `
+        -Identity $expectedIdentity
+    if (-not $script:PrivateDirectoryClaims.ContainsKey($claimKeyFull)) {
+        Die (
+            "Private install directory has no creation claim and was preserved; " +
+            "canonical binding is unverified: $candidateFull"
+        )
+    }
+    $entry = $script:PrivateDirectoryClaims[$claimKeyFull]
+    $cleanupClaim = $null
+    try {
+        $cleanupClaim = [DefenseClaw.Install.FreshV1.FreshPathClaim]::OpenIfExists(
+            $candidateFull,
+            $true,
+            $true
+        )
+        if (-not $cleanupClaim) {
+            Die (
+                "Private install directory canonical binding was lost; " +
+                "creation-bound identity $($entry.Identity) remains unretired and its " +
+                "current location is unknown. Last expected path: $candidateFull"
+            )
+        }
+        if ($cleanupClaim.Identity -cne $entry.Identity) {
+            Die (
+                "Private install directory canonical path now names a different object " +
+                "and was preserved; creation-bound identity $($entry.Identity) remains " +
+                "unretired and its current location is unknown. Last expected path: " +
+                $candidateFull
+            )
+        }
+        Assert-PrivateDirectoryAcl -Path $candidateFull
+        $removed = if ($RequireEmpty) {
+            $cleanupClaim.DeleteEmptyDirectoryExact()
+        } else {
+            $cleanupClaim.DeleteTreeExact()
+        }
+        if (-not $removed) {
+            Die (
+                "Private install directory changed during exact cleanup; the verified " +
+                "directory was preserved at '$candidateFull' (identity $($entry.Identity))"
+            )
+        }
+        $entry.Native.Dispose()
+        [void]$script:PrivateDirectoryClaims.Remove($claimKeyFull)
+        Complete-RollbackSafetyBoundary -Token $cleanupSafety
+    } finally {
+        if ($cleanupClaim) { $cleanupClaim.Dispose() }
+    }
 }
 
 function Remove-PrivateDirectory {
-    param([string]$Path)
-    if (-not $Path -or -not (Test-InstallMarker -Path $Path)) { return }
-    Assert-PrivateDirectoryAcl -Path $Path
-    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
-    if (Test-InstallMarker -Path $Path) { Die "Private install directory cleanup failed: $Path" }
+    param([string]$Path, [switch]$RequireEmpty)
+    if (-not $Path) { return }
+    $full = [IO.Path]::GetFullPath($Path)
+    if (-not $script:PrivateDirectoryClaims.ContainsKey($full)) {
+        Die "Private install directory has no creation claim and was preserved: $full"
+    }
+    $keys = if ($RequireEmpty) { @($full) } else { @(Get-PrivateDirectoryClaimKeys -Path $full) }
+    foreach ($key in $keys) {
+        if (-not $script:PrivateDirectoryClaims.ContainsKey($key)) { continue }
+        $entry = $script:PrivateDirectoryClaims[$key]
+        $entryRequiresEmpty = $RequireEmpty -or $entry.CleanupMode -ceq "EmptyDirectory"
+        Remove-PrivateDirectoryClaimAt `
+            -ClaimKey $key `
+            -CandidatePath $entry.Path `
+            -RequireEmpty:$entryRequiresEmpty
+    }
 }
 
 function Close-ReleasePolicyCustody {
@@ -573,6 +1042,15 @@ function Close-ReleasePolicyCustody {
     # back a fully healthy payload or replace the original install diagnostic.
     $policyToRemove = $script:PolicyDir
     $script:PolicyDir = ""
+    if ($InjectPolicyCustodyMoveBeforeCleanup) {
+        $displaced = "$policyToRemove.installer-owned-original"
+        if (-not [DefenseClaw.Install.FreshV1.FreshPathClaim]::MoveDirectoryNoReplace(
+            $policyToRemove,
+            $displaced
+        )) {
+            Die "Injected private policy custody move unexpectedly collided: $displaced"
+        }
+    }
     $lastCleanupError = "private policy custody still exists after cleanup"
     $attemptCount = if ($InjectPolicyCleanupFailure) { 1 } else { 3 }
     for ($attempt = 1; $attempt -le $attemptCount; $attempt++) {
@@ -591,9 +1069,16 @@ function Close-ReleasePolicyCustody {
         }
     }
 
+    $retainedIdentity = if ($script:PrivateDirectoryClaims.ContainsKey($policyToRemove)) {
+        [string]$script:PrivateDirectoryClaims[$policyToRemove].Identity
+    } else {
+        "unavailable"
+    }
     $script:PolicyCleanupWarning = (
-        "Private release-policy cleanup was incomplete; installer-owned custody " +
-        "remains at '$policyToRemove'. Last cleanup error: $lastCleanupError"
+        "Private release-policy cleanup was incomplete; its canonical binding is " +
+        "unverified and the current location of installer-owned custody may be unknown. " +
+        "Retained creation identity: $retainedIdentity. Last expected path: " +
+        "'$policyToRemove'. Last cleanup error: $lastCleanupError"
     )
     try {
         Write-Warn2 $script:PolicyCleanupWarning
@@ -677,6 +1162,181 @@ function New-PrivateFileStream {
     )
 }
 
+function Invoke-NativeFreshDirectoryBoundarySelfTest {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $exactCleanupModes = @(
+        "pre-registration",
+        "pre-rekey",
+        "open-failure",
+        "list-add",
+        "release"
+    )
+    $modes = $exactCleanupModes + @("identity-mismatch", "lost-binding")
+    foreach ($mode in $modes) {
+        $target = Join-Path $Root ("fresh-boundary-$mode-" + [guid]::NewGuid().ToString("N"))
+        $script:FreshDirectoryFaultMode = $mode
+        $script:FreshDirectoryFaultTarget = $target
+        $script:FreshDirectoryFaultDisplaced = ""
+        $failureMessage = ""
+        if ($mode -ceq "pre-registration") {
+            try {
+                [void](New-PrivateDirectory -Path $target)
+            } catch {
+                $failureMessage = [string]$_.Exception.Message
+            }
+        } else {
+            $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
+            $script:FreshInstallAttemptActive = $true
+            $script:FreshInstallOriginalProcessPath = $env:PATH
+            $script:FreshInstallPublishedProcessPath = $null
+            try {
+                New-FreshInstallOwnedDirectory -Path $target -Kind EmptyDirectory
+            } catch {
+                $failureMessage = [string]$_.Exception.Message
+            }
+        }
+        $rollbackResidue = @(Undo-FreshInstallAttempt)
+        if (-not $failureMessage -or
+            $rollbackResidue.Count -eq 0 -or
+            -not @($rollbackResidue | Where-Object {
+                $_ -match 'rollback safety boundary did not complete'
+            })) {
+            Die "Native fresh-directory boundary did not retain rollback residue: $mode"
+        }
+
+        $displaced = $script:FreshDirectoryFaultDisplaced
+        if ($mode -ceq "identity-mismatch" -and
+            (Test-Path -LiteralPath $target -PathType Container)) {
+            [IO.Directory]::Delete($target)
+        }
+        if ($displaced) {
+            if (-not $script:PrivateDirectoryClaims.ContainsKey(
+                [IO.Path]::GetFullPath($target)
+            )) {
+                Die "Native fresh-directory boundary lost its retained claim: $mode"
+            }
+            Remove-PrivateDirectoryClaimAt `
+                -ClaimKey $target `
+                -CandidatePath $displaced `
+                -RequireEmpty
+        }
+        if ($exactCleanupModes -contains $mode -and
+            (Test-InstallMarker -Path $target)) {
+            Die "Native fresh-directory boundary left public state after exact cleanup: $mode"
+        }
+        if ($script:PrivateDirectoryClaims.Count -ne 0) {
+            Die "Native fresh-directory boundary left private claims after test cleanup: $mode"
+        }
+        $script:RollbackSafetyLedger.Clear()
+        $script:FreshDirectoryFaultMode = ""
+        $script:FreshDirectoryFaultTarget = ""
+        $script:FreshDirectoryFaultDisplaced = ""
+    }
+    Write-Host "Native fresh directory fault boundaries passed" -ForegroundColor Green
+}
+
+function Invoke-NativePrivateDirectorySelfTest {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootFull = [IO.Path]::GetFullPath($Root)
+    $rootItem = Get-Item -LiteralPath $rootFull -Force
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Die "Native private-directory self-test root must be a real directory: $rootFull"
+    }
+    $private = Join-Path $rootFull ("private-lifecycle-" + [guid]::NewGuid().ToString("N"))
+    $movePrivate = Join-Path $rootFull ("private-move-out-" + [guid]::NewGuid().ToString("N"))
+    $movedMarker = Join-Path $rootFull ("moved-marker-" + [guid]::NewGuid().ToString("N"))
+    $stream = $null
+    $moveStream = $null
+    try {
+        [void](New-PrivateDirectory -Path $private)
+        $marker = Join-Path $private "native-marker.bin"
+        $stream = New-PrivateFileStream -Path $marker
+        $bytes = [Text.Encoding]::ASCII.GetBytes("defenseclaw-native-private-lifecycle`r`n")
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        Remove-PrivateDirectory -Path $private
+        if ((Test-InstallMarker -Path $private) -or
+            $script:PrivateDirectoryClaims.ContainsKey([IO.Path]::GetFullPath($private))) {
+            Die "Native private-directory self-test cleanup reported false success: $private"
+        }
+
+        [void](New-PrivateDirectory -Path $movePrivate)
+        $moveSource = Join-Path $movePrivate "move-out-marker.bin"
+        $moveStream = New-PrivateFileStream -Path $moveSource
+        $moveBytes = [Text.Encoding]::ASCII.GetBytes("defenseclaw-snapshot-move-out`r`n")
+        $moveStream.Write($moveBytes, 0, $moveBytes.Length)
+        $moveStream.Flush($true)
+        $moveStream.Dispose()
+        $moveStream = $null
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestMoveOutAfterSnapshot(
+            $moveSource,
+            $movedMarker
+        )
+        $moveOutRefused = $false
+        try {
+            Remove-PrivateDirectory -Path $movePrivate
+        } catch {
+            if (([string]$_.Exception.Message) -notmatch
+                'changed during exact cleanup') {
+                throw
+            }
+            $moveOutRefused = $true
+        } finally {
+            [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestMoveOutAfterSnapshot()
+        }
+        if (-not $moveOutRefused -or
+            -not (Test-Path -LiteralPath $movePrivate -PathType Container) -or
+            -not (Test-Path -LiteralPath $movedMarker -PathType Leaf) -or
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($movedMarker)) -cne
+                [Convert]::ToBase64String($moveBytes)) {
+            Die "Native tree rollback treated a moved-out snapshotted child as deleted"
+        }
+        [IO.File]::Delete($movedMarker)
+        Remove-PrivateDirectory -Path $movePrivate
+        Write-Host "Native snapshotted-child move-out refusal passed" -ForegroundColor Green
+
+        Invoke-NativeFreshDirectoryBoundarySelfTest -Root $rootFull
+
+        $fileParent = Join-Path $rootFull ("not-a-directory-" + [guid]::NewGuid().ToString("N"))
+        [IO.File]::WriteAllText($fileParent, "parent-type-guard", [Text.Encoding]::ASCII)
+        $parentTypeRejected = $false
+        try {
+            [void](New-PrivateDirectory -Path (Join-Path $fileParent "child"))
+        } catch {
+            if (([string]$_.Exception.Message) -notmatch
+                'private directory parent must be a real directory') {
+                throw
+            }
+            $parentTypeRejected = $true
+        } finally {
+            [IO.File]::Delete($fileParent)
+        }
+        if (-not $parentTypeRejected) {
+            Die "Native private-directory self-test accepted a file as its parent"
+        }
+        # This expected pre-registration refusal is the subject of the test,
+        # not residue from a real installer transaction.
+        $script:RollbackSafetyLedger.Clear()
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        if ($moveStream) { $moveStream.Dispose() }
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestMoveOutAfterSnapshot()
+        if (Test-Path -LiteralPath $movedMarker -PathType Leaf) {
+            [IO.File]::Delete($movedMarker)
+        }
+        if ($script:PrivateDirectoryClaims.ContainsKey([IO.Path]::GetFullPath($private))) {
+            try { Remove-PrivateDirectory -Path $private } catch {}
+        }
+        if ($script:PrivateDirectoryClaims.ContainsKey([IO.Path]::GetFullPath($movePrivate))) {
+            try { Remove-PrivateDirectory -Path $movePrivate } catch {}
+        }
+    }
+    Write-Host "Native private directory lifecycle passed" -ForegroundColor Green
+}
+
 function Assert-ExactPrivateArtifactDigest {
     param([string]$Path, [string]$ExpectedSha256, [string]$Label)
     if ($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') {
@@ -707,7 +1367,6 @@ function Copy-AuthenticatedPrivateArtifact {
     $output = $null
     $outerHash = $null
     $innerHash = $null
-    $created = $false
     $freshClaimRegistered = $false
     try {
         $sourceStream = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -728,7 +1387,6 @@ function Copy-AuthenticatedPrivateArtifact {
             if($sourceStream.Length -le $magic.Length){throw "Protected release artifact payload is empty: $Source"}
         }
         $output = New-PrivateFileStream -Path $Destination
-        $created = $true
         $innerHash = [Security.Cryptography.SHA256]::Create()
         $buffer=New-Object byte[] (1024 * 1024)
         while(($read=$sourceStream.Read($buffer,0,$buffer.Length)) -gt 0){
@@ -754,27 +1412,31 @@ function Copy-AuthenticatedPrivateArtifact {
             throw "Private materialized artifact digest mismatch"
         }
         $output.Flush($true)
+        # The CreateNew stream is exclusive and has DELETE access. Verify the
+        # bytes and ACL while that creation-bound handle still pins the exact
+        # object; any failure can then retire only that object by handle.
+        $verificationHash = [Security.Cryptography.SHA256]::Create()
+        try {
+            $output.Position = 0
+            $sameHandleDigest = [BitConverter]::ToString(
+                $verificationHash.ComputeHash($output)
+            ).Replace('-','').ToLowerInvariant()
+        } finally {
+            $verificationHash.Dispose()
+        }
+        if ($sameHandleDigest -ne $observedInner) {
+            throw "Private materialized artifact changed on its opened install handle"
+        }
+        Assert-PrivateFileAcl -Path $Destination
         if ($FreshInstallDestination) {
-            # Verify and retain the exact CreateNew handle before its exclusive
-            # sharing window closes.  No pathname re-open can bind rollback to
-            # a concurrently substituted gateway.
-            $verificationHash = [Security.Cryptography.SHA256]::Create()
-            try {
-                $output.Position = 0
-                $sameHandleDigest = [BitConverter]::ToString(
-                    $verificationHash.ComputeHash($output)
-                ).Replace('-','').ToLowerInvariant()
-            } finally {
-                $verificationHash.Dispose()
-            }
-            if ($sameHandleDigest -ne $observedInner) {
-                throw "Private materialized artifact changed on its opened install handle"
-            }
+            # Retain exact rollback custody before the exclusive creation
+            # stream closes. A pathname replacement during the handoff is
+            # detected by file ID and preserved.
             Add-FreshInstallStreamClaim -Stream $output -Path $Destination
             $freshClaimRegistered = $true
         }
     } catch {
-        if ($FreshInstallDestination -and $output -and -not $freshClaimRegistered) {
+        if ($output -and -not $freshClaimRegistered) {
             try {
                 [void][DefenseClaw.Install.FreshV1.FreshPathClaim]::DeleteOpenedFileExact(
                     $output.SafeFileHandle
@@ -785,23 +1447,12 @@ function Copy-AuthenticatedPrivateArtifact {
             }
         }
         if ($output) { $output.Dispose(); $output = $null }
-        if ($created -and -not $FreshInstallDestination) {
-            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-        }
         Die "Could not materialize an authenticated private install artifact: $Destination"
     } finally {
         if ($output) { $output.Dispose() }
         if ($sourceStream) { $sourceStream.Dispose() }
         if ($outerHash) { $outerHash.Dispose() }
         if ($innerHash) { $innerHash.Dispose() }
-    }
-    if (-not $FreshInstallDestination) {
-        Assert-PrivateFileAcl -Path $Destination
-        $actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $observedInner) {
-            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-            Die "Private materialized artifact changed after authenticated copy: $Destination"
-        }
     }
     return $observedInner
 }
@@ -816,7 +1467,7 @@ $ConnectorChoices = @(
 )
 $HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# -- Logging ------------------------------------------------------------------
 
 function Write-Info  { param([string]$Msg) Write-Host "  > $Msg" -ForegroundColor Blue }
 function Write-Ok    { param([string]$Msg) Write-Host "  + $Msg" -ForegroundColor Green }
@@ -854,7 +1505,7 @@ Environment variables:
 "@ | Write-Host
 }
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
+# -- Utilities ----------------------------------------------------------------
 
 function Test-HasCommand {
     param([string]$Name)
@@ -934,6 +1585,7 @@ function Add-FreshInstallStreamClaim {
             Native = $claim
         })
     } catch {
+        try { [void]$claim.DeleteFileExact() } catch {}
         $claim.Dispose()
         throw
     }
@@ -960,6 +1612,38 @@ function Ensure-FreshInstallDirectory {
     New-FreshInstallOwnedDirectory -Path $full -Kind EmptyDirectory
 }
 
+function Invoke-FreshDirectoryFaultBoundary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Boundary,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    if (-not $script:FreshDirectoryFaultMode -or
+        $script:FreshDirectoryFaultMode -cne $Boundary -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath($Path),
+            [IO.Path]::GetFullPath($script:FreshDirectoryFaultTarget),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        return
+    }
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($Boundary -in @("identity-mismatch", "lost-binding")) {
+        $displaced = "$full.injected-original"
+        if (-not [DefenseClaw.Install.FreshV1.FreshPathClaim]::MoveDirectoryNoReplace(
+            $full,
+            $displaced
+        )) {
+            Die "Injected fresh-directory displacement collided: $displaced"
+        }
+        $script:FreshDirectoryFaultDisplaced = $displaced
+        if ($Boundary -ceq "identity-mismatch") {
+            [void][IO.Directory]::CreateDirectory($full)
+        }
+        return
+    }
+    Die "Injected fresh-directory fault at ${Boundary}: $full"
+}
+
 function New-FreshInstallOwnedDirectory {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -971,20 +1655,17 @@ function New-FreshInstallOwnedDirectory {
     $leaf = Split-Path -Leaf $full
     $stage = Join-Path $parent (".$leaf.fresh-install-" + [guid]::NewGuid().ToString("N"))
     $stageIdentity = ""
-    $stageClaim = $null
     $publishedClaim = $null
     $moved = $false
     $registered = $false
+    $publicationSafety = ""
     try {
         [void](New-PrivateDirectory -Path $stage)
-        $stageClaim = [DefenseClaw.Install.FreshV1.FreshPathClaim]::Open(
-            $stage,
-            $true,
-            $true
-        )
-        $stageIdentity = $stageClaim.Identity
-        $stageClaim.Dispose()
-        $stageClaim = $null
+        $stageIdentity = [string]$script:PrivateDirectoryClaims[$stage].Identity
+        $publicationSafety = Start-RollbackSafetyBoundary `
+            -Boundary "fresh-directory-publication" `
+            -Path $full `
+            -Identity $stageIdentity
 
         $moved = [DefenseClaw.Install.FreshV1.FreshPathClaim]::MoveDirectoryNoReplace(
             $stage,
@@ -993,6 +1674,19 @@ function New-FreshInstallOwnedDirectory {
         if (-not $moved) {
             Die "A fresh-install directory appeared concurrently and was preserved: $full"
         }
+        Invoke-FreshDirectoryFaultBoundary -Boundary "pre-rekey" -Path $full
+        Move-PrivateDirectoryClaimRegistration -Source $stage -Destination $full
+        if ($InjectFailureAfterFreshDirectoryMove -and
+            [string]::Equals(
+                $full,
+                [IO.Path]::GetFullPath($InstallDir),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            Die "Injected fresh-install directory failure after publishing: $full"
+        }
+        Invoke-FreshDirectoryFaultBoundary -Boundary "open-failure" -Path $full
+        Invoke-FreshDirectoryFaultBoundary -Boundary "lost-binding" -Path $full
+        Invoke-FreshDirectoryFaultBoundary -Boundary "identity-mismatch" -Path $full
         $publishedClaim = [DefenseClaw.Install.FreshV1.FreshPathClaim]::Open(
             $full,
             $true,
@@ -1003,6 +1697,7 @@ function New-FreshInstallOwnedDirectory {
             $publishedClaim = $null
             Die "Fresh-install directory identity changed during publication and was preserved: $full"
         }
+        Invoke-FreshDirectoryFaultBoundary -Boundary "list-add" -Path $full
         [void]$script:FreshInstallClaims.Add([pscustomobject]@{
             Kind = $Kind
             Path = $full
@@ -1010,31 +1705,119 @@ function New-FreshInstallOwnedDirectory {
             Native = $publishedClaim
         })
         $registered = $true
+        Invoke-FreshDirectoryFaultBoundary -Boundary "release" -Path $full
+        Release-PrivateDirectoryClaim -Path $full
+        Complete-RollbackSafetyBoundary -Token $publicationSafety
     } catch {
         $publicationFailure = $_
-        if ($publishedClaim -and -not $registered) {
-            try { [void]$publishedClaim.DeleteEmptyDirectoryExact() } catch {}
-            $publishedClaim.Dispose()
+        if (-not $stageIdentity) {
+            # New-PrivateDirectory owns creation/registration cleanup and its
+            # durable safety entry. Preserve its exact diagnostic rather than
+            # inventing a retained publication identity that never existed.
+            throw $publicationFailure
         }
-        if (-not $moved -and (Test-InstallMarker -Path $stage)) {
+        $cleanupFailure = ""
+        $candidatePath = if ($moved) { $full } else { $stage }
+        if (-not $registered -and $publishedClaim) {
+            # A published claim prevents any second DELETE-capable cleanup
+            # handle from opening. Drop it, but retain the creation claim and
+            # require an identity match before deleting through the namespace.
             try {
-                $cleanupClaim = [DefenseClaw.Install.FreshV1.FreshPathClaim]::Open(
-                    $stage,
-                    $true,
-                    $true
-                )
-                try {
-                    if ($cleanupClaim.Identity -ceq $stageIdentity) {
-                        [void]$cleanupClaim.DeleteEmptyDirectoryExact()
-                    }
-                } finally {
-                    $cleanupClaim.Dispose()
+                $publishedClaim.Dispose()
+                $publishedClaim = $null
+            } catch {
+                $cleanupFailure = [string]$_.Exception.Message
+            }
+        }
+        if (-not $registered) {
+            $claimKey = ""
+            foreach ($possibleKey in @($full, $stage)) {
+                if (-not $script:PrivateDirectoryClaims.ContainsKey($possibleKey)) {
+                    continue
                 }
-            } catch {}
+                $possibleIdentity = [string]$script:PrivateDirectoryClaims[$possibleKey].Identity
+                if ($possibleIdentity -ceq $stageIdentity) {
+                    $claimKey = $possibleKey
+                    break
+                }
+            }
+            if ($claimKey) {
+                # Move/rekey itself is a failure boundary. Record the last
+                # expected public binding even if registration failed midway,
+                # so rollback never misreports the old staging name.
+                $entry = $script:PrivateDirectoryClaims[$claimKey]
+                $entry.Path = $candidatePath
+                $entry.CleanupMode = "EmptyDirectory"
+                try {
+                    Remove-PrivateDirectoryClaimAt `
+                        -ClaimKey $claimKey `
+                        -CandidatePath $candidatePath `
+                        -RequireEmpty
+                } catch {
+                    $claimCleanupFailure = [string]$_.Exception.Message
+                    $cleanupFailure = if ($cleanupFailure) {
+                        "$cleanupFailure; $claimCleanupFailure"
+                    } else {
+                        $claimCleanupFailure
+                    }
+                }
+            } else {
+                $missingClaimFailure = (
+                    "fresh-install directory lost its creation-bound claim; " +
+                    "canonical binding and current location are unverified"
+                )
+                $cleanupFailure = if ($cleanupFailure) {
+                    "$cleanupFailure; $missingClaimFailure"
+                } else {
+                    $missingClaimFailure
+                }
+            }
+        } elseif ($script:PrivateDirectoryClaims.ContainsKey($full)) {
+            # FreshInstallClaims now owns exact rollback authority. Retire the
+            # relocatable creation handle so it cannot become silent residue.
+            try {
+                Release-PrivateDirectoryClaim -Path $full
+            } catch {
+                $cleanupFailure = [string]$_.Exception.Message
+            }
+        }
+        if ($cleanupFailure) {
+            Die (
+                "$([string]$publicationFailure.Exception.Message)`n" +
+                "Fresh-install directory publication cleanup was incomplete; the retained " +
+                "creation identity remains unretired. Canonical binding and current " +
+                "location are unverified. Last expected path: '$candidatePath'. " +
+                "Last cleanup error: $cleanupFailure"
+            )
         }
         throw $publicationFailure
-    } finally {
-        if ($stageClaim) { $stageClaim.Dispose() }
+    }
+}
+
+function Add-PrivateDirectoryRollbackResidue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[string]]$Residue
+    )
+    foreach ($token in @($script:RollbackSafetyLedger.Keys | Sort-Object)) {
+        $safety = $script:RollbackSafetyLedger[$token]
+        [void]$Residue.Add(
+            "rollback safety boundary did not complete: $($safety.Boundary); retained " +
+            "identity $($safety.Identity); last expected path '$($safety.Path)'"
+        )
+    }
+    foreach ($key in @(
+        $script:PrivateDirectoryClaims.Keys |
+            Sort-Object -Property Length -Descending
+    )) {
+        if (-not $script:PrivateDirectoryClaims.ContainsKey($key)) { continue }
+        $entry = $script:PrivateDirectoryClaims[$key]
+        [void]$Residue.Add(
+            "creation-bound private directory cleanup remains incomplete: retained " +
+            "identity $($entry.Identity); last expected path '$($entry.Path)'; canonical " +
+            "binding and current location are unverified, and the process-local identity " +
+            "claim will close when the installer exits"
+        )
     }
 }
 
@@ -1044,8 +1827,6 @@ function Initialize-FreshInstallAttempt {
     }
     $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
     $script:FreshInstallAttemptActive = $true
-    $script:FreshInstallOriginalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $script:FreshInstallPublishedUserPath = $null
     $script:FreshInstallOriginalProcessPath = $env:PATH
     $script:FreshInstallPublishedProcessPath = $null
 
@@ -1067,24 +1848,13 @@ function Remove-FreshInstallClaim {
 function Undo-FreshInstallAttempt {
     $residue = New-Object 'System.Collections.Generic.List[string]'
     if (-not $script:FreshInstallAttemptActive -or $null -eq $script:FreshInstallClaims) {
-        return @()
+        Add-PrivateDirectoryRollbackResidue -Residue $residue
+        return @($residue)
     }
 
-    # Undo a PATH publication only when it still equals this attempt's exact
-    # value.  A concurrent user/process edit is evidence to preserve.
+    # Process PATH is private to this installer process. Restore it only when
+    # it still equals this attempt's exact publication.
     try {
-        if ($null -ne $script:FreshInstallPublishedUserPath) {
-            $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-            if ($currentUserPath -ceq $script:FreshInstallPublishedUserPath) {
-                [Environment]::SetEnvironmentVariable(
-                    "Path",
-                    $script:FreshInstallOriginalUserPath,
-                    "User"
-                )
-            } else {
-                [void]$residue.Add("the user PATH changed concurrently and was preserved")
-            }
-        }
         if ($null -ne $script:FreshInstallPublishedProcessPath) {
             if ($env:PATH -ceq $script:FreshInstallPublishedProcessPath) {
                 $env:PATH = $script:FreshInstallOriginalProcessPath
@@ -1093,7 +1863,7 @@ function Undo-FreshInstallAttempt {
             }
         }
     } catch {
-        [void]$residue.Add("the installer could not restore its PATH publication: $($_.Exception.Message)")
+        [void]$residue.Add("the installer could not restore its process PATH: $($_.Exception.Message)")
     }
 
     foreach ($kind in @("File", "Tree", "EmptyDirectory")) {
@@ -1118,6 +1888,7 @@ function Undo-FreshInstallAttempt {
     foreach ($entry in $script:FreshInstallClaims) {
         if ($entry.Kind -eq "Guard") { $entry.Native.Dispose() }
     }
+    Add-PrivateDirectoryRollbackResidue -Residue $residue
     foreach ($marker in @(
         $DefenseClawHome,
         $Venv,
@@ -1179,7 +1950,7 @@ function Assert-FreshInstall {
     exit 1
 }
 
-# ── Platform detection ────────────────────────────────────────────────────────
+# -- Platform detection -------------------------------------------------------
 
 function Get-Arch {
     Write-Step "Detecting platform"
@@ -1196,7 +1967,7 @@ function Get-Arch {
     return $arch
 }
 
-# ── Dependency: uv ────────────────────────────────────────────────────────────
+# -- Dependency: uv -----------------------------------------------------------
 
 function Install-Uv {
     Write-Step "Checking uv"
@@ -1205,32 +1976,69 @@ function Install-Uv {
         return
     }
     Write-Info "Installing uv..."
+    $previousUvNoModifyPath = [Environment]::GetEnvironmentVariable(
+        "UV_NO_MODIFY_PATH",
+        [EnvironmentVariableTarget]::Process
+    )
     try {
+        # The upstream uv installer otherwise edits shell PATH state. Keep its
+        # install process-local; Add-ToPath prints the explicit operator-owned
+        # new-shell setup after DefenseClaw itself has installed successfully.
+        [Environment]::SetEnvironmentVariable(
+            "UV_NO_MODIFY_PATH",
+            "1",
+            [EnvironmentVariableTarget]::Process
+        )
         Invoke-RestMethod -Uri "https://astral.sh/uv/install.ps1" | Invoke-Expression
     } catch {
         Die "Failed to install uv. Install manually: https://docs.astral.sh/uv/"
+    } finally {
+        [Environment]::SetEnvironmentVariable(
+            "UV_NO_MODIFY_PATH",
+            $previousUvNoModifyPath,
+            [EnvironmentVariableTarget]::Process
+        )
     }
     # uv's installer drops the binary in %USERPROFILE%\.local\bin; surface it on
     # PATH for the rest of this process so subsequent calls resolve.
     $uvDir = Join-Path $env:USERPROFILE ".local\bin"
     if (Test-Path $uvDir) { $env:PATH = "$uvDir;$env:PATH" }
     if (-not (Test-HasCommand "uv")) {
-        Die "uv installed but not found on PATH. Open a new terminal and re-run."
+        Die (
+            "uv installation completed but 'uv' was not found at the expected location " +
+            "'$uvDir'. Persistent PATH was not modified. Install a current uv release " +
+            "from https://docs.astral.sh/uv/getting-started/installation/ and retry."
+        )
     }
     Write-Ok "uv installed"
 }
 
-# ── Dependency: Python ────────────────────────────────────────────────────────
+# -- Dependency: Python -------------------------------------------------------
 
 function Ensure-Python {
     Write-Step "Checking Python"
-    # uv manages an interpreter for us; ask it for 3.12 and install on demand.
-    # This avoids depending on a system Python being present or new enough.
-    & uv python install 3.12 *> $null
+    # uv manages an interpreter for the private venv. Do not publish a global
+    # executable or Windows registry registration for this internal runtime.
+    $pythonInstallOutput = (& uv python install 3.12 --no-bin --no-registry --quiet 2>&1 |
+        Select-Object -Last 20 | Out-String).Trim()
+    $pythonInstallExitCode = $LASTEXITCODE
+    if ($pythonInstallExitCode -ne 0) {
+        $pythonInstallDetail = if ($pythonInstallOutput) {
+            "`nuv output:`n$pythonInstallOutput"
+        } else {
+            ""
+        }
+        Die (
+            "Failed to install the managed Python 3.12 runtime. A current uv release " +
+            "with --no-bin and --no-registry support is required. Install or update uv " +
+            "from https://docs.astral.sh/uv/getting-started/installation/ and retry." +
+            $pythonInstallDetail
+        )
+    }
     Write-Ok "Python 3.12 (managed by uv)"
 }
 
-# ── Resolve release version ───────────────────────────────────────────────────
+# -- Resolve release version --------------------------------------------------
 
 function Resolve-Version {
     if ($Local) { return $null }
@@ -1359,7 +2167,7 @@ function Initialize-ReleasePolicy {
     Write-Ok "Release policy and protected artifacts verified ($manifestVersion)"
 }
 
-# ── Artifact fetch + checksum verification ────────────────────────────────────
+# -- Artifact fetch + checksum verification ----------------------------------
 
 function Get-Artifact {
     param([string]$Name, [string]$Dest)
@@ -1419,7 +2227,7 @@ function Get-RequiredChecksumDigest {
     return [string]$checksumDigests[0]
 }
 
-# ── Install: gateway binary ───────────────────────────────────────────────────
+# -- Install: gateway binary --------------------------------------------------
 
 function Install-Gateway {
     param([string]$Arch)
@@ -1460,7 +2268,7 @@ function Install-Gateway {
     Write-Ok "Gateway installed -> $InstallDir\defenseclaw-gateway.exe"
 }
 
-# ── Install: Python CLI (from wheel) ──────────────────────────────────────────
+# -- Install: Python CLI (from wheel) -----------------------------------------
 
 function Install-Cli {
     Write-Step "Installing DefenseClaw CLI"
@@ -1553,7 +2361,7 @@ function Install-Cli {
     }
 }
 
-# ── Connector selection ───────────────────────────────────────────────────────
+# -- Connector selection -----------------------------------------------------
 
 function Select-Connector {
     if ($script:PickedConnector) { return }
@@ -1622,7 +2430,7 @@ function Save-PickedConnector {
     }
 }
 
-# ── Optional: quickstart ──────────────────────────────────────────────────────
+# -- Optional: quickstart -----------------------------------------------------
 
 function Invoke-Quickstart {
     if (-not $Quickstart) { return }
@@ -1639,48 +2447,57 @@ function Invoke-Quickstart {
     if ($LASTEXITCODE -eq 0) { Write-Ok "Quickstart completed" } else { Write-Warn2 "Quickstart reported errors - run 'defenseclaw doctor'" }
 }
 
-# ── PATH configuration ────────────────────────────────────────────────────────
+# -- PATH configuration -------------------------------------------------------
 
 function Add-ToPath {
-    # Persist InstallDir on the user PATH (idempotent) and add it to this
-    # process so quickstart and `defenseclaw-gateway` resolve immediately.
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $userPath) { $userPath = "" }
-    $entries = $userPath -split ';' | Where-Object { $_ -ne "" }
-    if ($entries -notcontains $InstallDir) {
-        $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        $script:FreshInstallPublishedUserPath = $newPath
-        Write-Step "PATH updated"
-        Write-Info "Added $InstallDir to your user PATH."
-        Write-Info "Open a new terminal for it to take effect."
-    }
+    # Persistent User PATH is shared registry state without an atomic
+    # compare-and-set API. Never modify/write it from this installer.
+    # Process PATH is rollback-bound and exists only for the current quickstart.
     if (($env:PATH -split ';') -notcontains $InstallDir) {
         $publishedProcessPath = "$InstallDir;$env:PATH"
         $env:PATH = $publishedProcessPath
         $script:FreshInstallPublishedProcessPath = $publishedProcessPath
     }
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $userEntries = if ($userPath) {
+        @($userPath -split ';' | Where-Object { $_ -ne "" })
+    } else {
+        @()
+    }
+    if ($userEntries -notcontains $InstallDir) {
+        $shim = Join-Path $InstallDir "defenseclaw.cmd"
+        Write-Step "New-shell PATH setup required"
+        Write-Warn2 "Persistent User PATH was not modified."
+        Write-Host "  To enable 'defenseclaw' in new shells:" -ForegroundColor Cyan
+        Write-Host "    1. Open 'Edit environment variables for your account'."
+        Write-Host "    2. Under User variables, edit Path and choose New."
+        Write-Host "    3. Add this exact directory:"
+        Write-Host "       $InstallDir" -ForegroundColor White
+        Write-Host "  Until then, run the CLI by its exact path:" -ForegroundColor Cyan
+        Write-Host "       & `"$shim`" <command>" -ForegroundColor White
+    }
 }
 
-# ── Success ───────────────────────────────────────────────────────────────────
+# -- Success ------------------------------------------------------------------
 
 function Write-Success {
+    $shim = Join-Path $InstallDir "defenseclaw.cmd"
     Write-Host ""
     Write-Host "  ============================================================" -ForegroundColor Green
     Write-Host "         DefenseClaw installed successfully!" -ForegroundColor Green
     Write-Host "  ============================================================" -ForegroundColor Green
     Write-Host ""
     switch ($script:PickedConnector) {
-        "codex"      { Write-Host "  Get started (Codex):`n`n    defenseclaw init --connector codex`n" -ForegroundColor Cyan }
-        "claudecode" { Write-Host "  Get started (Claude Code):`n`n    defenseclaw init --connector claudecode`n" -ForegroundColor Cyan }
+        "codex"      { Write-Host "  Get started (Codex):`n`n    & `"$shim`" init --connector codex`n" -ForegroundColor Cyan }
+        "claudecode" { Write-Host "  Get started (Claude Code):`n`n    & `"$shim`" init --connector claudecode`n" -ForegroundColor Cyan }
         { $_ -in $HookConnectors } {
-            Write-Host "  Get started ($script:PickedConnector):`n`n    defenseclaw init --connector $script:PickedConnector`n" -ForegroundColor Cyan
+            Write-Host "  Get started ($script:PickedConnector):`n`n    & `"$shim`" init --connector $script:PickedConnector`n" -ForegroundColor Cyan
         }
-        default      { Write-Host "  Get started (pick a connector later):`n`n    defenseclaw init`n" -ForegroundColor Cyan }
+        default      { Write-Host "  Get started (pick a connector later):`n`n    & `"$shim`" init`n" -ForegroundColor Cyan }
     }
 }
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# -- Entry point --------------------------------------------------------------
 
 function Main {
     if ($Help) { Show-Help; return }
@@ -1688,9 +2505,17 @@ function Main {
     if ((
         $InjectFailureBeforeShim -or
         $InjectConcurrentShimBeforePublish -or
-        $InjectPolicyCleanupFailure
+        $InjectPolicyCleanupFailure -or
+        $InjectPolicyCustodyMoveBeforeCleanup -or
+        $InjectFailureAfterFreshDirectoryMove -or
+        $NativePrivateDirectorySelfTestRoot
     ) -and -not $TestMode) {
         Die "Fresh-install fault injection requires -TestMode"
+    }
+
+    if ($NativePrivateDirectorySelfTestRoot) {
+        Invoke-NativePrivateDirectorySelfTest -Root $NativePrivateDirectorySelfTestRoot
+        return
     }
 
     # This guard must precede platform/dependency discovery: Install-Uv and

@@ -23,6 +23,8 @@ import struct
 import sys
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import defenseclaw.windows_acl as windows_acl
 import pytest
@@ -279,6 +281,72 @@ def test_windows_rename_and_disposition_layouts_match_x86_and_x64_abi() -> None:
         windows_acl._FileRenameInformation.file_name.offset
     )
     assert ctypes.sizeof(ctypes.c_ubyte) == 1
+
+
+def test_native_claim_reader_requests_delete_sharing() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    create_file = Mock(return_value=73)
+    api._create_file = create_file
+    api._file_information = Mock(
+        return_value=SimpleNamespace(file_attributes=windows_acl._FILE_ATTRIBUTE_NORMAL)
+    )
+    api.close_handle = Mock()
+
+    assert api._open_regular_reader_shared_delete(r"C:\state\created.claim") == 73
+
+    create_file.assert_called_once_with(
+        r"C:\state\created.claim",
+        windows_acl._GENERIC_READ,
+        (
+            windows_acl._FILE_SHARE_READ
+            | windows_acl._FILE_SHARE_WRITE
+            | windows_acl._FILE_SHARE_DELETE
+        ),
+        None,
+        windows_acl._OPEN_EXISTING,
+        windows_acl._FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    api.close_handle.assert_not_called()
+
+
+def test_shared_delete_claim_reader_closes_native_handle_when_crt_conversion_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    api._open_regular_reader_shared_delete = Mock(return_value=79)
+    fake_msvcrt = SimpleNamespace(
+        open_osfhandle=Mock(side_effect=OSError("conversion failed")),
+    )
+    monkeypatch.setattr(windows_acl, "_api", api)
+    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    with pytest.raises(OSError, match="conversion failed"):
+        windows_acl.open_regular_read_fd_shared_delete(r"C:\state\created.claim")
+
+    api._open_regular_reader_shared_delete.assert_called_once_with(
+        r"C:\state\created.claim"
+    )
+    assert ("close", 79) in api.events
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
+def test_native_shared_delete_claim_allows_exact_hardlink_disposition(tmp_path) -> None:
+    claim = tmp_path / "created.claim"
+    destination = tmp_path / "created.yaml"
+    claim.write_bytes(b"target-created state\n")
+    os.link(claim, destination)
+
+    descriptor = windows_acl.open_regular_read_fd_shared_delete(str(claim))
+    try:
+        assert os.path.samestat(os.fstat(descriptor), destination.stat())
+        windows_acl.delete_regular_file_by_handle(str(destination))
+    finally:
+        os.close(descriptor)
+
+    assert not destination.exists()
+    assert claim.read_bytes() == b"target-created state\n"
 
 
 def test_handle_publication_refuses_cross_directory_target(

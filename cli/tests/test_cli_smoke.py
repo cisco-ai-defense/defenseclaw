@@ -114,6 +114,32 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Usage:", result.output)
 
+    def test_upgrade_preflight_does_not_initialize_audit_store(self):
+        from defenseclaw.main import cli
+
+        argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.3"]
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            home = Path.cwd() / ".defenseclaw"
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(
+                    os.environ,
+                    {"DEFENSECLAW_HOME": str(home), "HOME": str(Path.cwd())},
+                ),
+                patch("defenseclaw.config.load", return_value=object()) as load,
+                patch("defenseclaw.db.Store") as store,
+            ):
+                result = runner.invoke(cli, argv[1:])
+
+            self.assertFalse(home.exists())
+            load.assert_called_once_with()
+            store.assert_not_called()
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Refusing to downgrade", result.output)
+        self.assertIn("No changes were made", result.output)
+
     def test_setup_splunk_o11y_bootstraps_clean_home(self):
         from defenseclaw.main import cli
 

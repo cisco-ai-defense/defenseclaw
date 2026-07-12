@@ -70,12 +70,42 @@ def test_windows_installer_refuses_existing_install_before_any_dependency_or_art
     assert "if($count -eq 0){break}" in source
 
 
+def test_windows_fresh_installer_never_delegates_persistent_path_or_python_registration() -> None:
+    source = INSTALLER.read_text(encoding="utf-8")
+    install_uv = source[source.index("function Install-Uv {") : source.index("function Ensure-Python {")]
+    ensure_python = source[source.index("function Ensure-Python {") : source.index("function Resolve-Version {")]
+
+    assert '"UV_NO_MODIFY_PATH"' in install_uv
+    assert '"1"' in install_uv
+    assert "[EnvironmentVariableTarget]::Process" in install_uv
+    assert "$previousUvNoModifyPath" in install_uv
+    assert "finally" in install_uv
+    assert 'SetEnvironmentVariable("Path"' not in install_uv
+    assert "uv python install 3.12 --no-bin --no-registry --quiet" in ensure_python
+    assert "$pythonInstallExitCode -ne 0" in ensure_python
+    assert "Select-Object -Last 20" in ensure_python
+    assert "A current uv release" in ensure_python
+    assert "uv output:" in ensure_python
+    assert "and adds that bin dir to the user PATH" not in source
+    assert "Persistent PATH was not modified" in install_uv
+
+
 def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)
 
+    # Windows PowerShell 5.1 treats a BOM-less script as the active ANSI code
+    # page. Keep this release entrypoint ASCII so its mandatory 5.1 execution
+    # does not rely on comment-only UTF-8 bytes being decoded benignly.
+    assert INSTALLER.read_bytes().isascii()
+
     for contract in (
         "FreshPathClaim",
+        "NtCreateFile",
+        "FILE_CREATE",
+        "FILE_DIRECTORY_FILE",
+        "CreatePrivateDirectory",
+        "OpenIfExists",
         "GetFileInformationByHandle",
         "SetFileInformationByHandle",
         "FILE_FLAG_OPEN_REPARSE_POINT",
@@ -86,6 +116,8 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "MOVEFILE_WRITE_THROUGH",
         "DeleteFileExact",
         "DeleteTreeExact",
+        "ConfigureTestMoveOutAfterSnapshot",
+        "ClearTestMoveOutAfterSnapshot",
         "DeleteEmptyDirectoryExact",
         "MAX_TREE_DEPTH",
         "MAX_TREE_NODES",
@@ -93,6 +125,7 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "Add-FreshInstallStreamClaim",
         "Initialize-FreshInstallAttempt",
         "Undo-FreshInstallAttempt",
+        "Add-PrivateDirectoryRollbackResidue",
         "Complete-FreshInstallAttempt",
         "Close-ReleasePolicyCustody",
         "PolicyCleanupWarning",
@@ -102,11 +135,35 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     ):
         assert contract in source
 
-    assert "FILE_SHARE_DELETE" not in source[
-        source.index("private static SafeFileHandle OpenHandle") : source.index(
+    open_handle_start = source.index("private static SafeFileHandle OpenHandle")
+    open_handle_end = source.index("private static SafeFileHandle OpenParentHandle")
+    assert open_handle_start < open_handle_end
+    assert "FILE_SHARE_DELETE" not in source[open_handle_start:open_handle_end]
+    parent_handle = source[
+        source.index("private static SafeFileHandle OpenParentHandle") : source.index(
             "private static BY_HANDLE_FILE_INFORMATION Information"
         )
     ]
+    assert "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE" in parent_handle
+    factory = source[
+        source.index("public static FreshPathClaim CreatePrivateDirectory") : source.index(
+            "public static FreshPathClaim TransitionOpenedFileCustody"
+        )
+    ]
+    assert "if (!parentIsDirectory || parentIsReparse)" in factory
+    assert "private directory parent must be a real directory" in factory
+    assert "SYNCHRONIZE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES" in factory
+    assert "DELETE | SYNCHRONIZE" not in factory
+    assert "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE" in factory
+    tree_delete = source[source.index("public bool DeleteTreeExact()") : source.index("public void Dispose()")]
+    missing_child = tree_delete[
+        tree_delete.index("if (current == null)") : tree_delete.index(
+            "try {", tree_delete.index("if (current == null)")
+        )
+    ]
+    assert "return false" in missing_child
+    assert "continue" not in missing_child
+    assert "InvokeTestMoveOutAfterSnapshot()" in tree_delete
     assert "FreshInstallDestination" in source
     assert "$sourceStream" in source
     assert "$checksumDigests" in source
@@ -116,20 +173,12 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert source.count("-FreshInstallDestination") == 2
     assert "Add-FreshInstallStreamClaim -Stream $shimStream -Path $shim" in source
     assert "Add-FreshInstallStreamClaim -Stream $stream -Path $marker" in source
-    assert main.index("Initialize-FreshInstallAttempt") < main.index(
-        "Install-Gateway -Arch $arch"
-    )
+    assert main.index("Initialize-FreshInstallAttempt") < main.index("Install-Gateway -Arch $arch")
     assert main.index("Install-Cli") < main.index("Complete-FreshInstallAttempt")
-    assert main.index("Close-ReleasePolicyCustody") < main.index(
-        "Complete-FreshInstallAttempt"
-    )
+    assert main.index("Close-ReleasePolicyCustody") < main.index("Complete-FreshInstallAttempt")
     failure_handler = main[main.index("} catch {") : main.index("Write-Success")]
     assert "$installFailure$cleanupDiagnostic" in failure_handler
-    cleanup = source[
-        source.index("function Close-ReleasePolicyCustody {") : source.index(
-            "function Get-OwnerDaclSddl"
-        )
-    ]
+    cleanup = source[source.index("function Close-ReleasePolicyCustody {") : source.index("function Get-OwnerDaclSddl")]
     assert "$attemptCount = if ($InjectPolicyCleanupFailure) { 1 } else { 3 }" in cleanup
     assert "Start-Sleep -Milliseconds (50 * $attempt)" in cleanup
     assert "Write-Warn2 $script:PolicyCleanupWarning" in cleanup
@@ -139,29 +188,185 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "Fresh-install fault injection requires -TestMode" in main
     assert "[Parameter(DontShow = $true)][switch]$TestMode" in source
     assert "[Parameter(DontShow = $true)][switch]$InjectFailureBeforeShim" in source
-    assert (
-        "[Parameter(DontShow = $true)][switch]$InjectConcurrentShimBeforePublish"
-        in source
-    )
-    assert (
-        "[Parameter(DontShow = $true)][switch]$InjectPolicyCleanupFailure"
-        in source
-    )
+    assert "[Parameter(DontShow = $true)][switch]$InjectConcurrentShimBeforePublish" in source
+    assert "[Parameter(DontShow = $true)][switch]$InjectPolicyCleanupFailure" in source
+    assert "[Parameter(DontShow = $true)][switch]$InjectPolicyCustodyMoveBeforeCleanup" in source
+    assert "[Parameter(DontShow = $true)][switch]$InjectFailureAfterFreshDirectoryMove" in source
+    assert '[Parameter(DontShow = $true)][string]$NativePrivateDirectorySelfTestRoot = ""' in source
 
-    harness = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(
-        encoding="utf-8"
-    )
+    harness = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
     assert "-InjectFailureBeforeShim" in harness
     assert "Invoke-FreshInstaller -InjectConcurrentShimBeforePublish" in harness
     assert "InjectPolicyCleanupFailure" in harness
+    assert "InjectPolicyCustodyMoveBeforeCleanup" in harness
+    assert "Invoke-FreshInstaller -InjectFailureAfterFreshDirectoryMove" in harness
+    assert "Post-move fresh-directory cleanup was not exact" in harness
+    assert "Persistent User PATH was not modified" in harness
+    assert "Modern fresh install mutated the persistent user PATH" in harness
+    assert 'defenseclaw.cmd`" init' in harness
+    assert 'Join-Path $HomeRoot ".local\\bin"' in harness
+    assert 'Join-Path $HomeRoot ".local/bin"' not in harness
+    assert "Remove-MovedPolicyCustodyResidue" in harness
+    assert "Creation-bound policy custody was not preserved" in harness
     assert "Remove-InjectedPolicyResidue" in harness
     assert "Fresh Windows install did not survive policy cleanup failure" in harness
     assert "Policy cleanup failure or residual retirement changed installed bytes" in harness
     assert "powershell.exe" in harness
+    assert "Get-Command powershell.exe -CommandType Application -ErrorAction Stop" in harness
+    assert "WindowsPowerShellCommand" not in harness
     assert "Windows PowerShell 5.1 could not parse/compile install.ps1" in harness
+    assert "-NativePrivateDirectorySelfTestRoot $legacyNativeRoot" in harness
+    assert "Windows PowerShell 5.1 native private lifecycle failed" in harness
+    assert "Native private directory lifecycle passed" in source
+    assert "Native snapshotted-child move-out refusal passed" in source
+    assert "Native fresh directory fault boundaries passed" in source
+    assert "Native private-directory self-test accepted a file as its parent" in source
     assert "Fresh-install payload rollback completed; retry is safe" in harness
     assert "Concurrent unclaimed shim disappeared during rollback" in harness
     assert "Failed fresh install left installer-created binary directories behind" in harness
+
+
+def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() -> None:
+    source = INSTALLER.read_text(encoding="utf-8")
+
+    create = source[
+        source.index("function New-PrivateDirectory {") : source.index("function Get-PrivateDirectoryClaimKeys")
+    ]
+    cleanup = source[
+        source.index("function Get-PrivateDirectoryClaimKeys") : source.index("function Close-ReleasePolicyCustody")
+    ]
+    materialize = source[
+        source.index("function Copy-AuthenticatedPrivateArtifact") : source.index(
+            "# Keep in sync with cli/defenseclaw/connector_paths.py"
+        )
+    ]
+
+    assert "CreatePrivateDirectory" in create
+    assert "$script:PrivateDirectoryClaims[$full] = [pscustomobject]@{" in create
+    assert "Identity = $claim.Identity" in create
+    assert "Native = $claim" in create
+    assert "$claim = $null" in create
+    assert "Remove-PrivateDirectory -Path $full -RequireEmpty" in create
+    assert "Private install directory cleanup was incomplete; creation-bound custody" in create
+    assert "private-directory-registration" in create
+    assert "Update-RollbackSafetyBoundary" in create
+    assert "Remove-Item" not in create
+    assert "$script:PrivateDirectoryClaims.ContainsKey($full)" in cleanup
+    assert "Sort-Object -Property Length -Descending" in cleanup
+    assert "OpenIfExists" in cleanup
+    assert "$cleanupClaim.Identity -cne $entry.Identity" in cleanup
+    assert "$cleanupClaim.DeleteTreeExact()" in cleanup
+    assert "canonical binding was lost" in cleanup
+    assert "current location is unknown" in cleanup
+    assert "canonical path now names a different object" in cleanup
+    assert "private-directory-cleanup" in cleanup
+    assert "Complete-RollbackSafetyBoundary" in cleanup
+    assert "$entry.Native.Dispose()" in cleanup
+    missing_path = cleanup[
+        cleanup.index("if (-not $cleanupClaim)") : cleanup.index("if ($cleanupClaim.Identity -cne $entry.Identity)")
+    ]
+    assert "PrivateDirectoryClaims.Remove" not in missing_path
+    assert ".Native.Dispose" not in missing_path
+    deletion = cleanup.index("$cleanupClaim.DeleteTreeExact()")
+    release = cleanup.index("$entry.Native.Dispose()", deletion)
+    forget = cleanup.index("$script:PrivateDirectoryClaims.Remove($claimKeyFull)", release)
+    assert deletion < release < forget
+    assert "Remove-Item" not in cleanup
+    assert "$output.Position = 0" in materialize
+    assert "ComputeHash($output)" in materialize
+    assert "DeleteOpenedFileExact" in materialize
+    assert "Remove-Item" not in materialize
+
+    path_claim = source[
+        source.index("function Add-FreshInstallClaim") : source.index("function Add-FreshInstallStreamClaim")
+    ]
+    stream_claim = source[
+        source.index("function Add-FreshInstallStreamClaim") : source.index("function Ensure-FreshInstallDirectory")
+    ]
+    assert "DeleteFileExact" not in path_claim
+    assert "DeleteFileExact" in stream_claim
+
+    fresh_directory = source[
+        source.index("function New-FreshInstallOwnedDirectory") : source.index(
+            "function Initialize-FreshInstallAttempt"
+        )
+    ]
+    assert "Move-PrivateDirectoryClaimRegistration -Source $stage -Destination $full" in fresh_directory
+    assert "Release-PrivateDirectoryClaim -Path $full" in fresh_directory
+    assert "$InjectFailureAfterFreshDirectoryMove" in fresh_directory
+    assert "Injected fresh-install directory failure after publishing" in fresh_directory
+    assert "Remove-PrivateDirectoryClaimAt" in fresh_directory
+    assert "-CandidatePath $candidatePath" in fresh_directory
+    assert "Fresh-install directory publication cleanup was incomplete" in fresh_directory
+    assert "Add-PrivateDirectoryRollbackResidue" in fresh_directory
+    assert "process-local identity" in fresh_directory
+    assert "fresh-directory-publication" in fresh_directory
+    for boundary in (
+        "pre-rekey",
+        "open-failure",
+        "lost-binding",
+        "identity-mismatch",
+        "list-add",
+        "release",
+    ):
+        assert boundary in fresh_directory
+
+    undo = source[
+        source.index("function Undo-FreshInstallAttempt") : source.index("function Complete-FreshInstallAttempt")
+    ]
+    assert undo.count("Add-PrivateDirectoryRollbackResidue -Residue $residue") == 2
+    assert "RollbackSafetyLedger" in source
+    assert "rollback safety boundary did not complete" in source
+    assert (
+        "[StringComparison]::OrdinalIgnoreCase"
+        in source[
+            source.index("function Start-RollbackSafetyBoundary") : source.index(
+                "function Update-RollbackSafetyBoundary"
+            )
+        ]
+    )
+    assert "canonical binding and current location are unverified" in source
+    assert "claim will close when the installer exits" in source
+
+    path_publish = source[source.index("function Add-ToPath") : source.index("# -- Success")]
+    assert "Persistent User PATH is shared registry state" in path_publish
+    assert "Persistent User PATH was not modified" in path_publish
+    assert "Edit environment variables for your account" in path_publish
+    assert "Add this exact directory" in path_publish
+    assert '& `"$shim`" <command>' in path_publish
+    assert "FreshInstallPublishedProcessPath" in path_publish
+    assert "SetEnvironmentVariable" not in path_publish
+    assert "FreshInstallOriginalUserPath" not in source
+    assert "FreshInstallPublishedUserPath" not in source
+    assert "Invoke-WithUserPathLock" not in source
+    assert "InjectConcurrentUserPathBeforePublish" not in source
+    assert 'SetEnvironmentVariable("Path"' not in source
+    assert "FreshInstallPublishedProcessPath" in undo
+
+    no_stage_identity = fresh_directory[
+        fresh_directory.index("if (-not $stageIdentity)") : fresh_directory.index('$cleanupFailure = ""')
+    ]
+    assert "throw $publicationFailure" in no_stage_identity
+    assert "missingClaimFailure" not in no_stage_identity
+    assert "Die" not in no_stage_identity
+
+    success = source[source.index("function Write-Success") : source.index("function Main {")]
+    assert 'Join-Path $InstallDir "defenseclaw.cmd"' in success
+    assert '& `"$shim`" init' in success
+    assert "    defenseclaw init" not in success
+
+    policy_cleanup = source[
+        source.index("function Close-ReleasePolicyCustody") : source.index("function Get-OwnerDaclSddl")
+    ]
+    assert "$InjectPolicyCustodyMoveBeforeCleanup" in policy_cleanup
+    assert "FreshPathClaim]::MoveDirectoryNoReplace" in policy_cleanup
+    assert "its canonical binding is" in policy_cleanup
+    assert "current location of installer-owned custody may be unknown" in policy_cleanup
+    assert "Retained creation identity:" in policy_cleanup
+    assert "installer-owned custody remains at" not in policy_cleanup
+
+    legacy_gateway = source[source.index("function Install-Gateway") : source.index("function Install-Cli")]
+    assert "Remove-PrivateDirectory -Path $tmp" in legacy_gateway
 
 
 def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract() -> None:
@@ -211,9 +416,7 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     assert "Bridge $bridgeVersion does not declare $installed in its tested Windows source matrix" in source
     assert "-I -m defenseclaw.main upgrade" in source
 
-    release_gate = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(
-        encoding="utf-8"
-    )
+    release_gate = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(encoding="utf-8")
     assert "defenseclaw-$TargetVersion-2-py3-none-any.whl" in release_gate
     assert "defenseclaw-$BaselineVersion-2-py3-none-any.whl" in release_gate
     assert "seed-target-dependencies.whl" not in release_gate
@@ -309,9 +512,7 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
         "Seal-PhaseOneActiveStateSnapshot $Plan"
     )
     restore_source = source[
-        source.index("function Restore-PhaseOneSource {") : source.index(
-            "function Recover-InterruptedPhaseOne"
-        )
+        source.index("function Restore-PhaseOneSource {") : source.index("function Recover-InterruptedPhaseOne")
     ]
     assert restore_source.index("Assert-PhaseOneStateRollbackCas") < restore_source.index(
         "if(Test-Path -LiteralPath $Plan.GatewaySnapshot.Active"
@@ -332,7 +533,7 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     )
     assert "if($committed)" in bridge_transaction
     assert "release contract; installed version $installed is already current" in main
-    assert main.index('if($target -eq $installed)') < main.index("Confirm-Plan")
+    assert main.index("if($target -eq $installed)") < main.index("Confirm-Plan")
     for managed in (
         "guardrail_runtime.json",
         "active_connector.json",
@@ -350,9 +551,9 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     assert "Enter-PhaseTwoMutatorLease" in source
     assert "_recover_interrupted_hard_cut" in source
     assert "$stateFiles.Count -ne 7" in source
-    assert '$configPath=[IO.Path]::GetFullPath($configRaw)' in source
-    assert '$env:DEFENSECLAW_HOME=$script:RuntimePaths.ControllerHome' in source
-    assert '$env:DEFENSECLAW_CONFIG=$script:RuntimePaths.ConfigPath' in source
+    assert "$configPath=[IO.Path]::GetFullPath($configRaw)" in source
+    assert "$env:DEFENSECLAW_HOME=$script:RuntimePaths.ControllerHome" in source
+    assert "$env:DEFENSECLAW_CONFIG=$script:RuntimePaths.ConfigPath" in source
     assert "Test-VersionBoundGatewayHealth" in source
     assert "Assert-PhaseTwoGatewayStopped -DataDir $plan.DataDir -ConfigPath $plan.ConfigPath" in source
     assert "pip install --python (Get-Python) --quiet --offline --no-deps --reinstall" in source
@@ -360,18 +561,16 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     assert main.index("[void](Recover-InterruptedPhaseOne)") < main.index("[void](Recover-InterruptedPhaseTwo)")
     assert main.index("[void](Recover-InterruptedPhaseTwo)") < main.index("Resolve-InstalledRuntimePaths")
     assert main.index("[void](Recover-InterruptedPhaseTwo)") < main.index("$installed=Get-InstalledVersion")
-    assert '$displaced=Join-Path $parent' in source
-    assert '$createdQuarantine=Join-Path $createdParent' in source
-    assert '$sourceStream=[IO.File]::OpenRead($Source)' in source
-    assert '[IO.Directory]::CreateDirectory($Path, $acl)' in source
+    assert "$displaced=Join-Path $parent" in source
+    assert "$createdQuarantine=Join-Path $createdParent" in source
+    assert "$sourceStream=[IO.File]::OpenRead($Source)" in source
+    assert "[IO.Directory]::CreateDirectory($Path, $acl)" in source
 
 
 def test_windows_success_health_is_bounded_running_and_version_bound() -> None:
     source = RESOLVER.read_text(encoding="utf-8")
     helper = source[
-        source.index("function Test-VersionBoundGatewayHealth") : source.index(
-            "function Assert-PhaseTwoGatewayStopped"
-        )
+        source.index("function Test-VersionBoundGatewayHealth") : source.index("function Assert-PhaseTwoGatewayStopped")
     ]
 
     for required in (
@@ -388,9 +587,7 @@ def test_windows_success_health_is_bounded_running_and_version_bound() -> None:
     assert "(Get-Gateway) status" not in helper
 
     source_probe = source[
-        source.index("function Get-PhaseOneSourceRunningState") : source.index(
-            "function Assert-PhaseOneGatewayStopped"
-        )
+        source.index("function Get-PhaseOneSourceRunningState") : source.index("function Assert-PhaseOneGatewayStopped")
     ]
     assert "-ExpectedVersion $ExpectedVersion" in source_probe
 
@@ -403,26 +600,16 @@ def test_windows_success_health_is_bounded_running_and_version_bound() -> None:
     assert "(Get-Gateway) status" not in fresh
 
     restore = source[
-        source.index("function Restore-PhaseOneSource") : source.index(
-            "function Recover-InterruptedPhaseOne"
-        )
+        source.index("function Restore-PhaseOneSource") : source.index("function Recover-InterruptedPhaseOne")
     ]
     assert "-ExpectedVersion $Plan.SourceVersion" in restore
     assert "(Get-Gateway) status" not in restore
 
-    recovery = source[
-        source.index("function Recover-InterruptedPhaseTwo") : source.index(
-            "function Confirm-Plan"
-        )
-    ]
+    recovery = source[source.index("function Recover-InterruptedPhaseTwo") : source.index("function Confirm-Plan")]
     assert "-ExpectedVersion $expected" in recovery
     assert "-ExpectedVersion $plan.SourceVersion" in recovery
 
-    final_health = source[
-        source.index("function Assert-Healthy") : source.index(
-            "function Assert-RunningComponents"
-        )
-    ]
+    final_health = source[source.index("function Assert-Healthy") : source.index("function Assert-RunningComponents")]
     assert "-ExpectedVersion $Expected" in final_health
     assert "(Get-Gateway) status" not in final_health
 
@@ -430,9 +617,7 @@ def test_windows_success_health_is_bounded_running_and_version_bound() -> None:
 def test_windows_version_bound_health_probe_rejects_false_green_and_polls() -> None:
     source = RESOLVER.read_text(encoding="utf-8")
     helper = source[
-        source.index("function Test-VersionBoundGatewayHealth") : source.index(
-            "function Assert-PhaseTwoGatewayStopped"
-        )
+        source.index("function Test-VersionBoundGatewayHealth") : source.index("function Assert-PhaseTwoGatewayStopped")
     ]
     marker = "$probe=@'\n"
     probe = helper[helper.index(marker) + len(marker) : helper.index("\n'@")]
@@ -461,10 +646,7 @@ def test_windows_version_bound_health_probe_rejects_false_green_and_polls() -> N
             with TemporaryDirectory() as root:
                 root_path = Path(root)
                 (root_path / "config.yaml").write_text(
-                    "config_version: 7\n"
-                    "gateway:\n"
-                    "  api_bind: 127.0.0.1\n"
-                    f"  api_port: {server.server_port}\n",
+                    f"config_version: 7\ngateway:\n  api_bind: 127.0.0.1\n  api_port: {server.server_port}\n",
                     encoding="utf-8",
                 )
                 env = os.environ.copy()
@@ -592,7 +774,7 @@ def test_native_windows_release_harness_proves_refusal_bridge_and_exact_rollback
     assert '"receipt_path","recovery_home"' in source
     assert "different controller recovery home" in source
     assert "exact seven-state inventory" in source
-    assert "$Case.Controller \".upgrade-recovery\"" in source
+    assert '$Case.Controller ".upgrade-recovery"' in source
     assert 'failure_code -ne "interrupted"' in source
     assert 'status -eq "rolled_back"' in source
     assert 'failure_code -eq "health_check_failed"' in source

@@ -94,13 +94,25 @@ private struct GeneralSettings: View {
                 if let update = appState.availableRuntimeUpdate {
                     LabeledContent("Available", value: update.tag)
                     runtimeStatus
-                    if case .failed = appState.runtimeUpgradeState, !appState.runtimeUpgradeLog.isEmpty {
+                    if let command = runtimeUpgradeCommand {
+                        Button("Copy Upgrade Command") {
+                            copyToPasteboard(command)
+                        }
+                        .controlSize(.small)
+                        Text(command)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                            .accessibilityLabel("Authenticated runtime upgrade command")
+                    }
+                    if shouldShowRuntimeUpgradeLog {
                         Button("Copy Full Upgrade Log") {
                             copyToPasteboard(appState.runtimeUpgradeLog)
                         }
                         .controlSize(.small)
                     }
-                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Path below for a copy/paste command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://github.com/cisco-ai-defense/defenseclaw/blob/0.8.4/docs/CLI.md#upgrade.")
+                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Command below, then copy the runnable command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://github.com/cisco-ai-defense/defenseclaw/blob/0.8.4/docs/CLI.md#upgrade.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -193,11 +205,28 @@ private struct GeneralSettings: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+        case .actionRequired(let guidance, _):
+            Text(guidance).font(.caption).foregroundStyle(Cisco.blue).lineLimit(3)
         case .failed(let why):
             Text(why).font(.caption).foregroundStyle(Cisco.red).lineLimit(2)
         default:
             EmptyView()
         }
+    }
+
+    private var shouldShowRuntimeUpgradeLog: Bool {
+        guard !appState.runtimeUpgradeLog.isEmpty else { return false }
+        return switch appState.runtimeUpgradeState {
+        case .failed: true
+        default: false
+        }
+    }
+
+    private var runtimeUpgradeCommand: String? {
+        if case .actionRequired(_, let command) = appState.runtimeUpgradeState {
+            return command
+        }
+        return nil
     }
 
     private var macAppButtonTitle: String {
@@ -212,8 +241,8 @@ private struct GeneralSettings: View {
     private var runtimeButtonTitle: String {
         switch appState.runtimeUpgradeState {
         case .checking: "Checking Runtime…"
-        case .downloading, .installing: "Preparing Upgrade Path…"
-        default: appState.availableRuntimeUpdate == nil ? "Check Runtime" : "Show Upgrade Path"
+        case .downloading, .installing: "Preparing Upgrade Command…"
+        default: appState.availableRuntimeUpdate == nil ? "Check Runtime" : "Show Upgrade Command"
         }
     }
 

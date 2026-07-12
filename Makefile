@@ -37,7 +37,8 @@ endif
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-grafana-dashboards check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
-        upgrade-smoke upgrade-smoke-matrix \
+        upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix \
+        upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
         _bundle-data _source-install-preflight \
         proto proto-tools \
@@ -754,10 +755,24 @@ check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
 
 upgrade-smoke:
-	@scripts/test-upgrade-release.sh $(ARGS)
+	@scripts/test-upgrade-protocol-release.sh --refusal-contract-only $(ARGS)
 
 upgrade-smoke-matrix:
+	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" --refusal-contract-only $(ARGS)
+
+upgrade-refusal-contract-matrix: upgrade-smoke-matrix
+
+upgrade-legacy-smoke:
+	@scripts/test-upgrade-release.sh $(ARGS)
+
+upgrade-legacy-smoke-matrix:
 	@scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
+
+upgrade-signed-protocol:
+	@scripts/test-upgrade-protocol-release.sh $(ARGS)
+
+upgrade-signed-protocol-matrix:
+	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
 
 # ---------------------------------------------------------------------------
 # Lint targets

@@ -39,6 +39,10 @@ enum UpgradeState: Equatable {
     case checking
     case downloading
     case installing
+    /// No mutation failed; the operator must complete an external authenticated action.
+    /// Keep human-readable guidance separate from the exact runnable command so
+    /// copy actions never put explanatory prose on the operator's pasteboard.
+    case actionRequired(guidance: String, command: String)
     case failed(String)
 }
 

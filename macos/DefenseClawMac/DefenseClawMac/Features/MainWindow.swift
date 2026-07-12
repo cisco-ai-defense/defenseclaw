@@ -211,6 +211,7 @@ struct MainWindow: View {
         case .idle, .checking: "Mac app update — installed: \(UpdateChecker.currentVersion). ⌘⇧U upgrades this app and restarts it."
         case .downloading: "Downloading release…"
         case .installing: "Installing and restarting…"
+        case .actionRequired(let guidance, _): "Action required: \(guidance)"
         case .failed(let why): "Upgrade failed: \(why)"
         }
     }
@@ -227,14 +228,29 @@ struct MainWindow: View {
                 Text(runtimeStatusText)
                     .font(.caption2)
                     .foregroundStyle(isRuntimeFailed ? Cisco.red : .secondary)
-                    .lineLimit(isRuntimeFailed ? 4 : 1)
+                    .lineLimit(isRuntimeFailed || isRuntimeActionRequired ? 4 : 1)
                     .fixedSize(horizontal: false, vertical: true)
             }
             switch appState.runtimeUpgradeState {
             case .checking, .installing, .downloading:
                 ProgressView().controlSize(.small).padding(.leading, 4)
+            case .actionRequired(_, let command):
+                Button("Copy Upgrade Command") { copyToPasteboard(command) }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Cisco.green)
+                    .help("Copy the authenticated resolver command to run in Terminal")
+                if let url = appState.availableRuntimeUpdate.flatMap({ URL(string: $0.htmlURL) }) {
+                    Link("Release notes", destination: url)
+                        .font(.caption)
+                }
+                Button { appState.runtimeBannerDismissed = true } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Dismiss runtime update")
             default:
-                Button("Show Upgrade Path") { appState.performRuntimeUpgrade() }
+                Button("Show Upgrade Command") { appState.performRuntimeUpgrade() }
                     .controlSize(.small)
                     .buttonStyle(.borderedProminent)
                     .tint(Cisco.green)
@@ -260,6 +276,11 @@ struct MainWindow: View {
         return false
     }
 
+    private var isRuntimeActionRequired: Bool {
+        if case .actionRequired = appState.runtimeUpgradeState { return true }
+        return false
+    }
+
     private var runtimeStatusText: String {
         switch appState.runtimeUpgradeState {
         case .checking:
@@ -268,6 +289,8 @@ struct MainWindow: View {
             return appState.runtimeUpgradeLogTail.isEmpty
                 ? "Preparing release-owned resolver guidance…"
                 : appState.runtimeUpgradeLogTail
+        case .actionRequired(let guidance, _):
+            return guidance
         case .failed(let why):
             return why
         default:

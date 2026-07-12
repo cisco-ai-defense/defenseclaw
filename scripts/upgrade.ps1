@@ -375,16 +375,6 @@ function Get-UpgradeRecoveryRoot {
     else{return $null}
     return [IO.Path]::GetFullPath($root)
 }
-function Get-PhaseOneRecoveryRoot {
-    param([switch]$Create)
-    $controllerHome=Get-ControllerHome
-    $root=Join-Path $controllerHome ".upgrade-recovery"
-    if(Test-Path -LiteralPath $root){Assert-PrivateDirectoryAcl -Path $root -Expected (New-PrivateDirectoryAcl)}
-    elseif($Create){$root=New-PrivateDirectory $root}
-    else{return $null}
-    return [IO.Path]::GetFullPath($root)
-}
-
 function Release-Url {
     param([string]$ReleaseVersion, [string]$Name)
     return "$($ReleaseBaseUrl.TrimEnd('/'))/$ReleaseVersion/$Name"
@@ -1723,7 +1713,7 @@ function New-PhaseOneRollbackPlan {
     param([object]$SourceRelease,[string]$SourceVersion,[object]$Bridge)
     $uv=Get-Command uv -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1
     if(-not $uv){Fail "uv is required for bridge rollback; no installed state changed."}
-    $recoveryRoot=Get-PhaseOneRecoveryRoot -Create
+    $recoveryRoot=Get-UpgradeRecoveryRoot -Create
     $planId="phase-one-"+[guid]::NewGuid().ToString("N")
     $root=New-PrivateDirectory (Join-Path $recoveryRoot $planId)
     $mutatorLease=""
@@ -1805,7 +1795,7 @@ function Get-PhaseOneJournalValue {
     return $property.Value
 }
 function Read-PhaseOneJournal {
-    $recoveryRoot=Get-PhaseOneRecoveryRoot
+    $recoveryRoot=Get-UpgradeRecoveryRoot
     if(-not $recoveryRoot){return $null}
     $journal=Join-Path $recoveryRoot "phase-one-active.json"
     if(-not(Test-Path -LiteralPath $journal)){return $null}
@@ -2242,7 +2232,7 @@ function Restore-PhaseOneSource {
     }
 }
 function Recover-InterruptedPhaseOne {
-    $recoveryRoot=Get-PhaseOneRecoveryRoot
+    $recoveryRoot=Get-UpgradeRecoveryRoot
     if(-not $recoveryRoot -or -not(Test-Path -LiteralPath (Join-Path $recoveryRoot "phase-one-active.json"))){return $false}
     $lease=Enter-PhaseOneMutatorLease $recoveryRoot
     try{$plan=Read-PhaseOneJournal}finally{$lease.Dispose()}
@@ -2719,7 +2709,7 @@ function Main {
     [void](Get-ControllerHome)
     $upgradeMutex=Enter-UpgradeMutex
     try{
-    $phaseOneRecoveryRoot=Get-PhaseOneRecoveryRoot;$phaseTwoRecoveryRoot=Get-UpgradeRecoveryRoot
+    $phaseOneRecoveryRoot=Get-UpgradeRecoveryRoot;$phaseTwoRecoveryRoot=Get-UpgradeRecoveryRoot
     if($phaseOneRecoveryRoot -and $phaseTwoRecoveryRoot -and (Test-Path -LiteralPath (Join-Path $phaseOneRecoveryRoot "phase-one-active.json")) -and (Test-Path -LiteralPath (Join-Path $phaseTwoRecoveryRoot "phase-two-active.json"))){Fail "Conflicting phase-one and phase-two recovery journals require manual inspection; no version was trusted."}
     [void](Recover-InterruptedPhaseOne)
     if($InjectPhaseOneCrashDuringRecovery){Fail "Phase-one recovery crash injection requires an active journal."}

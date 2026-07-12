@@ -12,12 +12,45 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly FIRST_SCHEMA2_RELEASE="0.8.4"
+REFUSAL_CONTRACT_ONLY=0
 
 # shellcheck source=scripts/test-upgrade-release.sh
 source "${ROOT}/scripts/test-upgrade-release.sh"
 trap - EXIT
 
 REFUSAL_SENTINEL_PIDS=()
+
+protocol_usage() {
+    usage
+    cat <<'EOF'
+
+Protocol-gate-only options:
+  --refusal-contract-only  Prove schema-2 pre-mutation refusal only. This is
+                           for unsigned PR candidates; the signed release
+                           workflow owns the positive resolver success path.
+EOF
+}
+
+parse_protocol_args() {
+    local -a shared_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --refusal-contract-only)
+                REFUSAL_CONTRACT_ONLY=1
+                shift
+                ;;
+            --help|-h)
+                protocol_usage
+                exit 0
+                ;;
+            *)
+                shared_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    parse_args "${shared_args[@]}"
+}
 
 protocol_cleanup() {
     local status=$?
@@ -225,7 +258,7 @@ snapshot_state() {
     local real_gateway="${gateway}.protocol-gate-real"
     local venv_python="${SMOKE_HOME}/.defenseclaw/.venv/bin/python"
     local package_dir
-    package_dir="$("${venv_python}" - <<'PY'
+    package_dir="$(PYTHONDONTWRITEBYTECODE=1 "${venv_python}" - <<'PY'
 from pathlib import Path
 import defenseclaw
 
@@ -286,6 +319,31 @@ for label, path in (
 ):
     record(path, label)
 output.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+materialize_baseline_cli_startup_state() {
+    local venv_python="${SMOKE_HOME}/.defenseclaw/.venv/bin/python"
+
+    # Every supported immutable controller initializes its audit store in the
+    # root callback before dispatching `upgrade`. Seed that ordinary controller
+    # startup state before the refusal snapshot so the comparison isolates
+    # upgrade mutations. Disable bytecode writes here and on the command under
+    # test because interpreter caches are not release or operator state.
+    HOME="${SMOKE_HOME}" \
+    DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+    PYTHONDONTWRITEBYTECODE=1 \
+        "${venv_python}" - <<'PY' \
+        || die "could not materialize immutable controller startup state"
+from defenseclaw import config as cfg_mod
+from defenseclaw.db import Store
+
+cfg = cfg_mod.load()
+store = Store(cfg.audit_db)
+try:
+    store.init()
+finally:
+    store.close()
 PY
 }
 
@@ -360,6 +418,52 @@ for path in root.glob("*.json"):
 PY
 }
 
+assert_reviewed_resolver_asset_contract() {
+    local release_dir="${RELEASE_ROOT}/${TARGET_VERSION}"
+    local posix_resolver="${release_dir}/defenseclaw-upgrade.sh"
+    python3 - \
+        "${ROOT}/scripts/upgrade.sh" \
+        "${release_dir}/defenseclaw-upgrade.sh" \
+        "${ROOT}/scripts/upgrade.ps1" \
+        "${release_dir}/defenseclaw-upgrade.ps1" \
+        "${release_dir}/checksums.txt" <<'PY' \
+        || die "reviewed release-owned resolver assets failed byte-for-byte validation"
+import hashlib
+from pathlib import Path
+import re
+import stat
+import sys
+
+posix_source, posix_candidate, windows_source, windows_candidate, checksums = map(
+    Path, sys.argv[1:]
+)
+lines = checksums.read_text(encoding="utf-8").splitlines()
+for source, candidate in (
+    (posix_source, posix_candidate),
+    (windows_source, windows_candidate),
+):
+    info = candidate.lstat()
+    if candidate.is_symlink() or not stat.S_ISREG(info.st_mode):
+        raise SystemExit(f"candidate resolver is not a regular file: {candidate.name}")
+    payload = candidate.read_bytes()
+    if not payload:
+        raise SystemExit(f"candidate resolver is empty: {candidate.name}")
+    if payload != source.read_bytes():
+        raise SystemExit(f"candidate resolver differs from reviewed source: {candidate.name}")
+    if payload.splitlines()[-1] != b"# DefenseClaw upgrade resolver complete v1":
+        raise SystemExit(f"candidate resolver is incomplete: {candidate.name}")
+    pattern = re.compile(rf"([0-9a-f]{{64}})  {re.escape(candidate.name)}")
+    entries = [match.group(1) for line in lines if (match := pattern.fullmatch(line))]
+    if len(entries) != 1:
+        raise SystemExit(f"checksums.txt must bind {candidate.name} exactly once")
+    if entries[0] != hashlib.sha256(payload).hexdigest():
+        raise SystemExit(f"checksums.txt does not bind the exact {candidate.name} bytes")
+PY
+    bash -n "${posix_resolver}" \
+        || die "candidate resolver asset is not valid Bash"
+    ok "Reviewed release-owned resolver assets are complete and checksum-bound"
+}
+
 assert_staged_success_receipt() {
     python3 - \
         "${SMOKE_HOME}/.defenseclaw/.upgrade-receipts" \
@@ -398,6 +502,7 @@ prepare_refusal_home() {
     mkdir -p "${SMOKE_HOME}"
     install_baseline
     seed_upgrade_fixture
+    materialize_baseline_cli_startup_state
     mkdir -p "${SMOKE_HOME}/.openclaw"
     printf '%s\n' '{"sentinel":"refusal-must-not-mutate"}' \
         > "${SMOKE_HOME}/.openclaw/openclaw.json"
@@ -435,13 +540,16 @@ verify_refusal_invariants() {
 
     local observed_version
     observed_version="$(HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
         PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw --version)"
     [[ "${observed_version}" == *"${baseline_version}"* ]] \
         || die "refused upgrade changed installed CLI version: ${observed_version}"
 
     snapshot_state "${after}"
-    cmp "${before}" "${after}" >/dev/null \
-        || die "refused upgrade mutated config, data, OpenClaw state, permissions, CLI, or gateway bytes"
+    if ! cmp "${before}" "${after}" >/dev/null; then
+        diff -u "${before}" "${after}" >&2 || true
+        die "refused upgrade mutated config, data, OpenClaw state, permissions, CLI, or gateway bytes"
+    fi
     assert_no_success_receipt
     case "${refusal_mode}" in
         schema)
@@ -470,20 +578,31 @@ run_installed_controller_refusal() {
     local baseline="$1"
     local refusal_mode="${2:-schema}"
     local invocation before after log_file status
-    local -a target_args
+    local -a command_args
     for invocation in explicit latest; do
         log "Proving installed ${baseline} controller refuses ${TARGET_VERSION} before mutation (${refusal_mode}, ${invocation})"
         prepare_refusal_home "${baseline}" "installed-${invocation}"
-        target_args=()
+        command_args=(upgrade)
+        # The immutable legacy controller may require its existing explicit
+        # opt-in before it will parse an unsigned PR candidate's manifest.
+        # This is confined to the pre-mutation refusal fixture: the modern
+        # resolver never receives this flag, and release.yaml still requires
+        # the real release-workflow signature for every positive path.
+        if [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] \
+            && upgrade_supports_allow_unverified \
+            && ! candidate_has_checksum_signature; then
+            command_args+=(--allow-unverified)
+        fi
         if [[ "${invocation}" == "explicit" ]]; then
             patch_installed_upgrade_endpoint
-            target_args=(--version "${TARGET_VERSION}")
+            command_args+=(--version "${TARGET_VERSION}")
         else
             # Exercise the common `defenseclaw upgrade` path deterministically
             # against the sealed candidate rather than whatever release GitHub
             # happens to mark latest while this draft candidate is still gated.
             patch_installed_upgrade_endpoint "${TARGET_VERSION}"
         fi
+        command_args+=(--yes --health-timeout "${HEALTH_TIMEOUT}")
 
         before="${WORKDIR}/${baseline}-installed-${invocation}.before.json"
         after="${WORKDIR}/${baseline}-installed-${invocation}.after.json"
@@ -493,10 +612,11 @@ run_installed_controller_refusal() {
         set +e
         HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
         UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
         UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
         PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
-            defenseclaw upgrade "${target_args[@]}" --yes --health-timeout "${HEALTH_TIMEOUT}" \
+            defenseclaw "${command_args[@]}" \
             >"${log_file}" 2>&1
         status=$?
         set -e
@@ -712,6 +832,12 @@ run_protocol_case() {
         if manifest_array_contains tested_source_versions "${baseline}"; then
             source_is_tested=1
         fi
+        if [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]]; then
+            [[ "${source_is_tested}" == "1" ]] \
+                || die "refusal-contract source ${baseline} is absent from tested_source_versions"
+            run_installed_controller_refusal "${baseline}" "${installed_refusal_mode}"
+            return
+        fi
         if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]; then
             [[ "${source_is_tested}" == "1" ]] \
                 || die "success canary source ${baseline} is absent from tested_source_versions"
@@ -772,7 +898,7 @@ run_protocol_case() {
 }
 
 main_protocol_gate() {
-    parse_args "$@"
+    parse_protocol_args "$@"
     cd "${ROOT}"
     if [[ -z "${TARGET_VERSION}" ]]; then
         TARGET_VERSION="$(current_version)"
@@ -813,6 +939,12 @@ main_protocol_gate() {
     if [[ "${SUCCESS_PATH_ONLY}" == "1" && "${CANDIDATE_SCHEMA_VERSION}" -ne 2 ]]; then
         die "--success-path-only requires a schema-2 candidate"
     fi
+    if [[ "${REFUSAL_CONTRACT_ONLY}" == "1" && "${CANDIDATE_SCHEMA_VERSION}" -ne 2 ]]; then
+        die "--refusal-contract-only requires a schema-2 candidate"
+    fi
+    if [[ "${REFUSAL_CONTRACT_ONLY}" == "1" && "${SUCCESS_PATH_ONLY}" == "1" ]]; then
+        die "--refusal-contract-only and --success-path-only are mutually exclusive"
+    fi
     [[ -z "${MINIMUM_SOURCE_VERSION}" || "${MINIMUM_SOURCE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || die "candidate minimum_source_version must be X.Y.Z"
     [[ -z "${REQUIRED_BRIDGE_VERSION}" || "${REQUIRED_BRIDGE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
@@ -824,15 +956,26 @@ main_protocol_gate() {
         manifest_array_values auto_bridge_from >/dev/null
     fi
 
-    prepare_required_bridge_assets
+    if [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]]; then
+        assert_reviewed_resolver_asset_contract
+    else
+        prepare_required_bridge_assets
+    fi
     start_release_server
-    run_v8_source_contract_tests
+    if [[ "${REFUSAL_CONTRACT_ONLY}" != "1" ]]; then
+        run_v8_source_contract_tests
+    fi
 
     local baseline
     for baseline in "${FROM_VERSION_LIST[@]}"; do
         run_protocol_case "${baseline}"
     done
-    ok "Manifest-derived protocol matrix passed: ${FROM_VERSION_LIST[*]} -> ${TARGET_VERSION}"
+    if [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]]; then
+        ok "Unsigned-PR schema-2 refusal contract passed: ${FROM_VERSION_LIST[*]} -> ${TARGET_VERSION}"
+        ok "Signed resolver success remains mandatory in release.yaml after candidate signing"
+    else
+        ok "Manifest-derived protocol matrix passed: ${FROM_VERSION_LIST[*]} -> ${TARGET_VERSION}"
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

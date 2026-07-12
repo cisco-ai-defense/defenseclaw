@@ -53,7 +53,9 @@ Usage: scripts/test-upgrade-release.sh [options]
 
 Build or consume candidate release artifacts, install an older DefenseClaw in a
 throwaway HOME, redirect its upgrade command to the local candidate artifacts,
-then run and verify a real upgrade.
+then run and verify a real upgrade. This direct-controller harness is retained
+for schema-1 release fixtures. Use test-upgrade-protocol-release.sh for
+schema-2 refusal and signed resolver/handoff gates.
 
 Options:
   --from-version VERSION     Installed baseline version to upgrade from (default: 0.7.2)
@@ -73,8 +75,8 @@ Options:
   --help                     Show this help
 
 Examples:
-  make upgrade-smoke
-  make upgrade-smoke-matrix
+  make upgrade-legacy-smoke
+  make upgrade-legacy-smoke-matrix
   scripts/test-upgrade-release.sh --from-version 0.7.2
   scripts/test-upgrade-release.sh --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1"
   scripts/test-upgrade-release.sh --release-dir dist --baseline-mode seed
@@ -439,6 +441,9 @@ PY
             --release-dir "${out}" \
             --version "${TARGET_VERSION}"
         python3 "${build_root}/scripts/release_candidate.py" verify-runtime \
+            --release-dir "${out}" \
+            --version "${TARGET_VERSION}"
+        python3 "${build_root}/scripts/release_candidate.py" stage-resolvers \
             --release-dir "${out}" \
             --version "${TARGET_VERSION}"
     fi
@@ -1189,6 +1194,7 @@ SH
 
 upgrade_supports_allow_unverified() {
     HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+    PYTHONDONTWRITEBYTECODE=1 \
     PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
         defenseclaw upgrade --help 2>/dev/null | grep -q -- "--allow-unverified"
 }

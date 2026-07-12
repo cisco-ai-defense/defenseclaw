@@ -2041,15 +2041,37 @@ function Assert-SucceededReceipt {
         [Parameter(Mandatory = $true)][string]$From,
         [Parameter(Mandatory = $true)][string]$Target
     )
+    $nonterminal = @(
+        $Receipts | Where-Object {
+            [string]$_.status -in @("pending", "partial")
+        }
+    )
+    if ($nonterminal.Count -ne 0) {
+        Fail "Successful staged upgrade left a pending or partial receipt"
+    }
+    $targetReceipts = @(
+        $Receipts | Where-Object { [string]$_.target_version -eq $Target }
+    )
+    if ($targetReceipts.Count -gt 1) {
+        Fail "Successful staged upgrade left more than one terminal target receipt"
+    }
     $receiptMatches = @(
         $Receipts | Where-Object {
             [string]$_.from_version -eq $From -and
             [string]$_.target_version -eq $Target -and
             [string]$_.status -eq "succeeded" -and
-            $_.artifacts_verified -eq $true
+            [string]$_.migration_status -eq "completed" -and
+            $_.artifacts_verified -eq $true -and
+            [string]::IsNullOrEmpty([string]$_.failure_code)
         }
     )
-    if ($receiptMatches.Count -eq 0) {
+    if ($receiptMatches.Count -gt 1) {
+        Fail "Successful staged upgrade left duplicate succeeded receipts"
+    }
+    if ($targetReceipts.Count -eq 1 -and $receiptMatches.Count -eq 0) {
+        Fail "Successful staged upgrade left an invalid terminal target receipt"
+    }
+    if ($targetReceipts.Count -eq 0) {
         # A healthy v8 gateway acknowledges terminal handoff files after
         # canonical audit persistence.  Accept that durable row if the queue
         # file was consumed after the production resolver verified it.

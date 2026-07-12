@@ -253,8 +253,8 @@ it is not a publishable or authenticated `0.8.4+` release candidate by itself.
 make dist
 ```
 
-This runs `dist-cli`, `dist-gateway`, `dist-plugin`, and
-`dist-checksums` in sequence. Output goes to `dist/`:
+This runs `dist-cli`, `dist-gateway`, `dist-plugin`, `dist-sandbox`,
+`dist-upgrade-manifest`, and `dist-checksums` in sequence. Output goes to `dist/`:
 
 ```
 dist/
@@ -358,6 +358,14 @@ current release-owned `scripts/upgrade.sh` or `scripts/upgrade.ps1` resolver
 for an existing pre-bridge host. A `0.8.3`-or-older built-in
 `defenseclaw upgrade` safely refuses a hard-cut target but cannot perform the
 required two-process bridge handoff retroactively.
+
+Authenticated POSIX installs keep a private, mode-0700 same-filesystem custody
+directory for inactive rollback objects. A durable mode-0600 in-progress marker
+is present only while a fresh install may need recovery and is retired before a
+successful install is reported. Consequently, retained custody from a healthy
+completed install does not bypass the early existing-install refusal; missing,
+malformed, or symlinked marker state also fails closed before dependency or
+artifact work.
 
 Pin a specific version:
 

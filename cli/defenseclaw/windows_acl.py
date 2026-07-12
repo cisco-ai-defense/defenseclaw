@@ -143,6 +143,8 @@ class _WindowsApi(Protocol):
 
     def close_handle(self, handle: int) -> None: ...
 
+    def _open_regular_reader_shared_delete(self, path: str) -> int: ...
+
     def open_exclusive_file(self, path: str) -> int: ...
 
     def open_directory_no_delete(self, path: str) -> int: ...
@@ -599,6 +601,29 @@ class _CtypesWindowsApi:
             self.close_handle(int(handle))
             raise
 
+    def _open_regular_reader_shared_delete(self, path: str) -> int:
+        """Open an exact regular-file claim without blocking later deletion."""
+
+        handle = self._create_file(
+            path,
+            _GENERIC_READ,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if handle == _INVALID_HANDLE_VALUE:
+            self._raise_last_error("CreateFileW(shared-delete regular-file reader)")
+        try:
+            attributes = self._file_information(int(handle)).file_attributes
+            if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+                raise WindowsAclError("Windows rollback claim is not a real regular file")
+            return int(handle)
+        except BaseException:
+            self.close_handle(int(handle))
+            raise
+
     def replace_regular_file_by_handle(self, source: str, target: str) -> None:
         """Rename the exact opened source over ``target`` atomically."""
 
@@ -719,6 +744,32 @@ def _get_api() -> _WindowsApi:
     if _api is None:
         _api = _CtypesWindowsApi()
     return _api
+
+
+def open_regular_read_fd_shared_delete(path: str) -> int:
+    """Return a CRT read descriptor backed by a delete-sharing Win32 handle.
+
+    ``open_osfhandle`` transfers ownership of the native handle to the CRT
+    descriptor.  After a successful conversion callers must use ``os.close``;
+    if conversion fails, this function closes the still-native handle itself.
+    """
+
+    if os.name != "nt":
+        raise WindowsAclError("shared-delete CRT handles require Windows")
+    import msvcrt
+
+    api = _get_api()
+    handle = api._open_regular_reader_shared_delete(path)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+    )
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        api.close_handle(handle)
+        raise
 
 
 def capture_fd(fd: int) -> WindowsFileSecurity:
@@ -1262,6 +1313,7 @@ __all__ = [
     "hold_directory_chain",
     "hold_phase_two_mutator_lease",
     "move_file_no_replace",
+    "open_regular_read_fd_shared_delete",
     "private_security_for_directory",
     "replace_regular_file_by_handle",
     "replace_file",

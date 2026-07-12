@@ -471,6 +471,9 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     install_dir.mkdir(parents=True)
     if openclaw_present:
         openclaw_home.mkdir(parents=True)
+        openclaw_home.chmod(0o700)
+    home.chmod(0o700)
+    controller_home.chmod(0o700)
 
     source_cli = source_venv / "bin" / "defenseclaw"
     _write_executable(
@@ -519,10 +522,6 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         (openclaw_home / "openclaw.json").write_bytes(openclaw_original)
 
     initial_process: subprocess.Popen[bytes] | None = None
-    if source_running:
-        command = ["sleep", "300"] if unrelated_pid else [str(source_gateway), "__daemon"]
-        initial_process = subprocess.Popen(command)
-        _write_json_pid(data_home / "gateway.pid", initial_process.pid, source_gateway)
 
     target_python_template = tmp_path / "target-python"
     _write_executable(
@@ -684,6 +683,19 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
     initial_was_alive_before_cleanup = False
     result: subprocess.CompletedProcess[str] | None = None
     try:
+        if source_running:
+            command = (
+                ["sleep", "300"]
+                if unrelated_pid
+                else [str(source_gateway), "__daemon"]
+            )
+            initial_process = subprocess.Popen(command)
+            _write_json_pid(
+                data_home / "gateway.pid",
+                initial_process.pid,
+                source_gateway,
+            )
+
         if crash_point is not None:
             if crash_point == "after-stop":
                 crash_variable = "INJECT_PHASE1_CRASH_AFTER_SOURCE_STOP"
@@ -1030,19 +1042,20 @@ def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe()
 def test_gateway_pid_parser_accepts_legacy_integer_with_live_binary_identity(tmp_path: Path) -> None:
     gateway = tmp_path / "defenseclaw-gateway"
     _compile_source_gateway(gateway)
-    process = subprocess.Popen([str(gateway), "__daemon"])
-    pid_file = tmp_path / "gateway.pid"
-    pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
-    pid_file.chmod(0o600)
-
-    script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
-    match = re.search(
-        r"GATEWAY_PID_PARSER=\"\$\(cat <<'PY'\n(?P<source>.*?)\nPY\n\)\"",
-        script,
-        re.DOTALL,
-    )
-    assert match is not None
+    process: subprocess.Popen[bytes] | None = None
     try:
+        process = subprocess.Popen([str(gateway), "__daemon"])
+        pid_file = tmp_path / "gateway.pid"
+        pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
+        pid_file.chmod(0o600)
+
+        script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+        match = re.search(
+            r"GATEWAY_PID_PARSER=\"\$\(cat <<'PY'\n(?P<source>.*?)\nPY\n\)\"",
+            script,
+            re.DOTALL,
+        )
+        assert match is not None
         result = subprocess.run(
             [sys.executable, "-c", match.group("source"), str(pid_file), str(gateway)],
             text=True,
@@ -1053,8 +1066,9 @@ def test_gateway_pid_parser_accepts_legacy_integer_with_live_binary_identity(tmp
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == f"live\t{process.pid}"
     finally:
-        process.terminate()
-        process.wait(timeout=10)
+        if process is not None:
+            process.terminate()
+            process.wait(timeout=10)
 
 
 def test_source_venv_identity_rejects_same_version_substitution(tmp_path: Path) -> None:

@@ -59,6 +59,14 @@ main() {
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 readonly DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"
 readonly INSTALL_DIR="${HOME}/.local/bin"
+readonly INSTALL_CUSTODY_ROOT="${HOME}/.defenseclaw-install-custody"
+# State may be deliberately placed on a filesystem different from $HOME.
+# Keep its retirement custody beside (never inside) DEFENSECLAW_HOME so every
+# rename stays on the managed object's filesystem and the home can still be
+# retired as one empty-directory claim.
+readonly STATE_CUSTODY_ROOT="$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
+readonly INSTALL_ATTEMPT_MARKER=".defenseclaw-install-in-progress-v1"
+readonly INSTALL_ATTEMPT_MARKER_CONTENT="DefenseClaw authenticated fresh install in progress v1"
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly OPENCLAW_VERSION="2026.3.24"
 VERIFIED_CHECKSUM=""
@@ -92,21 +100,288 @@ die() { err "$@"; exit 1; }
 
 has() { command -v "$1" &>/dev/null; }
 
-# Return a device/inode pair without following a symlink. The two stat forms
-# cover BSD/macOS and GNU/Linux respectively. Identity checks keep failure
-# cleanup from removing a path that another process substituted mid-install.
+existing_install_detected() {
+    has defenseclaw \
+        || has defenseclaw-gateway \
+        || [[ -e "${DEFENSECLAW_HOME}" || -L "${DEFENSECLAW_HOME}" ]] \
+        || [[ -e "${DEFENSECLAW_VENV}" || -L "${DEFENSECLAW_VENV}" ]] \
+        || [[ -e "${INSTALL_DIR}/defenseclaw" || -L "${INSTALL_DIR}/defenseclaw" ]] \
+        || [[ -e "${INSTALL_DIR}/defenseclaw-gateway" || -L "${INSTALL_DIR}/defenseclaw-gateway" ]]
+}
+
+custody_stat() {
+    local field="$1" path="$2" platform_name
+    platform_name="$(uname -s 2>/dev/null)" || return 1
+    case "${platform_name}" in
+        Darwin)
+            case "${field}" in
+                mode) command stat -f '%Lp' "${path}" 2>/dev/null ;;
+                size) command stat -f '%z' "${path}" 2>/dev/null ;;
+                *) return 1 ;;
+            esac
+            ;;
+        Linux)
+            case "${field}" in
+                mode) command stat -c '%a' "${path}" 2>/dev/null ;;
+                size) command stat -c '%s' "${path}" 2>/dev/null ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+custody_has_install_attempt_marker() {
+    local root="$1" marker content mode size
+    marker="${root}/${INSTALL_ATTEMPT_MARKER}"
+    [[ -d "${root}" && ! -L "${root}" && -O "${root}" ]] || return 1
+    [[ -f "${marker}" && ! -L "${marker}" && -O "${marker}" ]] || return 1
+    mode="$(custody_stat mode "${root}")" || return 1
+    [[ "${mode}" == "700" ]] || return 1
+    mode="$(custody_stat mode "${marker}")" || return 1
+    [[ "${mode}" == "600" ]] || return 1
+    size="$(custody_stat size "${marker}")" || return 1
+    [[ "${size}" == "$((${#INSTALL_ATTEMPT_MARKER_CONTENT} + 1))" ]] || return 1
+    content="$(command cat "${marker}" 2>/dev/null)" || return 1
+    [[ "${content}" == "${INSTALL_ATTEMPT_MARKER_CONTENT}" ]]
+}
+
+interrupted_install_attempt_detected() {
+    custody_has_install_attempt_marker "${INSTALL_CUSTODY_ROOT}" \
+        || { [[ "${STATE_CUSTODY_ROOT}" != "${INSTALL_CUSTODY_ROOT}" ]] \
+            && custody_has_install_attempt_marker "${STATE_CUSTODY_ROOT}"; }
+}
+
+update_install_attempt_marker() {
+    local root="$1"
+    "${POLICY_PYTHON}" - \
+        "${root}" \
+        "${INSTALL_ATTEMPT_MARKER}" \
+        "${INSTALL_ATTEMPT_MARKER_CONTENT}" <<'PY'
+import os
+import stat
+import sys
+
+root, leaf, content = sys.argv[1:]
+expected = (content + "\n").encode("ascii")
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+root_fd = os.open(root, flags)
+
+
+def read_marker() -> tuple[int, int]:
+    metadata = os.stat(leaf, dir_fd=root_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or metadata.st_size != len(expected)
+    ):
+        raise RuntimeError("install-attempt marker is not a private caller-owned regular file")
+    descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise RuntimeError("install-attempt marker changed while opening")
+        data = b""
+        while len(data) <= len(expected):
+            chunk = os.read(descriptor, len(expected) + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if data != expected:
+            raise RuntimeError("install-attempt marker content is invalid")
+        return opened.st_dev, opened.st_ino
+    finally:
+        os.close(descriptor)
+
+
+try:
+    root_metadata = os.fstat(root_fd)
+    if root_metadata.st_uid != os.geteuid() or stat.S_IMODE(root_metadata.st_mode) != 0o700:
+        raise RuntimeError("install-attempt custody is not mode-0700 and caller-owned")
+    try:
+        marker_fd = os.open(
+            leaf,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=root_fd,
+        )
+    except FileExistsError:
+        read_marker()
+    else:
+        try:
+            remaining = memoryview(expected)
+            while remaining:
+                written = os.write(marker_fd, remaining)
+                if written <= 0:
+                    raise RuntimeError("install-attempt marker write did not progress")
+                remaining = remaining[written:]
+            os.fsync(marker_fd)
+        finally:
+            os.close(marker_fd)
+        read_marker()
+        os.fsync(root_fd)
+finally:
+    os.close(root_fd)
+PY
+}
+
+retire_install_attempt_marker() {
+    local root="$1" marker identity
+    marker="${root}/${INSTALL_ATTEMPT_MARKER}"
+    # Revalidate the private marker immediately before claiming its strong
+    # identity.  unlink-exact then performs descriptor-bound, no-delete,
+    # deterministic retirement; a concurrent replacement is preserved.
+    update_install_attempt_marker "${root}" \
+        || die "Authenticated fresh-install attempt marker changed before retirement"
+    identity="$("${POLICY_PYTHON}" "${PUBLISH_HELPER}" path-identity "${marker}")" \
+        || die "Could not bind the authenticated fresh-install attempt marker"
+    [[ "${identity}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
+        || die "Authenticated fresh-install attempt marker identity is invalid"
+    "${POLICY_PYTHON}" "${PUBLISH_HELPER}" unlink-exact \
+        "${marker}" "${identity}" --custody-root "${root}" \
+        || die "Could not durably retire the authenticated fresh-install attempt marker"
+}
+
+begin_install_attempt() {
+    update_install_attempt_marker "${INSTALL_CUSTODY_ROOT}" \
+        || die "Could not durably mark the authenticated fresh-install attempt"
+    if [[ "${STATE_CUSTODY_ROOT}" != "${INSTALL_CUSTODY_ROOT}" ]]; then
+        update_install_attempt_marker "${STATE_CUSTODY_ROOT}" \
+            || die "Could not durably mark the authenticated state-install attempt"
+    fi
+    INSTALL_ATTEMPT_MARKERS_ACTIVE=true
+}
+
+finish_install_attempt() {
+    [[ "${INSTALL_ATTEMPT_MARKERS_ACTIVE:-false}" == true ]] \
+        || die "Authenticated fresh-install attempt custody was not active"
+    if [[ "${STATE_CUSTODY_ROOT}" != "${INSTALL_CUSTODY_ROOT}" ]]; then
+        retire_install_attempt_marker "${STATE_CUSTODY_ROOT}"
+    fi
+    retire_install_attempt_marker "${INSTALL_CUSTODY_ROOT}"
+    INSTALL_ATTEMPT_MARKERS_ACTIVE=false
+}
+
+# Return device, inode, and the kernel's object-birth timestamp without
+# following a symlink.  Device/inode alone is unsafe because Linux may recycle
+# an inode immediately after unlink.  Birth identity stays stable as a managed
+# directory is populated but changes when the pathname is replaced.
 path_identity() {
-    local value="" platform_name="${OS:-}"
+    local platform_name="${OS:-}" python="${POLICY_PYTHON:-}"
     if [[ -z "${platform_name}" ]]; then
         platform_name="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
     fi
-    case "${platform_name}" in
-        linux) value="$(stat -c '%d:%i' "$1" 2>/dev/null || true)" ;;
-        darwin) value="$(stat -f '%d:%i' "$1" 2>/dev/null || true)" ;;
-        *) return 1 ;;
-    esac
-    [[ "${value}" =~ ^[0-9]+:[0-9]+$ ]] || return 1
-    printf '%s\n' "${value}"
+    if [[ -z "${python}" ]]; then
+        python="$(command -v python3 2>/dev/null || true)"
+    fi
+    [[ -n "${python}" && -x "${python}" ]] || return 1
+    "${python}" - "$1" "${platform_name}" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import struct
+import sys
+
+path, platform_name = sys.argv[1:]
+if platform_name == "linux":
+    buffer = ctypes.create_string_buffer(256)
+    library = ctypes.CDLL(None, use_errno=True)
+    function = getattr(library, "statx", None)
+    if function is None:
+        raise SystemExit(1)
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.c_void_p,
+    ]
+    function.restype = ctypes.c_int
+    statx_ino = 0x00000100
+    statx_btime = 0x00000800
+    statx_mnt_id = 0x00001000
+    statx_basic_stats = 0x000007FF
+    at_fdcwd = -100
+    at_symlink_nofollow = 0x100
+    requested = statx_basic_stats | statx_btime | statx_mnt_id
+    if function(at_fdcwd, os.fsencode(path), at_symlink_nofollow, requested, buffer) != 0:
+        if ctypes.get_errno() == errno.ENOENT:
+            raise SystemExit(1)
+        raise SystemExit(1)
+    raw = buffer.raw
+    mask = struct.unpack_from("=I", raw, 0)[0]
+    inode = struct.unpack_from("=Q", raw, 32)[0]
+    birth_seconds, birth_nanoseconds = struct.unpack_from("=qI", raw, 80)
+    device_major, device_minor = struct.unpack_from("=II", raw, 136)
+    device = os.makedev(device_major, device_minor)
+    if (
+        mask & (statx_ino | statx_btime | statx_mnt_id)
+        != (statx_ino | statx_btime | statx_mnt_id)
+        or device <= 0
+        or inode <= 0
+        or birth_seconds <= 0
+        or birth_nanoseconds >= 1_000_000_000
+    ):
+        raise SystemExit(1)
+elif platform_name == "darwin":
+    metadata = os.lstat(path)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if stat.S_ISDIR(metadata.st_mode):
+        flags |= os.O_DIRECTORY | os.O_NOFOLLOW
+    elif stat.S_ISLNK(metadata.st_mode):
+        # Apple system Python 3.9 omits the binding even though O_SYMLINK is
+        # part of the stable Darwin ABI (sys/fcntl.h).
+        flags |= getattr(os, "O_SYMLINK", 0x00200000)
+    elif stat.S_ISFIFO(metadata.st_mode):
+        flags |= os.O_NONBLOCK | os.O_NOFOLLOW
+    elif not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(1)
+    else:
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise SystemExit(1)
+        class AttrList(ctypes.Structure):
+            _fields_ = [
+                ("bitmapcount", ctypes.c_ushort),
+                ("reserved", ctypes.c_ushort),
+                ("commonattr", ctypes.c_uint),
+                ("volattr", ctypes.c_uint),
+                ("dirattr", ctypes.c_uint),
+                ("fileattr", ctypes.c_uint),
+                ("forkattr", ctypes.c_uint),
+            ]
+        attributes = AttrList(5, 0, 0x00000200, 0, 0, 0, 0)
+        buffer = ctypes.create_string_buffer(32)
+        function = ctypes.CDLL(None, use_errno=True).fgetattrlist
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.POINTER(AttrList),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        if function(descriptor, ctypes.byref(attributes), buffer, len(buffer), 0) != 0:
+            raise SystemExit(1)
+        length = struct.unpack_from("=I", buffer.raw, 0)[0]
+        birth_seconds, birth_nanoseconds = struct.unpack_from("=qq", buffer.raw, 4)
+        if length < 20:
+            raise SystemExit(1)
+        device, inode = opened.st_dev, opened.st_ino
+    finally:
+        os.close(descriptor)
+else:
+    raise SystemExit(1)
+if device <= 0 or inode <= 0 or birth_seconds <= 0 or not 0 <= birth_nanoseconds < 1_000_000_000:
+    raise SystemExit(1)
+print(f"{device}:{inode}:{birth_seconds}:{birth_nanoseconds}")
+PY
 }
 
 path_has_identity() {
@@ -127,10 +402,10 @@ cleanup_install_attempt() {
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" unlink-exact \
                     "${INSTALL_DIR}/defenseclaw" \
-                    "${CLI_PUBLISHED_ID%%:*}" "${CLI_PUBLISHED_ID#*:}" || true
-            elif path_has_identity \
-                "${INSTALL_DIR}/defenseclaw" "${CLI_PUBLISHED_ID}" true; then
-                rm -f "${INSTALL_DIR}/defenseclaw"
+                    "${CLI_PUBLISHED_ID}" \
+                    --custody-root "${INSTALL_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy CLI rollback residue was preserved because exact retirement is unavailable"
             fi
         fi
         if [[ -n "${GATEWAY_ROLLBACK_TOKEN:-}" \
@@ -138,25 +413,21 @@ cleanup_install_attempt() {
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rollback-token \
                 "${GATEWAY_ROLLBACK_TOKEN}" || true
         fi
-        if [[ -n "${GATEWAY_PUBLISHED_ID:-}" ]] \
-            && path_has_identity \
-                "${INSTALL_DIR}/defenseclaw-gateway" \
-                "${GATEWAY_PUBLISHED_ID}"; then
-            rm -f "${INSTALL_DIR}/defenseclaw-gateway"
+        if [[ -n "${GATEWAY_PUBLISHED_ID:-}" ]]; then
+            warn "Legacy gateway rollback residue was preserved because exact retirement is unavailable"
         fi
-        if [[ -n "${GATEWAY_ACTIVATION:-}" ]] \
-            && path_has_identity \
-                "${GATEWAY_ACTIVATION}" "${GATEWAY_ACTIVATION_ID:-}"; then
-            rm -f "${GATEWAY_ACTIVATION}"
+        if [[ -n "${GATEWAY_ACTIVATION:-}" ]]; then
+            warn "Legacy gateway activation residue was preserved because exact retirement is unavailable"
         fi
         if [[ -n "${VENV_CLAIM_ID:-}" ]]; then
             if [[ "${MODERN_RELEASE:-false}" == true \
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" remove-tree-exact \
                     "${DEFENSECLAW_VENV}" \
-                    "${VENV_CLAIM_ID%%:*}" "${VENV_CLAIM_ID#*:}" || true
-            elif path_has_identity "${DEFENSECLAW_VENV}" "${VENV_CLAIM_ID}"; then
-                rm -rf "${DEFENSECLAW_VENV}"
+                    "${VENV_CLAIM_ID}" \
+                    --custody-root "${STATE_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy environment rollback residue was preserved because exact retirement is unavailable"
             fi
         fi
         if [[ -n "${CONNECTOR_MARKER_ROLLBACK_TOKEN:-}" \
@@ -168,30 +439,24 @@ cleanup_install_attempt() {
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" unlink-exact \
                     "${DEFENSECLAW_HOME}/picked_connector" \
-                    "${CONNECTOR_MARKER_ID%%:*}" \
-                    "${CONNECTOR_MARKER_ID#*:}" || true
-            elif path_has_identity \
-                "${DEFENSECLAW_HOME}/picked_connector" \
-                "${CONNECTOR_MARKER_ID}"; then
-                rm -f "${DEFENSECLAW_HOME}/picked_connector"
+                    "${CONNECTOR_MARKER_ID}" \
+                    --custody-root "${STATE_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy connector marker residue was preserved because exact retirement is unavailable"
             fi
         fi
-        if [[ -n "${PICKED_CONNECTOR_ACTIVATION:-}" ]] \
-            && path_has_identity \
-                "${PICKED_CONNECTOR_ACTIVATION}" \
-                "${PICKED_CONNECTOR_ACTIVATION_ID:-}"; then
-            rm -f "${PICKED_CONNECTOR_ACTIVATION}"
+        if [[ -n "${PICKED_CONNECTOR_ACTIVATION:-}" ]]; then
+            warn "Legacy connector activation residue was preserved because exact retirement is unavailable"
         fi
         if [[ -n "${PLUGIN_CLAIM_ID:-}" ]]; then
             if [[ "${MODERN_RELEASE:-false}" == true \
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" remove-tree-exact \
                     "${DEFENSECLAW_HOME}/extensions/defenseclaw" \
-                    "${PLUGIN_CLAIM_ID%%:*}" "${PLUGIN_CLAIM_ID#*:}" || true
-            elif path_has_identity \
-                "${DEFENSECLAW_HOME}/extensions/defenseclaw" \
-                "${PLUGIN_CLAIM_ID}"; then
-                rm -rf "${DEFENSECLAW_HOME}/extensions/defenseclaw"
+                    "${PLUGIN_CLAIM_ID}" \
+                    --custody-root "${STATE_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy plugin rollback residue was preserved because exact retirement is unavailable"
             fi
         fi
         if [[ -n "${EXTENSIONS_CLAIM_ID:-}" ]]; then
@@ -199,11 +464,10 @@ cleanup_install_attempt() {
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
                     "${DEFENSECLAW_HOME}/extensions" \
-                    "${EXTENSIONS_CLAIM_ID%%:*}" \
-                    "${EXTENSIONS_CLAIM_ID#*:}" || true
-            elif path_has_identity \
-                "${DEFENSECLAW_HOME}/extensions" "${EXTENSIONS_CLAIM_ID}"; then
-                rmdir "${DEFENSECLAW_HOME}/extensions" 2>/dev/null || true
+                    "${EXTENSIONS_CLAIM_ID}" \
+                    --custody-root "${STATE_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy extensions rollback residue was preserved because exact retirement is unavailable"
             fi
         fi
         if [[ -n "${HOME_CLAIM_ID:-}" ]]; then
@@ -211,9 +475,10 @@ cleanup_install_attempt() {
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
                     "${DEFENSECLAW_HOME}" \
-                    "${HOME_CLAIM_ID%%:*}" "${HOME_CLAIM_ID#*:}" || true
-            elif path_has_identity "${DEFENSECLAW_HOME}" "${HOME_CLAIM_ID}"; then
-                rmdir "${DEFENSECLAW_HOME}" 2>/dev/null || true
+                    "${HOME_CLAIM_ID}" \
+                    --custody-root "${STATE_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy home rollback residue was preserved because exact retirement is unavailable"
             fi
         fi
         if [[ -n "${INSTALL_DIR_CLAIM_ID:-}" ]]; then
@@ -221,9 +486,10 @@ cleanup_install_attempt() {
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
                     "${INSTALL_DIR}" \
-                    "${INSTALL_DIR_CLAIM_ID%%:*}" "${INSTALL_DIR_CLAIM_ID#*:}" || true
-            elif path_has_identity "${INSTALL_DIR}" "${INSTALL_DIR_CLAIM_ID}"; then
-                rmdir "${INSTALL_DIR}" 2>/dev/null || true
+                    "${INSTALL_DIR_CLAIM_ID}" \
+                    --custody-root "${INSTALL_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy binary directory residue was preserved because exact retirement is unavailable"
             fi
         fi
         if [[ -n "${LOCAL_BIN_PARENT_CLAIM_ID:-}" ]]; then
@@ -233,10 +499,10 @@ cleanup_install_attempt() {
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
                 "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rmdir-exact \
                     "${bin_parent}" \
-                    "${LOCAL_BIN_PARENT_CLAIM_ID%%:*}" \
-                    "${LOCAL_BIN_PARENT_CLAIM_ID#*:}" || true
-            elif path_has_identity "${bin_parent}" "${LOCAL_BIN_PARENT_CLAIM_ID}"; then
-                rmdir "${bin_parent}" 2>/dev/null || true
+                    "${LOCAL_BIN_PARENT_CLAIM_ID}" \
+                    --custody-root "${INSTALL_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy binary parent residue was preserved because exact retirement is unavailable"
             fi
         fi
     fi
@@ -244,11 +510,15 @@ cleanup_install_attempt() {
     if [[ -n "${POLICY_DIR:-}" && -n "${POLICY_DIR_ID:-}" ]]; then
         if [[ "${MODERN_RELEASE:-false}" == true \
             && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
-            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" remove-tree-exact \
-                "${POLICY_DIR}" \
-                "${POLICY_DIR_ID%%:*}" "${POLICY_DIR_ID#*:}" || true
-        elif path_has_identity "${POLICY_DIR}" "${POLICY_DIR_ID}"; then
-            rm -rf "${POLICY_DIR}"
+            if "${POLICY_PYTHON}" "${PUBLISH_HELPER}" remove-tree-exact \
+                "${POLICY_DIR}" "${POLICY_DIR_ID}" \
+                --custody-root "${POLICY_CUSTODY_ROOT}"; then
+                warn "Authenticated policy material was retired, not deleted, at ${POLICY_CUSTODY_ROOT}"
+            else
+                warn "Authenticated policy material could not be retired and was preserved at ${POLICY_DIR}"
+            fi
+        else
+            warn "Legacy policy residue was preserved because exact retirement is unavailable"
         fi
     fi
     return "${status}"
@@ -260,6 +530,9 @@ claim_fresh_install_home() {
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         "${POLICY_PYTHON}" "${PUBLISH_HELPER}" ensure-real-directory "${home_parent}" \
             || die "Could not bind the fresh-install home parent"
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" prepare-custody \
+            "${STATE_CUSTODY_ROOT}" "${home_parent}" \
+            || die "State rollback custody is not on the DefenseClaw home filesystem; no payload was activated"
         HOME_CLAIM_ID="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-directory "${DEFENSECLAW_HOME}"
         )" || die "A DefenseClaw home appeared during installation; it was preserved and no payload was activated"
@@ -279,8 +552,8 @@ claim_fresh_install_home() {
         VENV_CLAIM_ID="$(path_identity "${DEFENSECLAW_VENV}")" \
             || die "Could not bind the new DefenseClaw environment identity"
     fi
-    [[ "${HOME_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ \
-       && "${VENV_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+    [[ "${HOME_CLAIM_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ \
+       && "${VENV_CLAIM_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Fresh-install directory custody returned an invalid identity"
 
     claim_fresh_install_bin_dir
@@ -309,6 +582,12 @@ claim_fresh_install_bin_dir() {
             || die "Could not bind the fresh-install binary parent identity"
     fi
 
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" prepare-custody \
+            "${INSTALL_CUSTODY_ROOT}" "${bin_parent}" \
+            || die "Binary rollback custody is not on the install filesystem; no payload was activated"
+    fi
+
     if [[ -e "${INSTALL_DIR}" || -L "${INSTALL_DIR}" ]]; then
         if [[ "${MODERN_RELEASE:-false}" == true ]]; then
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" ensure-real-directory "${INSTALL_DIR}" \
@@ -329,43 +608,51 @@ claim_fresh_install_bin_dir() {
     fi
 
     [[ -z "${LOCAL_BIN_PARENT_CLAIM_ID}" \
-        || "${LOCAL_BIN_PARENT_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+        || "${LOCAL_BIN_PARENT_CLAIM_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Fresh-install binary parent custody returned an invalid identity"
     [[ -z "${INSTALL_DIR_CLAIM_ID}" \
-        || "${INSTALL_DIR_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+        || "${INSTALL_DIR_CLAIM_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Fresh-install binary directory custody returned an invalid identity"
 }
 
 complete_install_attempt() {
+    local retained_install_custody=false retained_state_custody=false
     if [[ -n "${CONNECTOR_MARKER_ROLLBACK_TOKEN:-}" ]]; then
         "${POLICY_PYTHON}" "${PUBLISH_HELPER}" commit-token \
             "${CONNECTOR_MARKER_ROLLBACK_TOKEN}" \
             || die "Could not close connector marker rollback custody"
         CONNECTOR_MARKER_ROLLBACK_TOKEN=""
+        retained_state_custody=true
     fi
     if [[ -n "${GATEWAY_ROLLBACK_TOKEN:-}" ]]; then
         "${POLICY_PYTHON}" "${PUBLISH_HELPER}" commit-token \
             "${GATEWAY_ROLLBACK_TOKEN}" \
             || die "Could not close fresh gateway rollback custody"
         GATEWAY_ROLLBACK_TOKEN=""
+        retained_install_custody=true
     fi
-    if [[ -n "${GATEWAY_ACTIVATION:-}" ]] \
-        && path_has_identity \
-            "${GATEWAY_ACTIVATION}" "${GATEWAY_ACTIVATION_ID:-}"; then
-        rm -f "${GATEWAY_ACTIVATION}"
+    if [[ -n "${GATEWAY_ACTIVATION:-}" ]]; then
+        warn "Legacy gateway activation residue was preserved because exact retirement is unavailable"
     fi
     GATEWAY_ACTIVATION=""
     GATEWAY_PRECLAIM_ID=""
     GATEWAY_ACTIVATION_ID=""
     GATEWAY_PUBLISHED_ID=""
-    if [[ -n "${PICKED_CONNECTOR_ACTIVATION:-}" ]] \
-        && path_has_identity \
-            "${PICKED_CONNECTOR_ACTIVATION}" \
-            "${PICKED_CONNECTOR_ACTIVATION_ID:-}"; then
-        rm -f "${PICKED_CONNECTOR_ACTIVATION}"
+    if [[ -n "${PICKED_CONNECTOR_ACTIVATION:-}" ]]; then
+        warn "Legacy connector activation residue was preserved because exact retirement is unavailable"
     fi
     PICKED_CONNECTOR_ACTIVATION=""
     PICKED_CONNECTOR_ACTIVATION_ID=""
+    if [[ "${retained_install_custody}" == true ]]; then
+        warn "Inactive rollback hardlinks were retained at ${INSTALL_CUSTODY_ROOT}; they share payload blocks with active files"
+    fi
+    if [[ "${retained_state_custody}" == true \
+        && "${STATE_CUSTODY_ROOT}" != "${INSTALL_CUSTODY_ROOT}" ]]; then
+        warn "Inactive state rollback hardlinks were retained at ${STATE_CUSTODY_ROOT}; they share payload blocks with active files"
+    fi
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        finish_install_attempt
+    fi
     INSTALL_SUCCEEDED=true
 }
 
@@ -517,14 +804,15 @@ record_picked_connector() {
             || die "Could not stage the selected connector marker"
         CONNECTOR_MARKER_ROLLBACK_TOKEN="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-regular \
-                "${source}" "${destination}" --retain-token
+                "${source}" "${destination}" --retain-token \
+                --custody-root "${STATE_CUSTODY_ROOT}"
         )" || die "A connector marker appeared during installation; it was preserved"
         [[ -n "${CONNECTOR_MARKER_ROLLBACK_TOKEN}" ]] \
             || die "Connector marker publication did not return rollback custody"
         local retained_stages=(
             "${DEFENSECLAW_HOME}"/.picked_connector.source-install-*
         )
-        [[ ${#retained_stages[@]} -eq 1 ]] \
+        [[ ${#retained_stages[@]} -eq 1 && -e "${retained_stages[0]}" ]] \
             || die "Connector marker rollback custody could not be bound"
         local observed_marker_id retained_stage_id
         observed_marker_id="$(path_identity "${destination}")" \
@@ -681,7 +969,19 @@ load_release_policy() {
     step "Authenticating release policy"
     [[ -n "${POLICY_PYTHON:-}" && -x "${POLICY_PYTHON}" ]] \
         || die "A supported Python interpreter is required to validate the signed release artifact policy"
-    POLICY_DIR="$(mktemp -d)"
+    local policy_dir_raw
+    policy_dir_raw="$(mktemp -d)"
+    POLICY_DIR="$(cd "${policy_dir_raw}" && pwd -P)" \
+        || die "Could not canonicalize the release-policy staging directory"
+    local policy_custody_key
+    policy_custody_key="$("${POLICY_PYTHON}" - "${HOME}" <<'PY'
+import hashlib
+import os
+import sys
+print(hashlib.sha256(os.fsencode(sys.argv[1])).hexdigest()[:24])
+PY
+)" || die "Could not derive deterministic policy retirement custody"
+    POLICY_CUSTODY_ROOT="$(dirname "${POLICY_DIR}")/.defenseclaw-install-custody-${UID}-${policy_custody_key}"
     POLICY_DIR_ID="$(path_identity "${POLICY_DIR}")" \
         || die "Could not bind the release-policy staging directory identity"
 
@@ -852,10 +1152,11 @@ for source_value, destination_value, expected_outer_sha256 in zip(
             output_stream.flush()
             os.fsync(destination_fd)
     except BaseException:
-        try:
-            destination.unlink()
-        except FileNotFoundError:
-            pass
+        # Keep a partial materialization inside the attempt-owned private
+        # policy directory.  Pathname unlink after a separate identity check
+        # would let a concurrent replacement be deleted.  The outer exact-tree
+        # rollback retires this residue under deterministic private custody;
+        # it never claims that the retained bytes were eagerly deleted.
         raise
     finally:
         os.close(source_fd)
@@ -1033,7 +1334,7 @@ install_gateway() {
         GATEWAY_ROLLBACK_TOKEN="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-regular \
                 "${gateway_source}" "${INSTALL_DIR}/defenseclaw-gateway" \
-                --retain-token
+                --retain-token --custody-root "${INSTALL_CUSTODY_ROOT}"
         )" || die "A DefenseClaw gateway appeared during installation; it was preserved and this installation was not activated"
         [[ -n "${GATEWAY_ROLLBACK_TOKEN}" ]] \
             || die "Fresh gateway publication did not return rollback custody"
@@ -1045,9 +1346,7 @@ install_gateway() {
         GATEWAY_PRECLAIM_ID="$(path_identity "${activation}")" \
             || die "Could not bind the allocated gateway activation file"
         cp "${gateway_source}" "${activation}" || {
-            if path_has_identity "${activation}" "${GATEWAY_PRECLAIM_ID}"; then
-                rm -f "${activation}"
-            fi
+            warn "Legacy gateway activation residue was preserved after staging failed"
             die "Could not stage the gateway for activation"
         }
         chmod +x "${activation}" || {
@@ -1068,9 +1367,7 @@ install_gateway() {
         GATEWAY_ACTIVATION_ID="$(path_identity "${activation}")" \
             || die "Could not bind fresh gateway activation custody"
         if ! ln "${activation}" "${INSTALL_DIR}/defenseclaw-gateway"; then
-            if path_has_identity "${activation}" "${GATEWAY_ACTIVATION_ID}"; then
-                rm -f "${activation}"
-            fi
+            warn "Legacy gateway activation residue was preserved after publication failed"
             die "A DefenseClaw gateway appeared during installation; it was preserved and this installation was not activated"
         fi
         local observed_gateway_id
@@ -1081,7 +1378,8 @@ install_gateway() {
         [[ "${observed_gateway_id}" == "${GATEWAY_ACTIVATION_ID}" ]] \
             || die "Fresh gateway activation identity changed during publication"
     fi
-    [[ -z "${extraction_dir}" ]] || rm -rf "${extraction_dir}"
+    [[ -z "${extraction_dir}" ]] \
+        || warn "Legacy gateway extraction residue was preserved because exact retirement is unavailable"
 
     ok "Gateway installed"
 }
@@ -1114,13 +1412,14 @@ install_python_cli() {
         fetch_artifact "${whl_url}" "${tmp}/${whl_name}"
         uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${tmp}/${whl_name}" \
             || die "Failed to install CLI from wheel"
-        rm -rf "${tmp}"
+        warn "Legacy wheel download residue was preserved because exact retirement is unavailable"
     fi
 
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         CLI_PUBLISHED_ID="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-symlink \
-                "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
+                "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw" \
+                --custody-root "${INSTALL_CUSTODY_ROOT}"
         )" || die "A DefenseClaw CLI appeared during installation; it was preserved and this installation was not activated"
     else
         mkdir -p "${INSTALL_DIR}"
@@ -1129,7 +1428,7 @@ install_python_cli() {
         CLI_PUBLISHED_ID="$(path_identity "${INSTALL_DIR}/defenseclaw")" \
             || die "Could not bind the installed DefenseClaw CLI identity"
     fi
-    [[ "${CLI_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+    [[ "${CLI_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Installed DefenseClaw CLI returned an invalid identity"
 
     if "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null; then
@@ -1145,10 +1444,17 @@ install_python_cli() {
 # attempting install so installs on earlier releases do not fail.
 
 release_has_plugin() {
+    local tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        # Protocol-2 release candidates declare this artifact in the sealed
+        # asset set.  Do not turn a missing/tampered required artifact into an
+        # optional skip; installation below must authenticate it or fail.
+        return 0
+    fi
     if [[ -n "${LOCAL_DIR}" ]]; then
-        ls "${LOCAL_DIR}"/defenseclaw-plugin-*.tar.gz 2>/dev/null | head -1 | grep -q .
+        [[ -f "${LOCAL_DIR}/${tarball_name}" && ! -L "${LOCAL_DIR}/${tarball_name}" ]]
     else
-        local url="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
+        local url="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${tarball_name}"
         curl -sSfL --head --output /dev/null "${url}" 2>/dev/null
     fi
 }
@@ -1182,22 +1488,39 @@ install_plugin() {
         PLUGIN_CLAIM_ID="$(path_identity "${dest}")" \
             || die "Could not bind the DefenseClaw plugin directory identity"
     fi
-    [[ "${EXTENSIONS_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ \
-        && "${PLUGIN_CLAIM_ID}" =~ ^[0-9]+:[0-9]+$ ]] \
+    [[ "${EXTENSIONS_CLAIM_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ \
+        && "${PLUGIN_CLAIM_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Plugin directory custody returned an invalid identity"
 
-    if [[ -n "${LOCAL_DIR}" ]]; then
-        local tarball
-        tarball="$(ls "${LOCAL_DIR}"/defenseclaw-plugin-*.tar.gz | head -1)"
-        tar -xzf "${tarball}" -C "${dest}"
+    local tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
+    local tarball
+    if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+        # The checksum list was authenticated with the release-workflow
+        # Fulcio identity before any payload activation.  Materialize the exact
+        # versioned plugin in the private policy directory and bind its bytes to
+        # that signed list before extraction; a glob or unverified local archive
+        # must never become executable OpenClaw code.
+        tarball="${POLICY_DIR}/${tarball_name}"
+        fetch_artifact "$(artifact_path "${tarball_name}")" "${tarball}"
+        verify_checksum "${tarball}" "${tarball_name}"
+    elif [[ -n "${LOCAL_DIR}" ]]; then
+        tarball="${LOCAL_DIR}/${tarball_name}"
+        [[ -f "${tarball}" && ! -L "${tarball}" ]] \
+            || die "Local plugin artifact is not an exact regular file: ${tarball_name}"
     else
-        local tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
         local tarball_url tmp
         tarball_url="$(artifact_path "${tarball_name}")"
         tmp="$(mktemp -d)"
-        fetch_artifact "${tarball_url}" "${tmp}/${tarball_name}"
-        tar -xzf "${tmp}/${tarball_name}" -C "${dest}"
-        rm -rf "${tmp}"
+        tarball="${tmp}/${tarball_name}"
+        fetch_artifact "${tarball_url}" "${tarball}"
+    fi
+
+    tar -xzf "${tarball}" -C "${dest}" \
+        || die "Failed to extract authenticated OpenClaw plugin"
+    if [[ "${MODERN_RELEASE:-false}" != true && -z "${LOCAL_DIR}" ]]; then
+        # This is the legacy path only.  Modern release artifacts remain under
+        # exact policy-directory custody until the attempt is finalized.
+        warn "Legacy plugin download residue was preserved because exact retirement is unavailable"
     fi
 
     ok "Plugin installed"
@@ -1394,6 +1717,7 @@ YES_MODE=false
 LOCAL_DIR=""
 POLICY_DIR=""
 POLICY_DIR_ID=""
+POLICY_CUSTODY_ROOT=""
 MODERN_RELEASE=false
 GATEWAY_ARTIFACT=""
 WHEEL_ARTIFACT=""
@@ -1479,6 +1803,10 @@ while [[ $# -gt 0 ]]; do
             echo "  DEFENSECLAW_HOME   Install directory (default: ~/.defenseclaw)"
             echo "  VERSION            Specific release version to install"
             echo "  OPENSHELL_VERSION  openshell-sandbox version (default: 0.0.16)"
+            echo "  Retired install custody is kept privately at ~/.defenseclaw-install-custody."
+            echo "  A custom DEFENSECLAW_HOME uses same-filesystem custody beside that directory."
+            echo "  After health verification and with no installer running, operators may inspect"
+            echo "  and remove that entire inactive custody directory during maintenance."
             echo ""
             echo "For a source-owned development install:"
             echo "  make install"
@@ -1508,15 +1836,11 @@ if [[ -n "${LOCAL_DIR}" ]]; then
     info "Installing from local directory: ${LOCAL_DIR}"
 fi
 
-# This installer intentionally owns fresh hosts only. Re-running it over an
-# installed controller would bypass release-owned upgrade manifests, bridge
-# selection, migration rollback, and post-upgrade health verification.
-if has defenseclaw \
-    || has defenseclaw-gateway \
-    || [[ -e "${DEFENSECLAW_HOME}" || -L "${DEFENSECLAW_HOME}" ]] \
-    || [[ -e "${DEFENSECLAW_VENV}" || -L "${DEFENSECLAW_VENV}" ]] \
-    || [[ -e "${INSTALL_DIR}/defenseclaw" || -L "${INSTALL_DIR}/defenseclaw" ]] \
-    || [[ -e "${INSTALL_DIR}/defenseclaw-gateway" || -L "${INSTALL_DIR}/defenseclaw-gateway" ]]; then
+# Ordinary existing installs, including healthy completed installs that retain
+# inactive rollback custody, refuse before dependency or artifact work.  Only
+# an exact private in-progress marker authorizes signed interrupted recovery.
+# Missing, malformed, symlinked, or completed marker state fails closed.
+if existing_install_detected && ! interrupted_install_attempt_detected; then
     die "An existing DefenseClaw installation was detected. No changes were made.
   Use the release-owned upgrade resolver so required bridge releases, rollback, and health checks are enforced."
 fi
@@ -1526,6 +1850,51 @@ resolve_version
 ensure_uv
 ensure_python
 load_release_policy
+if [[ "${MODERN_RELEASE}" == true ]]; then
+    # Bind both roots before publishing payloads or rollback-token hardlinks.
+    # A custom state home may be on another filesystem; its sibling custody is
+    # prepared against that physical parent.  The later claim functions repeat
+    # these checks at the final managed parents immediately before mutation.
+    state_parent="$(dirname "${DEFENSECLAW_HOME}")"
+    "${POLICY_PYTHON}" "${PUBLISH_HELPER}" ensure-real-directory "${state_parent}" \
+        || die "Could not bind the fresh-install home parent"
+    "${POLICY_PYTHON}" "${PUBLISH_HELPER}" prepare-custody \
+        "${STATE_CUSTODY_ROOT}" "${state_parent}" \
+        || die "State rollback custody is not on the DefenseClaw home filesystem; no payload was activated"
+    install_anchor="${HOME}"
+    if [[ -e "$(dirname "${INSTALL_DIR}")" || -L "$(dirname "${INSTALL_DIR}")" ]]; then
+        install_anchor="$(dirname "${INSTALL_DIR}")"
+    fi
+    "${POLICY_PYTHON}" "${PUBLISH_HELPER}" prepare-custody \
+        "${INSTALL_CUSTODY_ROOT}" "${install_anchor}" \
+        || die "Binary rollback custody is not on the install filesystem; no payload was activated"
+    "${POLICY_PYTHON}" "${PUBLISH_HELPER}" recover-custody "${INSTALL_CUSTODY_ROOT}" \
+        || die "An interrupted install retirement could not be reconciled; all foreign state was preserved"
+    if [[ "${STATE_CUSTODY_ROOT}" != "${INSTALL_CUSTODY_ROOT}" ]]; then
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" recover-custody "${STATE_CUSTODY_ROOT}" \
+            || die "An interrupted state retirement could not be reconciled; all foreign state was preserved"
+    fi
+    "${POLICY_PYTHON}" "${PUBLISH_HELPER}" recover-custody "${POLICY_CUSTODY_ROOT}" \
+        || die "An interrupted policy retirement could not be reconciled; all foreign state was preserved"
+fi
+
+# This installer intentionally owns fresh hosts only. Re-running it over an
+# installed controller would bypass release-owned upgrade manifests, bridge
+# selection, migration rollback, and post-upgrade health verification. Signed
+# retirement recovery above runs first so a killed prior fresh attempt can
+# converge without treating its placeholders as an installed controller.
+if existing_install_detected; then
+    die "An existing DefenseClaw installation was detected. No changes were made.
+  Use the release-owned upgrade resolver so required bridge releases, rollback, and health checks are enforced."
+fi
+
+if [[ "${MODERN_RELEASE:-false}" == true ]]; then
+    # This durable marker precedes every managed payload publication.  Failure
+    # leaves it in private same-filesystem custody so a later invocation can
+    # authenticate the policy and converge the interrupted retirement first.
+    begin_install_attempt
+fi
+
 pick_connector_interactive
 claim_fresh_install_home
 install_gateway

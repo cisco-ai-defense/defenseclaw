@@ -26,7 +26,13 @@ RELEASE_ARTIFACTS = release_candidate._expected_release_artifacts(VERSION)
 PROTECTED_WHEEL = RELEASE_ARTIFACTS["wheel"]
 PHASE_TWO_MUTATOR_SOURCE = (ROOT / "cli/defenseclaw/phase_two_mutator.py").read_text(encoding="utf-8")
 HARD_CUT_BUNDLE_TRANSACTION_SOURCE = """
+import base64
+import json
+import os
+import stat
 import shutil
+
+_MAX_BUNDLE_ROLLBACK_METADATA_BYTES = 4_194_304
 
 def _fsync_directory_chain(path, *, stop):
     current = path
@@ -39,22 +45,71 @@ def _fsync_directory_chain(path, *, stop):
             raise RuntimeError("backup root is not an ancestor")
         current = parent
 
-def _activate_local_observability_manifest(*, was_running: bool):
-    managed_paths = {"managed/file"}
-    backup_root = object()
-    backup_metadata = {
-        "managed_paths": sorted(managed_paths),
-        "restart_required": was_running,
+def _serialize_windows_security(security):
+    return {
+        "owner": base64.b64encode(security.owner).decode("ascii"),
+        "dacl": base64.b64encode(security.dacl).decode("ascii"),
+        "dacl_protected": security.dacl_protected,
     }
-    for path in managed_paths:
-        backup_path = path
+
+def _activate_local_observability_manifest(*, was_running: bool):
+    existing_paths = {"managed/existing"}
+    created_paths = {"managed/created"}
+    managed_paths = existing_paths | created_paths
+    backup_root = object()
+    backup_managed = backup_root / "managed"
+    backup_created = backup_root / "created"
+    backup_retired = backup_root / "retired"
+    _mkdir_private(backup_managed)
+    _mkdir_private(backup_created)
+    _mkdir_private(backup_retired)
+    _fsync_directory_chain(backup_managed, stop=backup_root)
+    _fsync_directory_chain(backup_created, stop=backup_root)
+    _fsync_directory_chain(backup_retired, stop=backup_root)
+    old_sha256 = {}
+    old_modes = {}
+    created_sha256 = {}
+    old_windows_security = {}
+    for path in existing_paths:
+        backup_path = backup_managed / path
         shutil.copy2(path, backup_path)
         _fsync_file(backup_path)
         _fsync_directory_chain(backup_path.parent, stop=backup_root)
-    _atomic_write_bytes(backup_root / "refresh-backup.json", b"metadata")
+        old_sha256[path] = _sha256_file(backup_path)
+        old_modes[path] = stat.S_IMODE(path.stat().st_mode)
+        if os.name == "nt":
+            old_windows_security[path] = _serialize_windows_security(
+                windows_acl.capture_path(path)
+            )
+    for path in created_paths:
+        created_claim = backup_created / path
+        _atomic_copy_file("stage", created_claim)
+        _fsync_file(created_claim)
+        _fsync_directory_chain(created_claim.parent, stop=backup_root)
+        created_sha256[path] = _sha256_file(created_claim)
+    backup_metadata = {
+        "schema_version": 2,
+        "managed_paths": sorted(managed_paths),
+        "existing_paths": sorted(existing_paths),
+        "old_sha256": old_sha256,
+        "old_modes": old_modes,
+        "created_sha256": created_sha256,
+        "old_windows_security": old_windows_security,
+        "restart_required": was_running,
+    }
+    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")
+    if not 0 < len(serialized_metadata) <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES:
+        raise OSError("rollback metadata exceeds the bridge reader bound")
+    _atomic_write_bytes(backup_root / "refresh-backup.json", serialized_metadata)
     mutation_started = False
     mutation_started = True
-    _atomic_copy_file("stage", "destination")
+    for path in created_paths:
+        created_claim = backup_created / path
+        destination = path
+        os.link(created_claim, destination)
+    for path in existing_paths:
+        destination = path
+        _atomic_copy_file("stage", destination)
     return mutation_started
 """
 
@@ -421,6 +476,24 @@ def test_windows_release_gate_does_not_require_a_posix_execute_bit(
     monkeypatch.setattr(release_candidate.os, "name", "nt")
 
     assert release_candidate._validated_resolver_source("defenseclaw-upgrade.sh") == resolver
+
+
+def test_local_release_harness_stages_exact_reviewed_resolvers(tmp_path: Path) -> None:
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+
+    release_candidate.stage_resolvers(release_dir, VERSION)
+
+    assert {path.name for path in release_dir.iterdir()} == set(
+        release_candidate.resolver_asset_names(VERSION)
+    )
+    for name in release_candidate.resolver_asset_names(VERSION):
+        assert (release_dir / name).read_bytes() == release_candidate.RESOLVER_ASSET_SOURCES[
+            name
+        ].read_bytes()
+
+    with pytest.raises(release_candidate.CandidateError, match="destination already exists"):
+        release_candidate.stage_resolvers(release_dir, VERSION)
 
 
 def test_exact_reviewed_release_sources_have_cross_platform_lf_attributes() -> None:
@@ -1037,8 +1110,8 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         ),
         (
             HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
-                "stop=backup_root",
-                "stop=backup_path.parent",
+                "        _fsync_directory_chain(backup_path.parent, stop=backup_root)\n",
+                "        _fsync_directory_chain(backup_path.parent, stop=backup_path.parent)\n",
             ),
             "must include the backup root",
         ),
@@ -1051,6 +1124,198 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
             ),
             "before directory entries",
         ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "        old_modes[path] = stat.S_IMODE(path.stat().st_mode)\n",
+                "        old_modes[path] = 0o600\n",
+            ),
+            "exact digest and mode inventory",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        "schema_version": 2,\n',
+                '        "schema_version": 1,\n',
+            ),
+            "schema version 2",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    managed_paths = existing_paths | created_paths\n",
+                "    managed_paths = existing_paths\n",
+            ),
+            "exact existing/created union",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        "created_sha256": created_sha256,\n',
+                "",
+            ),
+            "created_sha256",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        "created_sha256": created_sha256,\n',
+                '        "created_sha256": (created_sha256, {})[0],\n',
+            ),
+            "created_sha256 is not bound",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        "old_windows_security": old_windows_security,\n',
+                "",
+            ),
+            "old_windows_security",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                "    serialized_metadata = b\"not the metadata object\"\n",
+            ),
+            "publish its exact schema-2 metadata object",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    if not 0 < len(serialized_metadata) <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES:\n"
+                "        raise OSError(\"rollback metadata exceeds the bridge reader bound\")\n",
+                "",
+            ),
+            "serialized metadata is not bounded",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "len(serialized_metadata) <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES",
+                "len(serialized_metadata) >= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES",
+            ),
+            "invalid size bound",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '    backup_created = backup_root / "created"\n',
+                '    backup_created = backup_root / "claims"\n',
+            ),
+            "created rollback custody",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    _mkdir_private(backup_retired)\n",
+                "",
+            ),
+            "retired rollback custody is not durably created",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "        _fsync_file(created_claim)\n",
+                "",
+            ),
+            "claims are not durably retained",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "        _fsync_directory_chain(created_claim.parent, stop=backup_root)\n",
+                "",
+            ),
+            "claims are not durably retained",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "        created_sha256[path] = _sha256_file(created_claim)\n",
+                "",
+            ),
+            "claim digest inventory is incomplete",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "        os.link(created_claim, destination)\n",
+                "",
+            ),
+            "lack one no-replace publication",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "                windows_acl.capture_path(path)\n",
+                "                windows_acl.private_security_for_directory(path)\n",
+            ),
+            "not captured and serialized exactly",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        if os.name == "nt":\n',
+                '        if os.name != "nt":\n',
+            ),
+            "not platform-exact",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        "owner": base64.b64encode(security.owner).decode("ascii"),\n',
+                "",
+            ),
+            "lacks exact owner/DACL fields",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        "owner": base64.b64encode(security.owner).decode("ascii"),\n',
+                '        "owner": (base64.b64encode(security.owner).decode("ascii"), "forged")[1],\n',
+            ),
+            "not canonically serialized",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "        destination = path\n",
+                '        destination = "foreign/path"\n',
+                1,
+            ),
+            "not claim-bound",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                '        _atomic_copy_file("stage", created_claim)\n',
+                '        _atomic_copy_file("stage", created_claim)\n'
+                '        _atomic_copy_file("extra", created_claim)\n',
+            ),
+            "lacks one retained target-created claim loop",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    _atomic_copy_file("stage", path)\n'
+                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+            ),
+            "ambiguous copy mutation",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    _atomic_write_bytes("canonical", b"early mutation")\n'
+                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+            ),
+            "ambiguous direct file write",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    path.write_bytes(b"early mutation")\n'
+                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+            ),
+            "bypasses its reviewed publication primitives",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "            old_windows_security[path] = _serialize_windows_security(\n",
+                "            old_windows_security['wrong'] = _serialize_windows_security(\n",
+            ),
+            "not keyed by its exact path",
+        ),
+        (
+            HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
+                "    _atomic_write_bytes(backup_root / \"refresh-backup.json\", serialized_metadata)\n"
+                "    mutation_started = False\n"
+                "    mutation_started = True\n",
+                "    mutation_started = False\n"
+                "    mutation_started = True\n"
+                "    _atomic_write_bytes(backup_root / \"refresh-backup.json\", serialized_metadata)\n",
+            ),
+            "not durable before first mutation",
+        ),
     ],
 )
 def test_hard_cut_candidate_requires_durable_bundle_rollback_authority(
@@ -1058,6 +1323,38 @@ def test_hard_cut_candidate_requires_durable_bundle_rollback_authority(
     message: str,
 ) -> None:
     with pytest.raises(release_candidate.CandidateError, match=message):
+        release_candidate._validate_hard_cut_bundle_transaction(source)
+
+
+def test_hard_cut_candidate_rejects_legacy_minimal_bundle_transaction() -> None:
+    source = """
+import shutil
+
+def _fsync_directory_chain(path, *, stop):
+    while path != stop:
+        _fsync_directory(path)
+        path = path.parent
+
+def _activate_local_observability_manifest(*, was_running: bool):
+    managed_paths = {"managed/file"}
+    backup_root = object()
+    backup_metadata = {
+        "managed_paths": sorted(managed_paths),
+        "restart_required": was_running,
+    }
+    for path in managed_paths:
+        backup_path = path
+        shutil.copy2(path, backup_path)
+        _fsync_file(backup_path)
+        _fsync_directory_chain(backup_path.parent, stop=backup_root)
+    _atomic_write_bytes(backup_root / "refresh-backup.json", b"metadata")
+    mutation_started = True
+    return mutation_started
+"""
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="metadata size bound",
+    ):
         release_candidate._validate_hard_cut_bundle_transaction(source)
 
 

@@ -124,9 +124,6 @@ def cli(ctx: click.Context) -> None:
         return
 
     from defenseclaw import config as cfg_mod
-    from defenseclaw.db import Store
-    from defenseclaw.logger import Logger
-
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
@@ -135,6 +132,15 @@ def cli(ctx: click.Context) -> None:
             err=True,
         )
         raise SystemExit(1)
+
+    # The upgrade controller owns its authenticated preflight, receipts, and
+    # rollback transaction. Do not initialize generic audit state before that
+    # preflight: a refused direct upgrade must not create or alter audit.db.
+    if invoked == "upgrade":
+        return
+
+    from defenseclaw.db import Store
+    from defenseclaw.logger import Logger
 
     # Fast-fail on config errors before any command runs, so operators
     # see a clear diagnostic instead of a deep stack trace. Skipped for

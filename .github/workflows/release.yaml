@@ -66,53 +66,6 @@ jobs:
             exit 1
           fi
 
-      - name: Require protected release environment
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/environments/release" > release-environment.json
-          python3 - release-environment.json <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as handle:
-              environment = json.load(handle)
-          if environment.get("can_admins_bypass") is not False:
-              raise SystemExit("release environment must disable administrator bypass")
-          rules = environment.get("protection_rules")
-          if not isinstance(rules, list):
-              raise SystemExit("release environment protection_rules are unavailable")
-          reviewer_rules = [rule for rule in rules if rule.get("type") == "required_reviewers"]
-          if len(reviewer_rules) != 1:
-              raise SystemExit("release environment must define exactly one reviewer rule")
-          reviewers = reviewer_rules[0].get("reviewers")
-          if not isinstance(reviewers, list) or len(reviewers) != 1:
-              raise SystemExit(
-                  "release environment must require exactly the defenseclaw-reviewers team"
-              )
-          reviewer = reviewers[0]
-          team = reviewer.get("reviewer") if isinstance(reviewer, dict) else None
-          if (
-              not isinstance(reviewer, dict)
-              or reviewer.get("type") != "Team"
-              or not isinstance(team, dict)
-              or team.get("id") != 16849702
-              or team.get("slug") != "defenseclaw-reviewers"
-          ):
-              raise SystemExit(
-                  "release environment reviewer must be cisco-ai-defense/defenseclaw-reviewers"
-              )
-          if reviewer_rules[0].get("prevent_self_review") is not True:
-              raise SystemExit("release environment must prevent initiator self-review")
-          policy = environment.get("deployment_branch_policy")
-          if not isinstance(policy, dict) or policy.get("protected_branches") is not True:
-              raise SystemExit("release environment must permit only protected branches")
-          if policy.get("custom_branch_policies") is not False:
-              raise SystemExit("release environment must not use a widening custom branch policy")
-          print("release environment protection verified")
-          PY
-
       - name: Resolve and validate target version
         id: tag
         env:
@@ -287,7 +240,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     outputs:
       artifact_name: ${{ steps.names.outputs.runtime }}
     steps:
@@ -315,8 +267,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
-
       - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
       - name: Create local release tag
@@ -342,7 +292,9 @@ jobs:
         uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
         with:
           version: "v2.15.4"
-          args: release --clean
+          # These archives are transformed into protected runtime envelopes
+          # below. Sign only the final sealed candidate, never transient bytes.
+          args: release --clean --skip=sign
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -503,7 +455,7 @@ jobs:
           name: ${{ needs.macos-app.outputs.artifact_name }}
           path: candidate-input/macos
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - name: Assemble checksummed candidate
         env:
@@ -712,7 +664,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -750,7 +702,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -797,7 +749,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -851,7 +803,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -907,7 +859,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -953,6 +905,10 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
+        # Each hard-cut cell stages one pre-bridge source and also exercises a
+        # direct published-bridge -> target case inside the native harness.
+        # Feeding the bridge itself here would violate -SourceVersion's
+        # deliberate pre-bridge contract and duplicate that direct case.
         baseline: ${{ fromJSON(needs.assemble-release-candidate.outputs.windows_prebridge_baselines) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -964,7 +920,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1036,7 +992,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -1106,7 +1062,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

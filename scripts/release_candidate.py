@@ -275,6 +275,16 @@ def _validate_resolver_assets(directory: Path, version: str) -> None:
             raise CandidateError(f"release resolver differs from reviewed source: {name}")
 
 
+def stage_resolvers(directory: Path, version: str) -> None:
+    """Stage the exact reviewed resolver assets for a local release harness."""
+
+    _validate_version(version)
+    if directory.is_symlink() or not directory.is_dir():
+        raise CandidateError(f"resolver staging destination is not a regular directory: {directory}")
+    _copy_resolver_assets(directory, version)
+    _validate_resolver_assets(directory, version)
+
+
 def _load_upgrade_baseline_policy() -> tuple[list[str], dict[str, list[str]]]:
     try:
         document = json.loads(UPGRADE_BASELINES_PATH.read_text(encoding="utf-8"))
@@ -848,6 +858,137 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         tree = ast.parse(source, filename="defenseclaw/bundle_refresh.py")
     except (SyntaxError, ValueError) as exc:
         raise CandidateError("0.8.5+ candidate wheel bundle transaction is invalid") from exc
+
+    def references_name(node: ast.AST, name: str) -> bool:
+        return any(
+            isinstance(candidate, ast.Name) and candidate.id == name
+            for candidate in ast.walk(node)
+        )
+
+    def static_int(node: ast.AST | None) -> int | None:
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, int)
+            and not isinstance(node.value, bool)
+        ):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            left = static_int(node.left)
+            right = static_int(node.right)
+            if left is not None and right is not None:
+                return left * right
+        return None
+
+    metadata_bounds: list[int] = []
+    for node in tree.body:
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name)
+            and target.id == "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES"
+            for target in node.targets
+        ):
+            value = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES"
+        ):
+            value = node.value
+        static_value = static_int(value)
+        if static_value is not None:
+            metadata_bounds.append(static_value)
+    if metadata_bounds != [4 * 1024 * 1024]:
+        raise CandidateError(
+            "0.8.5+ bundle transaction lacks the bridge metadata size bound"
+        )
+
+    serializers = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_serialize_windows_security"
+    ]
+    if len(serializers) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle transaction lacks one exact Windows security serializer"
+        )
+    serializer = serializers[0]
+    serializer_arguments = [argument.arg for argument in serializer.args.args]
+    serializer_returns = [
+        node.value
+        for node in ast.walk(serializer)
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+    ]
+    if (
+        serializer.args.posonlyargs
+        or serializer_arguments != ["security"]
+        or serializer.args.kwonlyargs
+        or serializer.args.vararg is not None
+        or serializer.args.kwarg is not None
+        or serializer.args.defaults
+        or serializer.args.kw_defaults
+        or len(serializer_returns) != 1
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle Windows security serializer has an invalid signature"
+        )
+    serialized_security = serializer_returns[0]
+    serialized_values = {
+        key.value: value
+        for key, value in zip(
+            serialized_security.keys,
+            serialized_security.values,
+            strict=True,
+        )
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    if (
+        len(serialized_security.keys) != 3
+        or len(serialized_values) != 3
+        or set(serialized_values) != {"owner", "dacl", "dacl_protected"}
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle Windows security serializer lacks exact owner/DACL fields"
+        )
+
+    def is_canonical_security_bytes(value: ast.AST, field: str) -> bool:
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "decode"
+            and len(value.args) == 1
+            and not value.keywords
+            and isinstance(value.args[0], ast.Constant)
+            and value.args[0].value == "ascii"
+            and isinstance(value.func.value, ast.Call)
+        ):
+            return False
+        encoder = value.func.value
+        return (
+            _ast_call_name(encoder) == "base64.b64encode"
+            and len(encoder.args) == 1
+            and not encoder.keywords
+            and isinstance(encoder.args[0], ast.Attribute)
+            and encoder.args[0].attr == field
+            and isinstance(encoder.args[0].value, ast.Name)
+            and encoder.args[0].value.id == "security"
+        )
+
+    for field in ("owner", "dacl"):
+        if not is_canonical_security_bytes(serialized_values[field], field):
+            raise CandidateError(
+                "0.8.5+ bundle Windows owner/DACL bytes are not canonically serialized"
+            )
+    protected_value = serialized_values["dacl_protected"]
+    if not (
+        isinstance(protected_value, ast.Attribute)
+        and protected_value.attr == "dacl_protected"
+        and isinstance(protected_value.value, ast.Name)
+        and protected_value.value.id == "security"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle Windows DACL protection state is not serialized exactly"
+        )
     directory_chain_helpers = [
         node
         for node in tree.body
@@ -934,8 +1075,55 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         for key, value in zip(metadata.keys, metadata.values, strict=True)
         if isinstance(key, ast.Constant) and isinstance(key.value, str)
     }
-    if "managed_paths" not in metadata_values:
-        raise CandidateError("0.8.5+ bundle rollback metadata lacks managed_paths")
+    expected_metadata_fields = {
+        "schema_version",
+        "managed_paths",
+        "existing_paths",
+        "old_sha256",
+        "old_modes",
+        "created_sha256",
+        "old_windows_security",
+        "restart_required",
+    }
+    if (
+        len(metadata.keys) != len(expected_metadata_fields)
+        or len(metadata_values) != len(expected_metadata_fields)
+        or set(metadata_values) != expected_metadata_fields
+    ):
+        missing = sorted(expected_metadata_fields - set(metadata_values))
+        extra = sorted(set(metadata_values) - expected_metadata_fields)
+        raise CandidateError(
+            "0.8.5+ bundle rollback metadata lacks the exact schema-2 inventory "
+            f"(missing={missing!r}, extra={extra!r})"
+        )
+    schema_value = metadata_values["schema_version"]
+    if not (
+        isinstance(schema_value, ast.Constant)
+        and isinstance(schema_value.value, int)
+        and not isinstance(schema_value.value, bool)
+        and schema_value.value == 2
+    ):
+        raise CandidateError("0.8.5+ bundle rollback metadata is not schema version 2")
+    for field in ("managed_paths", "existing_paths"):
+        value = metadata_values[field]
+        binding = field
+        if not (
+            isinstance(value, ast.Call)
+            and _ast_call_name(value) == "sorted"
+            and len(value.args) == 1
+            and not value.keywords
+            and isinstance(value.args[0], ast.Name)
+            and value.args[0].id == binding
+        ):
+            raise CandidateError(
+                f"0.8.5+ bundle rollback metadata {field} is not bound to its exact inventory"
+            )
+    for field in ("old_sha256", "old_modes", "created_sha256", "old_windows_security"):
+        value = metadata_values[field]
+        if not (isinstance(value, ast.Name) and value.id == field):
+            raise CandidateError(
+                f"0.8.5+ bundle rollback metadata {field} is not bound to its exact inventory"
+            )
     restart_value = metadata_values.get("restart_required")
     if not (
         isinstance(restart_value, ast.Name) and restart_value.id == "was_running"
@@ -957,24 +1145,298 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
     ]
     if len(metadata_writes) != 1:
         raise CandidateError("0.8.5+ bundle transaction must durably publish one backup manifest")
-    metadata_write_line = metadata_writes[0].lineno
+    metadata_write = metadata_writes[0]
+    all_atomic_writes = [
+        node for node in calls if _ast_call_name(node) == "_atomic_write_bytes"
+    ]
+    if len(all_atomic_writes) != 1 or all_atomic_writes[0] is not metadata_write:
+        raise CandidateError(
+            "0.8.5+ bundle transaction has an ambiguous direct file write"
+        )
+    metadata_write_line = metadata_write.lineno
     if metadata.lineno >= metadata_write_line:
         raise CandidateError("0.8.5+ bundle rollback authority is not built before publication")
+    metadata_assignments = [
+        node
+        for node in ast.walk(transaction)
+        if (
+            isinstance(node, ast.Assign)
+            and node.value is metadata
+            and any(
+                isinstance(target, ast.Name) and target.id == "backup_metadata"
+                for target in node.targets
+            )
+        )
+        or (
+            isinstance(node, ast.AnnAssign)
+            and node.value is metadata
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "backup_metadata"
+        )
+    ]
+    metadata_payload = metadata_write.args[1] if len(metadata_write.args) >= 2 else None
+    serialized_assignments = [
+        node
+        for node in ast.walk(transaction)
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "serialized_metadata"
+                for target in node.targets
+            )
+        )
+        or (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "serialized_metadata"
+        )
+    ]
+    serialized_value = (
+        serialized_assignments[0].value if len(serialized_assignments) == 1 else None
+    )
+    serialized_json_call = (
+        serialized_value.func.value
+        if isinstance(serialized_value, ast.Call)
+        and isinstance(serialized_value.func, ast.Attribute)
+        and isinstance(serialized_value.func.value, ast.Call)
+        else None
+    )
+    serialized_keywords = (
+        {keyword.arg: keyword.value for keyword in serialized_json_call.keywords}
+        if isinstance(serialized_json_call, ast.Call)
+        and all(keyword.arg is not None for keyword in serialized_json_call.keywords)
+        else {}
+    )
+    if not (
+        len(metadata_assignments) == 1
+        and len(serialized_assignments) == 1
+        and serialized_assignments[0].lineno < metadata_write_line
+        and serialized_value is not None
+        and isinstance(metadata_payload, ast.Name)
+        and metadata_payload.id == "serialized_metadata"
+        and isinstance(serialized_value, ast.Call)
+        and isinstance(serialized_value.func, ast.Attribute)
+        and serialized_value.func.attr == "encode"
+        and len(serialized_value.args) == 1
+        and not serialized_value.keywords
+        and isinstance(serialized_value.args[0], ast.Constant)
+        and serialized_value.args[0].value == "utf-8"
+        and isinstance(serialized_json_call, ast.Call)
+        and _ast_call_name(serialized_json_call) == "json.dumps"
+        and len(serialized_json_call.args) == 1
+        and isinstance(serialized_json_call.args[0], ast.Name)
+        and serialized_json_call.args[0].id == "backup_metadata"
+        and set(serialized_keywords) == {"sort_keys"}
+        and isinstance(serialized_keywords["sort_keys"], ast.Constant)
+        and serialized_keywords["sort_keys"].value is True
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle transaction does not publish its exact schema-2 metadata object"
+        )
+    metadata_bound_guards = [
+        node
+        for node in ast.walk(transaction)
+        if isinstance(node, ast.If)
+        and node.lineno < metadata_write_line
+        and references_name(node.test, "serialized_metadata")
+        and references_name(node.test, "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES")
+        and any(
+            isinstance(candidate, ast.Call)
+            and _ast_call_name(candidate) == "len"
+            and candidate.args
+            and references_name(candidate.args[0], "serialized_metadata")
+            for candidate in ast.walk(node.test)
+        )
+        and any(isinstance(candidate, ast.Raise) for candidate in ast.walk(node))
+    ]
+    if len(metadata_bound_guards) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle serialized metadata is not bounded before publication"
+        )
+    bound_test = metadata_bound_guards[0].test
+    bound_comparison = bound_test.operand if isinstance(bound_test, ast.UnaryOp) else None
+    if not (
+        isinstance(bound_test, ast.UnaryOp)
+        and isinstance(bound_test.op, ast.Not)
+        and isinstance(bound_comparison, ast.Compare)
+        and isinstance(bound_comparison.left, ast.Constant)
+        and bound_comparison.left.value == 0
+        and len(bound_comparison.ops) == 2
+        and isinstance(bound_comparison.ops[0], ast.Lt)
+        and isinstance(bound_comparison.ops[1], ast.LtE)
+        and len(bound_comparison.comparators) == 2
+        and isinstance(bound_comparison.comparators[0], ast.Call)
+        and _ast_call_name(bound_comparison.comparators[0]) == "len"
+        and len(bound_comparison.comparators[0].args) == 1
+        and isinstance(bound_comparison.comparators[0].args[0], ast.Name)
+        and bound_comparison.comparators[0].args[0].id == "serialized_metadata"
+        and isinstance(bound_comparison.comparators[1], ast.Name)
+        and bound_comparison.comparators[1].id == "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle serialized metadata uses an invalid size bound"
+        )
 
     parent: dict[ast.AST, ast.AST] = {}
     for ancestor in ast.walk(transaction):
         for child in ast.iter_child_nodes(ancestor):
             parent[child] = ancestor
 
+    def condition_between(node: ast.AST, boundary: ast.AST) -> bool:
+        current = node
+        while current in parent and current is not boundary:
+            current = parent[current]
+            if current is boundary:
+                break
+            if isinstance(
+                current,
+                (ast.If, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+            ):
+                return True
+        return False
+
+    if (
+        condition_between(metadata_assignments[0], transaction)
+        or condition_between(serialized_assignments[0], transaction)
+        or condition_between(metadata_write, transaction)
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle rollback metadata construction or publication is conditional"
+        )
+
+    def assignment_value(node: ast.AST, name: str) -> ast.AST | None:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            return node.value
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+        ):
+            return node.value
+        return None
+
+    def child_path(value: ast.AST, root: str, leaf: str) -> bool:
+        return (
+            isinstance(value, ast.BinOp)
+            and isinstance(value.op, ast.Div)
+            and isinstance(value.left, ast.Name)
+            and value.left.id == root
+            and isinstance(value.right, ast.Constant)
+            and value.right.value == leaf
+        ) or (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "joinpath"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == root
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Constant)
+            and value.args[0].value == leaf
+        )
+
+    def exact_root_call(name: str, argument: str) -> list[ast.Call]:
+        return [
+            node
+            for node in calls
+            if _ast_call_name(node) == name
+            and node.lineno < metadata_write_line
+            and len(node.args) >= 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == argument
+        ]
+
+    custody_roots = {
+        "backup_managed": "managed",
+        "backup_created": "created",
+        "backup_retired": "retired",
+    }
+    for binding, leaf in custody_roots.items():
+        assignments = [
+            value
+            for node in ast.walk(transaction)
+            if getattr(node, "lineno", metadata_write_line) < metadata_write_line
+            and (value := assignment_value(node, binding)) is not None
+        ]
+        if len(assignments) != 1 or not child_path(assignments[0], "backup_root", leaf):
+            raise CandidateError(
+                f"0.8.5+ bundle transaction lacks exact {leaf} rollback custody"
+            )
+        mkdir_calls = exact_root_call("_mkdir_private", binding)
+        fsync_calls = exact_root_call("_fsync_directory_chain", binding)
+        if len(mkdir_calls) != 1 or len(fsync_calls) != 1:
+            raise CandidateError(
+                f"0.8.5+ bundle {leaf} rollback custody is not durably created"
+            )
+        stop_values = [
+            keyword.value
+            for keyword in fsync_calls[0].keywords
+            if keyword.arg == "stop"
+        ]
+        if not (
+            len(mkdir_calls[0].args) == 1
+            and not mkdir_calls[0].keywords
+            and len(fsync_calls[0].args) == 1
+            and len(fsync_calls[0].keywords) == 1
+            and not condition_between(mkdir_calls[0], transaction)
+            and not condition_between(fsync_calls[0], transaction)
+            and mkdir_calls[0].lineno < fsync_calls[0].lineno < metadata_write_line
+            and len(stop_values) == 1
+            and isinstance(stop_values[0], ast.Name)
+            and stop_values[0].id == "backup_root"
+        ):
+            raise CandidateError(
+                f"0.8.5+ bundle {leaf} rollback custody is not fsynced to its root"
+            )
+
+    for binding in ("old_sha256", "old_modes", "created_sha256", "old_windows_security"):
+        initializers = [
+            value
+            for node in ast.walk(transaction)
+            if getattr(node, "lineno", metadata_write_line) < metadata_write_line
+            and (value := assignment_value(node, binding)) is not None
+            and isinstance(value, ast.Dict)
+        ]
+        if len(initializers) != 1 or initializers[0].keys:
+            raise CandidateError(
+                f"0.8.5+ bundle transaction lacks one empty {binding} inventory"
+            )
+
+    managed_inventory_values = [
+        value
+        for node in ast.walk(transaction)
+        if getattr(node, "lineno", metadata_write_line) < metadata_write_line
+        and (value := assignment_value(node, "managed_paths")) is not None
+    ]
+    if not (
+        len(managed_inventory_values) == 1
+        and isinstance(managed_inventory_values[0], ast.BinOp)
+        and isinstance(managed_inventory_values[0].op, ast.BitOr)
+        and isinstance(managed_inventory_values[0].left, ast.Name)
+        and isinstance(managed_inventory_values[0].right, ast.Name)
+        and {
+            managed_inventory_values[0].left.id,
+            managed_inventory_values[0].right.id,
+        }
+        == {"existing_paths", "created_paths"}
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle managed inventory is not the exact existing/created union"
+        )
+
     backup_copies = [
         node
         for node in calls
         if _ast_call_name(node) == "shutil.copy2"
         and node.lineno < metadata_write_line
-        and any(
-            isinstance(candidate, ast.Name) and candidate.id == "backup_path"
-            for candidate in ast.walk(node)
-        )
+        and len(node.args) == 2
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "path"
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "backup_path"
     ]
     if len(backup_copies) != 1:
         raise CandidateError("0.8.5+ bundle transaction lacks one bounded backup copy loop")
@@ -988,21 +1450,188 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
             break
     if copy_loop is None:
         raise CandidateError("0.8.5+ bundle backup copy is outside its managed inventory loop")
+    if condition_between(copy_call, copy_loop) or not (
+        isinstance(copy_loop.iter, ast.Name)
+        and copy_loop.iter.id == "existing_paths"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle backup copy does not exactly cover existing paths"
+        )
+    backup_path_values = [
+        value
+        for node in ast.walk(copy_loop)
+        if (value := assignment_value(node, "backup_path")) is not None
+    ]
+    backup_path_value = backup_path_values[0] if len(backup_path_values) == 1 else None
+    if not (
+        isinstance(backup_path_value, ast.BinOp)
+        and isinstance(backup_path_value.op, ast.Div)
+        and isinstance(backup_path_value.left, ast.Name)
+        and backup_path_value.left.id == "backup_managed"
+        and isinstance(backup_path_value.right, ast.Name)
+        and backup_path_value.right.id == "path"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle existing backup is outside managed rollback custody"
+        )
+
+    def inventory_writes(scope: ast.AST, binding: str) -> list[ast.Assign | ast.AnnAssign]:
+        writes: list[ast.Assign | ast.AnnAssign] = []
+        for node in ast.walk(scope):
+            targets: tuple[ast.AST, ...] = ()
+            if isinstance(node, ast.Assign):
+                targets = tuple(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets = (node.target,)
+            else:
+                continue
+            if any(
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == binding
+                for target in targets
+            ):
+                writes.append(node)
+        return writes
+
+    def exact_inventory_key(
+        write: ast.Assign | ast.AnnAssign,
+        binding: str,
+    ) -> bool:
+        targets = write.targets if isinstance(write, ast.Assign) else [write.target]
+        return (
+            len(targets) == 1
+            and isinstance(targets[0], ast.Subscript)
+            and isinstance(targets[0].value, ast.Name)
+            and targets[0].value.id == binding
+            and isinstance(targets[0].slice, ast.Name)
+            and targets[0].slice.id == "path"
+        )
+
+    old_digest_writes = inventory_writes(copy_loop, "old_sha256")
+    old_mode_writes = inventory_writes(copy_loop, "old_modes")
+    old_digest_value = old_digest_writes[0].value if len(old_digest_writes) == 1 else None
+    old_mode_value = old_mode_writes[0].value if len(old_mode_writes) == 1 else None
+    if (
+        len(old_digest_writes) != 1
+        or len(old_mode_writes) != 1
+        or old_digest_value is None
+        or old_mode_value is None
+        or not exact_inventory_key(old_digest_writes[0], "old_sha256")
+        or not exact_inventory_key(old_mode_writes[0], "old_modes")
+        or condition_between(old_digest_writes[0], copy_loop)
+        or condition_between(old_mode_writes[0], copy_loop)
+        or old_digest_writes[0].lineno <= copy_call.lineno
+        or old_mode_writes[0].lineno <= copy_call.lineno
+        or not isinstance(old_digest_value, ast.Call)
+        or _ast_call_name(old_digest_value) != "_sha256_file"
+        or len(old_digest_value.args) != 1
+        or old_digest_value.keywords
+        or not isinstance(old_digest_value.args[0], ast.Name)
+        or old_digest_value.args[0].id != "backup_path"
+        or not isinstance(old_mode_value, ast.Call)
+        or _ast_call_name(old_mode_value) != "stat.S_IMODE"
+        or len(old_mode_value.args) != 1
+        or old_mode_value.keywords
+        or not isinstance(old_mode_value.args[0], ast.Attribute)
+        or old_mode_value.args[0].attr != "st_mode"
+        or not isinstance(old_mode_value.args[0].value, ast.Call)
+        or _ast_call_name(old_mode_value.args[0].value) != "path.stat"
+        or old_mode_value.args[0].value.args
+        or old_mode_value.args[0].value.keywords
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle backup loop lacks exact digest and mode inventory"
+        )
+
+    windows_writes = inventory_writes(copy_loop, "old_windows_security")
+    if len(windows_writes) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle backup loop lacks exact per-path Windows security inventory"
+        )
+    windows_write = windows_writes[0]
+    if not exact_inventory_key(windows_write, "old_windows_security"):
+        raise CandidateError(
+            "0.8.5+ bundle Windows security inventory is not keyed by its exact path"
+        )
+    windows_value = windows_write.value
+    if windows_value is None:
+        raise CandidateError(
+            "0.8.5+ bundle Windows security inventory has no serialized value"
+        )
+    captured_security = (
+        windows_value.args[0]
+        if isinstance(windows_value, ast.Call) and len(windows_value.args) == 1
+        else None
+    )
+    if (
+        not isinstance(windows_value, ast.Call)
+        or _ast_call_name(windows_value) != "_serialize_windows_security"
+        or windows_value.keywords
+        or not isinstance(captured_security, ast.Call)
+        or _ast_call_name(captured_security) != "windows_acl.capture_path"
+        or len(captured_security.args) != 1
+        or captured_security.keywords
+        or not isinstance(captured_security.args[0], ast.Name)
+        or captured_security.args[0].id != "path"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle Windows security inventory is not captured and serialized exactly"
+        )
+    current = windows_write
+    windows_guard: ast.If | None = None
+    while current in parent and current is not copy_loop:
+        current = parent[current]
+        if isinstance(current, ast.If):
+            windows_guard = current
+            break
+    windows_test = windows_guard.test if windows_guard is not None else None
+    if not (
+        isinstance(windows_test, ast.Compare)
+        and len(windows_test.ops) == 1
+        and isinstance(windows_test.ops[0], ast.Eq)
+        and len(windows_test.comparators) == 1
+        and (
+            (
+                isinstance(windows_test.left, ast.Attribute)
+                and windows_test.left.attr == "name"
+                and isinstance(windows_test.left.value, ast.Name)
+                and windows_test.left.value.id == "os"
+                and isinstance(windows_test.comparators[0], ast.Constant)
+                and windows_test.comparators[0].value == "nt"
+            )
+            or (
+                isinstance(windows_test.left, ast.Constant)
+                and windows_test.left.value == "nt"
+                and isinstance(windows_test.comparators[0], ast.Attribute)
+                and windows_test.comparators[0].attr == "name"
+                and isinstance(windows_test.comparators[0].value, ast.Name)
+                and windows_test.comparators[0].value.id == "os"
+            )
+        )
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle Windows security inventory is not platform-exact"
+        )
     durable_backup_calls = [
         node
         for node in ast.walk(copy_loop)
         if isinstance(node, ast.Call)
         and node.lineno > copy_call.lineno
         and node.lineno < metadata_write_line
-        and (_ast_call_name(node) or "").endswith("fsync_file")
-        and any(
-            isinstance(candidate, ast.Name) and candidate.id == "backup_path"
-            for candidate in ast.walk(node)
-        )
+        and _ast_call_name(node) == "_fsync_file"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "backup_path"
     ]
     if not durable_backup_calls:
         raise CandidateError(
             "0.8.5+ bundle backup files are not fsynced before metadata publication"
+        )
+    if any(condition_between(node, copy_loop) for node in durable_backup_calls):
+        raise CandidateError(
+            "0.8.5+ bundle backup file durability is conditional"
         )
     durable_directory_calls = [
         node
@@ -1011,15 +1640,20 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         and node.lineno > copy_call.lineno
         and node.lineno < metadata_write_line
         and _ast_call_name(node) == "_fsync_directory_chain"
-        and node.args
-        and any(
-            isinstance(candidate, ast.Name) and candidate.id == "backup_path"
-            for candidate in ast.walk(node.args[0])
-        )
+        and len(node.args) == 1
+        and len(node.keywords) == 1
+        and isinstance(node.args[0], ast.Attribute)
+        and node.args[0].attr == "parent"
+        and isinstance(node.args[0].value, ast.Name)
+        and node.args[0].value.id == "backup_path"
     ]
     if len(durable_directory_calls) != 1:
         raise CandidateError(
             "0.8.5+ bundle backup directory entries are not fsynced before metadata publication"
+        )
+    if condition_between(durable_directory_calls[0], copy_loop):
+        raise CandidateError(
+            "0.8.5+ bundle backup directory durability is conditional"
         )
     directory_call = durable_directory_calls[0]
     stop_values = [
@@ -1038,8 +1672,191 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
             "0.8.5+ bundle backup files must be fsynced before directory entries"
         )
 
-    mutation_lines = [
-        node.lineno
+    claim_copies = [
+        node
+        for node in calls
+        if _ast_call_name(node) == "_atomic_copy_file"
+        and node.lineno < metadata_write_line
+        and len(node.args) == 2
+        and not node.keywords
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "created_claim"
+    ]
+    if len(claim_copies) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle transaction lacks one retained target-created claim loop"
+        )
+    claim_copy = claim_copies[0]
+    claim_loop: ast.For | None = None
+    current = claim_copy
+    while current in parent:
+        current = parent[current]
+        if isinstance(current, ast.For):
+            claim_loop = current
+            break
+    if claim_loop is None or condition_between(claim_copy, claim_loop) or not (
+        isinstance(claim_loop.iter, ast.Name)
+        and claim_loop.iter.id == "created_paths"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle target-created claims do not exactly cover created paths"
+        )
+    claim_bindings = [
+        value
+        for node in ast.walk(claim_loop)
+        if (value := assignment_value(node, "created_claim")) is not None
+    ]
+    claim_binding = claim_bindings[0] if len(claim_bindings) == 1 else None
+    if not (
+        isinstance(claim_binding, ast.BinOp)
+        and isinstance(claim_binding.op, ast.Div)
+        and isinstance(claim_binding.left, ast.Name)
+        and claim_binding.left.id == "backup_created"
+        and isinstance(claim_binding.right, ast.Name)
+        and claim_binding.right.id == "path"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle target-created claims are outside retained custody"
+        )
+    claim_file_fsyncs = [
+        node
+        for node in ast.walk(claim_loop)
+        if isinstance(node, ast.Call)
+        and _ast_call_name(node) == "_fsync_file"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "created_claim"
+    ]
+    claim_directory_fsyncs = [
+        node
+        for node in ast.walk(claim_loop)
+        if isinstance(node, ast.Call)
+        and _ast_call_name(node) == "_fsync_directory_chain"
+        and len(node.args) == 1
+        and len(node.keywords) == 1
+        and isinstance(node.args[0], ast.Attribute)
+        and node.args[0].attr == "parent"
+        and isinstance(node.args[0].value, ast.Name)
+        and node.args[0].value.id == "created_claim"
+    ]
+    if len(claim_file_fsyncs) != 1 or len(claim_directory_fsyncs) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle target-created claims are not durably retained"
+        )
+    if condition_between(claim_file_fsyncs[0], claim_loop) or condition_between(
+        claim_directory_fsyncs[0],
+        claim_loop,
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle target-created claim durability is conditional"
+        )
+    claim_stop_values = [
+        keyword.value
+        for keyword in claim_directory_fsyncs[0].keywords
+        if keyword.arg == "stop"
+    ]
+    if not (
+        claim_copy.lineno
+        < claim_file_fsyncs[0].lineno
+        < claim_directory_fsyncs[0].lineno
+        < metadata_write_line
+        and len(claim_stop_values) == 1
+        and isinstance(claim_stop_values[0], ast.Name)
+        and claim_stop_values[0].id == "backup_root"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle target-created claims are not fsynced to the backup root"
+        )
+    created_digest_writes = inventory_writes(claim_loop, "created_sha256")
+    created_digest_value = (
+        created_digest_writes[0].value if len(created_digest_writes) == 1 else None
+    )
+    if not (
+        len(created_digest_writes) == 1
+        and created_digest_value is not None
+        and exact_inventory_key(created_digest_writes[0], "created_sha256")
+        and not condition_between(created_digest_writes[0], claim_loop)
+        and created_digest_writes[0].lineno > claim_copy.lineno
+        and isinstance(created_digest_value, ast.Call)
+        and _ast_call_name(created_digest_value) == "_sha256_file"
+        and len(created_digest_value.args) == 1
+        and not created_digest_value.keywords
+        and isinstance(created_digest_value.args[0], ast.Name)
+        and created_digest_value.args[0].id == "created_claim"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle target-created claim digest inventory is incomplete"
+        )
+
+    claim_publications = [
+        node
+        for node in calls
+        if _ast_call_name(node) == "os.link"
+        and node.lineno > metadata_write_line
+        and len(node.args) == 2
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "created_claim"
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "destination"
+    ]
+    if len(claim_publications) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle target-created claims lack one no-replace publication"
+        )
+    claim_publication = claim_publications[0]
+    publication_loop: ast.For | None = None
+    current = claim_publication
+    while current in parent:
+        current = parent[current]
+        if isinstance(current, ast.For):
+            publication_loop = current
+            break
+    if publication_loop is None or condition_between(
+        claim_publication,
+        publication_loop,
+    ) or not (
+        isinstance(publication_loop.iter, ast.Name)
+        and publication_loop.iter.id == "created_paths"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle target-created publication does not cover its exact inventory"
+        )
+    publication_claim_values = [
+        value
+        for node in ast.walk(publication_loop)
+        if (value := assignment_value(node, "created_claim")) is not None
+    ]
+    publication_destination_values = [
+        value
+        for node in ast.walk(publication_loop)
+        if (value := assignment_value(node, "destination")) is not None
+    ]
+    published_claim = (
+        publication_claim_values[0] if len(publication_claim_values) == 1 else None
+    )
+    published_destination = (
+        publication_destination_values[0]
+        if len(publication_destination_values) == 1
+        else None
+    )
+    if not (
+        isinstance(published_claim, ast.BinOp)
+        and isinstance(published_claim.op, ast.Div)
+        and isinstance(published_claim.left, ast.Name)
+        and published_claim.left.id == "backup_created"
+        and isinstance(published_claim.right, ast.Name)
+        and published_claim.right.id == "path"
+        and isinstance(published_destination, ast.Name)
+        and published_destination.id == "path"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle target-created publication is not claim-bound"
+        )
+
+    mutation_nodes = [
+        node
         for node in ast.walk(transaction)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
         and (
@@ -1059,9 +1876,151 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(node.value, ast.Constant)
         and node.value.value is True
     ]
-    if not mutation_lines or min(mutation_lines) <= metadata_write_line:
+    mutation_lines = [node.lineno for node in mutation_nodes]
+    if (
+        len(mutation_lines) != 1
+        or mutation_lines[0] <= metadata_write_line
+        or mutation_lines[0] >= claim_publication.lineno
+        or condition_between(mutation_nodes[0], transaction)
+    ):
         raise CandidateError(
             "0.8.5+ bundle rollback metadata is not durable before first mutation"
+        )
+    mutation_line = mutation_lines[0]
+    all_link_calls = [node for node in calls if _ast_call_name(node) == "os.link"]
+    if len(all_link_calls) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle transaction has ambiguous target-created publication"
+        )
+    managed_publications = [
+        node
+        for node in calls
+        if _ast_call_name(node) == "_atomic_copy_file"
+        and node.lineno > metadata_write_line
+        and len(node.args) == 2
+        and not node.keywords
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "destination"
+    ]
+    if len(managed_publications) != 1:
+        raise CandidateError(
+            "0.8.5+ bundle transaction lacks one authenticated managed-file publication"
+        )
+    all_atomic_copies = [
+        node for node in calls if _ast_call_name(node) == "_atomic_copy_file"
+    ]
+    all_legacy_copies = [
+        node for node in calls if _ast_call_name(node) == "shutil.copy2"
+    ]
+    if set(all_atomic_copies) != {claim_copy, managed_publications[0]} or all_legacy_copies != [
+        copy_call
+    ]:
+        raise CandidateError(
+            "0.8.5+ bundle transaction has an ambiguous copy mutation"
+        )
+    managed_publication = managed_publications[0]
+    managed_publication_loop: ast.For | None = None
+    current = managed_publication
+    while current in parent:
+        current = parent[current]
+        if isinstance(current, ast.For):
+            managed_publication_loop = current
+            break
+    if managed_publication_loop is None or condition_between(
+        managed_publication,
+        managed_publication_loop,
+    ) or not (
+        isinstance(managed_publication_loop.iter, ast.Name)
+        and managed_publication_loop.iter.id == "existing_paths"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle managed-file publication does not cover existing paths"
+        )
+    managed_destination_values = [
+        value
+        for node in ast.walk(managed_publication_loop)
+        if (value := assignment_value(node, "destination")) is not None
+    ]
+    if not (
+        len(managed_destination_values) == 1
+        and isinstance(managed_destination_values[0], ast.Name)
+        and managed_destination_values[0].id == "path"
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle managed-file publication is not destination-bound"
+        )
+    canonical_mutations = [*all_link_calls, *managed_publications]
+    if any(node.lineno <= mutation_line for node in canonical_mutations):
+        raise CandidateError(
+            "0.8.5+ bundle mutation begins before durable rollback authority"
+        )
+    transaction_returns = [
+        node for node in ast.walk(transaction) if isinstance(node, ast.Return)
+    ]
+    if not (
+        len(transaction_returns) == 1
+        and transaction_returns[0].lineno > max(
+            node.lineno for node in canonical_mutations
+        )
+        and isinstance(transaction_returns[0].value, ast.Name)
+        and transaction_returns[0].value.id == "mutation_started"
+        and not condition_between(transaction_returns[0], transaction)
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle transaction has an ambiguous completion path"
+        )
+    forbidden_direct_mutators = {
+        "open",
+        "os.open",
+        "os.write",
+        "os.pwrite",
+        "os.replace",
+        "os.rename",
+        "os.unlink",
+        "os.remove",
+        "os.symlink",
+        "os.truncate",
+        "shutil.copy",
+        "shutil.copyfile",
+        "shutil.move",
+        "shutil.rmtree",
+    }
+    forbidden_mutator_suffixes = (
+        ".open",
+        ".write_bytes",
+        ".write_text",
+        ".touch",
+        ".unlink",
+        ".replace",
+        ".rename",
+        ".rmdir",
+    )
+    if any(
+        (name := _ast_call_name(node)) is not None
+        and (
+            name in forbidden_direct_mutators
+            or name.endswith(forbidden_mutator_suffixes)
+        )
+        for node in calls
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle transaction bypasses its reviewed publication primitives"
+        )
+    forbidden_before_metadata = {
+        "os.link",
+        "os.replace",
+        "os.rename",
+        "os.unlink",
+        "os.remove",
+        "shutil.rmtree",
+    }
+    if any(
+        (_ast_call_name(node) in forbidden_before_metadata)
+        and node.lineno < metadata_write_line
+        for node in calls
+    ):
+        raise CandidateError(
+            "0.8.5+ bundle transaction mutates canonical paths before rollback metadata"
         )
 
 
@@ -1876,6 +2835,10 @@ def _parser() -> argparse.ArgumentParser:
     stage_runtime_parser.add_argument("--output-dir", type=Path, required=True)
     stage_runtime_parser.add_argument("--version", required=True)
 
+    stage_resolvers_parser = subparsers.add_parser("stage-resolvers")
+    stage_resolvers_parser.add_argument("--release-dir", type=Path, required=True)
+    stage_resolvers_parser.add_argument("--version", required=True)
+
     extract_parser = subparsers.add_parser("extract-gateway")
     extract_parser.add_argument("--release-dir", type=Path, required=True)
     extract_parser.add_argument("--output", type=Path, required=True)
@@ -1935,6 +2898,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stage-runtime":
             stage_runtime(args.release_dir, args.output_dir, args.version)
             print(f"runtime candidate staged: {args.output_dir}")
+        elif args.command == "stage-resolvers":
+            stage_resolvers(args.release_dir, args.version)
+            print(f"release resolvers staged: {args.version}")
         elif args.command == "extract-gateway":
             extract_gateway(args.release_dir, args.output, args.version, args.os, args.arch)
             print(f"candidate gateway extracted: {args.output}")

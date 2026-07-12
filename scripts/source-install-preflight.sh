@@ -39,12 +39,14 @@ esac
     exit 64
 }
 
-readonly REPO_ROOT="$(cd "${REPO_ROOT_INPUT}" && pwd -P)"
+REPO_ROOT="$(cd "${REPO_ROOT_INPUT}" && pwd -P)"
+readonly REPO_ROOT
 if [[ "${INSTALL_DIR_INPUT}" = /* ]]; then
-    readonly INSTALL_DIR="${INSTALL_DIR_INPUT}"
+    INSTALL_DIR="${INSTALL_DIR_INPUT}"
 else
-    readonly INSTALL_DIR="$(pwd)/${INSTALL_DIR_INPUT}"
+    INSTALL_DIR="$(pwd)/${INSTALL_DIR_INPUT}"
 fi
+readonly INSTALL_DIR
 readonly MARKER="${INSTALL_DIR}/.defenseclaw-source-root"
 readonly CLI_PATH="${INSTALL_DIR}/${CLI_NAME}"
 readonly EXPECTED_CLI="${REPO_ROOT}/${VENV_BIN}/${CLI_NAME}"

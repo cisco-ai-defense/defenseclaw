@@ -131,7 +131,8 @@ final class AppState {
     var runtimeBannerDismissed = false
     var runtimeUpgradeLogTail = ""
     @ObservationIgnored @AppStorage("lastRuntimeUpdateCheckTime") private var lastRuntimeUpdateCheckTime: Double = 0
-    /// Full `defenseclaw upgrade` output from the last failed run (for Copy).
+    /// Human-readable action guidance, or diagnostic output from a failed runtime action.
+    /// The runnable command lives separately in UpgradeState.actionRequired.
     var runtimeUpgradeLog = ""
     /// True when the last release lookup failed (offline / GitHub rate limit) —
     /// "Up to date" must not be claimed on a failed check.
@@ -798,19 +799,23 @@ final class AppState {
         // binary — never present overlapping runtime actions.
         guard !runtimeInstallState.isRunning else { return false }
         guard let runtimeUpdate = availableRuntimeUpdate else { return true }
-        let resolverGuidance = Self.authenticatedRuntimeUpgradeResolverGuidance(
+        guard let resolverCommand = Self.authenticatedRuntimeUpgradeResolverCommand(
             releaseTag: runtimeUpdate.tag
-        ) ?? """
-        The available release identifier is not canonical, so no copy/paste command was produced. Follow the authenticated release-asset instructions at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.
-        """
+        ) else {
+            let failure = """
+            The available release identifier is not canonical, so no copy/paste command was produced. No installed files or services were changed. Follow the authenticated release-asset instructions at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.
+            """
+            runtimeUpgradeLogTail = ""
+            runtimeUpgradeLog = failure
+            runtimeUpgradeState = .failed(failure)
+            return false
+        }
         let guidance = """
-        Runtime upgrade was not started; no installed files or services were changed. Quit DefenseClaw, then use this authenticated release-asset path:
-
-        \(resolverGuidance)
+        Runtime upgrade was not started; no installed files or services were changed. Quit DefenseClaw, then copy the authenticated resolver command and run it in Terminal. It runs in latest mode without --version so tested-source policy, the 0.8.4 bridge, rollback, migrations, and health checks remain mandatory.
         """
         runtimeUpgradeLogTail = ""
         runtimeUpgradeLog = guidance
-        runtimeUpgradeState = .failed(guidance)
+        runtimeUpgradeState = .actionRequired(guidance: guidance, command: resolverCommand)
         return false
     }
 

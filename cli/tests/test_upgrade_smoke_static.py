@@ -50,6 +50,18 @@ def test_makefile_upgrade_smoke_matrix_tracks_supported_baselines() -> None:
     policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text())
     assert tuple(policy["published_baselines"]) == UPGRADE_SMOKE_BASELINES
 
+    assert "upgrade-refusal-contract-matrix: upgrade-smoke-matrix" in text
+    assert (
+        'scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" '
+        "--refusal-contract-only $(ARGS)"
+    ) in text
+    assert "upgrade-legacy-smoke-matrix:" in text
+    assert (
+        'scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)'
+        in text
+    )
+    assert "upgrade-signed-protocol-matrix:" in text
+
 
 def test_upgrade_smoke_docs_cover_default_matrix() -> None:
     text = (ROOT / "docs" / "TESTING.md").read_text()
@@ -80,6 +92,7 @@ def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> N
     assert '"${build_root}/scripts/generate-upgrade-manifest.py"' in build
     assert '"${build_root}/scripts/release_candidate.py" prepare-runtime' in build
     assert '"${build_root}/scripts/release_candidate.py" verify-runtime' in build
+    assert '"${build_root}/scripts/release_candidate.py" stage-resolvers' in build
     assert 'for fixture_os in darwin linux windows; do' in build
     assert 'GOOS="${fixture_os}" GOARCH="${fixture_arch}"' in build
     assert 'make -C "${ROOT}" dist-cli' not in build
@@ -202,6 +215,11 @@ def test_bridge_controller_hard_cut_is_resolver_only_before_mutation() -> None:
     assert "--version/-Version" in guarded
     assert "upgrade.sh | bash" not in guarded
     assert "authenticated_resolver_instructions" in guarded
+    config_load = main.index("app.cfg = cfg_mod.load()", guard_end)
+    storeless_upgrade = main.index('if invoked == "upgrade":', config_load)
+    store_import = main.index("from defenseclaw.db import Store", storeless_upgrade)
+    assert config_load < storeless_upgrade < store_import
+    assert "a refused direct upgrade must not create or alter audit.db" in main
 
     posix_resolver = (ROOT / "scripts/upgrade.sh").read_text(encoding="utf-8")
     windows_resolver = (ROOT / "scripts/upgrade.ps1").read_text(encoding="utf-8")

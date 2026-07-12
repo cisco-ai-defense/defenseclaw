@@ -286,6 +286,58 @@ def test_source_checkout_alias_claims_the_canonical_root(tmp_path: Path) -> None
     assert marker == _marker_payload(repo, installed_gateway)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="source preflight path resolution uses Bash")
+def test_source_preflight_propagates_path_resolution_failures(tmp_path: Path) -> None:
+    bash_environment = tmp_path / "bash-environment"
+    bash_environment.write_text(
+        """pwd() {
+    if [[ "${FAIL_PWD_MODE:-}" == "repo-root" && "${1:-}" == "-P" ]]; then
+        return 73
+    fi
+    if [[ "${FAIL_PWD_MODE:-}" == "install-dir" && "$#" -eq 0 ]]; then
+        return 74
+    fi
+    builtin pwd "$@"
+}
+""",
+        encoding="utf-8",
+    )
+
+    for failure_mode, install_dir, expected_status in (
+        ("repo-root", str(tmp_path / "absolute-bin"), 73),
+        ("install-dir", "relative-bin", 74),
+    ):
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "scripts/source-install-preflight.sh"),
+                "check",
+                str(ROOT),
+                install_dir,
+                ".venv/bin",
+                "defenseclaw",
+                "defenseclaw-gateway",
+            ],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "BASH_ENV": str(bash_environment),
+                "FAIL_PWD_MODE": failure_mode,
+                "HOME": str(tmp_path / "home"),
+                "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
+                "PATH": "/usr/bin:/bin",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+
+        output = completed.stdout + completed.stderr
+        assert completed.returncode == expected_status, output
+        assert "source install refused" not in output
+
+
 def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> None:
     installer = (ROOT / "scripts/install-dev.sh").read_text(encoding="utf-8")
     main = installer[installer.index("main() {") :]

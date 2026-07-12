@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -23,6 +24,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from defenseclaw import install_publish
 
 ROOT = Path(__file__).resolve().parents[2]
 CURRENT_RELEASE = "0.8.4"
@@ -71,6 +73,13 @@ INSTALLER_FILES = (
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _write_python_selector_shims(root: Path, body: str) -> None:
+    """Make installer Python selection independent of host-installed minors."""
+
+    for name in ("python3.12", "python3.11", "python3.13", "python3.10", "python3"):
+        _write_executable(root / name, body)
 
 
 def _write_minimal_schema2_install_dist(root: Path, version: str = CURRENT_RELEASE) -> None:
@@ -151,15 +160,48 @@ def test_schema2_protected_envelopes_are_not_renamed_wheels_or_archives(tmp_path
         assert archive.getnames() == ["defenseclaw"]
 
 
+def test_protocol2_plugin_is_exact_versioned_signed_input_before_extraction() -> None:
+    installer = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    plugin = installer[
+        installer.index("release_has_plugin() {") : installer.index(
+            "# ── OpenClaw",
+        )
+    ]
+
+    assert 'tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"' in plugin
+    assert 'if [[ "${MODERN_RELEASE:-false}" == true ]]; then' in plugin
+    assert "return 0" in plugin
+    fetch = plugin.index('fetch_artifact "$(artifact_path "${tarball_name}")" "${tarball}"')
+    verify = plugin.index('verify_checksum "${tarball}" "${tarball_name}"')
+    extract = plugin.index('tar -xzf "${tarball}" -C "${dest}"')
+    assert fetch < verify < extract
+    assert "No plugin artifact in this release" in plugin
+
+
+def test_posix_envelope_failure_preserves_private_destination_for_tree_retirement() -> None:
+    installer = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    materializer = installer[
+        installer.index('MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1') : installer.index(
+            "materialized_digest = hashlib.sha256()"
+        )
+    ]
+
+    assert "destination.unlink" not in materializer
+    assert "os.unlink" not in materializer
+    assert "retires this residue under deterministic private custody" in materializer
+
+
 @pytest.mark.skipif(os.name == "nt", reason="installer identity helper is POSIX-only")
 def test_posix_installer_identity_is_per_inode_not_per_filesystem(tmp_path: Path) -> None:
     source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
     assert " -ef " not in source
-    assert 'path_has_identity "${activation}" "${GATEWAY_ACTIVATION_ID}"' in source
+    assert 'rm -f "${activation}"' not in source
+    assert '--custody-root "${INSTALL_CUSTODY_ROOT}"' in source
     assert '"${CONNECTOR_MARKER_ID}"' in source
     start = source.index("path_identity() {")
     end = source.index("\n}\n\npath_has_identity()", start) + len("\n}")
     function = source[start:end]
+    assert 'getattr(os, "O_SYMLINK", 0x00200000)' in function
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.write_bytes(b"first\n")
@@ -186,14 +228,454 @@ def test_posix_installer_identity_is_per_inode_not_per_filesystem(tmp_path: Path
 
     before = identities()
     assert len(before) == 2 and before[0] != before[1]
+    assert all(len(identity.split(":")) == 4 for identity in before)
     first.unlink()
     first.write_bytes(b"replacement\n")
     after = identities()
+    assert all(len(identity.split(":")) == 4 for identity in after)
     assert before[0] != after[0]
 
 
+def test_posix_installer_routes_retirement_custody_by_managed_filesystem() -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    assert (
+        'readonly STATE_CUSTODY_ROOT="$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"'
+    ) in source
+
+    cleanup = source[
+        source.index("cleanup_install_attempt() {") : source.index(
+            "\n}\n\nclaim_fresh_install_home()",
+            source.index("cleanup_install_attempt() {"),
+        )
+    ]
+    for managed in (
+        '"${DEFENSECLAW_VENV}"',
+        '"${DEFENSECLAW_HOME}/picked_connector"',
+        '"${DEFENSECLAW_HOME}/extensions/defenseclaw"',
+        '"${DEFENSECLAW_HOME}/extensions"',
+        '"${DEFENSECLAW_HOME}"',
+    ):
+        command = cleanup[cleanup.index(managed) :]
+        command = command[: command.index("|| true")]
+        assert '--custody-root "${STATE_CUSTODY_ROOT}"' in command
+
+    for managed in ('"${INSTALL_DIR}/defenseclaw"', '"${INSTALL_DIR}"', '"${bin_parent}"'):
+        command = cleanup[cleanup.index(managed) :]
+        command = command[: command.index("|| true")]
+        assert '--custody-root "${INSTALL_CUSTODY_ROOT}"' in command
+
+    connector = source[
+        source.index("record_picked_connector() {") : source.index(
+            "\n}\n\n# ── Interrupt handler",
+            source.index("record_picked_connector() {"),
+        )
+    ]
+    assert '--custody-root "${STATE_CUSTODY_ROOT}"' in connector
+    assert 'recover-custody "${STATE_CUSTODY_ROOT}"' in source
+    entrypoint = source[source.index("load_release_policy\n") :]
+    prepublication = entrypoint[: entrypoint.index("claim_fresh_install_home")]
+    assert prepublication.count("prepare-custody") == 2
+    assert '"${STATE_CUSTODY_ROOT}" "${state_parent}"' in prepublication
+    assert '"${INSTALL_CUSTODY_ROOT}" "${install_anchor}"' in prepublication
+
+
+def test_posix_install_attempt_marker_bounds_the_publication_lifecycle() -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    marker_lifecycle = source[
+        source.index("update_install_attempt_marker() {") : source.index(
+            "\n# Return device, inode",
+            source.index("update_install_attempt_marker() {"),
+        )
+    ]
+    assert "os.unlink(" not in marker_lifecycle
+    assert '"${PUBLISH_HELPER}" unlink-exact' in marker_lifecycle
+    early_guard = source.index(
+        "if existing_install_detected && ! interrupted_install_attempt_detected; then"
+    )
+    assert early_guard < source.index("detect_platform\n", early_guard)
+
+    recovered_guard = source.index("if existing_install_detected; then", early_guard + 1)
+    begin = source.index("begin_install_attempt\n", recovered_guard)
+    first_publication = source.index("claim_fresh_install_home\n", begin)
+    assert recovered_guard < begin < first_publication
+
+    completion = source[
+        source.index("complete_install_attempt() {") : source.index(
+            "\n}\n\nversion_gte()",
+            source.index("complete_install_attempt() {"),
+        )
+    ]
+    retire = completion.index("finish_install_attempt")
+    succeeded = completion.index("INSTALL_SUCCEEDED=true")
+    assert retire < succeeded
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer custody uses POSIX modes")
+@pytest.mark.parametrize("split_roots", (False, True))
+def test_posix_install_attempt_marker_is_durable_private_and_recoverable(
+    tmp_path: Path,
+    split_roots: bool,
+) -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    start = source.index("custody_stat() {")
+    end = source.index("\n# Return device, inode", start)
+    functions = source[start:end]
+
+    install_custody = tmp_path / "home/.defenseclaw-install-custody"
+    state_custody = (
+        tmp_path / "state/.defenseclaw-install-custody"
+        if split_roots
+        else install_custody
+    )
+    for custody in {install_custody, state_custody}:
+        custody.parent.mkdir(parents=True, mode=0o700)
+        prepared = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "cli/defenseclaw/install_publish.py"),
+                "prepare-custody",
+                str(custody),
+                str(custody.parent),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+
+    program = f"""
+set -euo pipefail
+die() {{ printf '%s\n' "$1" >&2; exit 71; }}
+{functions}
+INSTALL_ATTEMPT_MARKER=.defenseclaw-install-in-progress-v1
+INSTALL_ATTEMPT_MARKER_CONTENT='DefenseClaw authenticated fresh install in progress v1'
+INSTALL_CUSTODY_ROOT=$1
+STATE_CUSTODY_ROOT=$2
+POLICY_PYTHON=$3
+PUBLISH_HELPER=$4
+begin_install_attempt
+interrupted_install_attempt_detected
+if [[ "${{ACTION}}" == complete ]]; then
+    finish_install_attempt
+    ! interrupted_install_attempt_detected
+fi
+"""
+    environment = {**os.environ, "ACTION": "interrupt"}
+    interrupted = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            program,
+            "bash",
+            str(install_custody),
+            str(state_custody),
+            sys.executable,
+            str(ROOT / "cli/defenseclaw/install_publish.py"),
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert interrupted.returncode == 0, interrupted.stdout + interrupted.stderr
+
+    marker_name = ".defenseclaw-install-in-progress-v1"
+    roots = {install_custody, state_custody}
+    for custody in roots:
+        marker = custody / marker_name
+        assert stat.S_IMODE(custody.stat().st_mode) == 0o700
+        assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+        assert marker.stat().st_nlink == 1
+        assert marker.read_text(encoding="ascii") == (
+            "DefenseClaw authenticated fresh install in progress v1\n"
+        )
+
+    environment["ACTION"] = "complete"
+    recovered = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            program,
+            "bash",
+            str(install_custody),
+            str(state_custody),
+            sys.executable,
+            str(ROOT / "cli/defenseclaw/install_publish.py"),
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert all(not (custody / marker_name).exists() for custody in roots)
+    assert all(custody.is_dir() for custody in roots)
+    expected = b"DefenseClaw authenticated fresh install in progress v1\n"
+    for custody in roots:
+        retired = [
+            path
+            for path in custody.glob("retired-*")
+            if path.is_file() and path.read_bytes() == expected
+        ]
+        assert len(retired) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX marker retirement is rename-only")
+def test_posix_install_attempt_marker_substitution_is_preserved(tmp_path: Path) -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    start = source.index("custody_stat() {")
+    end = source.index("\n# Return device, inode", start)
+    functions = source[start:end]
+    custody = tmp_path / ".defenseclaw-install-custody"
+    prepared = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "cli/defenseclaw/install_publish.py"),
+            "prepare-custody",
+            str(custody),
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+
+    wrapper = tmp_path / "publisher-wrapper.py"
+    wrapper.write_text(
+        """#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+arguments = sys.argv[1:]
+if arguments and arguments[0] == "unlink-exact":
+    marker = Path(arguments[1])
+    marker.rename(marker.with_name("attempt-marker-moved-away"))
+    marker.write_bytes(b"foreign replacement\\n")
+    marker.chmod(0o600)
+os.execv(
+    sys.executable,
+    [sys.executable, os.environ["REAL_PUBLISHER"], *arguments],
+)
+""",
+        encoding="utf-8",
+    )
+    program = f"""
+set -euo pipefail
+die() {{ printf '%s\n' "$1" >&2; exit 71; }}
+{functions}
+INSTALL_ATTEMPT_MARKER=.defenseclaw-install-in-progress-v1
+INSTALL_ATTEMPT_MARKER_CONTENT='DefenseClaw authenticated fresh install in progress v1'
+INSTALL_CUSTODY_ROOT=$1
+STATE_CUSTODY_ROOT=$1
+POLICY_PYTHON=$2
+PUBLISH_HELPER=$3
+begin_install_attempt
+finish_install_attempt
+"""
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            program,
+            "bash",
+            str(custody),
+            sys.executable,
+            str(wrapper),
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "REAL_PUBLISHER": str(ROOT / "cli/defenseclaw/install_publish.py"),
+        },
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 71, output
+    assert "Could not durably retire" in output
+    marker = custody / ".defenseclaw-install-in-progress-v1"
+    assert marker.read_bytes() == b"foreign replacement\n"
+    assert (custody / "attempt-marker-moved-away").read_bytes() == (
+        b"DefenseClaw authenticated fresh install in progress v1\n"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX interrupted retirement is rename-only")
+def test_posix_install_attempt_marker_allows_authenticated_interrupted_recovery(
+    tmp_path: Path,
+) -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    start = source.index("custody_stat() {")
+    end = source.index("\n# Return device, inode", start)
+    functions = source[start:end]
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    custody = home / ".defenseclaw-install-custody"
+    install_publish.prepare_custody(custody, home)
+
+    program = f"""
+set -euo pipefail
+die() {{ printf '%s\n' "$1" >&2; exit 71; }}
+{functions}
+INSTALL_ATTEMPT_MARKER=.defenseclaw-install-in-progress-v1
+INSTALL_ATTEMPT_MARKER_CONTENT='DefenseClaw authenticated fresh install in progress v1'
+INSTALL_CUSTODY_ROOT=$1
+STATE_CUSTODY_ROOT=$1
+POLICY_PYTHON=$2
+PUBLISH_HELPER=$3
+begin_install_attempt
+interrupted_install_attempt_detected
+"""
+    marked = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            program,
+            "bash",
+            str(custody),
+            sys.executable,
+            str(ROOT / "cli/defenseclaw/install_publish.py"),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert marked.returncode == 0, marked.stdout + marked.stderr
+
+    partial_home = home / ".defenseclaw"
+    partial_home.mkdir(mode=0o700)
+    identity = install_publish.path_identity(partial_home)
+    custody_fd = install_publish._open_custody_root(custody, create=False)
+    try:
+        intent, _retired = install_publish._retirement_names(
+            str(partial_home),
+            identity,
+            "directory",
+        )
+        document = install_publish._retirement_document(
+            str(partial_home),
+            identity,
+            "directory",
+        )
+        assert install_publish._ensure_retirement_intent(
+            custody_fd,
+            intent,
+            document,
+            allow_create=True,
+        )
+    finally:
+        os.close(custody_fd)
+
+    recovered = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "cli/defenseclaw/install_publish.py"),
+            "recover-custody",
+            str(custody),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert not partial_home.exists()
+    assert (custody / ".defenseclaw-install-in-progress-v1").is_file()
+    retired_directories = [path for path in custody.glob("retired-*") if path.is_dir()]
+    assert len(retired_directories) == 1
+
+    retry = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            program,
+            "bash",
+            str(custody),
+            sys.executable,
+            str(ROOT / "cli/defenseclaw/install_publish.py"),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert retry.returncode == 0, retry.stdout + retry.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer custody uses POSIX file types")
+@pytest.mark.parametrize("invalid_kind", ("content", "mode", "symlink", "directory"))
+def test_posix_install_attempt_marker_invalid_state_fails_closed(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    start = source.index("custody_stat() {")
+    end = source.index("\nupdate_install_attempt_marker()", start)
+    functions = source[start:end]
+    custody = tmp_path / ".defenseclaw-install-custody"
+    custody.mkdir(mode=0o700)
+    marker = custody / ".defenseclaw-install-in-progress-v1"
+    if invalid_kind == "content":
+        marker.write_text("invalid\n", encoding="ascii")
+        marker.chmod(0o600)
+    elif invalid_kind == "mode":
+        marker.write_text(
+            "DefenseClaw authenticated fresh install in progress v1\n",
+            encoding="ascii",
+        )
+        marker.chmod(0o644)
+    elif invalid_kind == "symlink":
+        target = tmp_path / "marker-target"
+        target.write_text(
+            "DefenseClaw authenticated fresh install in progress v1\n",
+            encoding="ascii",
+        )
+        target.chmod(0o600)
+        marker.symlink_to(target)
+    else:
+        marker.mkdir(mode=0o700)
+
+    program = f"""
+set -euo pipefail
+{functions}
+INSTALL_ATTEMPT_MARKER=.defenseclaw-install-in-progress-v1
+INSTALL_ATTEMPT_MARKER_CONTENT='DefenseClaw authenticated fresh install in progress v1'
+INSTALL_CUSTODY_ROOT=$1
+STATE_CUSTODY_ROOT=$1
+if interrupted_install_attempt_detected; then
+    exit 72
+fi
+"""
+    completed = subprocess.run(
+        ["/bin/bash", "-c", program, "bash", str(custody)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 @pytest.mark.skipif(os.name == "nt", reason="legacy rollback is POSIX-only")
-def test_legacy_failure_removes_activation_links_before_claimed_parents(
+def test_legacy_failure_preserves_residue_without_exact_retirement(
     tmp_path: Path,
 ) -> None:
     source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
@@ -205,6 +687,7 @@ def test_legacy_failure_removes_activation_links_before_claimed_parents(
 set -euo pipefail
 OS={os_name}
 {functions}
+warn() {{ :; }}
 root=$1
 DEFENSECLAW_HOME=$root/.defenseclaw
 DEFENSECLAW_VENV=$DEFENSECLAW_HOME/.venv
@@ -237,8 +720,9 @@ CLI_PUBLISHED_ID=
 POLICY_DIR=
 POLICY_DIR_ID=
 cleanup_install_attempt
-test ! -e "$DEFENSECLAW_HOME"
-test ! -e "$root/.local"
+test -e "$DEFENSECLAW_HOME/picked_connector"
+test -e "$INSTALL_DIR/defenseclaw-gateway"
+test -e "$DEFENSECLAW_HOME/extensions/defenseclaw/index.js"
 """
     completed = subprocess.run(
         ["/bin/bash", "-c", script, "bash", str(tmp_path / "home")],
@@ -276,8 +760,8 @@ def test_legacy_macos_installer_claims_gateway_after_copy_and_codesign(
     gateway.chmod(0o755)
     (release / f"defenseclaw-{version}-py3-none-any.whl").write_bytes(b"legacy wheel fixture\n")
 
-    _write_executable(
-        fake_bin / "python3",
+    _write_python_selector_shims(
+        fake_bin,
         f"#!{sys.executable}\n"
         "import os\n"
         "import sys\n"
@@ -339,7 +823,10 @@ def test_legacy_macos_installer_claims_gateway_after_copy_and_codesign(
     assert completed.returncode == 0, output
     installed_gateway = home / ".local/bin/defenseclaw-gateway"
     assert installed_gateway.is_file() and not installed_gateway.is_symlink()
-    assert not list((home / ".local/bin").glob(".defenseclaw-gateway.install.*"))
+    activation_residue = list((home / ".local/bin").glob(".defenseclaw-gateway.install.*"))
+    assert len(activation_residue) == 1
+    assert activation_residue[0].stat().st_ino == installed_gateway.stat().st_ino
+    assert "Legacy gateway activation residue was preserved" in output
     verified = subprocess.run(
         ["/usr/bin/codesign", "--verify", str(installed_gateway)],
         text=True,
@@ -388,7 +875,7 @@ def test_posix_installer_refuses_partial_home_and_dangling_entrypoints(tmp_path:
         assert completed.returncode == 1, output
         assert "An existing DefenseClaw installation was detected" in output
         assert "No changes were made" in output
-        assert "Detecting platform" not in output
+        assert "Installing Gateway" not in output
         if case == "partial-home":
             assert marker.read_bytes() == b"preserve\n"
         else:
@@ -530,8 +1017,8 @@ def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
         "fi\n",
     )
     _write_executable(fake_bin / "cosign", "#!/bin/sh\nexit 0\n")
-    _write_executable(
-        fake_bin / "python3",
+    _write_python_selector_shims(
+        fake_bin,
         f"#!{sys.executable}\n"
         "import os\n"
         "from pathlib import Path\n"
@@ -612,6 +1099,53 @@ def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
         assert (home / ".defenseclaw/.venv/bin/defenseclaw").is_file()
         assert (home / ".local/bin/defenseclaw").is_symlink()
         assert (home / ".local/bin/defenseclaw-gateway").is_file()
+        custody = home / ".defenseclaw-install-custody"
+        attempt_marker = custody / ".defenseclaw-install-in-progress-v1"
+        assert custody.is_dir()
+        assert stat.S_IMODE(custody.stat().st_mode) == 0o700
+        assert not attempt_marker.exists()
+
+        uv_called = tmp_path / "second-uv-called"
+        python_called = tmp_path / "second-python-called"
+        _write_executable(
+            fake_bin / "uv",
+            "#!/bin/sh\nprintf 'called\\n' > \"$SECOND_UV_CALLED\"\nexit 97\n",
+        )
+        _write_python_selector_shims(
+            fake_bin,
+            "#!/bin/sh\nprintf 'called\\n' > \"$SECOND_PYTHON_CALLED\"\nexit 98\n",
+        )
+        environment.update(
+            {
+                "SECOND_UV_CALLED": str(uv_called),
+                "SECOND_PYTHON_CALLED": str(python_called),
+            }
+        )
+        refused = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "scripts/install.sh"),
+                "--local",
+                str(release),
+                "--yes",
+                "--connector",
+                "none",
+            ],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        refusal_output = refused.stdout + refused.stderr
+        assert refused.returncode == 1, refusal_output
+        assert "An existing DefenseClaw installation was detected" in refusal_output
+        assert "No changes were made" in refusal_output
+        assert "Detecting platform" not in refusal_output
+        assert not uv_called.exists()
+        assert not python_called.exists()
+        assert not attempt_marker.exists()
         return
     assert completed.returncode != 0, output
     assert "appeared during installation" in output
@@ -624,6 +1158,53 @@ def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
         assert not (home / ".defenseclaw").exists()
     if arrival == "cli":
         assert not (home / ".local/bin/defenseclaw-gateway").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer uses Bash glob expansion")
+def test_posix_connector_marker_requires_one_real_retained_stage(tmp_path: Path) -> None:
+    installer = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    function_start = installer.index("record_picked_connector() {")
+    function_end = installer.index("\n}\n\n# ── Interrupt handler", function_start) + len("\n}")
+    function = installer[function_start:function_end]
+
+    home = tmp_path / "home/.defenseclaw"
+    policy = tmp_path / "policy"
+    publisher = tmp_path / "publisher.sh"
+    identity_called = tmp_path / "path-identity-called"
+    home.mkdir(parents=True)
+    policy.mkdir()
+    _write_executable(publisher, "#!/bin/sh\nprintf '%s\\n' retained-token\n")
+
+    program = (
+        "set -euo pipefail\n"
+        "die() { printf '%s\\n' \"$1\" >&2; exit 71; }\n"
+        'path_identity() { : > "${PATH_IDENTITY_CALLED}"; return 1; }\n'
+        f"{function}\n"
+        "CONNECTOR=codex\n"
+        "MODERN_RELEASE=true\n"
+        f"DEFENSECLAW_HOME={home!s}\n"
+        f"INSTALL_CUSTODY_ROOT={tmp_path / 'custody'!s}\n"
+        f"STATE_CUSTODY_ROOT={tmp_path / 'state-custody'!s}\n"
+        f"POLICY_DIR={policy!s}\n"
+        "POLICY_PYTHON=/bin/sh\n"
+        f"PUBLISH_HELPER={publisher!s}\n"
+        f"PATH_IDENTITY_CALLED={identity_called!s}\n"
+        "record_picked_connector\n"
+    )
+    completed = subprocess.run(
+        ["/bin/bash", "-c", program],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 71, output
+    assert "Connector marker rollback custody could not be bound" in output
+    assert "Could not bind retained connector marker custody" not in output
+    assert not identity_called.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rollback uses descriptor-bound publisher")
@@ -643,12 +1224,15 @@ def test_posix_failed_install_removes_attempt_owned_plugin_marker_and_bin_dirs(
     plugin_info = tarfile.TarInfo("index.js")
     plugin_info.mode = 0o600
     plugin_info.size = len(plugin_body)
-    with tarfile.open(release / "defenseclaw-plugin-0.8.4.tar.gz", "w:gz") as archive:
+    plugin_archive = release / f"defenseclaw-plugin-{CURRENT_RELEASE}.tar.gz"
+    with tarfile.open(plugin_archive, "w:gz") as archive:
         archive.addfile(plugin_info, io.BytesIO(plugin_body))
+    with (release / "checksums.txt").open("a", encoding="utf-8") as checksums:
+        checksums.write(f"{hashlib.sha256(plugin_archive.read_bytes()).hexdigest()}  {plugin_archive.name}\n")
 
     _write_executable(fake_bin / "cosign", "#!/bin/sh\nexit 0\n")
-    _write_executable(
-        fake_bin / "python3",
+    _write_python_selector_shims(
+        fake_bin,
         f"#!{sys.executable}\n"
         "import os\n"
         "from pathlib import Path\n"
@@ -730,6 +1314,7 @@ def test_posix_failed_install_removes_attempt_owned_plugin_marker_and_bin_dirs(
 
     output = completed.stdout + completed.stderr
     assert completed.returncode != 0, output
+    assert commit_called.exists(), output
     assert commit_called.read_text(encoding="utf-8") == "called\n"
     assert not (home / ".defenseclaw").exists()
     assert not (home / ".local").exists()
@@ -1206,10 +1791,7 @@ def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> 
     assert documented_windows.strip() == generated_windows.strip()
     assert "does not require a source checkout" in quickstart
     assert "does not require a source checkout" in site
-    expected_reference = (
-        "https://github.com/cisco-ai-defense/defenseclaw/"
-        f"blob/{CURRENT_RELEASE}/docs/CLI.md#upgrade"
-    )
+    expected_reference = f"https://github.com/cisco-ai-defense/defenseclaw/blob/{CURRENT_RELEASE}/docs/CLI.md#upgrade"
     assert expected_reference in site
     assert "/blob/main/docs/CLI.md#upgrade" not in site
     assert "/blob/v0.8.4/docs/CLI.md#upgrade" not in site
@@ -1240,8 +1822,12 @@ def test_windows_install_protected_materialization_binds_exact_signed_outer_byte
     assert '-cnotcontains "wheel"' in installer
     assert "-cne $expectedWheel" in installer
     assert "function New-PrivateDirectoryAcl" in installer
-    assert "[IO.FileSystemAclExtensions]::Create($directory, $acl)" in installer
-    assert "[void][IO.Directory]::CreateDirectory($Path, $acl)" in installer
+    assert "CreatePrivateDirectory" in installer
+    assert "FILE_CREATE" in installer
+    assert "FILE_DIRECTORY_FILE" in installer
+    assert "$script:PrivateDirectoryClaims[$full] = [pscustomobject]@{" in installer
+    assert "Identity = $claim.Identity" in installer
+    assert "Native = $claim" in installer
     assert "function New-PrivateFileStream" in installer
     assert "GetTempFileName" not in installer
     assert "New-Item -ItemType Directory -Force -Path $tmp" not in installer

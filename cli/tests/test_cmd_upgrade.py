@@ -502,6 +502,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
         if environment_lock_payload is not None:
             with open(os.path.join(data_dir, ".env.lock"), "wb") as stream:
                 stream.write(environment_lock_payload)
+            os.chmod(os.path.join(data_dir, ".env.lock"), 0o644)
 
         release_artifacts = _expected_release_artifacts("0.8.4")
         wheel_name = release_artifacts["wheel"]
@@ -1370,6 +1371,56 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
                 health_timeout=3,
             )
 
+    def test_rollback_restart_uses_durable_metadata_result_not_child_field(self):
+        with TemporaryDirectory() as root:
+            app, running_plan, _config_path, _cursor_path, _gateway_payload, home = (
+                self._prepare_plan(root)
+            )
+            plan = replace(running_plan, source_gateway_was_running=False)
+            receipt_path = begin_upgrade_receipt(
+                app.cfg.data_dir,
+                from_version="0.8.4",
+                target_version="0.8.5",
+                artifacts_verified=True,
+            )
+            with (
+                patch.dict(os.environ, {"HOME": home}),
+                patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"),
+                patch("defenseclaw.commands.cmd_upgrade._install_wheel"),
+                patch("defenseclaw.commands.cmd_upgrade._verify_restored_bridge_artifacts"),
+                patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._restore_local_observability_upgrade_backup",
+                    return_value=True,
+                ) as restore_bundle,
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._restart_restored_local_observability_stack",
+                    return_value={"restarted": True, "degraded_errors": []},
+                ) as restart_stack,
+            ):
+                restored = _execute_hard_cut_rollback(
+                    plan,
+                    app,
+                    receipt_path,
+                    failure_code="health_check_failed",
+                    health_timeout=3,
+                    local_bundle_upgrade={
+                        "installed": True,
+                        "restart_required": False,
+                    },
+                )
+
+            self.assertTrue(restored)
+            restore_bundle.assert_called_once_with(
+                plan.data_dir,
+                plan.backup_dir,
+                {"installed": True, "restart_required": False},
+            )
+            restart_stack.assert_called_once_with(
+                app.cfg.data_dir,
+                health_timeout=3,
+            )
+
     def test_rollback_discards_target_dotenv_value_before_loading_restored_bridge(self):
         env_name = "TEST_HARD_CUT_ROLLBACK_TOKEN"
         os.environ.pop(env_name, None)
@@ -1785,16 +1836,23 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
 
             bundle_backup = Path(plan.backup_dir) / "local-observability-stack"
             managed_backup = bundle_backup / "managed"
+            created_backup = bundle_backup / "created"
+            retired_backup = bundle_backup / "retired"
             (managed_backup / "managed").mkdir(parents=True)
+            (created_backup / "managed").mkdir(parents=True)
+            retired_backup.mkdir()
             (managed_backup / "managed/existing.yaml").write_bytes(bridge_existing)
             (managed_backup / ".defenseclaw-bundle-manifest.json").write_bytes(
                 bridge_manifest
             )
+            created_claim = created_backup / "managed/created.yaml"
+            created_claim.write_bytes(b"target created\n")
+            os.link(created_claim, created)
             metadata = bundle_backup / "refresh-backup.json"
             metadata.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "existing_paths": [
                             ".defenseclaw-bundle-manifest.json",
                             "managed/existing.yaml",
@@ -1811,6 +1869,12 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
                             ".defenseclaw-bundle-manifest.json": 0o600,
                             "managed/existing.yaml": 0o640,
                         },
+                        "created_sha256": {
+                            "managed/created.yaml": hashlib.sha256(
+                                b"target created\n"
+                            ).hexdigest(),
+                        },
+                        "old_windows_security": {},
                         "managed_paths": [
                             ".defenseclaw-bundle-manifest.json",
                             "managed/created.yaml",
@@ -3832,6 +3896,18 @@ class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
                 )
             )
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
+            # ``cmd_upgrade.subprocess`` is the process-wide subprocess
+            # module. The fake below intentionally replaces ``run`` to
+            # exercise the missing OpenClaw CLI, which would otherwise also
+            # intercept config.detect_environment() on Linux during the
+            # post-install reload. Keep this unit test scoped to restart
+            # behavior; dedicated reload tests cover the real loader.
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config",
+                    return_value=app.cfg,
+                )
+            )
             stack.enter_context(
                 patch(
                     "defenseclaw.commands.cmd_upgrade.subprocess.run",

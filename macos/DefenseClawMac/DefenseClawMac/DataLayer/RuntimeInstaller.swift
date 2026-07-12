@@ -860,7 +860,7 @@ extension AppState {
     }
 
     private static func existingRuntimeRefusal(marker: String, payload: RuntimePayload) -> String {
-        guard let resolverGuidance = authenticatedRuntimeUpgradeResolverGuidance(
+        guard let resolverCommand = authenticatedRuntimeUpgradeResolverCommand(
             releaseTag: payload.tag
         ) else {
             return """
@@ -872,14 +872,16 @@ extension AppState {
         return """
         Bundled runtime installation is fresh-install-only. An existing or partial DefenseClaw runtime was detected at \(marker).
 
-        No installed files or services were changed. \(resolverGuidance)
+        No installed files or services were changed. Quit DefenseClaw, then authenticate and run the release-owned resolver in Terminal without --version so tested-source policy, the 0.8.4 bridge, rollback, migrations, and health checks remain mandatory (requires cosign):
+
+        \(resolverCommand)
         """
     }
 
-    /// Produce the copy/paste, signed-release resolver path shared by every
-    /// native-app refusal surface. Returning nil prevents a release tag from
-    /// being interpolated into a URL unless it is canonical SemVer.
-    static func authenticatedRuntimeUpgradeResolverGuidance(releaseTag: String) -> String? {
+    /// Produce only the runnable, signed-release resolver command shared by
+    /// every native-app refusal surface. Returning nil prevents a release tag
+    /// from being interpolated into a URL unless it is canonical SemVer.
+    static func authenticatedRuntimeUpgradeResolverCommand(releaseTag: String) -> String? {
         let tag = releaseTag.hasPrefix("v") ? String(releaseTag.dropFirst()) : releaseTag
         guard tag.range(
             of: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#,
@@ -887,30 +889,27 @@ extension AppState {
         ) != nil else { return nil }
         let assetBase = "https://github.com/cisco-ai-defense/defenseclaw/releases/download/\(tag)"
         return """
-        Authenticate and run the release-owned resolver asset without --version so tested-source policy, the 0.8.4 bridge, rollback, migrations, and health checks remain mandatory (requires cosign):
-
         (
           set -eu
           umask 077
-          d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
-          trap 'rm -rf "$d"' EXIT
           command -v cosign >/dev/null
-          for name in defenseclaw-upgrade.sh checksums.txt checksums.txt.sig checksums.txt.pem; do
-            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --output "$d/$name" '\(assetBase)/'$name
-          done
-          cosign verify-blob --certificate "$d/checksums.txt.pem" --signature "$d/checksums.txt.sig" --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$d/checksums.txt"
-          line="$(grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$' "$d/checksums.txt")"
+          checksums="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt')"
+          signature="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt.sig')"
+          certificate="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt.pem')"
+          resolver="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/defenseclaw-upgrade.sh')"
+          cosign verify-blob --certificate <(printf '%s\\n' "$certificate") --signature <(printf '%s\\n' "$signature") --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' <(printf '%s\\n' "$checksums")
+          line="$(printf '%s\\n' "$checksums" | grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$')"
           [ "$(printf '%s\\n' "$line" | wc -l | tr -d ' ')" = 1 ]
           expected="${line%% *}"
           if command -v sha256sum >/dev/null; then
-            actual="$(sha256sum "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
+            actual="$(printf '%s\\n' "$resolver" | sha256sum | awk '{print $1}')"
           else
-            actual="$(shasum -a 256 "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
+            actual="$(printf '%s\\n' "$resolver" | shasum -a 256 | awk '{print $1}')"
           fi
           [ "$actual" = "$expected" ]
-          [ "$(tail -n 1 "$d/defenseclaw-upgrade.sh")" = '# DefenseClaw upgrade resolver complete v1' ]
-          bash -n "$d/defenseclaw-upgrade.sh"
-          bash "$d/defenseclaw-upgrade.sh" --yes
+          [ "$(printf '%s\\n' "$resolver" | tail -n 1)" = '# DefenseClaw upgrade resolver complete v1' ]
+          bash -n <(printf '%s\\n' "$resolver")
+          bash <(printf '%s\\n' "$resolver") --yes
         )
         """
     }

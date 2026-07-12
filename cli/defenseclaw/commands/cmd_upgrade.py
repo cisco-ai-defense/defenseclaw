@@ -32,6 +32,7 @@ import email.parser
 import hashlib
 import ipaddress
 import json
+import ntpath
 import os
 import platform
 import re
@@ -96,6 +97,7 @@ _HARD_CUT_RECOVERY_FILENAME = "phase-two-active.json"
 _PHASE_TWO_MUTATOR_LEASE_FILENAME = "phase-two-mutator.lease"
 _HARD_CUT_RECOVERY_SCHEMA_VERSION = 3
 _MAX_HARD_CUT_RECOVERY_BYTES = 64 * 1024
+_MAX_BUNDLE_ROLLBACK_METADATA_BYTES = 4 * 1024 * 1024
 _PHASE_TWO_MUTATOR_LEASE_TIMEOUT_SECONDS = 600
 _MAX_PHASE_TWO_MUTATOR_OUTPUT_BYTES = 1024 * 1024
 _STRICT_SIGSTORE_RELEASE_VERSION = "0.8.4"
@@ -5361,6 +5363,106 @@ def _read_bounded_private_json(path: Path) -> object:
         raise OSError("hard-cut recovery journal is invalid JSON") from exc
 
 
+def _private_file_snapshot_unchanged(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        os.path.samestat(before, after)
+        and before.st_mode == after.st_mode
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ctime_ns == after.st_ctime_ns
+        and getattr(before, "st_uid", None) == getattr(after, "st_uid", None)
+    )
+
+
+def _read_bounded_bundle_rollback_json(path: Path) -> object:
+    """Read exact private rollback authority from one no-follow descriptor."""
+
+    try:
+        named_before = path.lstat()
+    except OSError as exc:
+        raise OSError("local observability rollback metadata is unavailable") from exc
+    if (
+        stat.S_ISLNK(named_before.st_mode)
+        or getattr(named_before, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISREG(named_before.st_mode)
+        or not 0 < named_before.st_size <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES
+    ):
+        raise OSError("local observability rollback metadata must be a bounded regular file")
+    if os.name == "posix" and (
+        named_before.st_uid != os.getuid()
+        or stat.S_IMODE(named_before.st_mode) != 0o600
+    ):
+        raise OSError("local observability rollback metadata must be owner-only")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise OSError("local observability rollback metadata could not be opened safely") from exc
+    windows_security = None
+    try:
+        opened_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or not os.path.samestat(named_before, opened_before)
+            or not 0 < opened_before.st_size <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES
+        ):
+            raise OSError("local observability rollback metadata changed while opening")
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            windows_security = windows_acl.capture_fd(descriptor)
+            windows_acl.assert_trusted_owner(windows_security)
+            windows_acl.assert_not_broadly_writable(windows_security)
+
+        payload = bytearray()
+        while len(payload) <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES:
+            block = os.read(
+                descriptor,
+                min(
+                    1024 * 1024,
+                    _MAX_BUNDLE_ROLLBACK_METADATA_BYTES + 1 - len(payload),
+                ),
+            )
+            if not block:
+                break
+            payload.extend(block)
+        opened_after = os.fstat(descriptor)
+        try:
+            named_after = path.lstat()
+        except OSError as exc:
+            raise OSError("local observability rollback metadata changed while reading") from exc
+        if (
+            not payload
+            or len(payload) > _MAX_BUNDLE_ROLLBACK_METADATA_BYTES
+            or not _private_file_snapshot_unchanged(opened_before, opened_after)
+            or stat.S_ISLNK(named_after.st_mode)
+            or getattr(named_after, "st_file_attributes", 0) & 0x00000400
+            or not stat.S_ISREG(named_after.st_mode)
+            or not _private_file_snapshot_unchanged(opened_after, named_after)
+        ):
+            raise OSError("local observability rollback metadata changed while reading")
+        if os.name == "posix" and (
+            opened_after.st_uid != os.getuid()
+            or stat.S_IMODE(opened_after.st_mode) != 0o600
+        ):
+            raise OSError("local observability rollback metadata lost owner-only protection")
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            security_after = windows_acl.capture_fd(descriptor)
+            if security_after != windows_security:
+                raise OSError("local observability rollback metadata security changed")
+            windows_acl.assert_trusted_owner(security_after)
+            windows_acl.assert_not_broadly_writable(security_after)
+    finally:
+        os.close(descriptor)
+    try:
+        return json.loads(payload)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise OSError("local observability rollback metadata is invalid JSON") from exc
+
+
 def _path_is_within(path: str, root: str) -> bool:
     try:
         return os.path.commonpath((os.path.abspath(path), os.path.abspath(root))) == os.path.abspath(root)
@@ -5615,6 +5717,212 @@ def _remove_hard_cut_recovery_journal(path: Path) -> None:
             os.close(descriptor)
 
 
+_WINDOWS_RESERVED_BUNDLE_BASENAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CLOCK$",
+        "CONIN$",
+        "CONOUT$",
+        *(f"COM{suffix}" for suffix in "123456789¹²³"),
+        *(f"LPT{suffix}" for suffix in "123456789¹²³"),
+    }
+)
+
+
+def _windows_bundle_component_key(component: str) -> str:
+    if (
+        any(ord(character) < 32 or ord(character) == 127 for character in component)
+        or any(character in '<>:"|?*' for character in component)
+        or component.endswith((" ", "."))
+        or component.split(".", 1)[0].upper() in _WINDOWS_RESERVED_BUNDLE_BASENAMES
+    ):
+        raise OSError("local observability rollback contains a Windows-unsafe path")
+    is_reserved = getattr(ntpath, "isreserved", None)
+    if is_reserved is not None and is_reserved(component):
+        raise OSError("local observability rollback contains a Windows-unsafe path")
+    return component.casefold()
+
+
+def _safe_bundle_rollback_paths(values: object) -> set[str]:
+    if not isinstance(values, list) or len(values) > 4096:
+        raise OSError("local observability rollback path inventory is invalid")
+    paths: set[str] = set()
+    windows_keys: set[tuple[str, ...]] = set()
+    for value in values:
+        components = value.split("/") if isinstance(value, str) else ()
+        try:
+            encoded = value.encode("utf-8") if isinstance(value, str) else b""
+            encoded_components = tuple(component.encode("utf-8") for component in components)
+        except UnicodeEncodeError as exc:
+            raise OSError("local observability rollback contains an unsafe path") from exc
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\x00" in value
+            or os.path.isabs(value)
+            or "\\" in value
+            or any(component in {"", ".", ".."} for component in components)
+            or len(encoded) > 4096
+            or len(components) > 64
+            or any(len(component) > 255 for component in encoded_components)
+        ):
+            raise OSError("local observability rollback contains an unsafe path")
+        windows_key = tuple(_windows_bundle_component_key(component) for component in components)
+        if windows_key in windows_keys:
+            raise OSError("local observability rollback contains a Windows path alias collision")
+        windows_keys.add(windows_key)
+        paths.add(value)
+    if len(paths) != len(values):
+        raise OSError("local observability rollback path inventory contains duplicates")
+    return paths
+
+
+def _parse_bundle_windows_security(
+    raw: object,
+    expected_paths: set[str],
+) -> dict[str, WindowsFileSecurity]:
+    if not isinstance(raw, dict) or len(raw) > 4096:
+        raise OSError("local observability rollback Windows security map is invalid")
+    keys = _safe_bundle_rollback_paths(list(raw))
+    if keys != expected_paths:
+        raise OSError("local observability rollback Windows security inventory is inconsistent")
+    from defenseclaw.windows_acl import WindowsFileSecurity
+
+    parsed: dict[str, WindowsFileSecurity] = {}
+    for relative, value in raw.items():
+        if not isinstance(value, dict) or set(value) != {
+            "owner",
+            "dacl",
+            "dacl_protected",
+        }:
+            raise OSError("local observability rollback Windows security row is invalid")
+        owner = value["owner"]
+        dacl = value["dacl"]
+        protected = value["dacl_protected"]
+        if (
+            not isinstance(owner, str)
+            or not isinstance(dacl, str)
+            or not isinstance(protected, bool)
+            or len(owner) > 128
+            or len(dacl) > 96 * 1024
+        ):
+            raise OSError("local observability rollback Windows security row is invalid")
+        try:
+            owner_bytes = base64.b64decode(owner, validate=True)
+            dacl_bytes = base64.b64decode(dacl, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise OSError("local observability rollback Windows security row is invalid") from exc
+        if (
+            not 0 < len(owner_bytes) <= 68
+            or not 8 <= len(dacl_bytes) <= 65_535
+            or base64.b64encode(owner_bytes).decode("ascii") != owner
+            or base64.b64encode(dacl_bytes).decode("ascii") != dacl
+        ):
+            raise OSError("local observability rollback Windows security row is invalid")
+        parsed[relative] = WindowsFileSecurity(owner_bytes, dacl_bytes, protected)
+    return parsed
+
+
+def _parse_bundle_rollback_metadata(
+    metadata: object,
+) -> tuple[
+    set[str],
+    set[str],
+    dict[str, str],
+    dict[str, int],
+    dict[str, str],
+    dict[str, WindowsFileSecurity],
+    bool | None,
+]:
+    """Validate durable target authority before any bundle replay mutation."""
+
+    if not isinstance(metadata, dict):
+        raise OSError("local observability rollback metadata is invalid")
+    schema_version = metadata.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version not in {1, 2}
+    ):
+        raise OSError("local observability rollback metadata is invalid")
+    existing = _safe_bundle_rollback_paths(metadata.get("existing_paths"))
+    managed = _safe_bundle_rollback_paths(metadata.get("managed_paths"))
+    digests_raw = metadata.get("old_sha256")
+    modes_raw = metadata.get("old_modes")
+    if not isinstance(digests_raw, dict) or not isinstance(modes_raw, dict):
+        raise OSError("local observability rollback metadata maps are invalid")
+    old_digests = {
+        key: value.lower()
+        for key, value in digests_raw.items()
+        if isinstance(key, str) and isinstance(value, str) and _is_sha256_hex(value)
+    }
+    old_modes = {
+        key: value
+        for key, value in modes_raw.items()
+        if (
+            isinstance(key, str)
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= 0o7777
+        )
+    }
+    if set(digests_raw) != set(old_digests) or set(modes_raw) != set(old_modes):
+        raise OSError("local observability rollback metadata contains invalid values")
+    if (
+        not existing.issubset(managed)
+        or set(old_digests) != existing
+        or set(old_modes) != existing
+    ):
+        raise OSError("local observability rollback inventory is inconsistent")
+
+    created = managed - existing
+    if schema_version == 1:
+        if created:
+            raise OSError(
+                "local observability rollback schema 1 lacks retained target-created claims"
+            )
+        created_digests: dict[str, str] = {}
+        if os.name == "nt" and existing:
+            raise OSError(
+                "local observability rollback schema 1 lacks exact Windows security"
+            )
+        old_windows_security: dict[str, WindowsFileSecurity] = {}
+    else:
+        created_raw = metadata.get("created_sha256")
+        if not isinstance(created_raw, dict):
+            raise OSError("local observability rollback lacks target-created claim digests")
+        created_digests = {
+            key: value.lower()
+            for key, value in created_raw.items()
+            if isinstance(key, str) and isinstance(value, str) and _is_sha256_hex(value)
+        }
+        if set(created_raw) != set(created_digests) or set(created_digests) != created:
+            raise OSError("local observability target-created claim inventory is inconsistent")
+        security_paths = existing if os.name == "nt" else set()
+        old_windows_security = _parse_bundle_windows_security(
+            metadata.get("old_windows_security"),
+            security_paths,
+        )
+
+    restart_required = metadata.get("restart_required")
+    if schema_version == 2 and not isinstance(restart_required, bool):
+        raise OSError("local observability rollback schema 2 lacks boolean restart state")
+    if restart_required is not None and not isinstance(restart_required, bool):
+        raise OSError("local observability rollback restart state is invalid")
+    return (
+        managed,
+        existing,
+        old_digests,
+        old_modes,
+        created_digests,
+        old_windows_security,
+        restart_required,
+    )
+
+
 def _crash_bundle_rollback_result(
     backup_dir: str,
     *,
@@ -5629,16 +5937,26 @@ def _crash_bundle_rollback_result(
             # child stopped before mutation and needs no bundle replay.
             return {"installed": False}
         return None
-    raw = _read_bounded_private_json(metadata_path)
-    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-        raise OSError("local observability crash rollback metadata is invalid")
-    managed = raw.get("managed_paths")
-    restart_required = raw.get("restart_required")
-    if not isinstance(managed, list) or not isinstance(restart_required, bool):
-        raise OSError("local observability crash rollback lacks its managed path inventory")
+    raw = _read_bounded_bundle_rollback_json(metadata_path)
+    try:
+        (
+            managed,
+            _existing,
+            _old_digests,
+            _old_modes,
+            _created,
+            _old_windows_security,
+            restart_required,
+        ) = (
+            _parse_bundle_rollback_metadata(raw)
+        )
+    except OSError as exc:
+        raise OSError(f"local observability crash rollback metadata is invalid: {exc}") from exc
+    if not isinstance(restart_required, bool):
+        raise OSError("local observability crash rollback lacks its boolean restart state")
     return {
         "installed": True,
-        "managed_paths": managed,
+        "managed_paths": sorted(managed),
         "changed_paths": [],
         "restart_required": restart_required,
     }
@@ -6439,7 +6757,7 @@ def _execute_hard_cut_rollback(
         _verify_restored_bridge_artifacts(plan)
         # Import bundle rollback only after the authenticated bridge wheel is
         # back on disk. The failed target must never supply recovery code.
-        _restore_local_observability_upgrade_backup(
+        durable_bundle_restart = _restore_local_observability_upgrade_backup(
             plan.data_dir,
             plan.backup_dir,
             local_bundle_upgrade,
@@ -6470,7 +6788,7 @@ def _execute_hard_cut_rollback(
                 gateway_path=plan.active_gateway_path,
             )
 
-        if local_bundle_upgrade and local_bundle_upgrade.get("restart_required") is True:
+        if durable_bundle_restart is True:
             restored_bundle = _restart_restored_local_observability_stack(
                 plan.data_dir,
                 health_timeout=max(health_timeout, 1),
@@ -6888,79 +7206,64 @@ def _restore_local_observability_upgrade_backup(
     data_dir: str,
     backup_dir: str,
     local_bundle_upgrade: dict[str, object] | None,
-) -> None:
-    if not local_bundle_upgrade or local_bundle_upgrade.get("installed") is not True:
-        return
+) -> bool | None:
+    if not local_bundle_upgrade:
+        return None
+    if local_bundle_upgrade.get("installed") is not True:
+        reported_restart = local_bundle_upgrade.get("restart_required")
+        if reported_restart is not None and not isinstance(reported_restart, bool):
+            raise OSError("local observability rollback restart state is invalid")
+        return reported_restart
     backup_root = os.path.join(backup_dir, "local-observability-stack")
     metadata_path = os.path.join(backup_root, "refresh-backup.json")
     managed_backup = os.path.join(backup_root, "managed")
-    try:
-        if os.path.getsize(metadata_path) > 4 * 1024 * 1024:
-            raise ValueError("bundle rollback metadata is too large")
-        with open(metadata_path, encoding="utf-8") as stream:
-            metadata = json.load(stream)
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise OSError("local observability rollback metadata is unavailable") from exc
-    if not isinstance(metadata, dict) or metadata.get("schema_version") != 1:
-        raise OSError("local observability rollback metadata is invalid")
-    existing_raw = metadata.get("existing_paths")
-    digests_raw = metadata.get("old_sha256")
-    modes_raw = metadata.get("old_modes")
+    created_backup = os.path.join(backup_root, "created")
+    retired_backup = os.path.join(backup_root, "retired")
+    metadata = _read_bounded_bundle_rollback_json(Path(metadata_path))
+    (
+        managed,
+        existing,
+        old_digests,
+        old_modes,
+        created_digests,
+        old_windows_security,
+        _restart_required,
+    ) = _parse_bundle_rollback_metadata(metadata)
     managed_raw = local_bundle_upgrade.get("managed_paths")
     changed_raw = local_bundle_upgrade.get("changed_paths")
-    if not all(isinstance(value, list) for value in (existing_raw, managed_raw, changed_raw)):
+    if not all(isinstance(value, list) for value in (managed_raw, changed_raw)):
         raise OSError("local observability rollback path inventory is invalid")
-    if not isinstance(digests_raw, dict) or not isinstance(modes_raw, dict):
-        raise OSError("local observability rollback metadata maps are invalid")
-
-    def _safe_paths(values) -> set[str]:
-        paths = set()
-        for value in values:
-            if (
-                not isinstance(value, str)
-                or not value
-                or os.path.isabs(value)
-                or ".." in value.replace("\\", "/").split("/")
-            ):
-                raise OSError("local observability rollback contains an unsafe path")
-            paths.add(value)
-        return paths
-
-    existing = _safe_paths(existing_raw)
-    managed = _safe_paths(managed_raw) | _safe_paths(changed_raw) | {".defenseclaw-bundle-manifest.json"}
-    old_digests = {
-        key: value
-        for key, value in digests_raw.items()
-        if isinstance(key, str) and isinstance(value, str) and _is_sha256_hex(value)
-    }
-    old_modes = {
-        key: value
-        for key, value in modes_raw.items()
-        if (
-            isinstance(key, str)
-            and isinstance(value, int)
-            and not isinstance(value, bool)
-            and 0 <= value <= 0o7777
-        )
-    }
-    if set(digests_raw) != set(old_digests) or set(modes_raw) != set(old_modes):
-        raise OSError("local observability rollback metadata contains invalid values")
-    if (
-        not existing.issubset(managed)
-        or set(old_digests) != existing
-        or set(old_modes) != existing
-    ):
+    reported_managed = (
+        _safe_bundle_rollback_paths(managed_raw)
+        | _safe_bundle_rollback_paths(changed_raw)
+        | {".defenseclaw-bundle-manifest.json"}
+    )
+    if reported_managed != managed:
         raise OSError("local observability rollback inventory is inconsistent")
+    reported_restart = local_bundle_upgrade.get("restart_required")
+    if _restart_required is not None:
+        if not isinstance(reported_restart, bool) or reported_restart != _restart_required:
+            raise OSError("local observability rollback restart state is inconsistent")
+        durable_restart = _restart_required
+    else:
+        if reported_restart is not None and not isinstance(reported_restart, bool):
+            raise OSError("local observability rollback restart state is invalid")
+        durable_restart = reported_restart
     from defenseclaw.bundle_refresh import _restore_local_observability_backup
 
     _restore_local_observability_backup(
         Path(data_dir) / "observability-stack",
         Path(managed_backup),
+        Path(created_backup),
+        Path(retired_backup),
         managed,
         existing,
         old_digests,
         old_modes,
+        created_digests,
+        old_windows_security,
     )
+    return durable_restart
 
 
 def _create_private_backup_directory(backup_root: str, timestamp: str) -> str:

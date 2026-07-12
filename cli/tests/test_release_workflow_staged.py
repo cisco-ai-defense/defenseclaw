@@ -3,20 +3,19 @@
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
-import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
+WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
 
@@ -29,23 +28,27 @@ def _ci_workflow() -> dict[str, object]:
     return yaml.load(CI_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_upgrade_smoke_installs_cosign_before_historical_authentication() -> None:
+def test_upgrade_refusal_contract_installs_cosign_before_historical_authentication() -> None:
     steps = _ci_workflow()["jobs"]["upgrade-smoke"]["steps"]
     cosign = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("uses", "").startswith("sigstore/cosign-installer@")
+        index for index, step in enumerate(steps) if step.get("uses", "").startswith("sigstore/cosign-installer@")
     )
     smoke = next(
-        index
-        for index, step in enumerate(steps)
-        if "make upgrade-smoke-matrix" in step.get("run", "")
+        index for index, step in enumerate(steps) if "make upgrade-refusal-contract-matrix" in step.get("run", "")
     )
 
-    assert steps[cosign]["uses"] == (
-        "sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409"
-    )
+    assert steps[cosign]["uses"] == ("sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da")
     assert cosign < smoke
+
+    job = _ci_workflow()["jobs"]["upgrade-smoke"]
+    assert job["name"] == "Upgrade Refusal Contract (unsigned PR candidate)"
+    rendered = str(job)
+    assert "--baseline-mode seed" in rendered
+    assert "make upgrade-smoke-matrix" not in rendered
+    workflow_text = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert "release.yaml@refs/heads/main" in workflow_text
+    assert "positive resolver" in workflow_text
+    assert "fake cosign success" in workflow_text
 
 
 def test_release_is_manual_and_default_permissions_are_read_only() -> None:
@@ -64,106 +67,25 @@ def test_release_is_manual_and_default_permissions_are_read_only() -> None:
     assert workflow["permissions"] == {"contents": "read"}
 
 
-def test_release_requires_protected_main_and_non_bypassable_environment() -> None:
+def test_release_requires_current_main_without_prescribing_repository_governance() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert 'GITHUB_REF" != "refs/heads/main' in text
     assert "is not the current origin/main tip" in text
-    assert "can_admins_bypass" in text
-    assert "required_reviewers" in text
-    assert 'reviewer.get("type") != "Team"' in text
-    assert 'team.get("id") != 16849702' in text
-    assert 'team.get("slug") != "defenseclaw-reviewers"' in text
-    assert 'reviewer_rules[0].get("prevent_self_review") is not True' in text
-    assert "release environment must prevent initiator self-review" in text
-    assert "protected_branches" in text
-    assert "custom_branch_policies" in text
     assert "refs/heads/release/" not in text
-
-
-def _release_environment_validator() -> str:
-    steps = _workflow()["jobs"]["release-preflight"]["steps"]
-    command = next(step["run"] for step in steps if step.get("name") == "Require protected release environment")
-    marker = "python3 - release-environment.json <<'PY'\n"
-    return command.split(marker, 1)[1].rsplit("\nPY", 1)[0]
-
-
-def _valid_release_environment(reviewers: list[dict[str, object]]) -> dict[str, object]:
-    return {
-        "can_admins_bypass": False,
-        "protection_rules": [
-            {
-                "type": "required_reviewers",
-                "prevent_self_review": True,
-                "reviewers": reviewers,
-            }
-        ],
-        "deployment_branch_policy": {
-            "protected_branches": True,
-            "custom_branch_policies": False,
-        },
+    for forbidden in (
+        "defenseclaw-reviewers",
+        "required_reviewers",
+        "prevent_self_review",
+        "can_admins_bypass",
+        "protection_rules",
+        'gh api "repos/$GITHUB_REPOSITORY/environments/',
+    ):
+        assert forbidden not in text
+    jobs = _workflow()["jobs"]
+    assert {name for name, job in jobs.items() if job.get("environment") == "release"} == {
+        "macos-app",
+        "publish-release",
     }
-
-
-@pytest.mark.parametrize(
-    "reviewers",
-    [
-        [{"type": "User", "reviewer": {"id": 16849702, "slug": "defenseclaw-reviewers"}}],
-        [{"type": "Team", "reviewer": {"id": 1, "slug": "weak-reviewers"}}],
-        [
-            {"type": "Team", "reviewer": {"id": 16849702, "slug": "defenseclaw-reviewers"}},
-            {"type": "Team", "reviewer": {"id": 1, "slug": "weak-reviewers"}},
-        ],
-    ],
-)
-def test_release_environment_rejects_user_wrong_or_extra_reviewers(
-    tmp_path: Path,
-    reviewers: list[dict[str, object]],
-) -> None:
-    environment = tmp_path / "release-environment.json"
-    environment.write_text(json.dumps(_valid_release_environment(reviewers)), encoding="utf-8")
-
-    completed = subprocess.run(
-        [sys.executable, "-", str(environment)],
-        input=_release_environment_validator(),
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=10,
-    )
-
-    assert completed.returncode != 0
-    assert "defenseclaw-reviewers" in completed.stderr
-
-
-def test_release_environment_accepts_exact_required_team(tmp_path: Path) -> None:
-    environment = tmp_path / "release-environment.json"
-    environment.write_text(
-        json.dumps(
-            _valid_release_environment(
-                [
-                    {
-                        "type": "Team",
-                        "reviewer": {
-                            "id": 16849702,
-                            "slug": "defenseclaw-reviewers",
-                        },
-                    }
-                ]
-            )
-        ),
-        encoding="utf-8",
-    )
-
-    completed = subprocess.run(
-        [sys.executable, "-", str(environment)],
-        input=_release_environment_validator(),
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=10,
-    )
-
-    assert completed.returncode == 0, completed.stderr
 
 
 def test_release_target_must_advance_reviewed_and_published_stable_state() -> None:
@@ -204,12 +126,26 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert text.count("scripts/release_candidate.py assemble") == 1
     assert "steps.upload.outputs.artifact-digest" not in text
 
-    macos_job = str(_workflow()["jobs"]["macos-app"])
+    jobs = _workflow()["jobs"]
+    build_job = jobs["build-runtime-candidate"]
+    build_rendered = str(build_job)
+    assert build_job["permissions"] == {"contents": "read"}
+    assert "id-token" not in build_rendered
+    assert "sigstore/cosign-installer@" not in build_rendered
+    assert "release --clean --skip=sign" in build_rendered
+
+    assemble_job = jobs["assemble-release-candidate"]
+    assemble_rendered = str(assemble_job)
+    assert assemble_job["permissions"]["id-token"] == "write"
+    assert "sigstore/cosign-installer@" in assemble_rendered
+    assert "cosign sign-blob" in assemble_rendered
+    assert text.count("cosign sign-blob") == 1
+
+    macos_job = str(jobs["macos-app"])
     assert "scripts/release_candidate.py extract-gateway" in macos_job
     assert "MACOS_GATEWAY_INPUT" in macos_job
     assert "make extensions" not in macos_job
 
-    jobs = _workflow()["jobs"]
     for name in (
         "linux-upgrade",
         "macos-upgrade",
@@ -329,6 +265,17 @@ def test_every_remote_action_is_commit_pinned() -> None:
         assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", action), action
 
 
+def test_every_ci_remote_action_is_commit_pinned() -> None:
+    uses = re.findall(
+        r"^\s*- uses:\s*([^\s#]+)",
+        CI_WORKFLOW.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert uses
+    for action in uses:
+        assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", action), action
+
+
 def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     text = PROTOCOL_GATE.read_text(encoding="utf-8")
     assert 'receipt.get("migration_status") != "completed"' in text
@@ -343,7 +290,7 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "run_installed_controller_refusal",
         "for invocation in explicit latest",
         'patch_installed_upgrade_endpoint "${TARGET_VERSION}"',
-        'defenseclaw upgrade "${target_args[@]}"',
+        'defenseclaw "${command_args[@]}"',
         "run_candidate_updater_refusal",
         "run_candidate_explicit_bridge_refusal",
         "run_candidate_updater_staged_success",
@@ -363,6 +310,16 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "there is intentionally no --version argument",
         "stage_authenticated_baseline",
         "SUCCESS_PATH_ONLY",
+        "REFUSAL_CONTRACT_ONLY",
+        "assert_reviewed_resolver_asset_contract",
+        "reviewed release-owned resolver assets failed byte-for-byte validation",
+        "--refusal-contract-only requires a schema-2 candidate",
+        "upgrade_supports_allow_unverified",
+        "resolver never receives this flag",
+        "Signed resolver success remains mandatory in release.yaml after candidate signing",
+        "materialize_baseline_cli_startup_state",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "interpreter caches are not release or operator state",
         "start_source_gateway_canary",
         "upgrade bridge|without --version",
     ):
@@ -373,6 +330,21 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
     assert "force_latest_version" in smoke
     assert 'target_version = "{force_latest_version}"' in smoke
+
+
+def test_windows_success_receipt_gate_matches_posix_terminal_invariants() -> None:
+    text = WINDOWS_PROTOCOL_GATE.read_text(encoding="utf-8")
+    assert 'status -in @("pending", "partial")' in text
+    assert "Successful staged upgrade left a pending or partial receipt" in text
+    assert "Successful staged upgrade left more than one terminal target receipt" in text
+    assert '[string]$_.migration_status -eq "completed"' in text
+    assert "$_.artifacts_verified -eq $true" in text
+    assert "[string]::IsNullOrEmpty([string]$_.failure_code)" in text
+    assert "Successful staged upgrade left duplicate succeeded receipts" in text
+    assert "Successful staged upgrade left an invalid terminal target receipt" in text
+    invalid_guard = text.index("$targetReceipts.Count -eq 1 -and $receiptMatches.Count -eq 0")
+    audit_fallback = text.index("$targetReceipts.Count -eq 0", invalid_guard)
+    assert invalid_guard < audit_fallback
 
 
 def test_protocol_gate_treats_a_baseline_without_upgrade_module_as_no_schema_gate(
@@ -414,3 +386,61 @@ def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
         timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
+    tmp_path: Path,
+) -> None:
+    release_root = tmp_path / "release-root"
+    (release_root / "0.8.4").mkdir(parents=True)
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"; set +e; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.4"; '
+                "assert_reviewed_resolver_asset_contract; "
+                'printf "%s\\n" "UNREACHABLE"'
+            ),
+            "resolver-contract-test",
+            str(PROTOCOL_GATE),
+            str(release_root),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode != 0
+    assert "reviewed release-owned resolver assets failed byte-for-byte validation" in (
+        completed.stdout + completed.stderr
+    )
+    assert "UNREACHABLE" not in completed.stdout
+
+
+def test_protocol_refusal_contract_option_preserves_shared_matrix_arguments() -> None:
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"; '
+                "parse_protocol_args --from-version 0.8.3 --baseline-mode seed "
+                "--refusal-contract-only; "
+                'printf "%s|%s|%s\\n" "$FROM_VERSION" "$BASELINE_MODE" '
+                '"$REFUSAL_CONTRACT_ONLY"'
+            ),
+            "protocol-refusal-option-test",
+            str(PROTOCOL_GATE),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "0.8.3|seed|1"

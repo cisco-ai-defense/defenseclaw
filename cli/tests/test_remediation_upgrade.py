@@ -143,6 +143,10 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
             stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config",
+                return_value=app.cfg,
+            ))
+            stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade.subprocess.run",
                 return_value=Mock(returncode=0),
             ))
@@ -271,6 +275,10 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config",
+                return_value=app.cfg,
+            ))
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade.subprocess.run",
                 return_value=Mock(returncode=0),
