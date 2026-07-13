@@ -304,7 +304,7 @@ jobs:
     name: Windows packaged install and lifecycle acceptance
     needs: package-artifact
     runs-on: windows-latest
-    timeout-minutes: 55
+    timeout-minutes: 75
     steps:
       - name: Initialize isolated paths
         run: |

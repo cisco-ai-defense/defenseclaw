@@ -9,9 +9,10 @@
     The default cancel-only probe is safe for a developer workstation: it
     cycles every connector, mode, and start-gateway control, then cancels
     without entering setup. -ActivateInstall is intentionally restricted to a
-    GitHub-hosted Windows runner and a state directory below RUNNER_TEMP. In
-    that mode the same real controls select the requested values, activate
-    Install, wait for the completion page, and activate Finish.
+    GitHub-hosted Windows runner and a state directory below RUNNER_TEMP or the
+    explicitly approved DC_WINDOWS_NATIVE_BASE_ROOT. In that mode the same real
+    controls select the requested values, activate Install, wait for the
+    completion page, and activate Finish.
 #>
 
 [CmdletBinding()]
@@ -35,6 +36,25 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Test-PathWithin([string]$Path, [string]$Root) {
+    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    return $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-SafeWindowsNativeBase([AllowNull()][string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $userProfile = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::UserProfile
+    ).TrimEnd('\')
+    if ([string]::IsNullOrWhiteSpace($userProfile) -or
+        -not (Test-PathWithin $full $userProfile)) {
+        throw "DC_WINDOWS_NATIVE_BASE_ROOT must be a strict child of the current user's profile: $full"
+    }
+    return $full
+}
+
 if (-not $IsWindows) {
     throw 'The setup wizard probe requires native Windows.'
 }
@@ -52,16 +72,23 @@ if ($ActivateInstall) {
     if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
         throw '-ActivateInstall is restricted to a disposable GitHub-hosted Actions user.'
     }
-    if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
-        throw '-ActivateInstall requires RUNNER_TEMP.'
+    $allowedStateRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+        $allowedStateRoots += [IO.Path]::GetFullPath($env:RUNNER_TEMP)
     }
-    $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
-    $relativeState = [IO.Path]::GetRelativePath($runnerTemp, $state)
-    $parentPrefix = '..' + [IO.Path]::DirectorySeparatorChar
-    if ($relativeState -eq '.' -or $relativeState -eq '..' -or
-        $relativeState.StartsWith($parentPrefix, [StringComparison]::Ordinal) -or
-        [IO.Path]::IsPathRooted($relativeState)) {
-        throw "Install-driving wizard state must be a child of RUNNER_TEMP: $state"
+    $explicitStateBase = Resolve-SafeWindowsNativeBase (
+        [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
+    )
+    if (-not [string]::IsNullOrWhiteSpace($explicitStateBase)) {
+        $allowedStateRoots += $explicitStateBase
+    }
+    if ($allowedStateRoots.Count -eq 0) {
+        throw '-ActivateInstall requires RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT.'
+    }
+    if (-not ($allowedStateRoots | Where-Object {
+        Test-PathWithin $state $_
+    } | Select-Object -First 1)) {
+        throw "Install-driving wizard state must be a child of RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT: $state"
     }
 }
 [IO.Directory]::CreateDirectory($state) | Out-Null

@@ -60,6 +60,10 @@ try {
     Assert-True ($profileTest.ExitCode -eq 0 -and $profileTest.StdOut -match 'self-test passed') 'disposable Windows profile and PATH isolation'
 
     $originalNativeBase = [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
+    $originalGithubActions = [Environment]::GetEnvironmentVariable('GITHUB_ACTIONS')
+    $originalRunnerEnvironment = [Environment]::GetEnvironmentVariable('RUNNER_ENVIRONMENT')
+    $originalRunnerTemp = [Environment]::GetEnvironmentVariable('RUNNER_TEMP')
+    $wizardApprovedRoot = $null
     try {
         $broadNativeBase = [Environment]::GetFolderPath(
             [Environment+SpecialFolder]::UserProfile
@@ -76,6 +80,36 @@ try {
         Assert-True ($approvedBaseResult.ExitCode -eq 0) `
             'native cleanup accepts a short state root below its explicit user-profile base'
 
+        $env:GITHUB_ACTIONS = 'true'
+        $env:RUNNER_ENVIRONMENT = 'github-hosted'
+        $env:RUNNER_TEMP = Join-Path $temp 'runner-temp'
+        [IO.Directory]::CreateDirectory($env:RUNNER_TEMP) | Out-Null
+        $wizardApprovedRoot = Join-Path $approvedNativeBase (
+            'wizard-root-gate-' + [guid]::NewGuid().ToString('N')
+        )
+        $approvedWizardResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $wizardHarness,
+            '-SetupPath', $pwsh,
+            '-StateRoot', $wizardApprovedRoot,
+            '-ActivateInstall',
+            '-InteropSelfTestOnly'
+        ) -TimeoutSeconds 15
+        Assert-True ($approvedWizardResult.ExitCode -eq 0 -and
+            ($approvedWizardResult.StdOut | ConvertFrom-Json).unicode_window_text -eq 'pass') `
+            'install-driving wizard accepts state below the explicit user-profile base'
+
+        $outsideApprovedRoots = Join-Path $temp 'wizard-outside-approved-roots'
+        $outsideWizardResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $wizardHarness,
+            '-SetupPath', $pwsh,
+            '-StateRoot', $outsideApprovedRoots,
+            '-ActivateInstall',
+            '-InteropSelfTestOnly'
+        ) -TimeoutSeconds 15 -AllowedExitCodes @(1)
+        Assert-True ($outsideWizardResult.StdErr -match
+            'must be a child of RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
+            'install-driving wizard rejects state outside both approved roots'
+
         $env:DC_WINDOWS_NATIVE_BASE_ROOT = $broadNativeBase
         $broadBaseResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
             '-NoProfile', '-File', $nativeHarness, '-Operation', 'cleanup',
@@ -84,11 +118,28 @@ try {
         Assert-True ($broadBaseResult.StdErr -match
             'DC_WINDOWS_NATIVE_BASE_ROOT must be a strict child of the current user''s profile') `
             'native cleanup rejects an explicit base as broad as the user profile'
+
+        $broadWizardResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $wizardHarness,
+            '-SetupPath', $pwsh,
+            '-StateRoot', (Join-Path $temp 'broad-wizard-base-rejection'),
+            '-ActivateInstall',
+            '-InteropSelfTestOnly'
+        ) -TimeoutSeconds 15 -AllowedExitCodes @(1)
+        Assert-True ($broadWizardResult.StdErr -match
+            'DC_WINDOWS_NATIVE_BASE_ROOT must be a strict child of the current user''s profile') `
+            'install-driving wizard rejects an explicit base as broad as the user profile'
     } finally {
+        if (-not [string]::IsNullOrWhiteSpace($wizardApprovedRoot)) {
+            Remove-Item -LiteralPath $wizardApprovedRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
         [Environment]::SetEnvironmentVariable(
             'DC_WINDOWS_NATIVE_BASE_ROOT',
             $originalNativeBase
         )
+        [Environment]::SetEnvironmentVariable('GITHUB_ACTIONS', $originalGithubActions)
+        [Environment]::SetEnvironmentVariable('RUNNER_ENVIRONMENT', $originalRunnerEnvironment)
+        [Environment]::SetEnvironmentVariable('RUNNER_TEMP', $originalRunnerTemp)
     }
 
     $unicodeInterop = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
@@ -268,7 +319,8 @@ try {
     Assert-True ($wizardHarnessText.Contains('[switch]$ActivateInstall') -and
         $wizardHarnessText -match "GITHUB_ACTIONS -ne 'true'" -and
         $wizardHarnessText -match "RUNNER_ENVIRONMENT -ne 'github-hosted'" -and
-        $wizardHarnessText -match 'GetRelativePath\(\$runnerTemp, \$state\)') `
+        $wizardHarnessText -match 'Resolve-SafeWindowsNativeBase' -and
+        $wizardHarnessText -match 'RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
         'install-driving wizard automation is restricted to disposable GitHub-hosted runner state'
     Assert-True ($wizardHarnessText -match 'EntryPoint = "SendMessageTimeoutW"' -and
         $wizardHarnessText -match 'CharSet = CharSet\.Unicode' -and
