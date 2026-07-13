@@ -195,6 +195,7 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 | `DEFENSECLAW_TEST_KEY_NOTSET_12345` | — | `unset` | `unset` | Placeholder env var name used to assert 'unset' behavior in tests. | — | `cli/tests/test_llm_env.py` — Test fixture for unset assertions |
 | `DEFENSECLAW_TEST_LLM_KEY` | — | `unset` | `any-string`, `unset` | Placeholder LLM key used in some test setups when DEFENSECLAW_LLM_KEY needs an alternate target. | — | `cli/tests/test_llm_env.py` — Test fixture |
 | `DEFENSECLAW_TEST_MARKER` | — | `unset` | `absolute file path`, `unset` | Test-only marker path used by the fake ClawHub launcher to record a single invocation. | — | `cli/tests/test_cmd_skill.py:858` — Fake Windows ClawHub launcher appends an invocation marker during command-adapter tests |
+| `DEFENSECLAW_TEST_WAIT_PROCESS_EXIT` | — | `unset` | `1`, `unset` | Activate the short-lived helper subprocess used to verify that native Windows daemon shutdown waits on the original process handle. | — | `internal/daemon/proc_windows_flags_test.go:95` — Native Windows daemon test binary enters its delayed-exit helper mode |
 | `DEFENSECLAW_WINDOWS_PROCESS_HELPER` | — | `unset` | `1`, `unset` | Activate the isolated subprocess entry point used by native Windows process-snapshot tests. | — | `internal/inventory/process_snapshot_windows_test.go:148` — Native Windows test binary enters its named-process helper mode |
 
 <!-- AUTOGEN-END: env-vars -->
