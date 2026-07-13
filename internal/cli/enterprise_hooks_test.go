@@ -186,6 +186,42 @@ func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHookScopedOTLPTokenUsesManagedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise OTLP scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod managed data dir: %v", err)
+	}
+	token, err := enterpriseHookScopedOTLPToken(dir, "codex")
+	if err != nil {
+		t.Fatalf("enterpriseHookScopedOTLPToken: %v", err)
+	}
+	if len(token) != 64 {
+		t.Fatalf("token length = %d, want 64", len(token))
+	}
+	path, err := connector.OTLPPathTokenFilePath(dir, connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read scoped OTLP token: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != token {
+		t.Fatalf("token file does not contain the returned token")
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat scoped OTLP token: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("scoped OTLP token mode = %o, want 600", got)
+	}
+	if token, err := enterpriseHookScopedOTLPToken(dir, "cursor"); err != nil || token != "" {
+		t.Fatalf("non-OTLP connector token = %q, %v; want empty", token, err)
+	}
+}
+
 func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

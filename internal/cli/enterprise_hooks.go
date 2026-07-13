@@ -203,6 +203,10 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
+	otlpToken, err := enterpriseHookScopedOTLPToken(cfg.DataDir, enterpriseHookConnector)
+	if err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 
 	opts := enterprisehooks.InstallOptions{
 		ConnectorName:                enterpriseHookConnector,
@@ -213,6 +217,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		APIAddr:                      apiAddr,
 		ProxyAddr:                    proxyAddr,
 		APIToken:                     token,
+		OTLPPathToken:                otlpToken,
 		HookFailMode:                 cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
 		GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
 		HILTEnabled:                  cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
@@ -349,10 +354,18 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			Connector: strings.TrimSpace(target.Connector),
 		}
 		token := ""
+		otlpToken := ""
 		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.DataDir)
 		if err == nil {
 			var tokenErr error
 			token, tokenErr = enterpriseHookScopedToken(cfg.DataDir, target.Connector)
+			if tokenErr != nil {
+				err = tokenErr
+			}
+		}
+		if err == nil {
+			var tokenErr error
+			otlpToken, tokenErr = enterpriseHookScopedOTLPToken(cfg.DataDir, target.Connector)
 			if tokenErr != nil {
 				err = tokenErr
 			}
@@ -367,6 +380,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				APIAddr:                      apiAddr,
 				ProxyAddr:                    proxyAddr,
 				APIToken:                     token,
+				OTLPPathToken:                otlpToken,
 				HookFailMode:                 cfg.EffectiveHookFailModeForConnector(target.Connector),
 				GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(target.Connector),
 				HILTEnabled:                  cfg.EffectiveHILTForConnector(target.Connector).Enabled,
@@ -825,6 +839,28 @@ func enterpriseHookScopedToken(dataDir, connectorName string) (string, error) {
 		return "", fmt.Errorf("enterprise hooks: ensure scoped hook API token: %w", err)
 	}
 	if err := alignEnterpriseHookScopedTokenOwner(dataDir, connectorName); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func enterpriseHookScopedOTLPToken(dataDir, connectorName string) (string, error) {
+	scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName)
+	if !ok {
+		return "", nil
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", fmt.Errorf("enterprise hooks: config data_dir is required before minting OTLP path token")
+	}
+	if err := validateEnterpriseOTLPTokenLocation(dataDir, scope); err != nil {
+		return "", err
+	}
+	token, err := connector.EnsureOTLPPathToken(dataDir, scope)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: ensure scoped OTLP path token: %w", err)
+	}
+	if err := alignEnterpriseOTLPTokenOwner(dataDir, scope); err != nil {
 		return "", err
 	}
 	return token, nil

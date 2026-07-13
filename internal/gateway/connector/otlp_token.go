@@ -66,6 +66,22 @@ func OTLPPathTokenScopes() []OTLPPathTokenScope {
 	return []OTLPPathTokenScope{OTLPScopeGeminiCLI, OTLPScopeCodex, OTLPScopeClaude}
 }
 
+// OTLPPathTokenScopeForConnector returns the path-token namespace owned by a
+// connector. Connectors without native OTLP support deliberately return
+// false so callers can leave OTLP provisioning disabled for them.
+func OTLPPathTokenScopeForConnector(connectorName string) (OTLPPathTokenScope, bool) {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "geminicli":
+		return OTLPScopeGeminiCLI, true
+	case "codex":
+		return OTLPScopeCodex, true
+	case "claudecode":
+		return OTLPScopeClaude, true
+	default:
+		return "", false
+	}
+}
+
 // otlpScopeRE prevents a future caller from sneaking a path traversal
 // or a scope that collides with the master `expected` token route
 // through the on-disk filename. Matches the same allow-list as
@@ -185,6 +201,21 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 		return "", fmt.Errorf("rename OTLP path-token: %w", err)
 	}
 	return tok, nil
+}
+
+// resolveSetupOTLPPathToken honors a caller-provisioned token when present.
+// Managed-enterprise setup uses this path because the gateway's root-owned
+// data directory, rather than the target user's data directory, is the source
+// of truth for accepted OTLP credentials. Ordinary per-user setup leaves the
+// value empty and mints the token beneath its own data directory.
+func resolveSetupOTLPPathToken(dataDir string, scope OTLPPathTokenScope, supplied string) (string, error) {
+	if token := strings.TrimSpace(supplied); token != "" {
+		if !otlpTokenHexRE.MatchString(token) {
+			return "", fmt.Errorf("invalid supplied OTLP path-token for scope %q", scope)
+		}
+		return token, nil
+	}
+	return EnsureOTLPPathToken(dataDir, scope)
 }
 
 // LoadOTLPPathToken reads the token for *scope* from disk if present.

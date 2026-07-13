@@ -43,6 +43,7 @@ type InstallOptions struct {
 	APIAddr        string
 	ProxyAddr      string
 	APIToken       string
+	OTLPPathToken  string
 	MasterKey      string
 	HookFailMode   string
 	GuardrailMode  string
@@ -126,6 +127,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
 		APIAddr:           strings.TrimSpace(opts.APIAddr),
 		APIToken:          strings.TrimSpace(opts.APIToken),
+		OTLPPathToken:     strings.TrimSpace(opts.OTLPPathToken),
 		Interactive:       false,
 		ManagedEnterprise: true,
 		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),

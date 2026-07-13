@@ -65,7 +65,7 @@ func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy {
 }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	otlpToken, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeClaude)
+	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 	if err != nil {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
 	}

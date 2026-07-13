@@ -53,6 +53,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 		t.Fatalf("write codex config: %v", err)
 	}
 
+	otlpToken := strings.Repeat("d", 64)
 	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
@@ -61,6 +62,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
 		APIToken:      "test-token",
+		OTLPPathToken: otlpToken,
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
 		AgentVersion:  "codex-cli 0.142.0",
@@ -84,6 +86,16 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	}
 	if !strings.Contains(string(data), filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")) {
 		t.Fatalf("codex config does not reference per-user hook script:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "/otlp/codex/"+otlpToken+"/v1/") {
+		t.Fatalf("codex config does not reference supplied service OTLP token:\n%s", string(data))
+	}
+	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(userOTLPToken); !os.IsNotExist(err) {
+		t.Fatalf("managed install minted a per-user OTLP token sidecar: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json")); err != nil {
 		t.Fatalf("hook contract lock missing: %v", err)

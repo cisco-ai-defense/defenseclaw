@@ -115,7 +115,7 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// removed — Codex talks directly to its native upstream and
 	// DefenseClaw only observes via hooks + OTel.
 
-	otlpToken, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeCodex, opts.OTLPPathToken)
 	if err != nil {
 		return fmt.Errorf("codex scoped OTLP token: %w", err)
 	}

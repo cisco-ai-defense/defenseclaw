@@ -193,7 +193,7 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	t.Cleanup(func() { connector.CodexConfigPathOverride = originalCodexPath })
 
 	defer withConnectorState(t, dataDir, "codex")()
-	scopedToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	hookToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,8 +221,15 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	if bytes.Contains(codexRegistration, []byte(cfg.Gateway.Token)) {
 		t.Fatal("selected registration contains the gateway master token")
 	}
-	if !bytes.Contains(codexRegistration, []byte(scopedToken)) {
-		t.Fatal("selected registration does not contain the connector-scoped token")
+	if bytes.Contains(codexRegistration, []byte(hookToken)) {
+		t.Fatal("selected registration exposes the connector-scoped hook token")
+	}
+	otlpToken, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeCodex)
+	if err != nil || otlpToken == "" {
+		t.Fatalf("load connector-scoped OTLP token = %q, %v", otlpToken, err)
+	}
+	if !bytes.Contains(codexRegistration, []byte(otlpToken)) {
+		t.Fatal("selected registration does not contain the connector-scoped OTLP path token")
 	}
 	claudeAfter, err := os.ReadFile(claudePath)
 	if err != nil {

@@ -82,6 +82,73 @@ func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
 	return nil
 }
 
+func validateEnterpriseOTLPTokenLocation(dataDir string, scope connector.OTLPPathTokenScope) error {
+	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
+		return err
+	}
+	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, scope)
+	if err != nil {
+		return err
+	}
+	tokenDir := filepath.Dir(tokenPath)
+	if _, err := validateEnterpriseHookManagedDir(tokenDir, "OTLP token dir", false); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(tokenPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("enterprise hooks: refusing symlink OTLP token: %s", tokenPath)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("enterprise hooks: OTLP token is not a regular file: %s", tokenPath)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("enterprise hooks: inspect OTLP token %s: %w", tokenPath, err)
+	}
+	return nil
+}
+
+func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathTokenScope) error {
+	info, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true)
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("enterprise hooks: cannot inspect managed data_dir owner")
+	}
+	uid, gid := int(st.Uid), int(st.Gid)
+	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, scope)
+	if err != nil {
+		return err
+	}
+	tokenDir := filepath.Dir(tokenPath)
+	if _, err := validateEnterpriseHookManagedDir(tokenDir, "OTLP token dir", true); err != nil {
+		return err
+	}
+	tokenInfo, err := os.Lstat(tokenPath)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect OTLP token %s: %w", tokenPath, err)
+	}
+	if tokenInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("enterprise hooks: refusing symlink OTLP token: %s", tokenPath)
+	}
+	if !tokenInfo.Mode().IsRegular() {
+		return fmt.Errorf("enterprise hooks: OTLP token is not a regular file: %s", tokenPath)
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(tokenDir, uid, gid); err != nil {
+			return fmt.Errorf("enterprise hooks: lchown OTLP token dir: %w", err)
+		}
+		if err := os.Lchown(tokenPath, uid, gid); err != nil {
+			return fmt.Errorf("enterprise hooks: lchown OTLP token: %w", err)
+		}
+	}
+	if err := os.Chmod(tokenPath, 0o600); err != nil {
+		return fmt.Errorf("enterprise hooks: chmod OTLP token: %w", err)
+	}
+	return nil
+}
+
 func validateEnterpriseHookManagedDir(path, label string, requireExisting bool) (os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {

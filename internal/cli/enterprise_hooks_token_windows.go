@@ -6,7 +6,11 @@
 
 package cli
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+)
 
 func validateEnterpriseHookScopedTokenLocation(_, _ string) error {
 	return fmt.Errorf("enterprise hook scoped tokens are unsupported on Windows until SID and DACL validation is implemented")
@@ -14,4 +18,12 @@ func validateEnterpriseHookScopedTokenLocation(_, _ string) error {
 
 func alignEnterpriseHookScopedTokenOwner(_, _ string) error {
 	return fmt.Errorf("enterprise hook scoped tokens are unsupported on Windows until target-user impersonation is implemented")
+}
+
+func validateEnterpriseOTLPTokenLocation(_ string, _ connector.OTLPPathTokenScope) error {
+	return fmt.Errorf("enterprise OTLP scoped tokens are unsupported on Windows until SID and DACL validation is implemented")
+}
+
+func alignEnterpriseOTLPTokenOwner(_ string, _ connector.OTLPPathTokenScope) error {
+	return fmt.Errorf("enterprise OTLP scoped tokens are unsupported on Windows until target-user impersonation is implemented")
 }

@@ -167,3 +167,53 @@ func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
 		t.Fatalf("token = %q, want %q", got, want)
 	}
 }
+
+func TestOTLPPathTokenScopeForConnector(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		scope OTLPPathTokenScope
+		ok    bool
+	}{
+		{name: "codex", scope: OTLPScopeCodex, ok: true},
+		{name: " ClaudeCode ", scope: OTLPScopeClaude, ok: true},
+		{name: "geminicli", scope: OTLPScopeGeminiCLI, ok: true},
+		{name: "cursor", ok: false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := OTLPPathTokenScopeForConnector(tc.name)
+			if got != tc.scope || ok != tc.ok {
+				t.Fatalf("OTLPPathTokenScopeForConnector(%q) = %q, %v; want %q, %v", tc.name, got, ok, tc.scope, tc.ok)
+			}
+		})
+	}
+}
+
+func TestResolveSetupOTLPPathTokenUsesSuppliedTokenWithoutLocalSidecar(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := strings.Repeat("c", 64)
+	got, err := resolveSetupOTLPPathToken(dir, OTLPScopeCodex, "  "+want+"\n")
+	if err != nil {
+		t.Fatalf("resolveSetupOTLPPathToken: %v", err)
+	}
+	if got != want {
+		t.Fatalf("token = %q, want supplied token", got)
+	}
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("per-user token sidecar exists after supplied token: %v", err)
+	}
+}
+
+func TestResolveSetupOTLPPathTokenRejectsInvalidSuppliedToken(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveSetupOTLPPathToken(t.TempDir(), OTLPScopeClaude, "not-a-token"); err == nil {
+		t.Fatal("resolveSetupOTLPPathToken accepted an invalid supplied token")
+	}
+}
