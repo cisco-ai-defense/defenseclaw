@@ -5761,6 +5761,167 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	pristine := `{
+		"env": {
+			"OTEL_METRICS_EXPORTER": "operator-before",
+			"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc-before",
+			"OTEL_SERVICE_NAME": "operator-before",
+			"PATH": "/operator/before"
+		}
+	}`
+	if err := os.WriteFile(settingsPath, []byte(pristine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env := settings["env"].(map[string]interface{})
+	if env["OTEL_METRICS_EXPORTER"] != "otlp" || env["OTEL_SERVICE_NAME"] != "claudecode" {
+		t.Fatalf("Setup did not write expected managed env: %v", env)
+	}
+
+	// Simulate operator edits after Setup. Teardown may restore/delete only
+	// keys whose current value is still the exact value DefenseClaw wrote.
+	operatorValues := map[string]string{}
+	for _, key := range claudeCodeOtelEnvKeys {
+		if _, present := env[key]; !present {
+			t.Fatalf("Setup did not write managed env %s: %v", key, env)
+		}
+		switch key {
+		case "CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_METRICS_EXPORTER":
+			// Leave one added key and one overwritten key unchanged so teardown
+			// must delete/restore them respectively.
+		case "OTEL_EXPORTER_OTLP_PROTOCOL":
+			// Removing an overwritten key is also an operator change; teardown
+			// must not resurrect its pre-Setup value.
+			delete(env, key)
+		default:
+			// Keep the old value as a prefix to prove ownership is exact-value
+			// based, not a broad marker/prefix heuristic.
+			value := env[key].(string) + ",operator-after=1"
+			env[key] = value
+			operatorValues[key] = value
+		}
+	}
+	env["PATH"] = "/operator/after"
+	drifted, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, drifted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after operator-preserving teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env = settings["env"].(map[string]interface{})
+	operatorValues["OTEL_METRICS_EXPORTER"] = "operator-before"
+	operatorValues["PATH"] = "/operator/after"
+	for key, want := range operatorValues {
+		if got := env[key]; got != want {
+			t.Errorf("env[%s] = %v after teardown, want %q", key, got, want)
+		}
+	}
+	if _, present := env["CLAUDE_CODE_ENABLE_TELEMETRY"]; present {
+		t.Errorf("unchanged DefenseClaw-added env survived teardown: %v", env)
+	}
+	if _, present := env["OTEL_EXPORTER_OTLP_PROTOCOL"]; present {
+		t.Errorf("operator-removed env was resurrected during teardown: %v", env)
+	}
+}
+
+func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+	opts := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: strings.Repeat("a", 64),
+		HookFailMode:  "closed",
+	}
+	managed := buildClaudeCodeOtelEnv(opts)
+	if len(managed) != len(claudeCodeOtelEnvKeys) {
+		t.Fatalf("managed env has %d keys, canonical ownership list has %d: %v", len(managed), len(claudeCodeOtelEnvKeys), managed)
+	}
+	keys := make([]string, 0, len(managed))
+	for key := range managed {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+
+	for i, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			settings := map[string]interface{}{
+				"env": map[string]interface{}{key: managed[key]},
+			}
+			if i%2 != 0 {
+				// A malformed hooks subtree must not suppress the independent
+				// env ownership check.
+				settings["hooks"] = "not-an-object"
+			}
+			data, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err = NewClaudeCodeConnector().VerifyClean(opts)
+			if err == nil || !strings.Contains(err.Error(), "env["+key+"]") {
+				t.Fatalf("VerifyClean error = %v, want managed env residue for %s", err, key)
+			}
+		})
+	}
+}
+
 func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 	requireZeptoClawHost(t)
 	dir := t.TempDir()
