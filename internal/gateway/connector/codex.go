@@ -515,7 +515,7 @@ func codexConfigPath() string {
 	if CodexConfigPathOverride != "" {
 		return CodexConfigPathOverride
 	}
-	return filepath.Join(userHomeDir(), ".codex", "config.toml")
+	return filepath.Join(codexHomeDir(), "config.toml")
 }
 
 // codexConfigBackup captures the pre-DefenseClaw shape of the three

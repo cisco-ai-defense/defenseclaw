@@ -2580,6 +2580,34 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	}
 }
 
+func TestCodex_Setup_HonorsCodexHome(t *testing.T) {
+	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "custom-codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = ""
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	configPath := filepath.Join(codexHome, "config.toml")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read CODEX_HOME config: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("parse CODEX_HOME config: %v", err)
+	}
+	if _, ok := parsed["hooks"].(map[string]interface{}); !ok {
+		t.Fatalf("CODEX_HOME config has no hooks table: %s", raw)
+	}
+}
+
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
 // regression test for the codex/claude-code observability-only
 // architecture. Codex is hook-only as of PR #265 — Setup must
