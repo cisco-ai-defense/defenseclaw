@@ -1431,10 +1431,30 @@ function Assert-WizardHookRegistration(
         throw "wizard-selected connector registration is missing: $($Specification.ConfigPath)"
     }
     $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
-    $pattern = '(?i)defenseclaw-hook(?:\.exe)?[^\r\n]*\bhook\b[^\r\n]*--connector\s+' +
-        [regex]::Escape($Specification.Connector) + '\b'
-    if ($registration -notmatch $pattern) {
-        throw "wizard-selected connector does not use its exact native hook command: $($Specification.ConfigPath)"
+    if ($Specification.Connector -eq 'claudecode') {
+        try { $settings = $registration | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "wizard-selected Claude registration is not valid JSON: $($_.Exception.Message)" }
+        $nativeHookFound = $false
+        foreach ($eventProperty in @($settings.hooks.PSObject.Properties)) {
+            foreach ($group in @($eventProperty.Value)) {
+                foreach ($handler in @($group.hooks)) {
+                    $hookArgs = @($handler.args | ForEach-Object { [string]$_ })
+                    if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
+                        ($hookArgs -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
+                        $nativeHookFound = $true
+                    }
+                }
+            }
+        }
+        if (-not $nativeHookFound) {
+            throw "wizard-selected connector does not use its exact native exec-form hook command: $($Specification.ConfigPath)"
+        }
+    } else {
+        $pattern = '(?i)defenseclaw-hook(?:\.exe)?[^\r\n]*\bhook\b[^\r\n]*--connector\s+' +
+            [regex]::Escape($Specification.Connector) + '\b'
+        if ($registration -notmatch $pattern) {
+            throw "wizard-selected connector does not use its exact native hook command: $($Specification.ConfigPath)"
+        }
     }
     if ($registration -match ('(?i)--connector\s+' + [regex]::Escape($Specification.OtherConnector) + '\b')) {
         throw "wizard-selected connector registration references the wrong connector"
