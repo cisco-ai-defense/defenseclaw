@@ -144,13 +144,16 @@ func (dispatcher *Dispatcher) Activate() {
 	dispatcher.observerStarted = true
 	dispatcher.lifecycleMu.Unlock()
 
-	go dispatcher.observeHealth()
-	go dispatcher.run()
+	// Publish the initial state before either worker can observe queued work.
+	// Otherwise an immediate delivery failure can transition to failing and then
+	// be overwritten by the later activated transition.
 	if dispatcher.intakeIsStopped() {
 		dispatcher.setHealth(HealthDraining, HealthReasonIntakeStopped)
 	} else {
 		dispatcher.setOperationalHealth(HealthHealthy, HealthReasonActivated)
 	}
+	go dispatcher.observeHealth()
+	go dispatcher.run()
 }
 
 // Enqueue snapshots no producer object and performs no destination I/O. It
@@ -426,8 +429,8 @@ func (dispatcher *Dispatcher) run() {
 		if oversized {
 			dispatcher.counters.failed.Add(1)
 			dispatcher.counters.rejected.Add(uint64(len(payloads)))
-			dispatcher.release(payloads)
 			dispatcher.setOperationalHealth(HealthFailing, HealthReasonDeliveryFailed)
+			dispatcher.release(payloads)
 			continue
 		}
 		if !dispatcher.deliver(payloads, encodedSize) {
@@ -571,8 +574,8 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int) bool 
 			now := time.Now()
 			dispatcher.recordSuccess(now)
 			dispatcher.recordFailure(now)
-			dispatcher.release(payloads)
 			dispatcher.setOperationalHealth(HealthDegraded, HealthReasonPartial)
+			dispatcher.release(payloads)
 			return true
 		case OutcomeTransient, OutcomeAmbiguous:
 			if result.DeliveredItems != 0 || result.RejectedItems != 0 {
@@ -583,8 +586,8 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int) bool 
 			if attempt == dispatcher.config.Retry.MaxAttempts {
 				dispatcher.recordFailure(time.Now())
 				dispatcher.counters.rejected.Add(uint64(len(payloads)))
-				dispatcher.release(payloads)
 				dispatcher.setOperationalHealth(HealthFailing, HealthReasonDeliveryFailed)
+				dispatcher.release(payloads)
 				return true
 			}
 			dispatcher.counters.retried.Add(uint64(len(payloads)))
@@ -602,15 +605,15 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int) bool 
 			dispatcher.counters.rejected.Add(uint64(len(payloads)))
 			dispatcher.counters.failed.Add(1)
 			dispatcher.recordFailure(time.Now())
-			dispatcher.release(payloads)
 			dispatcher.setOperationalHealth(HealthFailing, HealthReasonDeliveryFailed)
+			dispatcher.release(payloads)
 			return true
 		default:
 			dispatcher.counters.rejected.Add(uint64(len(payloads)))
 			dispatcher.counters.failed.Add(1)
 			dispatcher.recordFailure(time.Now())
-			dispatcher.release(payloads)
 			dispatcher.setOperationalHealth(HealthFailing, HealthReasonDeliveryFailed)
+			dispatcher.release(payloads)
 			return true
 		}
 	}
@@ -627,8 +630,8 @@ func (dispatcher *Dispatcher) rejectMalformedResult(payloads []Payload) {
 	dispatcher.counters.failed.Add(1)
 	dispatcher.counters.rejected.Add(uint64(len(payloads)))
 	dispatcher.recordFailure(time.Now())
-	dispatcher.release(payloads)
 	dispatcher.setOperationalHealth(HealthFailing, HealthReasonDeliveryFailed)
+	dispatcher.release(payloads)
 }
 
 func (dispatcher *Dispatcher) encodedSize(sizes []int) (size int, ok bool) {
@@ -694,6 +697,8 @@ func safeJitter(function func(time.Duration, int) time.Duration, delay time.Dura
 	return function(delay, attempt)
 }
 
+// release marks payloads complete and may wake Flush. Callers must publish the
+// terminal counters and health state before calling it.
 func (dispatcher *Dispatcher) release(payloads []Payload) {
 	dispatcher.queueMu.Lock()
 	for _, payload := range payloads {
