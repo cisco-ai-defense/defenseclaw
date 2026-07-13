@@ -310,6 +310,21 @@ function Test-ObsoleteWindowsHookGuidance([string]$Text) {
     return $false
 }
 
+function Get-CodexWindowsHookCommand([string]$Config) {
+    $tomlString = [regex]::Match(
+        $Config,
+        '(?m)^\s*command_windows\s*=\s*("(?:\\.|[^"\\])*")'
+    )
+    if (-not $tomlString.Success) { throw 'Codex config has no command_windows hook override' }
+    try { $command = $tomlString.Groups[1].Value | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "Codex command_windows is not a valid TOML basic string: $($_.Exception.Message)" }
+    $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
+    if (-not $encoded.Success) { throw 'Codex command_windows does not use the managed EncodedCommand form' }
+    try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
+    catch { throw "Codex command_windows has invalid encoded content: $($_.Exception.Message)" }
+    return [pscustomobject]@{ Command = $command; Encoded = $encoded.Groups[1].Value; Script = $script }
+}
+
 function Assert-DoctorHookRegistration {
     $doctor = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1)
     try {
@@ -332,7 +347,12 @@ function Assert-DoctorHookRegistration {
     }
     if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw "setup did not create $config" }
     $registration = [IO.File]::ReadAllText($config)
-    if ($registration -notmatch '(?i)defenseclaw-hook(?:\.exe|\.cmd)') {
+    if ($Connector -eq 'codex') {
+        $codexCommand = Get-CodexWindowsHookCommand $registration
+        if ($codexCommand.Script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
+            throw 'setup-created Codex registration does not invoke the native hook executable with PowerShell call semantics'
+        }
+    } elseif ($registration -notmatch '(?i)defenseclaw-hook(?:\.exe|\.cmd)') {
         throw "setup-created $Connector registration does not use a native DefenseClaw hook launcher"
     }
     if (Test-ObsoleteWindowsHookGuidance $registration) {
@@ -532,8 +552,10 @@ function Assert-DoctorWindowsHookRegistration {
         }
         if (-not $nativeHookFound) { throw 'claudecode setup did not register the Windows native exec-form hook command' }
     } else {
-        $commandPattern = '(?i)defenseclaw-hook(?:\.exe)?[^\r\n]*\bhook\s+--connector\s+' + [regex]::Escape($Connector) + '\b'
-        if ($config -notmatch $commandPattern) { throw "$Connector setup did not register the Windows native hook command" }
+        $codexCommand = Get-CodexWindowsHookCommand $config
+        if ($codexCommand.Script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
+            throw "$Connector setup did not register the Windows native hook command"
+        }
     }
 
     $result = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1) -Timeout 120
@@ -557,7 +579,14 @@ function Assert-DoctorWindowsHookRegistration {
     # is deliberately corrupted. Otherwise it can repair the fixture before
     # Doctor observes the invalid launcher, making the negative check racey.
     Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 60 | Out-Null
-    $tamperedConfig = [regex]::Replace($config, '(?i)defenseclaw-hook\.exe', 'defenseclaw-gateway.exe')
+    if ($Connector -eq 'codex') {
+        $codexCommand = Get-CodexWindowsHookCommand $config
+        $tamperedScript = [regex]::Replace($codexCommand.Script, '(?i)defenseclaw-hook\.exe', 'defenseclaw-gateway.exe')
+        $tamperedEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($tamperedScript))
+        $tamperedConfig = $config.Replace($codexCommand.Encoded, $tamperedEncoded)
+    } else {
+        $tamperedConfig = [regex]::Replace($config, '(?i)defenseclaw-hook\.exe', 'defenseclaw-gateway.exe')
+    }
     if ([string]::Equals($tamperedConfig, $config, [StringComparison]::Ordinal)) {
         throw "Doctor tamper contract could not locate the registered $Connector hook executable"
     }

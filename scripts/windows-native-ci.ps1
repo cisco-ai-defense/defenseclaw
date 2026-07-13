@@ -1456,7 +1456,22 @@ function Assert-WizardHookRegistration(
         throw "wizard-selected connector registration is missing: $($Specification.ConfigPath)"
     }
     $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
-    if ($Specification.Connector -eq 'claudecode') {
+    if ($Specification.Connector -eq 'codex') {
+        $tomlString = [regex]::Match(
+            $registration,
+            '(?m)^\s*command_windows\s*=\s*("(?:\\.|[^"\\])*")'
+        )
+        if (-not $tomlString.Success) { throw 'wizard-selected Codex registration has no command_windows override' }
+        try { $command = $tomlString.Groups[1].Value | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "wizard-selected Codex command_windows is malformed: $($_.Exception.Message)" }
+        $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
+        if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
+        try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
+        catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
+        if ($script -notmatch "(?i)&\s+'[^']*defenseclaw-hook\.exe'\s+hook\s+--connector\s+codex\b") {
+            throw "wizard-selected Codex registration does not use its exact native hook command: $($Specification.ConfigPath)"
+        }
+    } elseif ($Specification.Connector -eq 'claudecode') {
         try { $settings = $registration | ConvertFrom-Json -ErrorAction Stop }
         catch { throw "wizard-selected Claude registration is not valid JSON: $($_.Exception.Message)" }
         $nativeHookFound = $false

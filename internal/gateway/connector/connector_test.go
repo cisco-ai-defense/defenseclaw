@@ -2550,9 +2550,6 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		}
 	}
 	wantHookNeedle := "codex-hook.sh"
-	if runtime.GOOS == "windows" {
-		wantHookNeedle = nativeHookFlag + "codex"
-	}
 	if !strings.Contains(content, wantHookNeedle) {
 		t.Errorf("config.toml [hooks] missing %q reference\nfile:\n%s", wantHookNeedle, content)
 	}
@@ -2570,37 +2567,15 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		t.Errorf("hooks key is not a table, got %T", parsed["hooks"])
 	}
 	hooks := parsed["hooks"].(map[string]interface{})
-	state, ok := hooks["state"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
+	if _, ok := hooks["state"]; ok {
+		t.Fatal("Setup synthesized hooks.state; Codex must own the user review and trust decision")
 	}
-	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
-	hookCommand := hookInvocationCommand("codex", filepath.ToSlash(hookPath))
-	for _, tc := range []struct {
-		eventType string
-		eventKey  string
-		matcher   string
-		timeout   int
-	}{
-		{"SessionStart", "session_start", "startup|resume|clear", 30},
-		{"UserPromptSubmit", "user_prompt_submit", "", 30},
-		{"PreToolUse", "pre_tool_use", "*", 30},
-		{"PermissionRequest", "permission_request", "*", 30},
-		{"PostToolUse", "post_tool_use", "*", 30},
-		{"Stop", "stop", "", 90},
-	} {
-		key := fmt.Sprintf("%s:%s:0:0", configPath, tc.eventKey)
-		entry, ok := state[key].(map[string]interface{})
-		if !ok {
-			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
-		}
-		gotHash, _ := entry["trusted_hash"].(string)
-		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookCommand, tc.timeout)
-		if gotHash != wantHash {
-			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
-		}
-		if _, ok := entry["enabled"]; ok {
-			t.Errorf("trusted state for %s should not force enabled; got %v", tc.eventType, entry)
+	if runtime.GOOS == "windows" {
+		matchers := hooks["PreToolUse"].([]interface{})
+		handlers := matchers[0].(map[string]interface{})["hooks"].([]interface{})
+		handler := handlers[0].(map[string]interface{})
+		if got, _ := handler["command_windows"].(string); got != windowsCodexHookCommand() {
+			t.Errorf("command_windows = %q, want managed absolute invocation %q", got, windowsCodexHookCommand())
 		}
 	}
 }
@@ -2705,12 +2680,10 @@ env_key = "OPENROUTER_API_KEY"
 	if _, ok := hooks["PostToolUse"]; !ok {
 		t.Error("hooks.PostToolUse missing — tool-result telemetry lost")
 	}
-	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["hooks"].(bool); !v {
-		t.Errorf("features.hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
-	}
-	if _, legacy := features["codex_hooks"]; legacy {
-		t.Errorf("deprecated features.codex_hooks should be removed to avoid Codex startup warnings, got=%v", features)
+	if features, ok := parsed["features"].(map[string]interface{}); ok {
+		if _, managed := features["hooks"]; managed {
+			t.Errorf("Setup must not manufacture a hooks feature decision; Codex enables hooks by default, got=%v", features)
+		}
 	}
 
 	// Subprocess sandbox JSON must NOT be created — that's
@@ -3117,35 +3090,23 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	}
 }
 
-// TestCodex_Setup_EnablesHooksFeature confirms the connector writes
-// features.hooks = true into config.toml. Without this, Codex
-// ignores any registered hooks because the feature gate defaults to
-// off.
-func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
+// TestCodex_Setup_RejectsExplicitlyDisabledHooks prevents the installer from
+// reporting success when the user's active Codex configuration disables hooks.
+func TestCodex_Setup_RejectsExplicitlyDisabledHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	os.WriteFile(configPath, []byte(`model_provider = "openai"
+[features]
+hooks = false
 `), 0o644)
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	data, _ := os.ReadFile(configPath)
-	var parsed map[string]interface{}
-	if err := toml.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("invalid TOML after Setup: %v", err)
-	}
-	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["hooks"].(bool); !v {
-		t.Errorf("config.toml missing hooks feature flag; features=%v\nfile:\n%s", features, data)
-	}
-	if _, legacy := features["codex_hooks"]; legacy {
-		t.Errorf("config.toml still contains deprecated codex_hooks feature flag\nfile:\n%s", data)
+	err := c.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "hooks are disabled") {
+		t.Fatalf("Setup error = %v, want explicit disabled-hooks error", err)
 	}
 }
 
@@ -3194,19 +3155,22 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	}
 }
 
-// TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust is
-// the end-to-end pin for the "user replaced our hook script with their
-// own" workflow: after Setup, the operator may swap the hook command
-// out (or change the timeout/matcher) for any of the events. On
-// Teardown, DefenseClaw must NOT delete those entries because the
-// trusted_hash no longer matches what we wrote. Removing them would
-// silently re-prompt the user to trust their own hooks on next Codex
-// launch — a confusing security UX failure.
-func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T) {
+// TestCodex_SetupTeardownRoundtripPreservesExistingUserHooks proves that
+// DefenseClaw merges its entries and restores the user's hook table exactly.
+func TestCodex_SetupTeardownRoundtripPreservesExistingUserHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
-`), 0o600); err != nil {
+	original := `model_provider = "openai"
+
+[[hooks.PreToolUse]]
+matcher = "^Shell$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "user-policy.exe"
+timeout = 7
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
@@ -3224,11 +3188,6 @@ func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T
 		t.Fatalf("setup: %v", err)
 	}
 
-	// Operator simulates editing config.toml to register their own
-	// PreToolUse hook in place of (or alongside) ours. We model this
-	// by overwriting only the trust-state entry for that event. The
-	// real hook command stays whatever Setup wrote; what matters is
-	// that the trusted_hash diverges from codexCommandHookHash().
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read config after setup: %v", err)
@@ -3241,23 +3200,12 @@ func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T
 	if hooks == nil {
 		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
 	}
-	state, _ := hooks["state"].(map[string]interface{})
-	if state == nil {
-		t.Fatalf("hooks.state missing after Setup; cannot exercise user-modified branch")
+	preToolUse, _ := hooks["PreToolUse"].([]interface{})
+	if len(preToolUse) != 2 {
+		t.Fatalf("Setup replaced existing PreToolUse hooks; got %d entries\n%s", len(preToolUse), raw)
 	}
-	preToolUseKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
-	if _, ok := state[preToolUseKey]; !ok {
-		t.Fatalf("expected DefenseClaw to install pre_tool_use trust entry at %q; state=%v", preToolUseKey, state)
-	}
-	state[preToolUseKey] = map[string]interface{}{
-		"trusted_hash": "sha256:user-replacement-do-not-touch",
-	}
-	rewritten, err := toml.Marshal(parsed)
-	if err != nil {
-		t.Fatalf("re-marshal config: %v", err)
-	}
-	if err := os.WriteFile(configPath, rewritten, 0o600); err != nil {
-		t.Fatalf("write user-modified config: %v", err)
+	if _, ok := hooks["state"]; ok {
+		t.Fatal("Setup bypassed Codex trust review with synthesized state")
 	}
 
 	if err := c.Teardown(context.Background(), opts); err != nil {
@@ -3273,30 +3221,14 @@ func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T
 		t.Fatalf("unmarshal post-teardown config: %v", err)
 	}
 
-	postHooks, _ := post["hooks"].(map[string]interface{})
-	if postHooks == nil {
-		t.Fatalf("teardown deleted entire hooks block even though user edits remain:\n%s", postRaw)
+	postHooks := post["hooks"].(map[string]interface{})
+	entries := postHooks["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("Teardown did not restore the original hook table; got %d entries\n%s", len(entries), postRaw)
 	}
-	postState, _ := postHooks["state"].(map[string]interface{})
-	if postState == nil {
-		t.Fatalf("teardown deleted hooks.state even though user edit at %q must be preserved", preToolUseKey)
-	}
-	entry, ok := postState[preToolUseKey].(map[string]interface{})
-	if !ok {
-		t.Fatalf("teardown removed user trust entry at %q; state=%v", preToolUseKey, postState)
-	}
-	if got, _ := entry["trusted_hash"].(string); got != "sha256:user-replacement-do-not-touch" {
-		t.Fatalf("teardown clobbered user trusted_hash: got=%q want=sha256:user-replacement-do-not-touch", got)
-	}
-
-	// Untouched DefenseClaw entries (other events) must be removed,
-	// since their trusted_hash still matches what we wrote — that's
-	// the recognition signal teardown relies on.
-	for _, eventKey := range []string{"session_start", "user_prompt_submit", "permission_request", "post_tool_use", "stop"} {
-		key := codexHookStateKey(codexHookStateKeySource(configPath), eventKey, 0, 0)
-		if _, present := postState[key]; present {
-			t.Errorf("teardown failed to remove DefenseClaw-owned trust entry for %s at %q", eventKey, key)
-		}
+	handlers := entries[0].(map[string]interface{})["hooks"].([]interface{})
+	if got := handlers[0].(map[string]interface{})["command"]; got != "user-policy.exe" {
+		t.Fatalf("Teardown changed the user's command: got %v", got)
 	}
 }
 
@@ -3552,6 +3484,106 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 	got := err.Error()
 	if !strings.Contains(got, "config.toml hooks") || !strings.Contains(got, "[otel]") || !strings.Contains(got, "notify") {
 		t.Fatalf("VerifyClean error missing expected residue details: %v", err)
+	}
+}
+
+func TestCodex_VerifyCleanReportsMalformedConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[hooks\n"), 0o600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	err := NewCodexConnector().VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "parse codex config") {
+		t.Fatalf("VerifyClean error = %v, want parse failure", err)
+	}
+}
+
+func TestCodex_SetupRefusesUnknownHooksShape(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`hooks = "user-managed-source"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	err := NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace") {
+		t.Fatalf("Setup error = %v, want unsupported-shape refusal", err)
+	}
+	raw, readErr := os.ReadFile(configPath)
+	if readErr != nil || string(raw) != "hooks = \"user-managed-source\"\n" {
+		t.Fatalf("Setup changed unsupported user hooks config: readErr=%v content=%q", readErr, raw)
+	}
+}
+
+func TestCodex_VerifyCleanReportsMalformedHooksJSONShape(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(`{"hooks":"unknown"}`), 0o600); err != nil {
+		t.Fatalf("write hooks.json: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	err := NewCodexConnector().VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "hooks has unsupported type") {
+		t.Fatalf("VerifyClean error = %v, want hooks.json shape failure", err)
+	}
+}
+
+func TestCodex_TeardownPreservesUnrelatedHooksJSONEntries(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n# defenseclaw-managed-hook v6\n"), 0o700); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	owned := filepath.ToSlash(hookPath)
+	hooksJSON := fmt.Sprintf(`{
+  "hooks": {
+    "PreToolUse": [
+      {"hooks": [{"type": "command", "command": %q}]},
+      {"hooks": [{"type": "command", "command": "user-policy.exe"}]}
+    ]
+  }
+}`, owned)
+	path := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(path, []byte(hooksJSON), 0o600); err != nil {
+		t.Fatalf("write hooks.json: %v", err)
+	}
+
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := NewCodexConnector().Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved hooks.json: %v", err)
+	}
+	if strings.Contains(string(raw), owned) || !strings.Contains(string(raw), "user-policy.exe") {
+		t.Fatalf("Teardown did not surgically preserve hooks.json:\n%s", raw)
+	}
+	if err := NewCodexConnector().VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after surgical hooks.json cleanup: %v", err)
 	}
 }
 

@@ -32,6 +32,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf16"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 func setHookBinaryOverride(t *testing.T, path string) {
@@ -732,12 +734,12 @@ func TestShellWordPassesNativeCommandThrough(t *testing.T) {
 	}
 }
 
-// TestBuildCodexHooksTableHashesTheCommand verifies the Codex hooks table writes
-// the trust hash over the exact command it executes (so Codex recognizes it),
-// and that teardown reproduces the same fingerprint to remove the state.
-func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
+// TestBuildCodexHooksTableUsesSupportedTrustFlow verifies DefenseClaw leaves
+// trust decisions to Codex and supplies its absolute native Windows override.
+func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	const cmd = windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + "codex"
 	const configPath = "/home/u/.codex/config.toml"
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 
 	table := buildCodexHooksTable(configPath, cmd)
 
@@ -752,27 +754,15 @@ func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
 		if got := h0["command"].(string); got != cmd {
 			t.Errorf("event %s command = %q, want %q", group.eventType, got, cmd)
 		}
+		if runtime.GOOS == "windows" {
+			if got := h0["command_windows"].(string); got != windowsCodexHookCommand() {
+				t.Errorf("event %s command_windows = %q, want %q", group.eventType, got, windowsCodexHookCommand())
+			}
+		}
 	}
 
-	state, ok := table["state"].(map[string]interface{})
-	if !ok || len(state) == 0 {
-		t.Fatal("expected non-empty state table")
-	}
-
-	// Teardown with the same command recognizes and removes every entry.
-	hooks := map[string]interface{}{"state": state}
-	if !removeOwnedCodexHookState(hooks, configPath, cmd) {
-		t.Fatal("removeOwnedCodexHookState did not recognize its own hash")
-	}
-	if _, present := hooks["state"]; present {
-		t.Error("state should be deleted once every owned entry is removed")
-	}
-
-	// A different command must NOT match (ownership specificity).
-	fresh := buildCodexHooksTable(configPath, cmd)
-	freshHooks := map[string]interface{}{"state": fresh["state"]}
-	if removeOwnedCodexHookState(freshHooks, configPath, `"other.exe" hook --connector codex`) {
-		t.Error("teardown removed state for a command it never wrote")
+	if _, ok := table["state"]; ok {
+		t.Fatal("buildCodexHooksTable synthesized unsupported trust state")
 	}
 }
 
@@ -959,6 +949,20 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if !structuredHookCommandReferences(cfg, []string{nativeHookFlag + connectorName}) {
 					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
 				}
+			} else if connectorName == "codex" {
+				var cfg map[string]interface{}
+				if err := toml.Unmarshal(data, &cfg); err != nil {
+					t.Fatalf("parse Codex config: %v", err)
+				}
+				hooks := cfg["hooks"].(map[string]interface{})
+				groups := hooks["PreToolUse"].([]interface{})
+				handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
+				command := handlers[0].(map[string]interface{})["command_windows"].(string)
+				decoded := decodePowerShellEncodedCommandForTest(t, command)
+				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
+					!strings.Contains(decoded, nativeHookFlag+connectorName) {
+					t.Errorf("config missing native command_windows connector command for %s:\n%s", connectorName, text)
+				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {
 					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
@@ -968,7 +972,13 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				}
 			}
 			lower := strings.ToLower(text)
-			for _, forbidden := range []string{".sh", `"bash"`, "curl", "jq"} {
+			forbiddenDependencies := []string{".sh", `"bash"`, "curl", "jq"}
+			if connectorName == "codex" {
+				// Codex keeps the portable command for non-Windows clients and
+				// selects command_windows on Windows.
+				forbiddenDependencies = []string{`"bash"`, "curl", "jq"}
+			}
+			for _, forbidden := range forbiddenDependencies {
 				if strings.Contains(lower, forbidden) {
 					t.Errorf("config contains forbidden Windows hook dependency %q:\n%s", forbidden, text)
 				}

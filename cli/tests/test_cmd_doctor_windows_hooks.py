@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
@@ -191,6 +192,31 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(exe)))
+
+    def test_codex_command_windows_encoded_invocation_without_feature_override(self) -> None:
+        runtime = self._runtime()
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+            f"& '{runtime}' hook --connector codex; exit $LASTEXITCODE"
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        command = (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
+            f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        )
+        config = self._config("codex", "codex-hook.sh")
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        config.write_text(
+            "[hooks]\n"
+            'PreToolUse = [{ hooks = [{ type = "command", command = "codex-hook.sh", '
+            f'command_windows = "{escaped}", timeout = 30 }}] }}]\n',
+            encoding="utf-8",
+        )
+
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
 
     def test_healthy_managed_cmd_registration(self) -> None:
         runtime = self._runtime("defenseclaw-hook.cmd")

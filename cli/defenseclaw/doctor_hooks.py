@@ -10,6 +10,8 @@ inspects the resolved launcher and setup evidence on disk.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import ntpath
 import os
@@ -340,8 +342,8 @@ def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
         raise _InspectionError("missing", "hook registration has no hooks table")
     if connector == "codex":
         features = document.get("features")
-        if not isinstance(features, dict) or features.get("hooks") is not True:
-            raise _InspectionError("malformed", "Codex features.hooks is not enabled")
+        if isinstance(features, dict) and features.get("hooks") is False:
+            raise _InspectionError("malformed", "Codex features.hooks is explicitly disabled")
     commands: list[str] = []
     malformed_entry = False
     for event, entries in hooks.items():
@@ -356,7 +358,11 @@ def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
                 malformed_entry = True
                 continue
             for hook in nested:
-                command = hook.get("command") if isinstance(hook, dict) else None
+                command = None
+                if isinstance(hook, dict):
+                    command = hook.get("command_windows") if connector == "codex" else None
+                    if not isinstance(command, str) or not command.strip():
+                        command = hook.get("command")
                 if isinstance(command, str) and command.strip():
                     args = hook.get("args", None)
                     if "args" in hook:
@@ -376,7 +382,18 @@ def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
         raise _InspectionError("missing", "hook registration contains no command entries")
     marker = f"hook --connector {connector}"
     legacy = "codex-hook.sh" if connector == "codex" else "claude-code-hook.sh"
-    managed = [command for command in commands if marker in command or legacy in command]
+    managed: list[str] = []
+    for command in commands:
+        if marker in command or legacy in command:
+            managed.append(command)
+            continue
+        if connector == "codex" and "-encodedcommand" in command.casefold():
+            try:
+                target, _args, _kind = _command_target(command, connector)
+            except _InspectionError:
+                continue
+            if ntpath.basename(target).casefold() == "defenseclaw-hook.exe":
+                managed.append(command)
     if not managed:
         raise _InspectionError("foreign", "hook registration contains commands, but none target DefenseClaw")
     unique = set(managed)
@@ -422,6 +439,30 @@ def _command_target(command: str, connector: str) -> tuple[str, list[str], str]:
     first_base = ntpath.basename(parts[0]).casefold()
     if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
+        if "-encodedcommand" in lowered:
+            encoded_index = lowered.index("-encodedcommand")
+            if encoded_index + 2 != len(parts):
+                raise _InspectionError("malformed", "PowerShell EncodedCommand hook has unsupported launcher arguments")
+            if lowered[1:encoded_index] != ["-nologo", "-noprofile", "-noninteractive"]:
+                raise _InspectionError("malformed", "PowerShell EncodedCommand hook has unsupported launcher arguments")
+            try:
+                encoded = base64.b64decode(parts[encoded_index + 1], validate=True)
+                if len(encoded) > 16 * 1024 or len(encoded) % 2:
+                    raise ValueError("encoded script has invalid size")
+                script = encoded.decode("utf-16-le")
+            except (binascii.Error, UnicodeError, ValueError) as exc:
+                raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
+            match = re.fullmatch(
+                r"\$ErrorActionPreference='Stop'; "
+                r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                r"& '((?:[^']|'')+)' hook --connector " + re.escape(connector) +
+                r"; exit \$LASTEXITCODE",
+                script,
+            )
+            if not match:
+                raise _InspectionError("malformed", "PowerShell EncodedCommand hook has an unsupported script body")
+            target = match.group(1).replace("''", "'")
+            return target, ["hook", "--connector", connector], "direct"
         try:
             file_index = lowered.index("-file")
         except ValueError as exc:
