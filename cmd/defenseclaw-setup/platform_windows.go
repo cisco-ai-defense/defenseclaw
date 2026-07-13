@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -143,14 +144,26 @@ func removeDirectoryAfterExit(path string, parentPID int) error {
 	if err != nil {
 		return err
 	}
-	script := "$target=$args[0]; $parent=[int]$args[1]; " +
-		"try { Wait-Process -Id $parent -Timeout 120 -ErrorAction SilentlyContinue } catch {}; " +
-		"if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue }"
-	cmd := newCapturedSetupCommand(context.Background(), powerShell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script, path, strconv.Itoa(parentPID))
+	cmd := directoryCleanupCommand(powerShell, path, parentPID)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+func directoryCleanupCommand(powerShell, path string, parentPID int) *exec.Cmd {
+	const script = "$target=$env:DEFENSECLAW_CLEANUP_TARGET; $parent=[int]$env:DEFENSECLAW_CLEANUP_PARENT_PID; " +
+		"try { Wait-Process -Id $parent -Timeout 120 -ErrorAction SilentlyContinue } catch {}; " +
+		"if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue }"
+	cmd := newCapturedSetupCommand(context.Background(), powerShell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	// PowerShell treats tokens following -Command as more command text rather
+	// than reliably exposing them through $args. Environment variables keep the
+	// cleanup path byte-for-byte intact without shell interpolation.
+	cmd.Env = append(os.Environ(),
+		"DEFENSECLAW_CLEANUP_TARGET="+path,
+		"DEFENSECLAW_CLEANUP_PARENT_PID="+strconv.Itoa(parentPID),
+	)
+	return cmd
 }
 
 func processIdentity(pid uint32) (string, string, error) {
