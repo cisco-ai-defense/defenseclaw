@@ -5,10 +5,108 @@ package main
 
 import (
 	"archive/zip"
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
+
+func TestRenameInstallTreeRetriesTransientErrors(t *testing.T) {
+	for _, errno := range []syscall.Errno{5, 32, 33} {
+		errno := errno
+		t.Run(errno.Error(), func(t *testing.T) {
+			transient := &os.LinkError{Op: "rename", Old: "old", New: "new", Err: errno}
+			calls := 0
+			var sleeps []time.Duration
+			err := renameInstallTreeWith("old", "new", func(_, _ string) error {
+				calls++
+				if calls == 1 {
+					return transient
+				}
+				return nil
+			}, func(delay time.Duration) {
+				sleeps = append(sleeps, delay)
+			})
+			if err != nil {
+				t.Fatalf("renameInstallTreeWith: %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("rename calls = %d, want 2", calls)
+			}
+			if len(sleeps) != 1 || sleeps[0] != installTreeRenameRetryDelay {
+				t.Fatalf("sleep calls = %v, want [%s]", sleeps, installTreeRenameRetryDelay)
+			}
+		})
+	}
+}
+
+func TestRenameInstallTreeDoesNotRetryPermanentErrors(t *testing.T) {
+	for _, permanent := range []error{
+		&os.LinkError{Op: "rename", Old: "old", New: "new", Err: syscall.Errno(2)},
+		&os.LinkError{Op: "rename", Old: "old", New: "new", Err: syscall.Errno(13)},
+		&os.LinkError{Op: "rename", Old: "old", New: "new", Err: syscall.Errno(87)},
+		&os.LinkError{Op: "rename", Old: "old", New: "new", Err: syscall.Errno(183)},
+		errors.New("permanent rename failure"),
+	} {
+		permanent := permanent
+		t.Run(permanent.Error(), func(t *testing.T) {
+			calls := 0
+			sleeps := 0
+			got := renameInstallTreeWith("old", "new", func(_, _ string) error {
+				calls++
+				return permanent
+			}, func(time.Duration) { sleeps++ })
+			if got != permanent {
+				t.Fatalf("error = %v, want original %v", got, permanent)
+			}
+			if calls != 1 || sleeps != 0 {
+				t.Fatalf("calls = %d, sleeps = %d; want 1, 0", calls, sleeps)
+			}
+		})
+	}
+}
+
+func TestRenameInstallTreeStopsAtRetryBound(t *testing.T) {
+	transient := &os.LinkError{Op: "rename", Old: "old", New: "new", Err: syscall.Errno(5)}
+	calls := 0
+	var sleeps []time.Duration
+	got := renameInstallTreeWith("old", "new", func(_, _ string) error {
+		calls++
+		return transient
+	}, func(delay time.Duration) {
+		sleeps = append(sleeps, delay)
+	})
+	if got != transient || !errors.Is(got, syscall.Errno(5)) {
+		t.Fatalf("error = %v, want original access-denied error", got)
+	}
+	if calls != installTreeRenameMaxAttempts {
+		t.Fatalf("rename calls = %d, want %d", calls, installTreeRenameMaxAttempts)
+	}
+	if len(sleeps) != installTreeRenameMaxAttempts-1 {
+		t.Fatalf("sleep calls = %d, want %d", len(sleeps), installTreeRenameMaxAttempts-1)
+	}
+	for index, delay := range sleeps {
+		if delay != installTreeRenameRetryDelay {
+			t.Fatalf("sleep[%d] = %s, want %s", index, delay, installTreeRenameRetryDelay)
+		}
+	}
+}
+
+func TestRenameInstallTreeReturnsImmediatelyOnSuccess(t *testing.T) {
+	calls := 0
+	sleeps := 0
+	if err := renameInstallTreeWith("old", "new", func(_, _ string) error {
+		calls++
+		return nil
+	}, func(time.Duration) { sleeps++ }); err != nil {
+		t.Fatalf("renameInstallTreeWith: %v", err)
+	}
+	if calls != 1 || sleeps != 0 {
+		t.Fatalf("calls = %d, sleeps = %d; want 1, 0", calls, sleeps)
+	}
+}
 
 func TestParseArgsSilentInstallProperties(t *testing.T) {
 	opts, err := parseArgs([]string{

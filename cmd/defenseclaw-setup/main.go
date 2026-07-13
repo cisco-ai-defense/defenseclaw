@@ -29,13 +29,15 @@ import (
 var embeddedPayload embed.FS
 
 const (
-	productName         = "DefenseClaw"
-	setupArtifactName   = "DefenseClawSetup-x64.exe"
-	defaultPublisher    = "Cisco Systems, Inc."
-	userExitCode        = 1602
-	restartRequiredCode = 3010
-	maxZipFiles         = 100000
-	maxZipExpandedBytes = int64(2 << 30)
+	productName                  = "DefenseClaw"
+	setupArtifactName            = "DefenseClawSetup-x64.exe"
+	defaultPublisher             = "Cisco Systems, Inc."
+	userExitCode                 = 1602
+	installTreeRenameMaxAttempts = 40
+	installTreeRenameRetryDelay  = 100 * time.Millisecond
+	restartRequiredCode          = 3010
+	maxZipFiles                  = 100000
+	maxZipExpandedBytes          = int64(2 << 30)
 )
 
 type options struct {
@@ -266,7 +268,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 			_ = removeAllSafe(installRoot, filepath.Dir(installRoot))
 		}
 		if _, err := os.Stat(backup); err == nil {
-			_ = os.Rename(backup, installRoot)
+			_ = renameInstallTree(backup, installRoot)
 		}
 		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
 		if isSharingViolation(cause) {
@@ -276,15 +278,15 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	}
 
 	if _, err := os.Stat(installRoot); err == nil {
-		if err := os.Rename(installRoot, backup); err != nil {
+		if err := renameInstallTree(installRoot, backup); err != nil {
 			_ = removeAllSafe(staging, filepath.Dir(installRoot))
-			if isSharingViolation(err) {
+			if isTransientInstallTreeRenameError(err) {
 				return restartRequiredCode, fmt.Errorf("existing install files are locked; close running DefenseClaw terminals and retry")
 			}
 			return 1, fmt.Errorf("move existing install aside: %w", err)
 		}
 	}
-	if err := os.Rename(staging, installRoot); err != nil {
+	if err := renameInstallTree(staging, installRoot); err != nil {
 		return tryRestore(fmt.Errorf("publish staged install: %w", err))
 	}
 	published = true
@@ -367,15 +369,15 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 		trash := installRoot + ".uninstall." + strconv.Itoa(os.Getpid())
 		_ = removeAllSafe(trash, filepath.Dir(installRoot))
-		if err := os.Rename(installRoot, trash); err != nil {
+		if err := renameInstallTree(installRoot, trash); err != nil {
 			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
-			if isSharingViolation(err) {
+			if isTransientInstallTreeRenameError(err) {
 				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
 			}
 			return 1, err
 		}
 		if err := removeAllSafe(trash, filepath.Dir(installRoot)); err != nil {
-			_ = os.Rename(trash, installRoot)
+			_ = renameInstallTree(trash, installRoot)
 			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
 			if isSharingViolation(err) {
 				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
@@ -1465,4 +1467,29 @@ func isSharingViolation(err error) bool {
 		err = errors.Unwrap(err)
 	}
 	return false
+}
+
+func renameInstallTree(source, destination string) error {
+	return renameInstallTreeWith(source, destination, os.Rename, time.Sleep)
+}
+
+func renameInstallTreeWith(source, destination string, rename func(string, string) error, sleep func(time.Duration)) error {
+	var err error
+	for attempt := 0; attempt < installTreeRenameMaxAttempts; attempt++ {
+		err = rename(source, destination)
+		if err == nil {
+			return nil
+		}
+		if !isTransientInstallTreeRenameError(err) || attempt+1 == installTreeRenameMaxAttempts {
+			return err
+		}
+		sleep(installTreeRenameRetryDelay)
+	}
+	return err
+}
+
+func isTransientInstallTreeRenameError(err error) bool {
+	return errors.Is(err, syscall.Errno(5)) ||
+		errors.Is(err, syscall.Errno(32)) ||
+		errors.Is(err, syscall.Errno(33))
 }
