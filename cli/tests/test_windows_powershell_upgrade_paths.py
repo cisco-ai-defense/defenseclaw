@@ -40,6 +40,12 @@ def _main_body(source: str) -> str:
     return source[source.index(marker) :]
 
 
+def _powershell_python_here_string(source: str, variable: str) -> str:
+    marker = f"${variable}=@'\n"
+    start = source.index(marker) + len(marker)
+    return source[start : source.index("\n'@", start)]
+
+
 def test_windows_installer_refuses_existing_install_before_any_dependency_or_artifact_work() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)
@@ -116,7 +122,15 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "MOVEFILE_WRITE_THROUGH",
         "DeleteFileExact",
         "DeleteTreeExact",
-        "TREE_ROOT_DELETE_ATTEMPTS",
+        "RetirementState",
+        "NamespaceObservation",
+        "RetirementStateValue",
+        "MutationStarted",
+        "ObserveNamespace",
+        "WaitForNamespaceRetirement",
+        "NAMESPACE_RETIRE_TIMEOUT_MS",
+        "ConfigureTestNamespaceRetirementDelay",
+        "ClearTestNamespaceRetirementDelay",
         "ConfigureTestMoveOutAfterSnapshot",
         "ClearTestMoveOutAfterSnapshot",
         "ConfigureTestEmptyDirectoryDeleteFailures",
@@ -175,10 +189,28 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "return false" in missing_child
     assert "continue" not in missing_child
     assert "InvokeTestMoveOutAfterSnapshot()" in tree_delete
-    assert "for (int attempt = 1; attempt <= TREE_ROOT_DELETE_ATTEMPTS; attempt++)" in tree_delete
-    assert "if (DeleteEmptyDirectoryExact())" in tree_delete
-    assert "System.Threading.Thread.Sleep(50 * attempt)" in tree_delete
+    assert "TREE_ROOT_DELETE_ATTEMPTS" not in source
+    assert "WaitForNamespaceRetirement(" in tree_delete
+    assert tree_delete.index("current.Dispose()") < tree_delete.index("WaitForNamespaceRetirement(")
+    assert "return RetireRootNamespaceExact(" in tree_delete
+    assert "never resnapshot or acquire fresh delete authority" in tree_delete
     assert tree_delete.count("SnapshotDirectory(path, 1, entries, ref bytes)") == 1
+    observer = source[
+        source.index("private static NamespaceObservation ObserveNamespace") : source.index(
+            "private static long NewNamespaceRetirementDeadline"
+        )
+    ]
+    assert "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE" in source[
+        source.index("private static SafeFileHandle OpenNamespaceObservationHandle") : source.index(
+            "private static TestRetainer TakeTestNamespaceRetainer"
+        )
+    ]
+    assert "ERROR_FILE_NOT_FOUND" in observer
+    assert "ERROR_PATH_NOT_FOUND" in observer
+    assert "ERROR_ACCESS_DENIED" in observer
+    assert "ERROR_SHARING_VIOLATION" in observer
+    assert "ERROR_DELETE_PENDING" in observer
+    assert "NamespaceObservation.Different" in observer
     assert "FreshInstallDestination" in source
     assert "$sourceStream" in source
     assert "$checksumDigests" in source
@@ -200,6 +232,11 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert main.index("Undo-FreshInstallAttempt") < main.index(
         "Fresh-install payload rollback completed; retry is safe"
     )
+    self_test_branch = main.index("if ($NativePrivateDirectorySelfTestRoot)")
+    assert self_test_branch < main.index(
+        "Invoke-NativePrivateDirectorySelfTest -Root $NativePrivateDirectorySelfTestRoot",
+        self_test_branch,
+    ) < main.index("return", self_test_branch) < main.index("Assert-FreshInstall")
     assert "Fresh-install fault injection requires -TestMode" in main
     assert "[Parameter(DontShow = $true)][switch]$TestMode" in source
     assert "[Parameter(DontShow = $true)][switch]$InjectFailureBeforeShim" in source
@@ -232,18 +269,23 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "Windows PowerShell 5.1 could not parse/compile install.ps1" in harness
     assert "-NativePrivateDirectorySelfTestRoot $legacyNativeRoot" in harness
     assert "Windows PowerShell 5.1 native private lifecycle failed" in harness
+    assert "-NativePrivateDirectorySelfTestRoot $modernNativeRoot" in harness
+    assert "PowerShell 7 native private lifecycle failed" in harness
     assert "Native private directory lifecycle passed" in source
     assert "Native snapshotted-child move-out refusal passed" in source
     assert "Native fresh directory fault boundaries passed" in source
     assert "Native empty directory rollback retry passed" in source
-    assert "Native tree-root rollback retry passed" in source
-    assert "Native tree-root rollback retry exhaustion passed" in source
+    assert "Native delayed tree-root namespace retirement passed" in source
+    assert "Native delayed child namespace retirement passed" in source
+    assert "Native namespace retirement wait passed" in source
     assert "Native post-move rollback topology passed" in source
     assert "Native private-directory self-test accepted a file as its parent" in source
     assert "Fresh-install payload rollback completed; retry is safe" in harness
     assert "Concurrent unclaimed shim disappeared during rollback" in harness
     assert "Failed fresh install left installer-created binary directories behind" in harness
     assert "Assert-NoFreshPayload -Context $postMove.Output" in harness
+    assert "--- post-move installer output ---" in harness
+    assert "bounded residual path inventory (names and kinds only)" in harness
 
 
 def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() -> None:
@@ -275,7 +317,12 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
     assert "Sort-Object -Property Length -Descending" in cleanup
     assert "OpenIfExists" in cleanup
     assert "$cleanupClaim.Identity -cne $entry.Identity" in cleanup
-    assert "$cleanupClaim.DeleteTreeExact()" in cleanup
+    assert "$cleanupClaim.DeleteTreeExact($entry.Native)" in cleanup
+    assert "$cleanupClaim.DeleteEmptyDirectoryExact($entry.Native)" in cleanup
+    assert "$cleanupClaim.DeleteEmptyDirectoryExact($claim)" in create
+    assert "CleanupTerminal = $false" in create
+    assert "$entry.CleanupTerminal = $true" in cleanup
+    assert "refusing a second traversal" in cleanup
     assert "canonical binding was lost" in cleanup
     assert "current location is unknown" in cleanup
     assert "canonical path now names a different object" in cleanup
@@ -287,7 +334,7 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
     ]
     assert "PrivateDirectoryClaims.Remove" not in missing_path
     assert ".Native.Dispose" not in missing_path
-    deletion = cleanup.index("$cleanupClaim.DeleteTreeExact()")
+    deletion = cleanup.index("$cleanupClaim.DeleteTreeExact($entry.Native)")
     release = cleanup.index("$entry.Native.Dispose()", deletion)
     forget = cleanup.index("$script:PrivateDirectoryClaims.Remove($claimKeyFull)", release)
     assert deletion < release < forget
@@ -347,6 +394,8 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
     )
     assert "canonical binding and current location are unverified" in source
     assert "claim will close when the installer exits" in source
+    assert '$entry.Native.RetirementStateValue -cne "Bound"' in undo
+    assert "$entry.Native.MutationStarted" in undo
     path_publish = source[source.index("function Add-ToPath") : source.index("# -- Success")]
     assert "Persistent User PATH is shared registry state" in path_publish
     assert "Persistent User PATH was not modified" in path_publish
@@ -548,6 +597,22 @@ def test_windows_resolver_binds_hard_cut_provenance_before_mutation() -> None:
     ):
         assert runtime_field in source
     assert "Resolve-InstalledRuntimePaths" in source
+    runtime_paths = source[
+        source.index("function Resolve-InstalledRuntimePaths") : source.index("function Get-OpenClawHome")
+    ]
+    assert 'if "data_dir" in loader_parameters:' in runtime_paths
+    assert "cfg = config_module.load(data_dir=controller_home)" in runtime_paths
+    assert "config_module.CONFIG_FILE_NAME = config_path" in runtime_paths
+    assert "cfg = config_module.load()" in runtime_paths
+    assert "config_module.CONFIG_FILE_NAME = legacy_config_name" in runtime_paths
+    assert "installed source config loader has an unsupported signature" in runtime_paths
+    assert "except TypeError" not in runtime_paths
+    assert runtime_paths.index("$env:DEFENSECLAW_HOME=$controllerHome") < runtime_paths.index(
+        "(Get-Python) -I -c $resolver"
+    )
+    assert runtime_paths.index("$env:DEFENSECLAW_CONFIG=$configPath") < runtime_paths.index(
+        "(Get-Python) -I -c $resolver"
+    )
     assert "Get-ControllerHome" in source
     assert "Get-PhaseOneDirectoryIdentity" in source
     assert "Ambient DEFENSECLAW_HOME differs" in source
@@ -629,6 +694,142 @@ def test_windows_resolver_binds_hard_cut_provenance_before_mutation() -> None:
     assert "$createdQuarantine=Join-Path $createdParent" in source
     assert "$sourceStream=[IO.File]::OpenRead($Source)" in source
     assert "[IO.Directory]::CreateDirectory($Path, $acl)" in source
+
+
+@pytest.mark.parametrize(
+    ("legacy_loader", "configured_data_dir"),
+    [(True, True), (True, False), (False, True), (False, False)],
+)
+def test_windows_runtime_path_resolver_supports_published_and_scoped_loaders(
+    legacy_loader: bool,
+    configured_data_dir: bool,
+) -> None:
+    source = RESOLVER.read_text(encoding="utf-8")
+    runtime_paths = source[
+        source.index("function Resolve-InstalledRuntimePaths") : source.index("function Get-OpenClawHome")
+    ]
+    resolver = _powershell_python_here_string(runtime_paths, "resolver")
+
+    if legacy_loader:
+        loader = (
+            "def load():\n"
+            "    active = os.path.join(os.environ['DEFENSECLAW_HOME'], module.CONFIG_FILE_NAME)\n"
+            "    return make_config(active)\n"
+        )
+    else:
+        loader = (
+            "def load(*, data_dir=None):\n"
+            "    assert os.path.abspath(data_dir) == os.path.abspath(os.environ['DEFENSECLAW_HOME'])\n"
+            "    return make_config(os.environ['DEFENSECLAW_CONFIG'])\n"
+        )
+
+    module_prelude = (
+        "import json, os, sys, types\n"
+        "module = types.ModuleType('defenseclaw.config')\n"
+        "module.CONFIG_FILE_NAME = 'config.yaml'\n"
+        "class Config:\n"
+        "    def __init__(self, raw):\n"
+        "        self.raw = raw\n"
+        "        self.claw = types.SimpleNamespace(home_dir=raw.get('claw', {}).get('home_dir', '~/.openclaw'))\n"
+        "    @property\n"
+        "    def data_dir(self):\n"
+        "        assert module.CONFIG_FILE_NAME == 'config.yaml'\n"
+        "        return self.raw.get('data_dir', os.environ['DEFENSECLAW_HOME'])\n"
+        "def make_config(active):\n"
+        "    with open(active, encoding='utf-8') as stream:\n"
+        "        raw = json.load(stream)\n"
+        "    return Config(raw)\n"
+        + loader
+        + "module.load = load\n"
+        "package = types.ModuleType('defenseclaw')\n"
+        "package.__path__ = []\n"
+        "package.config = module\n"
+        "sys.modules['defenseclaw'] = package\n"
+        "sys.modules['defenseclaw.config'] = module\n"
+    )
+
+    with TemporaryDirectory() as root:
+        root_path = Path(root)
+        controller = root_path / "controller"
+        data_dir = root_path / "runtime-data"
+        external = root_path / "external" / "defenseclaw.yaml"
+        openclaw = root_path / "openclaw"
+        controller.mkdir()
+        data_dir.mkdir()
+        external.parent.mkdir()
+        raw: dict[str, object] = {"claw": {"home_dir": str(openclaw)}}
+        if configured_data_dir:
+            raw["data_dir"] = str(data_dir)
+        external.write_text(json.dumps(raw), encoding="utf-8")
+        env = os.environ.copy()
+        env["DEFENSECLAW_HOME"] = str(controller)
+        env["DEFENSECLAW_CONFIG"] = str(external)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                module_prelude + resolver,
+                str(controller),
+                str(external),
+                "0",
+                "__DEFENSECLAW_UNSET__",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    contract = json.loads(result.stdout)
+    assert Path(contract["data_dir"]) == (data_dir if configured_data_dir else controller)
+    assert Path(contract["config_path"]) == external
+    assert Path(contract["openclaw_home"]) == openclaw
+
+
+def test_windows_runtime_path_resolver_rejects_unknown_loader_signature() -> None:
+    source = RESOLVER.read_text(encoding="utf-8")
+    runtime_paths = source[
+        source.index("function Resolve-InstalledRuntimePaths") : source.index("function Get-OpenClawHome")
+    ]
+    resolver = _powershell_python_here_string(runtime_paths, "resolver")
+    module_prelude = (
+        "import sys, types\n"
+        "module = types.ModuleType('defenseclaw.config')\n"
+        "module.CONFIG_FILE_NAME = 'config.yaml'\n"
+        "def load(path):\n"
+        "    raise AssertionError('unsupported loader must not be called')\n"
+        "module.load = load\n"
+        "package = types.ModuleType('defenseclaw')\n"
+        "package.__path__ = []\n"
+        "package.config = module\n"
+        "sys.modules['defenseclaw'] = package\n"
+        "sys.modules['defenseclaw.config'] = module\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            module_prelude + resolver,
+            str(ROOT),
+            str(RESOLVER),
+            "0",
+            "__DEFENSECLAW_UNSET__",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "installed source config loader has an unsupported signature" in result.stderr
+    assert "unsupported loader must not be called" not in result.stderr
 
 
 def test_windows_success_health_is_bounded_healthy_and_version_bound() -> None:
