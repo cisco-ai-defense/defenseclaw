@@ -57,15 +57,16 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health      *SidecarHealth
-	client      *Client
-	store       *audit.Store
-	logger      *audit.Logger
-	addr        string
-	scannerCfg  *config.Config
-	hilt        *HILTApprovalManager
-	notifier    *notifier.Dispatcher
-	aiDiscovery *inventory.ContinuousDiscoveryService
+	health        *SidecarHealth
+	client        *Client
+	store         *audit.Store
+	logger        *audit.Logger
+	addr          string
+	scannerCfg    *config.Config
+	hilt          *HILTApprovalManager
+	notifier      *notifier.Dispatcher
+	aiDiscoveryMu sync.RWMutex
+	aiDiscovery   *inventory.ContinuousDiscoveryService
 
 	// inspectToolScanTimeout optionally overrides the synchronous
 	// /api/v1/inspect/tool scan budget for this server. Runtime constructors
@@ -518,7 +519,24 @@ func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 // the API can answer /v1/ai/* endpoints from a live store. Safe to
 // call with nil — endpoint handlers short-circuit on a nil service.
 func (a *APIServer) SetAIDiscoveryService(svc *inventory.ContinuousDiscoveryService) {
+	if a == nil {
+		return
+	}
+	a.aiDiscoveryMu.Lock()
 	a.aiDiscovery = svc
+	a.aiDiscoveryMu.Unlock()
+}
+
+// leaseAIDiscovery pins the current discovery service for one complete API
+// handler. Config reload publishes the replacement with the write lock, so it
+// waits for handlers using the old service/store before canceling that service
+// and allowing its Run defer to close inventory.db.
+func (a *APIServer) leaseAIDiscovery() (*inventory.ContinuousDiscoveryService, func()) {
+	if a == nil {
+		return nil, func() {}
+	}
+	a.aiDiscoveryMu.RLock()
+	return a.aiDiscovery, a.aiDiscoveryMu.RUnlock
 }
 
 // SetNotifier wires the user-session OS notifier dispatcher used by

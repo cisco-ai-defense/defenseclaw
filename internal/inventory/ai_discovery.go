@@ -364,12 +364,27 @@ type aiStateFile struct {
 	Signals   map[string]aiStoredSignal `json:"signals"`
 }
 
+type aiDiscoveryLifecycleState uint8
+
+const (
+	aiDiscoveryPrepared aiDiscoveryLifecycleState = iota
+	aiDiscoveryClaimed
+	aiDiscoveryRunning
+	aiDiscoveryClosed
+)
+
 // ContinuousDiscoveryService owns device-level AI visibility. It is deliberately
 // sidecar-scoped so CLI/TUI/API callers all see the same state and OTel fanout.
 type ContinuousDiscoveryService struct {
 	opts    AIDiscoveryOptions
 	catalog []AISignature
 	store   *AIStateStore
+	// lifecycleMu makes claiming Run and retiring a prepared-but-never-run
+	// service atomic. Sidecar config reload uses this to close an intermediate
+	// generation that was superseded before the restart worker could run it,
+	// without ever closing a service that has already been claimed.
+	lifecycleMu    sync.Mutex
+	lifecycleState aiDiscoveryLifecycleState
 	// invStore is the optional SQLite-backed history. It is created
 	// during NewContinuousDiscoveryServiceWithOptions when the data
 	// dir is writable. When nil (open failed, disk full, etc.) the
@@ -577,10 +592,93 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	return opts
 }
 
+// ClaimRun reserves this service for exactly one Run invocation. Sidecar calls
+// it while holding the same lock used to swap the current discovery pointer,
+// which closes the snapshot-vs-swap race for coalesced config reloads.
+//
+// The returned runner is itself once-only: duplicate calls wait for and return
+// the first call's result rather than starting a second scan loop.
+func (s *ContinuousDiscoveryService) ClaimRun() (func(context.Context) error, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.lifecycleMu.Lock()
+	if s.lifecycleState != aiDiscoveryPrepared {
+		s.lifecycleMu.Unlock()
+		return nil, false
+	}
+	s.lifecycleState = aiDiscoveryClaimed
+	s.lifecycleMu.Unlock()
+
+	var once sync.Once
+	done := make(chan struct{})
+	var runErr error
+	runner := func(ctx context.Context) error {
+		once.Do(func() {
+			defer close(done)
+			runErr = s.runClaimed(ctx)
+		})
+		<-done
+		return runErr
+	}
+	return runner, true
+}
+
+// CloseIfNeverStarted releases a prepared service that was superseded before
+// the restart worker claimed it. It deliberately refuses claimed/running
+// services; their Run defer remains the sole close boundary.
+func (s *ContinuousDiscoveryService) CloseIfNeverStarted() (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	s.lifecycleMu.Lock()
+	if s.lifecycleState != aiDiscoveryPrepared {
+		s.lifecycleMu.Unlock()
+		return false, nil
+	}
+	s.lifecycleState = aiDiscoveryClosed
+	s.lifecycleMu.Unlock()
+	return true, s.invStore.Close()
+}
+
 func (s *ContinuousDiscoveryService) Run(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
+	runner, ok := s.ClaimRun()
+	if !ok {
+		return errors.New("ai discovery service has already been started or closed")
+	}
+	return runner(ctx)
+}
+
+func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr error) {
+	s.lifecycleMu.Lock()
+	if s.lifecycleState != aiDiscoveryClaimed {
+		s.lifecycleMu.Unlock()
+		return errors.New("ai discovery service run was not claimed")
+	}
+	s.lifecycleState = aiDiscoveryRunning
+	s.lifecycleMu.Unlock()
+
+	// The service owns the optional history store for its complete running
+	// lifetime. Close only after the active scan has observed cancellation and
+	// Run is unwinding; config reloads can therefore publish the replacement
+	// service before retiring this one without invalidating in-flight queries.
+	defer func() {
+		closeErr := s.invStore.Close()
+		s.lifecycleMu.Lock()
+		s.lifecycleState = aiDiscoveryClosed
+		s.lifecycleMu.Unlock()
+		if closeErr != nil {
+			wrapped := fmt.Errorf("ai discovery inventory store close: %w", closeErr)
+			if runErr == nil || errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+				runErr = wrapped
+			} else {
+				runErr = errors.Join(runErr, wrapped)
+			}
+		}
+	}()
 	_, _ = s.runScan(ctx, true, "startup")
 
 	fullTicker := time.NewTicker(s.opts.ScanInterval)

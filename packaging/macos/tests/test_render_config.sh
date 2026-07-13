@@ -145,16 +145,18 @@ t_aid_endpoint_env_selection() {
   fi
 }
 
-t_otel_block_enabled_for_managed_sink() {
-  # render_config must emit an otel block with enabled: true so the managed
-  # Cisco AI Defense log sink is active on a fresh install. The sink itself is
-  # gated on managed_enterprise + cisco_ai_defense.endpoint (no user
-  # destination required — see config.hasManagedAIDLogSink), so no
-  # otel.destinations[] entry is rendered.
+t_v8_managed_sink_is_release_owned() {
+  # Observability v8 injects the managed Cisco AI Defense log sink from the
+  # validated deployment_mode + cisco_ai_defense.endpoint. The macOS renderer
+  # must not restore the removed v7 otel block or render an operator-controlled
+  # destination that could retarget or disable that release-owned route.
   local out
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
-  assert_contains     "${out}" "$(printf 'otel:\n  enabled: true')" "otel block enables telemetry"
-  assert_not_contains "${out}" "destinations:"                       "no user otel destinations rendered"
+  out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  assert_contains     "${out}" "config_version: 8"                    "v8 config is rendered"
+  assert_contains     "${out}" "observability:"                       "v8 observability block is present"
+  assert_contains     "${out}" "redaction_profile: sensitive"         "managed route defaults to sensitive"
+  assert_not_contains "${out}" "$(printf '\notel:')"                  "removed v7 otel block stays absent"
+  assert_not_contains "${out}" "destinations:"                        "no user destination is rendered"
 }
 
 t_ai_discovery_enabled_for_endpoint_inventory() {
@@ -164,7 +166,7 @@ t_ai_discovery_enabled_for_endpoint_inventory() {
   # scanner is a no-op (NewContinuousDiscoveryService returns nil when
   # ai_discovery.enabled is false) and no inventory flows.
   local out
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
   assert_contains "${out}" "$(printf 'ai_discovery:\n  enabled: true')" "ai_discovery block enables the inventory scanner"
 }
 
@@ -283,7 +285,7 @@ run_case "device_key_file pinned under runtime dir (SUPPORT_DIR is not writable 
 run_case "managed redaction profile" t_managed_redaction_is_sensitive
 run_case "cisco_ai_defense block emitted with installer endpoint" t_cisco_ai_defense_block_emitted
 run_case "aid_endpoint_for_env maps flags to hosts"               t_aid_endpoint_env_selection
-run_case "otel block enabled for managed AID sink"               t_otel_block_enabled_for_managed_sink
+run_case "v8 managed AID sink remains release-owned"             t_v8_managed_sink_is_release_owned
 run_case "ai_discovery enabled for endpoint inventory"           t_ai_discovery_enabled_for_endpoint_inventory
 run_case "resolve_aid_endpoint override precedence + validation"  t_resolve_aid_endpoint_precedence
 run_case "--env preview lands in rendered config"                 t_preview_env_endpoint_ends_up_in_config

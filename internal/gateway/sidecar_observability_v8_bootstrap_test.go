@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/localobservability"
@@ -165,6 +167,30 @@ func managedAIDBootstrapRawWithoutEndpoint(dataDir string) []byte {
 	))
 }
 
+func managedAIDReloadRaw(endpoint string) []byte {
+	return []byte(fmt.Sprintf(
+		"config_version: 8\ncisco_ai_defense:\n  endpoint: %q\nobservability: {}\n",
+		endpoint,
+	))
+}
+
+func trustedManagedConfigSource(t *testing.T) string {
+	t.Helper()
+	var source string
+	switch runtime.GOOS {
+	case "darwin":
+		source = "/private/etc/hosts"
+	case "windows":
+		source = `C:\Windows\System32\drivers\etc\hosts`
+	default:
+		source = "/etc/hosts"
+	}
+	if err := managed.ValidateTrustedConfigPath(source); err != nil {
+		t.Skipf("platform has no stable admin-owned config fixture: %v", err)
+	}
+	return source
+}
+
 func TestSidecarBootstrapManagedDestinationUsesEffectiveEndpoint(t *testing.T) {
 	for _, test := range []struct {
 		name              string
@@ -262,11 +288,12 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 
 func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
-	first := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	first := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("managed destination resolved credentials or sent during bootstrap")
 	}))
 	t.Cleanup(first.Close)
-	second := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	second := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("managed destination resolved credentials or sent during reload")
 	}))
 	t.Cleanup(second.Close)
@@ -304,7 +331,7 @@ func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *
 	next.CiscoAIDefense.Endpoint = second.URL
 	fixture.sidecar.publishConfig(next)
 	reload, reloadErr := fixture.sidecar.ReloadObservabilityRuntime(
-		t.Context(), fixture.configPath, managedAIDBootstrapRaw(fixture.dataDir, second.URL),
+		t.Context(), trustedManagedConfigSource(t), managedAIDReloadRaw(second.URL),
 	)
 	if reloadErr != nil || reload.Status() != runtimegraph.ReloadApplied {
 		t.Fatalf("managed reload status=%s error=%v", reload.Status(), reloadErr)
@@ -753,11 +780,8 @@ func TestNewSidecarRejectsV7BeforeInitialization(t *testing.T) {
 
 func TestNewSidecarFailureDoesNotPublishManagedRedactionPosture(t *testing.T) {
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
-	t.Setenv("DEFENSECLAW_DISABLE_REDACTION", "")
-	compatredaction.SetDisableAll(false)
 	t.Cleanup(func() {
 		setManagedEnterpriseRedactionPosture(false)
-		compatredaction.SetDisableAll(false)
 	})
 
 	for _, test := range []struct {
@@ -853,6 +877,42 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 	defer cancel()
 	if _, err := fixture.sidecar.ReloadObservabilityRuntime(ctx, fixture.configPath, reloadRaw); err == nil {
 		t.Fatal("closed runtime accepted reload")
+	}
+}
+
+func TestSidecarRawReloadResolvesManagedModeAndDefaultEndpoint(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, fixture.raw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+	fixture.sidecar.observabilityV8Mu.Lock()
+	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	fixture.sidecar.observabilityV8Mu.Unlock()
+
+	// The candidate loader must enforce managed activation trust. Use a
+	// platform-owned system file as the immutable source identity while the
+	// supplied bytes exercise defaulted data_dir and endpoint resolution.
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	reloadRaw := []byte("config_version: 8\nobservability:\n  local:\n    retention_days: 30\n")
+	result, reloadErr := fixture.sidecar.ReloadObservabilityRuntime(
+		t.Context(), trustedManagedConfigSource(t), reloadRaw,
+	)
+	if reloadErr != nil || result.Status() != runtimegraph.ReloadApplied {
+		t.Fatalf("managed raw reload=%s error=%v", result.Status(), reloadErr)
+	}
+	destination, ok := owner.runtime.Active().Plan().Destination(
+		config.ObservabilityV8ManagedAIDDestinationName,
+	)
+	wantEndpoint := config.DefaultConfig().CiscoAIDefense.Endpoint +
+		config.ObservabilityV8ManagedAIDIngestPath
+	if !ok || destination.Transport.Endpoint != wantEndpoint {
+		t.Fatalf(
+			"managed destination endpoint=%q present=%t, want %q",
+			destination.Transport.Endpoint, ok, wantEndpoint,
+		)
 	}
 }
 

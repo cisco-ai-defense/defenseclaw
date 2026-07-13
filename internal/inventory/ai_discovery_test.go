@@ -19,6 +19,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +31,118 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+func TestContinuousDiscoveryServiceRunClosesInventoryStoreAcrossRestarts(t *testing.T) {
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	for restart := 0; restart < 3; restart++ {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			DataDir:         dataDir,
+			HomeDir:         homeDir,
+			ScanRoots:       []string{homeDir},
+			ScanInterval:    time.Hour,
+			ProcessInterval: time.Hour,
+		}, nil)
+		store := svc.InventoryStore()
+		if store == nil {
+			t.Fatalf("restart %d: inventory store was not opened", restart)
+		}
+		if _, err := store.SchemaVersion(); err != nil {
+			t.Fatalf("restart %d: inventory store unusable before Run: %v", restart, err)
+		}
+		if open := store.db.Stats().OpenConnections; open == 0 {
+			t.Fatalf("restart %d: inventory store did not retain an open pool before Run", restart)
+		}
+
+		startupComplete := make(chan struct{}, 1)
+		svc.AddReportObserver(func(context.Context, AIDiscoveryReport) {
+			select {
+			case startupComplete <- struct{}{}:
+			default:
+			}
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		runDone := make(chan error, 1)
+		go func() { runDone <- svc.Run(ctx) }()
+		select {
+		case <-startupComplete:
+		case <-time.After(5 * time.Second):
+			cancel()
+			t.Fatalf("restart %d: startup scan did not complete", restart)
+		}
+		cancel()
+		var runErr error
+		select {
+		case runErr = <-runDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("restart %d: Run did not stop after cancellation", restart)
+		}
+		if err := runErr; !errors.Is(err, context.Canceled) {
+			t.Fatalf("restart %d: Run error = %v, want context.Canceled", restart, err)
+		}
+		if open := store.db.Stats().OpenConnections; open != 0 {
+			t.Fatalf("restart %d: inventory DB retained %d open connections after Run", restart, open)
+		}
+		if _, err := store.SchemaVersion(); err == nil {
+			t.Fatalf("restart %d: inventory DB still accepted queries after Run", restart)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("restart %d: repeated Close was not idempotent: %v", restart, err)
+		}
+	}
+}
+
+func TestContinuousDiscoveryServiceCloseIfNeverStartedAndClaimRun(t *testing.T) {
+	newService := func(dataDir string) (*ContinuousDiscoveryService, *InventoryStore) {
+		t.Helper()
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			DataDir:         dataDir,
+			HomeDir:         t.TempDir(),
+			ScanRoots:       []string{t.TempDir()},
+			ScanInterval:    time.Hour,
+			ProcessInterval: time.Hour,
+		}, nil)
+		store := svc.InventoryStore()
+		if store == nil {
+			t.Fatal("inventory store was not opened")
+		}
+		if _, err := store.SchemaVersion(); err != nil {
+			t.Fatalf("inventory store unusable before lifecycle transition: %v", err)
+		}
+		return svc, store
+	}
+
+	dataDir := t.TempDir()
+	prepared, preparedStore := newService(dataDir)
+	closed, err := prepared.CloseIfNeverStarted()
+	if err != nil || !closed {
+		t.Fatalf("CloseIfNeverStarted() = (%v, %v), want (true, nil)", closed, err)
+	}
+	if open := preparedStore.db.Stats().OpenConnections; open != 0 {
+		t.Fatalf("prepared service retained %d open connections", open)
+	}
+	if err := prepared.Run(context.Background()); err == nil {
+		t.Fatal("closed prepared service unexpectedly started")
+	}
+
+	claimed, claimedStore := newService(dataDir)
+	runner, ok := claimed.ClaimRun()
+	if !ok || runner == nil {
+		t.Fatal("ClaimRun did not reserve prepared service")
+	}
+	if closed, err := claimed.CloseIfNeverStarted(); err != nil || closed {
+		t.Fatalf("claimed CloseIfNeverStarted() = (%v, %v), want (false, nil)", closed, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runner(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("claimed runner error = %v, want context.Canceled", err)
+	}
+	if open := claimedStore.db.Stats().OpenConnections; open != 0 {
+		t.Fatalf("claimed service retained %d open connections after Run", open)
+	}
+}
 
 func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	sigs, err := LoadAISignatures()

@@ -88,8 +88,8 @@ func withRedactionDecision(ctx context.Context, redactionEnabled *bool) context.
 // while explicit true OR an ABSENT/nil directive => Redact. Treating a
 // missing directive as Redact is the managed "fail closed" contract: a
 // failed/absent inspect directive must never let a persistent sink emit raw
-// post-inspection content under a local DisableAll opt-out. Only callers
-// that have already gated on managed_enterprise should use this.
+// post-inspection content. Only callers that have already gated on
+// managed_enterprise should use this.
 func managedSinkPolicy(directive *bool) redaction.SinkPolicy {
 	if directive != nil && !*directive {
 		return redaction.SinkPolicyRaw
@@ -122,13 +122,13 @@ func notificationSinkPolicy(policy []redaction.SinkPolicy) redaction.SinkPolicy 
 // sinkPolicyFor resolves the redaction SinkPolicy for a post-inspection
 // event. Precedence:
 //
-//   - Outside managed_enterprise: always SinkPolicyDefault (behavior is
-//     unchanged — honor the local privacy config / DisableAll).
+//   - Outside managed_enterprise: always SinkPolicyDefault (the secure
+//     compatibility projection).
 //   - In managed_enterprise: the cloud directive is authoritative. An
 //     explicit event directive wins over the ctx-resolved policy; a
 //     present directive maps to SinkPolicyRaw (cloud=false => store raw)
 //     or SinkPolicyRedact (cloud=true => force redact, overriding a
-//     local DisableAll). An absent event directive honors an explicitly
+//     configured profile). An absent event directive honors an explicitly
 //     ctx-stamped policy, but FAILS CLOSED to SinkPolicyRedact when no
 //     policy was stamped (e.g. a detached/async sink with no inspect
 //     directive) so missing directives redact by default.
@@ -145,7 +145,7 @@ func sinkPolicyFor(ctx context.Context, eventDirective *bool) redaction.SinkPoli
 	}
 	// No event directive: prefer an explicitly stamped ctx policy
 	// (withRedactionDecision already resolved it), else fail closed so a
-	// managed sink never silently emits raw under a local DisableAll.
+	// managed sink never silently emits raw without an explicit directive.
 	if p := redaction.SinkPolicyFromContext(ctx); p != redaction.SinkPolicyDefault {
 		return p
 	}

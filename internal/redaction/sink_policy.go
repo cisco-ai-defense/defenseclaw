@@ -20,37 +20,31 @@ import "context"
 // cloud-controlled per-inspection redaction feature. The managed Cisco
 // AI Defense inspect response carries a per-inspection
 // is_redaction_enabled directive; in managed_enterprise that directive
-// is authoritative and must override the local privacy config BOTH ways
-// (force raw when the cloud says raw, force redact when the cloud says
-// redact — even if the global DisableAll opt-out is on).
+// is authoritative for that occurrence and must override the configured
+// destination profile both ways (force raw when the cloud says raw, force
+// sensitive redaction when the cloud says redact).
 //
 // Callers that don't have a directive (or aren't managed_enterprise)
-// pass SinkPolicyDefault, which preserves today's behavior exactly:
-// honor the global DisableAll opt-out, otherwise redact.
+// pass SinkPolicyDefault, which uses the secure compatibility projection.
 type SinkPolicy uint8
 
 const (
-	// SinkPolicyDefault honors the global DisableAll() opt-out
-	// (today's ForSink* behavior). Used when there is no
-	// per-inspection directive or the deployment is not
-	// managed_enterprise.
+	// SinkPolicyDefault uses the always-redacting compatibility projection.
+	// It is used when there is no per-inspection directive or the deployment
+	// is not managed_enterprise.
 	SinkPolicyDefault SinkPolicy = iota
-	// SinkPolicyRaw forces the raw value through, overriding local
-	// redaction config. Set when the cloud directive is
+	// SinkPolicyRaw forces the raw value through. Set when the cloud directive is
 	// is_redaction_enabled=false in managed_enterprise.
 	SinkPolicyRaw
-	// SinkPolicyRedact forces redaction, ignoring the DisableAll
-	// opt-out. Set when the cloud directive is
-	// is_redaction_enabled=true in managed_enterprise, so a
-	// cloud "redact" wins even on an install that locally disabled
-	// redaction.
+	// SinkPolicyRedact forces the sensitive compatibility projection. Set when
+	// the cloud directive is is_redaction_enabled=true in managed_enterprise.
 	SinkPolicyRedact
 )
 
 // StringForSink applies a SinkPolicy override on top of ForSinkString.
 //   - SinkPolicyRaw    -> raw value (cloud is_redaction_enabled=false)
-//   - SinkPolicyRedact -> redacted, ignoring DisableAll (cloud=true)
-//   - SinkPolicyDefault -> ForSinkString (honors DisableAll)
+//   - SinkPolicyRedact -> sensitive projection (cloud=true)
+//   - SinkPolicyDefault -> secure compatibility projection
 func StringForSink(s string, p SinkPolicy) string {
 	switch p {
 	case SinkPolicyRaw:

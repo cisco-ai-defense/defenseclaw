@@ -21,6 +21,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -542,6 +543,23 @@ func (s *Sidecar) swapAIDiscovery(next *inventory.ContinuousDiscoveryService) *i
 	return previous
 }
 
+// claimAIDiscoveryRun snapshots and claims the current service under the same
+// lock used by swapAIDiscovery. A coalesced reload therefore cannot strand an
+// intermediate generation between the pointer snapshot and ClaimRun.
+func (s *Sidecar) claimAIDiscoveryRun() (*inventory.ContinuousDiscoveryService, func(context.Context) error, bool) {
+	if s == nil {
+		return nil, nil, false
+	}
+	s.aiDiscoveryMu.Lock()
+	defer s.aiDiscoveryMu.Unlock()
+	service := s.aiDiscovery
+	if service == nil {
+		return nil, nil, false
+	}
+	runner, ok := service.ClaimRun()
+	return service, runner, ok
+}
+
 // Run starts all subsystems as independent goroutines. Each subsystem runs
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
@@ -950,12 +968,16 @@ func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-cha
 		select {
 		case <-ctx.Done():
 			cancel()
-			<-done
+			if err := <-done; err != nil && !isContextTermination(err) {
+				return err
+			}
 			return ctx.Err()
 		case <-restart:
 			fmt.Fprintf(os.Stderr, "[sidecar] restarting %s after config reload\n", name)
 			cancel()
-			<-done
+			if err := <-done; err != nil && !isContextTermination(err) {
+				return err
+			}
 			continue
 		case err := <-done:
 			cancel()
@@ -965,6 +987,10 @@ func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-cha
 			return err
 		}
 	}
+}
+
+func isContextTermination(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func signalRestart(ch chan struct{}) {
@@ -1169,9 +1195,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			return
 		}
 		if nextAIDiscovery != nil {
-			if store := nextAIDiscovery.InventoryStore(); store != nil {
-				_ = store.Close()
-			}
+			_, _ = nextAIDiscovery.CloseIfNeverStarted()
 		}
 	}()
 
@@ -1326,6 +1350,15 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		}
 		if api := s.apiSnapshot(); api != nil {
 			api.SetAIDiscoveryService(nextAIDiscovery)
+		}
+		// The API setter waits for leases using the old service before it
+		// publishes the replacement. A coalesced intermediate that the restart
+		// worker never claimed can now be retired without racing a query;
+		// claimed/running services close from their Run defer.
+		if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
+			if _, err := oldDiscovery.CloseIfNeverStarted(); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] close superseded ai discovery service: %v\n", err)
+			}
 		}
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
 	}
@@ -3692,11 +3725,14 @@ func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connec
 
 // runAIDiscovery starts continuous shadow-AI visibility when enabled.
 func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
-	aiDiscovery := s.aiDiscoverySnapshot()
+	aiDiscovery, runDiscovery, claimed := s.claimAIDiscoveryRun()
 	if aiDiscovery == nil {
 		s.health.SetAIDiscovery(StateDisabled, "", nil)
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if !claimed || runDiscovery == nil {
+		return fmt.Errorf("ai discovery service is already running or retired")
 	}
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
 		"mode":                      s.currentConfig().AIDiscovery.Mode,
@@ -3707,7 +3743,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 	})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- aiDiscovery.Run(ctx)
+		errCh <- runDiscovery(ctx)
 	}()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -3715,6 +3751,10 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 		select {
 		case err := <-errCh:
 			if ctx.Err() != nil {
+				if err != nil && !isContextTermination(err) {
+					s.health.SetAIDiscovery(StateError, err.Error(), nil)
+					return err
+				}
 				s.health.SetAIDiscovery(StateStopped, "", nil)
 				return ctx.Err()
 			}
@@ -3737,6 +3777,14 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 				"result":          report.Summary.Result,
 			})
 		case <-ctx.Done():
+			// Run owns the inventory database. Wait for its cancellation path to
+			// finish the active scan and close the store before runRestartable can
+			// start the replacement generation.
+			err := <-errCh
+			if err != nil && !isContextTermination(err) {
+				s.health.SetAIDiscovery(StateError, err.Error(), nil)
+				return err
+			}
 			s.health.SetAIDiscovery(StateStopped, "", nil)
 			return ctx.Err()
 		}

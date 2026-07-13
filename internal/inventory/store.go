@@ -51,6 +51,13 @@ import (
 //   - ai_components_v      view: dedup'd components rolled up across scans
 type InventoryStore struct {
 	db *sql.DB
+	// closeOnce makes the documented idempotent Close contract explicit. A
+	// discovery service normally closes the store when Run exits, while a
+	// sidecar reload that rejects a prepared (never-run) service closes it from
+	// the rollback path. Both paths may race with defensive cleanup without
+	// closing the database pool more than once.
+	closeOnce sync.Once
+	closeErr  error
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -143,7 +150,10 @@ func (s *InventoryStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.closeOnce.Do(func() {
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
 }
 
 // SQLite BUSY retry policy: see internal/audit/store.go for the

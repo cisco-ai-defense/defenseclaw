@@ -22,13 +22,10 @@ func projectReasonFromContext(ctx context.Context) string {
 }
 
 func TestManagedRedactionDecision_PropagatesCanonicalSinkPolicy(t *testing.T) {
-	t.Setenv("DEFENSECLAW_DISABLE_REDACTION", "")
 	t.Cleanup(func() {
 		SetManagedEnterpriseActive(false)
-		redaction.SetDisableAll(false)
 	})
 
-	redaction.SetDisableAll(false)
 	baselineRedacted := redaction.ForSinkReason(rawReason)
 	if baselineRedacted == rawReason {
 		t.Fatalf("test fixture rawReason did not redact by default: %q", rawReason)
@@ -48,7 +45,6 @@ func TestManagedRedactionDecision_PropagatesCanonicalSinkPolicy(t *testing.T) {
 
 	t.Run("managed directive true forces redaction", func(t *testing.T) {
 		SetManagedEnterpriseActive(true)
-		redaction.SetDisableAll(true)
 		yes := true
 		ctx := withRedactionDecision(context.Background(), &yes)
 		if policy := redaction.SinkPolicyFromContext(ctx); policy != redaction.SinkPolicyRedact {
@@ -58,12 +54,10 @@ func TestManagedRedactionDecision_PropagatesCanonicalSinkPolicy(t *testing.T) {
 		if got == rawReason || !strings.Contains(got, "<redacted") {
 			t.Fatalf("projected reason = %q, want forced redaction", got)
 		}
-		redaction.SetDisableAll(false)
 	})
 
 	t.Run("non-managed ignores cloud directive", func(t *testing.T) {
 		SetManagedEnterpriseActive(false)
-		redaction.SetDisableAll(false)
 		no := false
 		ctx := withRedactionDecision(context.Background(), &no)
 		if policy := redaction.SinkPolicyFromContext(ctx); policy != redaction.SinkPolicyDefault {
@@ -76,7 +70,6 @@ func TestManagedRedactionDecision_PropagatesCanonicalSinkPolicy(t *testing.T) {
 
 	t.Run("managed missing directive fails closed", func(t *testing.T) {
 		SetManagedEnterpriseActive(true)
-		redaction.SetDisableAll(true)
 		ctx := withRedactionDecision(context.Background(), nil)
 		if policy := redaction.SinkPolicyFromContext(ctx); policy != redaction.SinkPolicyRedact {
 			t.Fatalf("policy = %v, want redact", policy)
@@ -85,17 +78,13 @@ func TestManagedRedactionDecision_PropagatesCanonicalSinkPolicy(t *testing.T) {
 		if got == rawReason || !strings.Contains(got, "<redacted") {
 			t.Fatalf("projected reason = %q, want fail-closed redaction", got)
 		}
-		redaction.SetDisableAll(false)
 	})
 }
 
 func TestManagedEnterpriseRedactionPosture_AgentReasonCarveOut(t *testing.T) {
-	t.Setenv("DEFENSECLAW_DISABLE_REDACTION", "")
 	t.Cleanup(func() {
 		setManagedEnterpriseRedactionPosture(false)
-		redaction.SetDisableAll(false)
 	})
-	redaction.SetDisableAll(false)
 
 	const reason = "matched: PII-EMAIL:alice@example.com"
 	setManagedEnterpriseRedactionPosture(true)

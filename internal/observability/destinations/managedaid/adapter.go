@@ -21,10 +21,12 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -140,14 +142,24 @@ func prepareAuthenticatedTransport(
 }
 
 func validEndpoint(raw string) (string, bool) {
-	if len(raw) == 0 || len(raw) > 2_048 || !utf8.ValidString(raw) || strings.TrimSpace(raw) != raw {
+	if len(raw) == 0 || len(raw) > 2_048 || !utf8.ValidString(raw) ||
+		strings.IndexFunc(raw, unicode.IsSpace) >= 0 {
 		return "", false
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" ||
-		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
-		parsed.Path != config.ObservabilityV8ManagedAIDIngestPath {
+	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.Host == "" ||
+		parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(raw, "#") ||
+		parsed.Path != config.ObservabilityV8ManagedAIDIngestPath ||
+		parsed.EscapedPath() != config.ObservabilityV8ManagedAIDIngestPath ||
+		parsed.RawPath != "" || strings.HasSuffix(parsed.Host, ":") {
 		return "", false
+	}
+	if port := parsed.Port(); port != "" {
+		value, portErr := strconv.Atoi(port)
+		if portErr != nil || value < 1 || value > 65_535 {
+			return "", false
+		}
 	}
 	return parsed.String(), true
 }
@@ -196,11 +208,17 @@ func (adapter *Adapter) Deliver(ctx context.Context, batch delivery.Batch) deliv
 	deadline, cancel := context.WithTimeout(ctx, adapter.timeout)
 	defer cancel()
 	provider, err := resolveProvider(deadline, adapter.resolver)
-	if err != nil || provider == nil {
+	if err != nil {
+		return delivery.DeliveryResult{Outcome: classifyCredentialError(err)}
+	}
+	if provider == nil {
 		return delivery.DeliveryResult{Outcome: delivery.OutcomeAuthentication}
 	}
 	token, err := providerToken(deadline, provider)
-	if err != nil || !validToken(token) {
+	if err != nil {
+		return delivery.DeliveryResult{Outcome: delivery.OutcomeTransient}
+	}
+	if !validToken(token) {
 		return delivery.DeliveryResult{Outcome: delivery.OutcomeAuthentication}
 	}
 	status, outcome := adapter.post(deadline, body, token)
@@ -208,9 +226,9 @@ func (adapter *Adapter) Deliver(ctx context.Context, batch delivery.Batch) deliv
 		return delivery.DeliveryResult{Outcome: outcome}
 	}
 	if status == http.StatusUnauthorized {
-		fresh, ok := adapter.remint(deadline, provider, token)
-		if !ok {
-			return delivery.DeliveryResult{Outcome: delivery.OutcomeAuthentication}
+		fresh, outcome := adapter.remint(deadline, provider, token)
+		if outcome != "" {
+			return delivery.DeliveryResult{Outcome: outcome}
 		}
 		status, outcome = adapter.post(deadline, body, fresh)
 		if outcome != "" {
@@ -218,6 +236,13 @@ func (adapter *Adapter) Deliver(ctx context.Context, batch delivery.Batch) deliv
 		}
 	}
 	return delivery.DeliveryResult{Outcome: classifyStatus(status)}
+}
+
+func classifyCredentialError(err error) delivery.DeliveryOutcome {
+	if errors.Is(err, cloudreg.ErrNoProviderRegistered) {
+		return delivery.OutcomeAuthentication
+	}
+	return delivery.OutcomeTransient
 }
 
 func batchSizes(batch delivery.Batch) []int {
@@ -286,19 +311,29 @@ func (adapter *Adapter) remint(
 	ctx context.Context,
 	provider cloudreg.Provider,
 	current string,
-) (string, bool) {
+) (string, delivery.DeliveryOutcome) {
 	adapter.remintMu.Lock()
 	defer adapter.remintMu.Unlock()
 	if !adapter.lastRemint.IsZero() && time.Since(adapter.lastRemint) < remintMinimumInterval {
 		token, err := providerToken(ctx, provider)
-		return token, err == nil && validToken(token) && token != current
+		return classifyRemintedToken(token, current, err)
 	}
 	if !invalidateProvider(provider) {
-		return "", false
+		return "", delivery.OutcomeTransient
 	}
 	adapter.lastRemint = time.Now()
 	token, err := providerToken(ctx, provider)
-	return token, err == nil && validToken(token) && token != current
+	return classifyRemintedToken(token, current, err)
+}
+
+func classifyRemintedToken(token, current string, err error) (string, delivery.DeliveryOutcome) {
+	if err != nil {
+		return "", delivery.OutcomeTransient
+	}
+	if !validToken(token) || token == current {
+		return "", delivery.OutcomeAuthentication
+	}
+	return token, ""
 }
 
 func invalidateProvider(provider cloudreg.Provider) (ok bool) {

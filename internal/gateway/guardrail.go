@@ -203,7 +203,7 @@ type GuardrailInspector struct {
 	tracer *guardrailSpanEmitter
 	// managedAIDFailOpenRecorder owns the canonical availability/diagnostic occurrence for
 	// managed AID fail-open branches. It is bound with the generation-owned v8
-	// runtime and never falls back to the retired process-global EventWriter.
+	// runtime and never falls back to the retired process-global writer.
 	managedAIDFailOpenMu       sync.RWMutex
 	managedAIDFailOpenRecorder func(context.Context, string, string)
 }

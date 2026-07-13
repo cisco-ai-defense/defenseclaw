@@ -117,7 +117,7 @@ func TestManagedAIDDestinationGateAndReloadDigest(t *testing.T) {
 	base := mustCompileObservabilityV8(t, nil)
 	for _, options := range []ObservabilityV8ManagedAIDOptions{
 		{DeploymentMode: "unmanaged_byod", Endpoint: "https://aid.example.test"},
-		{DeploymentMode: "managed_enterprise", Endpoint: "   "},
+		{DeploymentMode: "managed_enterprise", Endpoint: ""},
 	} {
 		got, err := WithObservabilityV8ManagedAIDDestination(base, options)
 		if err != nil || got != base {
@@ -138,6 +138,48 @@ func TestManagedAIDDestinationGateAndReloadDigest(t *testing.T) {
 	}
 	if first.Digest() == second.Digest() || first.ReloadEquivalent(second) {
 		t.Fatal("managed endpoint change was not represented in reload identity")
+	}
+}
+
+func TestManagedAIDDestinationRequiresHTTPSBareOrigin(t *testing.T) {
+	base := mustCompileObservabilityV8(t, nil)
+	accepted, err := WithObservabilityV8ManagedAIDDestination(base, ObservabilityV8ManagedAIDOptions{
+		DeploymentMode: "managed_enterprise", Endpoint: "https://aid.example.test:8443/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, ok := accepted.RuntimeDestination(ObservabilityV8ManagedAIDDestinationName)
+	if !ok || destination.Transport.Endpoint !=
+		"https://aid.example.test:8443"+ObservabilityV8ManagedAIDIngestPath {
+		t.Fatalf("accepted managed endpoint = %+v, present=%v", destination.Transport, ok)
+	}
+
+	for _, endpoint := range []string{
+		"   ",
+		" http://aid.example.test",
+		"http://aid.example.test",
+		"https://user@aid.example.test",
+		"https://aid.example.test?tenant=operator",
+		"https://aid.example.test?",
+		"https://aid.example.test#fragment",
+		"https://aid.example.test#",
+		"https://aid.example.test/operator-path",
+		"https://aid.example.test//",
+		"https://aid.example.test/%2f",
+		"https://aid.example.test:70000",
+		"https://aid.example.test:",
+		"https://[invalid",
+		"https://",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			got, endpointErr := WithObservabilityV8ManagedAIDDestination(base, ObservabilityV8ManagedAIDOptions{
+				DeploymentMode: "managed_enterprise", Endpoint: endpoint,
+			})
+			if endpointErr == nil || got != nil {
+				t.Fatalf("managed endpoint %q returned plan=%p err=%v, want rejection", endpoint, got, endpointErr)
+			}
+		})
 	}
 }
 

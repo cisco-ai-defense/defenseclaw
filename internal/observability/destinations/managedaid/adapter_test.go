@@ -26,6 +26,7 @@ import (
 type testProvider struct {
 	mu          sync.Mutex
 	token       string
+	tokenErr    error
 	fresh       string
 	tokenCalls  int
 	invalidates int
@@ -35,7 +36,7 @@ func (provider *testProvider) Token(context.Context) (string, error) {
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 	provider.tokenCalls++
-	return provider.token, nil
+	return provider.token, provider.tokenErr
 }
 func (*testProvider) Refresh(context.Context) error { return nil }
 func (provider *testProvider) Invalidate() {
@@ -57,6 +58,12 @@ type testResolver struct {
 }
 
 type panickingNetworkResolver struct{}
+
+type testNetworkError struct{}
+
+func (testNetworkError) Error() string   { return "temporary network failure" }
+func (testNetworkError) Timeout() bool   { return true }
+func (testNetworkError) Temporary() bool { return true }
 
 func (panickingNetworkResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
 	panic("resolver implementation panic")
@@ -95,6 +102,10 @@ func testPayload(t *testing.T) delivery.Payload {
 }
 
 func testDispatcher(t *testing.T, adapter delivery.Adapter) *delivery.Dispatcher {
+	return testDispatcherAttempts(t, adapter, 1)
+}
+
+func testDispatcherAttempts(t *testing.T, adapter delivery.Adapter, attempts int) *delivery.Dispatcher {
 	t.Helper()
 	dispatcher, err := delivery.NewDispatcher(delivery.Config{
 		Destination: config.ObservabilityV8ManagedAIDDestinationName,
@@ -102,7 +113,7 @@ func testDispatcher(t *testing.T, adapter delivery.Adapter) *delivery.Dispatcher
 		MaxQueueItems: 8, MaxQueueBytes: 8 * 1024 * 1024,
 		MaxBatchItems: 8, MaxBatchBytes: 8 * 1024 * 1024,
 		ScheduledDelay: 0, AttemptTimeout: 2 * time.Second,
-		Retry: delivery.RetryPolicy{MaxAttempts: 1},
+		Retry: delivery.RetryPolicy{MaxAttempts: attempts},
 	}, adapter)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +138,7 @@ func TestAdapterWrapsCanonicalOTLPJSONAndRemintsOnce(t *testing.T) {
 	provider := &testProvider{token: "stale-token", fresh: "fresh-token"}
 	var requests atomic.Int64
 	var body []byte
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != config.ObservabilityV8ManagedAIDIngestPath || request.Method != http.MethodPost {
 			t.Errorf("request = %s %s", request.Method, request.URL.Path)
 		}
@@ -154,6 +165,7 @@ func TestAdapterWrapsCanonicalOTLPJSONAndRemintsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	adapter.client = server.Client()
 	if resolver.calls.Load() != 0 {
 		t.Fatal("CMID provider was resolved during generation preparation")
 	}
@@ -239,6 +251,106 @@ func TestAdapterInvalidManagedEndpointIsDropOnlyWithoutNetwork(t *testing.T) {
 	}
 }
 
+func TestManagedEndpointRequiresHTTPSExactIngestPath(t *testing.T) {
+	accepted := "https://aid.example.test:8443" + config.ObservabilityV8ManagedAIDIngestPath
+	if got, ok := validEndpoint(accepted); !ok || got != accepted {
+		t.Fatalf("validEndpoint(%q) = %q, %v", accepted, got, ok)
+	}
+	for _, endpoint := range []string{
+		"http://aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath,
+		"https://aid.example.test",
+		"https://aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath + "/",
+		"https://aid.example.test/api/v1/defenseclaw/events/%69ngest",
+		"https://aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath + "?tenant=operator",
+		"https://aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath + "?",
+		"https://aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath + "#fragment",
+		"https://user@aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath,
+		" https://aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath,
+		"https://aid.example.test:70000" + config.ObservabilityV8ManagedAIDIngestPath,
+		"https://[invalid" + config.ObservabilityV8ManagedAIDIngestPath,
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			if got, ok := validEndpoint(endpoint); ok || got != "" {
+				t.Fatalf("validEndpoint(%q) = %q, %v, want rejection", endpoint, got, ok)
+			}
+		})
+	}
+}
+
+func TestAdapterRetriesCredentialFetchErrors(t *testing.T) {
+	errorsToRetry := map[string]error{
+		"canceled":    context.Canceled,
+		"deadline":    context.DeadlineExceeded,
+		"network":     testNetworkError{},
+		"operational": errors.New("credential service unavailable"),
+	}
+	for name, fetchErr := range errorsToRetry {
+		for _, surface := range []string{"resolver", "token"} {
+			t.Run(surface+"/"+name, func(t *testing.T) {
+				provider := &testProvider{token: "token"}
+				resolver := &testResolver{provider: provider}
+				if surface == "resolver" {
+					resolver.err = fetchErr
+				} else {
+					provider.tokenErr = fetchErr
+				}
+				adapter, err := New(t.Context(), testConfig(
+					"https://8.8.8.8"+config.ObservabilityV8ManagedAIDIngestPath,
+				), resolver)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dispatcher := testDispatcherAttempts(t, adapter, 2)
+				if result := dispatcher.Enqueue(testPayload(t)); !result.Accepted() {
+					t.Fatalf("enqueue = %+v", result)
+				}
+				flushAndClose(t, dispatcher)
+				counters := dispatcher.Counters()
+				if counters.Retried != 1 || counters.Rejected != 1 || counters.Failed != 2 {
+					t.Fatalf("credential fetch counters = %+v, want one retry", counters)
+				}
+				if resolver.calls.Load() != 2 {
+					t.Fatalf("resolver calls = %d, want 2", resolver.calls.Load())
+				}
+				tokenCalls, _ := provider.snapshot()
+				if surface == "token" && tokenCalls != 2 {
+					t.Fatalf("token calls = %d, want 2", tokenCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestAdapterDoesNotRetryMissingOrInvalidToken(t *testing.T) {
+	for name, resolver := range map[string]*testResolver{
+		"provider not compiled": {err: cloudreg.ErrNoProviderRegistered},
+		"missing provider":      {provider: nil},
+		"missing token":         {provider: &testProvider{}},
+		"invalid token":         {provider: &testProvider{token: " token"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			adapter, err := New(t.Context(), testConfig(
+				"https://8.8.8.8"+config.ObservabilityV8ManagedAIDIngestPath,
+			), resolver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dispatcher := testDispatcherAttempts(t, adapter, 2)
+			if result := dispatcher.Enqueue(testPayload(t)); !result.Accepted() {
+				t.Fatalf("enqueue = %+v", result)
+			}
+			flushAndClose(t, dispatcher)
+			counters := dispatcher.Counters()
+			if counters.Retried != 0 || counters.Rejected != 1 || counters.Failed != 1 {
+				t.Fatalf("invalid credential counters = %+v, want terminal authentication failure", counters)
+			}
+			if resolver.calls.Load() != 1 {
+				t.Fatalf("resolver calls = %d, want 1", resolver.calls.Load())
+			}
+		})
+	}
+}
+
 func TestAdapterPanickingActivationResolverIsDropOnly(t *testing.T) {
 	resolver := &testResolver{provider: &testProvider{token: "must-not-be-used"}}
 	source := testConfig("https://aid.example.test" + config.ObservabilityV8ManagedAIDIngestPath)
@@ -258,7 +370,7 @@ func TestAdapterPanickingActivationResolverIsDropOnly(t *testing.T) {
 }
 
 func TestAdapterRejectsOversizedAcknowledgement(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(writer, strings.Repeat("x", maxResponseBytes+1))
 	}))
@@ -271,6 +383,7 @@ func TestAdapterRejectsOversizedAcknowledgement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	adapter.client = server.Client()
 	dispatcher := testDispatcher(t, adapter)
 	if result := dispatcher.Enqueue(testPayload(t)); !result.Accepted() {
 		t.Fatalf("enqueue = %+v", result)

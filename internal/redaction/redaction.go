@@ -72,29 +72,6 @@ import (
 // flags that defeat the audit story.
 const revealEnvVar = "DEFENSECLAW_REVEAL_PII"
 
-// disableEnvVar is retained for the non-canonical compatibility surfaces that
-// still honor the pre-v8 process-wide opt-out. Canonical v8 telemetry never
-// consults it: the runtime retains source facts and applies a compiled profile
-// independently for each destination.
-const disableEnvVar = "DEFENSECLAW_DISABLE_REDACTION"
-
-var disableOverride atomic.Bool
-
-// SetDisableAll updates the legacy compatibility override. It must not be used
-// to select a canonical v8 destination profile.
-func SetDisableAll(v bool) { disableOverride.Store(v) }
-
-func DisableAll() bool {
-	if disableOverride.Load() {
-		return true
-	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(disableEnvVar))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
 // agentReasonRedactionDisabled is the managed-enterprise, local-agent-only
 // carve-out. It never changes canonical persistence or destination routing.
 var agentReasonRedactionDisabled atomic.Bool
@@ -155,17 +132,14 @@ func String(s string) string {
 	return ForSinkString(s)
 }
 
-// ForSinkString is the Reveal-bypassing compatibility projection. It honors
-// the pre-v8 DisableAll opt-out; new v8 producers must retain the raw fact and
-// let the central destination projection apply policy.
+// ForSinkString is the Reveal-bypassing legacy-v7 projection. It always returns
+// the redacted form and has no global mutable bypass. New v8 producers must
+// retain the raw fact and let the central destination projection apply policy.
 //
 // Idempotent: a value already shaped like a redaction placeholder is
 // returned unchanged so layered helpers don't lose the original hash
 // or length on a second pass.
 func ForSinkString(s string) string {
-	if DisableAll() {
-		return s
-	}
 	return LegacyV7String(s)
 }
 
@@ -272,8 +246,8 @@ func Entity(value string) string {
 	return ForSinkEntity(value)
 }
 
-// ForSinkEntity is the Reveal-bypassing compatibility projection. It is
-// idempotent over its own placeholder shape and honors DisableAll.
+// ForSinkEntity is the Reveal-bypassing legacy-v7 projection. It is
+// idempotent over its own placeholder shape and has no global bypass.
 //
 // The first-rune preview is only included for values long enough
 // that a single character cannot be a meaningful fraction of the
@@ -282,9 +256,6 @@ func Entity(value string) string {
 // leading `A` of a 6-byte value like `AB4FGH` narrows the search
 // space for an attacker who controls adjacent log rows.
 func ForSinkEntity(value string) string {
-	if DisableAll() {
-		return value
-	}
 	return LegacyV7Entity(value)
 }
 
@@ -325,12 +296,9 @@ func MessageContent(content string) string {
 	return ForSinkMessageContent(content)
 }
 
-// ForSinkMessageContent is the Reveal-bypassing compatibility projection.
-// It is idempotent, ignores Reveal, and honors DisableAll.
+// ForSinkMessageContent is the Reveal-bypassing legacy-v7 projection.
+// It is idempotent and always redacts, even when Reveal() is set.
 func ForSinkMessageContent(content string) string {
-	if DisableAll() {
-		return content
-	}
 	return LegacyV7MessageContent(content)
 }
 
@@ -376,9 +344,6 @@ func ReasonForAgent(reason string) string {
 }
 
 func ForSinkReason(reason string) string {
-	if DisableAll() {
-		return reason
-	}
 	return LegacyV7Reason(reason)
 }
 
@@ -750,12 +715,9 @@ func Evidence(content string, matchStart, matchEnd int) string {
 	return ForSinkEvidence(content, matchStart, matchEnd)
 }
 
-// ForSinkEvidence is the Reveal-bypassing compatibility projection. It is
-// idempotent over its own placeholder shape and honors DisableAll.
+// ForSinkEvidence is the Reveal-bypassing legacy-v7 projection. It is
+// idempotent over its own placeholder shape and has no global bypass.
 func ForSinkEvidence(content string, matchStart, matchEnd int) string {
-	if DisableAll() {
-		return content
-	}
 	return LegacyV7Evidence(content, matchStart, matchEnd)
 }
 

@@ -11,7 +11,11 @@
 package config
 
 import (
+	"net/url"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -50,11 +54,15 @@ func WithObservabilityV8ManagedAIDDestination(
 	plan *ObservabilityV8Plan,
 	options ObservabilityV8ManagedAIDOptions,
 ) (*ObservabilityV8Plan, error) {
-	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || strings.TrimSpace(options.Endpoint) == "" {
+	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || options.Endpoint == "" {
 		return plan, nil
 	}
+	origin, ok := observabilityV8ManagedAIDOrigin(options.Endpoint)
+	if !ok {
+		return nil, &observabilityV8ManagedAIDPlanError{}
+	}
 	effective := cloneObservabilityV8EffectivePlan(plan.effective)
-	endpoint := strings.TrimRight(strings.TrimSpace(options.Endpoint), "/") + ObservabilityV8ManagedAIDIngestPath
+	endpoint := origin + ObservabilityV8ManagedAIDIngestPath
 	for _, destination := range effective.Destinations {
 		if destination.Name == ObservabilityV8ManagedAIDDestinationName {
 			// A generated destination is idempotent. Any other occurrence is a
@@ -129,6 +137,32 @@ func WithObservabilityV8ManagedAIDDestination(
 		ObservabilityV8Provenance{Path: base + ".reload_applicability", Origin: "reload-contract", Detail: "policy=restart_required,transport=live_reloadable"},
 	)
 	return newObservabilityV8Plan(effective)
+}
+
+// observabilityV8ManagedAIDOrigin accepts only the release-owned base origin.
+// The ingest path is appended below and can therefore never be supplied or
+// influenced by source configuration.
+func observabilityV8ManagedAIDOrigin(raw string) (string, bool) {
+	if raw == "" || len(raw) > 2_048 || !utf8.ValidString(raw) ||
+		strings.IndexFunc(raw, unicode.IsSpace) >= 0 {
+		return "", false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.Host == "" ||
+		parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(raw, "#") ||
+		(parsed.Path != "" && parsed.Path != "/") ||
+		(parsed.EscapedPath() != "" && parsed.EscapedPath() != "/") ||
+		parsed.RawPath != "" || strings.HasSuffix(parsed.Host, ":") {
+		return "", false
+	}
+	if port := parsed.Port(); port != "" {
+		value, portErr := strconv.Atoi(port)
+		if portErr != nil || value < 1 || value > 65_535 {
+			return "", false
+		}
+	}
+	return "https://" + parsed.Host, true
 }
 
 // forceObservabilityV8ManagedAIDRequiredLogCollection keeps the bounded

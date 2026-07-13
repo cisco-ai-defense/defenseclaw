@@ -195,11 +195,15 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		}
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
 	}
-	managedOptions, managedOptionsErr := sidecarObservabilityV8ManagedOptionsFromRaw(raw)
-	if managedOptionsErr != nil {
-		return runtimegraph.ReloadResult{}, managedOptionsErr
+	candidateConfig, candidateErr := config.LoadRuntimeV8CandidateFromBytes(sourceName, raw)
+	if candidateErr != nil || candidateConfig == nil {
+		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(
+			sidecarObservabilityV8BootstrapCompile, candidateErr,
+		)
 	}
-	if managedErr := applySidecarObservabilityV8ManagedDestination(compiled, managedOptions); managedErr != nil {
+	if managedErr := applySidecarObservabilityV8ManagedDestination(
+		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(candidateConfig),
+	); managedErr != nil {
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, managedErr)
 	}
 	result, reloadErr := owner.reload(ctx, compiled.Plan, owner.retainJudgeBodies)
@@ -861,28 +865,6 @@ func sidecarObservabilityV8ManagedReloadCandidate(
 		return nil, false, err
 	}
 	return candidate, !candidate.ReloadEquivalent(active), nil
-}
-
-// sidecarObservabilityV8ManagedOptionsFromRaw is retained only for the public
-// raw-document reload API. Production config-manager reloads use the effective
-// Config candidate so Viper defaults and environment-derived values are not
-// lost at the release-owned destination boundary.
-func sidecarObservabilityV8ManagedOptionsFromRaw(
-	raw []byte,
-) (config.ObservabilityV8ManagedAIDOptions, error) {
-	var envelope struct {
-		DeploymentMode string `yaml:"deployment_mode"`
-		CiscoAIDefense struct {
-			Endpoint string `yaml:"endpoint"`
-		} `yaml:"cisco_ai_defense"`
-	}
-	if err := yaml.Unmarshal(raw, &envelope); err != nil {
-		return config.ObservabilityV8ManagedAIDOptions{}, err
-	}
-	return config.ObservabilityV8ManagedAIDOptions{
-		DeploymentMode: envelope.DeploymentMode,
-		Endpoint:       envelope.CiscoAIDefense.Endpoint,
-	}, nil
 }
 
 func (s *Sidecar) observeObservabilityV8Delivery(transition delivery.HealthTransition) {

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +43,65 @@ func TestHandleAIUsageDisabled(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"enabled":false`) {
 		t.Fatalf("disabled response missing: %s", w.Body.String())
 	}
+}
+
+func TestAPIServerAIDiscoveryLeasePinsOneService(t *testing.T) {
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+	first := &inventory.ContinuousDiscoveryService{}
+	second := &inventory.ContinuousDiscoveryService{}
+	api.SetAIDiscoveryService(first)
+
+	got, release := api.leaseAIDiscovery()
+	if got != first {
+		release()
+		t.Fatalf("leased service = %p, want first %p", got, first)
+	}
+	if api.aiDiscoveryMu.TryLock() {
+		api.aiDiscoveryMu.Unlock()
+		release()
+		t.Fatal("discovery writer lock succeeded while handler lease was active")
+	}
+	release()
+	if !api.aiDiscoveryMu.TryLock() {
+		t.Fatal("discovery writer lock remained blocked after handler lease release")
+	}
+	api.aiDiscoveryMu.Unlock()
+
+	api.SetAIDiscoveryService(second)
+	got, release = api.leaseAIDiscovery()
+	defer release()
+	if got != second {
+		t.Fatalf("leased service after swap = %p, want second %p", got, second)
+	}
+}
+
+func TestAPIServerAIDiscoveryConcurrentSwapAndUsage(t *testing.T) {
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+	services := []*inventory.ContinuousDiscoveryService{{}, {}}
+	api.SetAIDiscoveryService(services[0])
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			api.SetAIDiscoveryService(services[i%len(services)])
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage", nil)
+			w := httptest.NewRecorder()
+			api.handleAIUsage(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("iteration %d: status = %d, want 200", i, w.Code)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
 
 func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
