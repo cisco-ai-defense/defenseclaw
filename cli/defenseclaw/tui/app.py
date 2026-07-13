@@ -159,6 +159,55 @@ def _write_owner_only_text(path: Path, text: str, *, protect_parent: bool = Fals
     atomic_write_private_bytes(path, text.encode("utf-8"), protect_parent=protect_parent)
 
 
+async def _terminate_async_process(process: asyncio.subprocess.Process) -> None:
+    """Kill and reap a captured child so Windows closes its pipe handles."""
+
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await process.wait()
+    except ProcessLookupError:
+        pass
+    _close_async_process_transport(process)
+    await asyncio.sleep(0)
+
+
+def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
+    """Close asyncio's process transport before a Windows loop is destroyed."""
+
+    # asyncio.Process has no public close API. Its private transport is the
+    # resource owner, and explicitly closing it is required on Proactor loops
+    # when a short-lived Textual test/app exits in the same event-loop turn.
+    transport = getattr(process, "_transport", None)
+    if transport is not None:
+        transport.close()
+
+
+async def _communicate_captured(
+    binary: str,
+    args: tuple[str, ...],
+) -> tuple[int, bytes, bytes]:
+    """Run one captured child and deterministically reap it on cancellation."""
+
+    process = await asyncio.create_subprocess_exec(
+        *resolve_subprocess_argv(binary, args),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **captured_subprocess_kwargs(),
+    )
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        await _terminate_async_process(process)
+        raise
+    _close_async_process_transport(process)
+    await asyncio.sleep(0)
+    return process.returncode or 0, stdout, stderr
+
+
 TOKENS = DEFAULT_TOKENS
 
 
@@ -1535,12 +1584,15 @@ class DefenseClawTUI(App[None]):
             except Exception:  # noqa: BLE001 - teardown is best-effort.
                 pass
         await self.executor.cancel()
-        state_worker = self._state_save_worker
-        if state_worker is not None:
-            try:
-                await state_worker.wait()
-            except Exception:  # noqa: BLE001 - final synchronous save remains authoritative.
-                pass
+        # Textual cancels workers during shutdown, but Windows' Proactor loop
+        # must also be given time to run each worker's cancellation cleanup.
+        # Otherwise subprocess pipe transports reach __del__ after the event
+        # loop closes and emit noisy warnings (and can retain child handles).
+        self.workers.cancel_all()
+        try:
+            await self.workers.wait_for_complete()
+        except Exception:  # noqa: BLE001 - final synchronous save remains authoritative.
+            pass
         # Best-effort final flush of session state so the next launch
         # keeps palette MRU, theme, filters, and per-panel cursors.
         try:
@@ -4814,15 +4866,18 @@ class DefenseClawTUI(App[None]):
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
             except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                await _terminate_async_process(proc)
                 self.notify_toast(
                     "error",
                     "Diagnose timed out after 60s — run `defenseclaw doctor` manually.",
                 )
                 return
+            except asyncio.CancelledError:
+                await _terminate_async_process(proc)
+                raise
+
+            _close_async_process_transport(proc)
+            await asyncio.sleep(0)
 
             text = (stdout or b"").decode("utf-8", errors="replace")
             # Strip ANSI color codes so the toast doesn't render escape
@@ -10118,21 +10173,14 @@ class DefenseClawTUI(App[None]):
 
     async def _load_setup_credentials(self) -> None:
         try:
-            process = await asyncio.create_subprocess_exec(
-                *resolve_subprocess_argv(
-                    "defenseclaw",
-                    ("keys", "list", "--json"),
-                ),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **captured_subprocess_kwargs(),
+            returncode, stdout, stderr = await _communicate_captured(
+                "defenseclaw", ("keys", "list", "--json")
             )
-            stdout, stderr = await process.communicate()
         except OSError as exc:
             self.setup_model.set_credential_snapshot((), error=exc)
             self._render_chrome()
             return
-        if process.returncode != 0:
+        if returncode != 0:
             self.setup_model.set_credential_snapshot((), error=stderr.decode(errors="replace").strip())
             self._render_chrome()
             return
@@ -10160,21 +10208,15 @@ class DefenseClawTUI(App[None]):
         intent = self.inventory_model.load_intent()
         self._set_status(intent.hint or "Loading inventory...")
         try:
-            process = await asyncio.create_subprocess_exec(
-                *resolve_subprocess_argv(intent.binary, intent.args),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **captured_subprocess_kwargs(),
-            )
-            stdout, stderr = await process.communicate()
+            returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
             self.inventory_model.apply_loaded(None, exc)
             self._render_chrome()
             return
-        if process.returncode != 0:
+        if returncode != 0:
             self.inventory_model.apply_loaded(
                 None,
-                stderr.decode(errors="replace").strip() or f"exit {process.returncode}",
+                stderr.decode(errors="replace").strip() or f"exit {returncode}",
             )
             self._render_chrome()
             return
@@ -10198,17 +10240,11 @@ class DefenseClawTUI(App[None]):
         for name in names:
             intent = self.inventory_model.load_intent_for(name)
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *resolve_subprocess_argv(intent.binary, intent.args),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    **captured_subprocess_kwargs(),
-                )
-                stdout, stderr = await process.communicate()
+                returncode, stdout, _stderr = await _communicate_captured(intent.binary, intent.args)
             except OSError:
                 results.append((name, None))
                 continue
-            if process.returncode != 0:
+            if returncode != 0:
                 results.append((name, None))
             else:
                 results.append((name, stdout.decode(errors="replace")))
@@ -10431,20 +10467,14 @@ class DefenseClawTUI(App[None]):
         intent = model.load_intent()
         self._set_status(intent.hint or f"Loading {panel}...")
         try:
-            process = await asyncio.create_subprocess_exec(
-                *resolve_subprocess_argv(intent.binary, intent.args),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **captured_subprocess_kwargs(),
-            )
-            stdout, stderr = await process.communicate()
+            returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
             model.apply_loaded([], exc)
             self._render_chrome()
             return
 
-        if process.returncode != 0:
-            model.apply_loaded([], stderr.decode(errors="replace").strip() or f"exit {process.returncode}")
+        if returncode != 0:
+            model.apply_loaded([], stderr.decode(errors="replace").strip() or f"exit {returncode}")
         else:
             try:
                 model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
@@ -10468,17 +10498,11 @@ class DefenseClawTUI(App[None]):
         for name in names:
             intent = model.load_intent_for(name)
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *resolve_subprocess_argv(intent.binary, intent.args),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    **captured_subprocess_kwargs(),
-                )
-                stdout, stderr = await process.communicate()
+                returncode, stdout, _stderr = await _communicate_captured(intent.binary, intent.args)
             except OSError:
                 results.append((name, None))
                 continue
-            if process.returncode != 0:
+            if returncode != 0:
                 results.append((name, None))
             else:
                 results.append((name, stdout.decode(errors="replace")))

@@ -347,12 +347,17 @@ async def test_background_clears_flag_on_timeout(tmp_path: Path) -> None:
         def kill(self) -> None:
             killed.append(True)
 
+        async def wait(self) -> int:
+            self.returncode = -9
+            return self.returncode
+
     async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProc:
         return _HangingProc()
 
     async def _fake_wait_for(_aw, timeout: float) -> tuple[bytes, bytes]:
         # Pretend we hit the timeout immediately so the test doesn't
         # wait 60 real seconds.
+        _aw.close()
         raise __import__("asyncio").TimeoutError
 
     import defenseclaw.tui.app as app_mod
@@ -379,7 +384,10 @@ def test_action_sets_diagnose_running_before_dispatch(tmp_path: Path) -> None:
     assert app._diagnose_running is False
     # Stop the worker from actually firing — we only want to observe
     # the synchronous side-effect (flag set + info toast emitted).
-    app.run_worker = lambda *_a, **_k: None  # type: ignore[assignment]
+    def _discard_worker(awaitable, *_args, **_kwargs) -> None:
+        awaitable.close()
+
+    app.run_worker = _discard_worker  # type: ignore[assignment]
     captured = _capture_toasts(app)
 
     app.action_run_diagnose()
