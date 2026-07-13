@@ -525,7 +525,7 @@ func compileObservabilityV8CapabilityRoute(capabilities ObservabilityV8Destinati
 		Action:   ObservabilityV8RouteSend,
 	}
 	if observabilityV8HasContentSignal(route.Signals) {
-		route.RedactionProfileByBucket = observabilityV8RouteProfiles(allBuckets, "none", buckets)
+		route.RedactionProfileByBucket = observabilityV8RouteProfiles(allBuckets, "", buckets)
 	}
 	return route
 }

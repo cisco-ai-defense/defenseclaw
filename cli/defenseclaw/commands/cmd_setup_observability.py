@@ -467,7 +467,6 @@ def _build_v8_preset_destination(
         destination["send"] = {
             "signals": list(selected),
             "buckets": ["*"],
-            "redaction_profile": "none",
         }
     return destination
 

@@ -175,6 +175,32 @@ func TestCompileObservabilityV8CapabilityDefaultsAndEnabledPointer(t *testing.T)
 	}
 }
 
+func TestCompileObservabilityV8CapabilityDefaultInheritsBucketRedaction(t *testing.T) {
+	plan := mustCompileObservabilityV8(t, &ObservabilityV8Source{
+		Defaults: ObservabilityV8BucketPolicySource{RedactionProfile: "strict"},
+		Buckets: map[observability.Bucket]ObservabilityV8BucketPolicySource{
+			observability.BucketModelIO: {RedactionProfile: "sensitive"},
+		},
+		Destinations: []ObservabilityV8DestinationSource{
+			validObservabilityV8Destination("otel", ObservabilityV8DestinationOTLP),
+		},
+	})
+	destination, ok := plan.Destination("otel")
+	if !ok {
+		t.Fatal("compiled destination not found")
+	}
+	if destination.PolicyForm != ObservabilityV8PolicyCapabilityDefault || len(destination.Routes) != 1 {
+		t.Fatalf("destination = %+v", destination)
+	}
+	profiles := destination.Routes[0].RedactionProfileByBucket
+	if profiles[observability.BucketSecurityFinding] != "strict" {
+		t.Fatalf("security finding profile = %q, want strict", profiles[observability.BucketSecurityFinding])
+	}
+	if profiles[observability.BucketModelIO] != "sensitive" {
+		t.Fatalf("model I/O profile = %q, want sensitive", profiles[observability.BucketModelIO])
+	}
+}
+
 func TestCompileObservabilityV8TransportDefaultsAndPresetExpansion(t *testing.T) {
 	maxBackups, maxAge, compress := 0, 0, false
 	source := &ObservabilityV8Source{Destinations: []ObservabilityV8DestinationSource{
