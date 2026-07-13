@@ -296,12 +296,22 @@ func (g *HookConfigGuard) run() {
 	defer ticker.Stop()
 
 	for {
+		g.mu.Lock()
+		ctx := g.ctx
+		watcher := g.fsw
+		g.mu.Unlock()
+		if ctx == nil || watcher == nil {
+			return
+		}
 		select {
-		case <-g.ctx.Done():
+		case <-ctx.Done():
 			return
 
-		case event, ok := <-g.fsw.Events:
+		case event, ok := <-watcher.Events:
 			if !ok {
+				if g.watcherWasReplaced(watcher) {
+					continue
+				}
 				return
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
@@ -317,8 +327,11 @@ func (g *HookConfigGuard) run() {
 			}
 			g.mu.Unlock()
 
-		case err, ok := <-g.fsw.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
+				if g.watcherWasReplaced(watcher) {
+					continue
+				}
 				return
 			}
 			if g.otel != nil {
@@ -330,6 +343,14 @@ func (g *HookConfigGuard) run() {
 			g.processPending()
 		}
 	}
+}
+
+// watcherWasReplaced distinguishes the expected channel closure caused by a
+// resync from a terminal closure of the active watcher.
+func (g *HookConfigGuard) watcherWasReplaced(observed *fsnotify.Watcher) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.started && g.fsw != nil && g.fsw != observed
 }
 
 // processPending evaluates debounced events: if any guarded config file no

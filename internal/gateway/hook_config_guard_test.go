@@ -116,6 +116,71 @@ func TestHookConfigGuard_RecreatesDeletedFile(t *testing.T) {
 	}
 }
 
+func TestHookConfigGuard_ContinuesAfterWatcherReplacement(t *testing.T) {
+	conn, opts, cfgPath := installedCursorConnector(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	guard.Start(ctx, conn, opts)
+	defer guard.Stop()
+
+	// Prove the run loop consumed an event from the original watcher before
+	// replacing it. The long debounce keeps the event pending and the loop
+	// blocked on that watcher's channels.
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("trigger original watcher: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		guard.mu.Lock()
+		pending := len(guard.pending)
+		guard.mu.Unlock()
+		if pending > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("original watcher event was not consumed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(2 * guardTestDebounce)
+
+	guard.mu.Lock()
+	original := guard.fsw
+	guard.resyncTargetsLocked(conn, opts)
+	replacement := guard.fsw
+	guard.pending = map[string]time.Time{}
+	guard.mu.Unlock()
+	if replacement == original {
+		t.Fatal("resync did not replace the filesystem watcher")
+	}
+
+	select {
+	case <-guard.done:
+		t.Fatal("guard stopped when the superseded watcher channels closed")
+	case <-time.After(4 * guardTestDebounce):
+	}
+
+	// The replacement watcher must remain live and consume a fresh event.
+	if err := os.WriteFile(cfgPath, []byte("{\"replacement\":true}\n"), 0o600); err != nil {
+		t.Fatalf("trigger replacement watcher: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		guard.mu.Lock()
+		pending := len(guard.pending)
+		guard.mu.Unlock()
+		if pending > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replacement watcher event was not consumed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestHookConfigGuard_IgnoresUnrelatedEdits(t *testing.T) {
 	conn, opts, cfgPath := installedCursorConnector(t)
 

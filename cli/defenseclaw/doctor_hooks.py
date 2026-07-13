@@ -40,6 +40,9 @@ _CLAUDE_FILE_CHANGED_MATCHER = (
     "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|"
     "package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
 )
+# Setup only observes initialization and cannot block. WorktreeCreate replaces
+# Claude's default git behavior and must create/print a worktree path, so the
+# generic security hook must not claim either event.
 _CLAUDE_HOOK_MATCHERS = {
     "SessionStart": "startup|resume|clear|compact",
     "InstructionsLoaded": "*",
@@ -69,6 +72,16 @@ _CLAUDE_HOOK_MATCHERS = {
     "SessionEnd": "",
     "Elicitation": "*",
     "ElicitationResult": "*",
+}
+_CLAUDE_EVENTS_WITHOUT_MATCHERS = {
+    "UserPromptSubmit",
+    "PostToolBatch",
+    "Stop",
+    "TeammateIdle",
+    "TaskCreated",
+    "TaskCompleted",
+    "WorktreeRemove",
+    "CwdChanged",
 }
 _REPAIR = {
     "codex": "defenseclaw setup codex --yes --restart",
@@ -485,16 +498,22 @@ def _validate_claude_policy(document: dict[str, Any], managed_settings_paths: tu
         # Claude chooses the highest available local managed tier rather than
         # merging tiers: HKLM, then system files, then HKCU.
         managed = _read_claude_registry_policy("HKEY_LOCAL_MACHINE") or {}
+        policy_source = "machine registry"
         if not managed:
             managed = _merge_claude_file_policies(_default_claude_managed_settings_paths())
+            policy_source = "system managed settings"
         if not managed:
             managed = _read_claude_registry_policy("HKEY_CURRENT_USER") or {}
+            policy_source = "user registry"
     else:
         # An explicit list is a deterministic test/embedding seam and excludes
         # host registry state.
         managed = _merge_claude_file_policies(managed_settings_paths)
+        policy_source = "explicit managed settings"
 
-    if "policyHelper" in managed:
+    # Claude only honors policyHelper from machine-managed policy. A value in
+    # HKCU is ordinary user input and is explicitly ignored by Claude itself.
+    if "policyHelper" in managed and policy_source != "user registry":
         raise _InspectionError(
             "policy-blocked",
             "Claude Code uses a dynamic policyHelper, so passive Doctor inspection cannot prove user hooks are active",
@@ -534,30 +553,81 @@ def _validate_claude_policy(document: dict[str, Any], managed_settings_paths: tu
 
 def _managed_hook_command(command: str, connector: str) -> bool:
     """Report whether a command is a current or recognized legacy launcher."""
-    marker = f"hook --connector {connector}"
-    legacy = "codex-hook.sh" if connector == "codex" else "claude-code-hook.sh"
-    if marker in command or legacy in command:
-        return True
-    if connector == "codex" and "-encodedcommand" in command.casefold():
-        try:
-            target, _args, _kind = _command_target(command, connector)
-        except _InspectionError:
+    try:
+        target, _args, _kind = _command_target(command, connector)
+    except _InspectionError:
+        target = _malformed_owned_hook_target(command, connector)
+        if not target:
             return False
-        return ntpath.basename(target).casefold() in {
-            "defenseclaw-hook.exe",
-            "defenseclaw-gateway.exe",
-            "defenseclaw-gateway.cmd",
-        }
-    return False
+    legacy_script = "codex-hook.sh" if connector == "codex" else "claude-code-hook.sh"
+    return ntpath.basename(target).casefold() in {
+        "defenseclaw-hook",
+        "defenseclaw-hook.exe",
+        "defenseclaw-hook.cmd",
+        "defenseclaw-hook.ps1",
+        "defenseclaw-gateway",
+        "defenseclaw-gateway.exe",
+        "defenseclaw-gateway.cmd",
+        "defenseclaw-gateway.ps1",
+        legacy_script,
+    }
 
 
-def _matcher_covers(actual: Any, required: str) -> bool:
+def _malformed_owned_hook_target(command: str, connector: str) -> str:
+    """Recover an exact owned target while preserving malformed diagnostics."""
+    value = command.strip()
+    prefix = "set NoDefaultCurrentDirectoryInExePath=1&& "
+    if value.casefold().startswith(prefix.casefold()):
+        value = value[len(prefix) :].strip()
+    if any(char in value for char in "\r\n\x00|<>"):
+        return ""
+    try:
+        parts = _split_windows(value)
+    except _InspectionError:
+        return ""
+    if parts and parts[0] == "&":
+        parts = parts[1:]
+    if not parts:
+        return ""
+
+    first_base = ntpath.basename(parts[0]).casefold()
+    if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        lowered = [part.casefold() for part in parts]
+        try:
+            file_index = lowered.index("-file")
+        except ValueError:
+            return ""
+        if file_index + 1 >= len(parts):
+            return ""
+        target = parts[file_index + 1]
+        args = parts[file_index + 2 :]
+    else:
+        target = parts[0]
+        args = parts[1:]
+
+    legacy_script = "codex-hook.sh" if connector == "codex" else "claude-code-hook.sh"
+    if ntpath.basename(target).casefold() == legacy_script and not args:
+        return target
+    if args[:3] != ["hook", "--connector", connector]:
+        return ""
+    return target
+
+
+def _matcher_covers(event: str, actual: Any, required: str) -> bool:
     """Report whether a configured matcher covers a required hook matcher."""
+    if event in _CLAUDE_EVENTS_WITHOUT_MATCHERS:
+        return True
     if actual is None:
         actual = ""
     if not isinstance(actual, str):
         return False
-    return actual in {"", "*", required}
+    if actual in {"", "*", required}:
+        return True
+    if event == "FileChanged":
+        # FileChanged is a pipe-separated literal watch list. Additional
+        # filenames broaden coverage without weakening the required set.
+        return set(required.split("|")).issubset(actual.split("|"))
+    return False
 
 
 def _validate_claude_hook_contract(
@@ -585,7 +655,7 @@ def _validate_claude_hook_contract(
         if not isinstance(condition, str) or condition:
             rejected[event] = "handler has a narrowing if condition"
             continue
-        if not _matcher_covers(entry.get("matcher"), required_matcher):
+        if not _matcher_covers(event, entry.get("matcher"), required_matcher):
             rejected[event] = f"matcher {entry.get('matcher')!r} is narrower than {required_matcher!r}"
             continue
         covered.add(event)

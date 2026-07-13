@@ -500,6 +500,9 @@ func newClaudeCodeHookGroup(eventType, matcher string) claudeCodeHookGroup {
 	}
 }
 
+// Setup only observes initialization and cannot block. WorktreeCreate replaces
+// Claude's default git behavior and must create/print a worktree path, so the
+// generic security hook intentionally owns neither event.
 var hookGroups = []claudeCodeHookGroup{
 	newClaudeCodeHookGroup("SessionStart", "startup|resume|clear|compact"),
 	newClaudeCodeHookGroup("InstructionsLoaded", "*"),
@@ -560,17 +563,19 @@ func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, er
 
 	for _, group := range hookGroups {
 		entries, ok := hooks[group.eventType].([]interface{})
-		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.matcher, opts) {
+		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, opts) {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-func claudeCodeEventHasEnforcingHook(entries []interface{}, requiredMatcher string, opts SetupOpts) bool {
+func claudeCodeEventHasEnforcingHook(
+	entries []interface{}, eventType, requiredMatcher string, opts SetupOpts,
+) bool {
 	for _, rawEntry := range entries {
 		entry, ok := rawEntry.(map[string]interface{})
-		if !ok || !claudeCodeMatcherCovers(entry["matcher"], requiredMatcher) {
+		if !ok || !claudeCodeMatcherCovers(eventType, entry["matcher"], requiredMatcher) {
 			continue
 		}
 		handlers, ok := entry["hooks"].([]interface{})
@@ -588,7 +593,14 @@ func claudeCodeEventHasEnforcingHook(entries []interface{}, requiredMatcher stri
 	return false
 }
 
-func claudeCodeMatcherCovers(raw interface{}, required string) bool {
+func claudeCodeMatcherCovers(eventType string, raw interface{}, required string) bool {
+	switch eventType {
+	case "UserPromptSubmit", "PostToolBatch", "Stop", "TeammateIdle",
+		"TaskCreated", "TaskCompleted", "WorktreeRemove", "CwdChanged":
+		// Claude ignores matchers for these events, so their value cannot
+		// narrow the effective registration.
+		return true
+	}
 	matcher := ""
 	if raw != nil {
 		var ok bool
@@ -599,7 +611,22 @@ func claudeCodeMatcherCovers(raw interface{}, required string) bool {
 	}
 	// Empty and "*" both match every occurrence. They are safe supersets of
 	// the deliberately narrower SessionStart and FileChanged registrations.
-	return matcher == "" || matcher == "*" || matcher == required
+	if matcher == "" || matcher == "*" || matcher == required {
+		return true
+	}
+	if eventType == "FileChanged" {
+		actualFiles := make(map[string]struct{})
+		for _, name := range strings.Split(matcher, "|") {
+			actualFiles[name] = struct{}{}
+		}
+		for _, requiredFile := range strings.Split(required, "|") {
+			if _, ok := actualFiles[requiredFile]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func claudeCodeHandlerEnforces(handler map[string]interface{}, opts SetupOpts) bool {

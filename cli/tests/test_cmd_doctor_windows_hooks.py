@@ -374,6 +374,16 @@ class WindowsHookDoctorTests(unittest.TestCase):
         check = self._validate("claudecode", config)
         self.assertEqual(check.state, "healthy", check.detail)
 
+    def test_foreign_hook_with_managed_text_is_not_classified_as_owned(self) -> None:
+        runtime = self._runtime()
+        managed = f'"{runtime}" hook --connector claudecode'
+        foreign = '"C:\\Tools\\formatter.exe" --label "hook --connector claudecode"'
+        config = self._config("claudecode", managed, extra_command=foreign)
+
+        check = self._validate("claudecode", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+
     def test_claude_requires_complete_synchronous_broad_hook_contract(self) -> None:
         runtime = self._runtime()
         command = f'"{runtime}" hook --connector claudecode'
@@ -405,6 +415,28 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 self.assertEqual(check.state, "stale", check.detail)
                 self.assertIn("contract", check.detail)
 
+    def test_claude_accepts_effective_matcher_supersets_and_ignored_matchers(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector claudecode'
+        mutations = {
+            "file-changed-superset": lambda document: document["hooks"]["FileChanged"][0].update(
+                {"matcher": document["hooks"]["FileChanged"][0]["matcher"] + "|README.md"}
+            ),
+            "stop-matcher-is-ignored": lambda document: document["hooks"]["Stop"][0].update(
+                {"matcher": "ignored-by-claude"}
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                config = self._config("claudecode", command)
+                document = json.loads(config.read_text(encoding="utf-8"))
+                mutate(document)
+                config.write_text(json.dumps(document), encoding="utf-8")
+
+                check = self._validate("claudecode", config)
+
+                self.assertEqual(check.state, "healthy", check.detail)
+
     def test_claude_reports_disable_all_hooks_as_policy_blocked(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
@@ -424,6 +456,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             ({"allowManagedHooksOnly": True}, "allowManagedHooksOnly"),
             ({"strictPluginOnlyCustomization": ["hooks"]}, "plugins or managed settings"),
             ({"disableAllHooks": True}, "disableAllHooks"),
+            ({"policyHelper": "C:\\Program Files\\Policy\\helper.exe"}, "dynamic policyHelper"),
         ):
             with self.subTest(policy=policy):
                 config = self._config("claudecode", command)
@@ -482,6 +515,23 @@ class WindowsHookDoctorTests(unittest.TestCase):
             policy = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
         self.assertEqual(policy, {"allowManagedHooksOnly": True})
         fake_winreg.OpenKey.assert_called_once()
+
+    def test_claude_ignores_policy_helper_from_hkcu_user_settings(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+
+        def registry_policy(hive_name: str):
+            if hive_name == "HKEY_CURRENT_USER":
+                return {"policyHelper": "C:\\Users\\me\\untrusted-policy-helper.exe"}
+            return None
+
+        with (
+            patch("defenseclaw.doctor_hooks._read_claude_registry_policy", side_effect=registry_policy),
+            patch("defenseclaw.doctor_hooks._default_claude_managed_settings_paths", return_value=()),
+        ):
+            check = self._validate("claudecode", config, managed_settings_paths=None)
+
+        self.assertEqual(check.state, "healthy", check.detail)
 
     def test_missing_registrations_have_only_native_repair_guidance(self) -> None:
         for connector, filename, repair in (

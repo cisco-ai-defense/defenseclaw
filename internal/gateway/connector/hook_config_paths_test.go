@@ -164,6 +164,13 @@ func TestOwnedHooksPresent_ClaudeRequiresEffectiveContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent baseline: %v", err)
+	}
+	if !present {
+		t.Fatal("OwnedHooksPresent=false for the connector's own baseline Claude Code contract")
+	}
 
 	tests := map[string]func(map[string]interface{}){
 		"irrelevant-event-only": func(settings map[string]interface{}) {
@@ -218,6 +225,42 @@ func TestOwnedHooksPresent_ClaudeRequiresEffectiveContract(t *testing.T) {
 			}
 			if present {
 				t.Fatal("OwnedHooksPresent=true for a non-enforcing Claude Code hook contract")
+			}
+		})
+	}
+}
+
+func TestOwnedHooksPresent_ClaudeAcceptsEffectiveMatcherSupersets(t *testing.T) {
+	conn, opts, settingsPath := installedClaudeCodeConnectorForPresence(t)
+	baseline, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]func(map[string]interface{}){
+		"file-changed-superset": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["FileChanged"].([]interface{})
+			entry := entries[0].(map[string]interface{})
+			entry["matcher"] = entry["matcher"].(string) + "|README.md"
+		},
+		"stop-matcher-is-ignored": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["Stop"].([]interface{})
+			entries[0].(map[string]interface{})["matcher"] = "ignored-by-claude"
+		},
+	}
+
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(settingsPath, baseline, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mutateClaudeSettings(t, settingsPath, mutate)
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil {
+				t.Fatalf("OwnedHooksPresent: %v", err)
+			}
+			if !present {
+				t.Fatal("OwnedHooksPresent=false for an effective Claude Code matcher superset")
 			}
 		})
 	}
