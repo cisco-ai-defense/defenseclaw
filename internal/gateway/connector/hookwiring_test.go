@@ -744,7 +744,7 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	table := buildCodexHooksTable(configPath, cmd)
 	wantCommand := cmd
 	if runtime.GOOS == "windows" {
-		wantCommand = windowsCodexHookCommand()
+		wantCommand = hookInvocationCommandFor("windows", "codex", cmd)
 	}
 
 	for _, group := range codexHookGroups {

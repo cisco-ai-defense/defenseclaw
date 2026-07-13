@@ -819,7 +819,7 @@ func buildCodexHooksTable(configPath, hookCommand string) map[string]interface{}
 		// part of the persisted registration and is inspected by lifecycle and
 		// compatibility tooling. Keep both fields native so a fallback can never
 		// select the Unix hook script on a Windows installation.
-		hookCommand = windowsCodexHookCommand()
+		hookCommand = hookInvocationCommandFor("windows", "codex", hookCommand)
 	}
 	for _, group := range codexHookGroups {
 		handler := map[string]interface{}{

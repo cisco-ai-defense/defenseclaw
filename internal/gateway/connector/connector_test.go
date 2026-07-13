@@ -2577,8 +2577,9 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		matchers := hooks["PreToolUse"].([]interface{})
 		handlers := matchers[0].(map[string]interface{})["hooks"].([]interface{})
 		handler := handlers[0].(map[string]interface{})
-		if got, _ := handler["command"].(string); got != windowsCodexHookCommand() {
-			t.Errorf("command = %q, want managed absolute invocation %q", got, windowsCodexHookCommand())
+		wantFallback := hookInvocationCommandFor("windows", "codex", "")
+		if got, _ := handler["command"].(string); got != wantFallback {
+			t.Errorf("command = %q, want hardened native fallback %q", got, wantFallback)
 		}
 		if got, _ := handler["command_windows"].(string); got != windowsCodexHookCommand() {
 			t.Errorf("command_windows = %q, want managed absolute invocation %q", got, windowsCodexHookCommand())
