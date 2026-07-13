@@ -128,6 +128,91 @@ func TestManagedFileBackup_SkipsWhenUserEditedAfterSetup(t *testing.T) {
 	}
 }
 
+func TestManagedFileBackup_RejectsDifferentTargetPath(t *testing.T) {
+	t.Run("recapture", func(t *testing.T) {
+		dir := t.TempDir()
+		first := filepath.Join(dir, "first", "config.json")
+		second := filepath.Join(dir, "second", "config.json")
+		for _, path := range []string{first, second} {
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`{"hooks":["original"]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := captureManagedFileBackup(dir, "claudecode", "settings", first); err != nil {
+			t.Fatalf("capture first: %v", err)
+		}
+		if err := captureManagedFileBackup(dir, "claudecode", "settings", second); err == nil {
+			t.Fatal("recapture accepted a different target path")
+		}
+	})
+
+	t.Run("post hash", func(t *testing.T) {
+		dir := t.TempDir()
+		first := filepath.Join(dir, "first.json")
+		second := filepath.Join(dir, "second.json")
+		if err := os.WriteFile(first, []byte(`{"hooks":["original"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(second, []byte(`{"hooks":["managed"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := captureManagedFileBackup(dir, "codex", "config", first); err != nil {
+			t.Fatalf("capture: %v", err)
+		}
+		if err := updateManagedFileBackupPostHash(dir, "codex", "config", second); err == nil {
+			t.Fatal("post-hash update accepted a different target path")
+		}
+	})
+
+	t.Run("restore", func(t *testing.T) {
+		dir := t.TempDir()
+		first := filepath.Join(dir, "first.json")
+		second := filepath.Join(dir, "second.json")
+		original := []byte(`{"hooks":["original"]}`)
+		managed := []byte(`{"hooks":["defenseclaw"]}`)
+		if err := os.WriteFile(first, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := captureManagedFileBackup(dir, "codex", "config", first); err != nil {
+			t.Fatalf("capture: %v", err)
+		}
+		if err := os.WriteFile(first, managed, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := updateManagedFileBackupPostHash(dir, "codex", "config", first); err != nil {
+			t.Fatalf("post hash: %v", err)
+		}
+		// Match the managed hash deliberately: without target binding, restore
+		// would overwrite this unrelated file with first's pristine bytes.
+		if err := os.WriteFile(second, managed, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		restored, err := restoreManagedFileBackupIfUnchanged(dir, "codex", "config", second)
+		if err == nil {
+			t.Fatal("restore accepted a different target path")
+		}
+		if restored {
+			t.Fatal("restore reported success for a different target path")
+		}
+		for _, path := range []string{first, second} {
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("read %s: %v", path, readErr)
+			}
+			if string(got) != string(managed) {
+				t.Fatalf("different-path restore changed %s to %q", path, got)
+			}
+		}
+		if _, statErr := os.Stat(managedFileBackupPath(dir, "codex", "config")); statErr != nil {
+			t.Fatalf("different-path restore removed recovery metadata: %v", statErr)
+		}
+	})
+}
+
 func TestAtomicWriteFile_PreservesSymlinkedDotfile(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "dotfiles", "config.toml")
