@@ -278,6 +278,7 @@ namespace DefenseClaw.Install.FreshV1 {
         private readonly string path;
         private static string testMoveOutSource;
         private static string testMoveOutDestination;
+        private static int testEmptyDirectoryDeleteFailures;
 
         private FreshPathClaim(
             string claimedPath,
@@ -485,6 +486,35 @@ namespace DefenseClaw.Install.FreshV1 {
             testMoveOutDestination = null;
         }
 
+        public static void ConfigureTestEmptyDirectoryDeleteFailures(int failures) {
+            if (failures < 0) {
+                throw new ArgumentOutOfRangeException("failures");
+            }
+            System.Threading.Interlocked.Exchange(
+                ref testEmptyDirectoryDeleteFailures,
+                failures);
+        }
+
+        public static void ClearTestEmptyDirectoryDeleteFailures() {
+            System.Threading.Interlocked.Exchange(ref testEmptyDirectoryDeleteFailures, 0);
+        }
+
+        private static bool ConsumeTestEmptyDirectoryDeleteFailure() {
+            while (true) {
+                int current = System.Threading.Volatile.Read(
+                    ref testEmptyDirectoryDeleteFailures);
+                if (current <= 0) {
+                    return false;
+                }
+                if (System.Threading.Interlocked.CompareExchange(
+                    ref testEmptyDirectoryDeleteFailures,
+                    current - 1,
+                    current) == current) {
+                    return true;
+                }
+            }
+        }
+
         private static void InvokeTestMoveOutAfterSnapshot() {
             string source = testMoveOutSource;
             string destination = testMoveOutDestination;
@@ -609,6 +639,9 @@ namespace DefenseClaw.Install.FreshV1 {
             }
             if (!deleteAccess) {
                 throw new InvalidOperationException("directory rollback claim lacks DELETE access");
+            }
+            if (ConsumeTestEmptyDirectoryDeleteFailure()) {
+                return false;
             }
             bool deleted = MarkDelete(handle, true);
             if (deleted) {
@@ -1167,6 +1200,24 @@ function New-PrivateFileStream {
 
 function Invoke-NativeFreshDirectoryBoundarySelfTest {
     param([Parameter(Mandatory = $true)][string]$Root)
+    $retryTarget = Join-Path $Root ("fresh-empty-retry-" + [guid]::NewGuid().ToString("N"))
+    $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
+    $script:FreshInstallAttemptActive = $true
+    $script:FreshInstallOriginalProcessPath = $env:PATH
+    $script:FreshInstallPublishedProcessPath = $null
+    try {
+        New-FreshInstallOwnedDirectory -Path $retryTarget -Kind EmptyDirectory
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestEmptyDirectoryDeleteFailures(1)
+        $retryResidue = @(Undo-FreshInstallAttempt)
+        if ($retryResidue.Count -ne 0 -or (Test-InstallMarker -Path $retryTarget)) {
+            Die "Native empty-directory rollback did not recover from a transient nonempty result"
+        }
+    } finally {
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestEmptyDirectoryDeleteFailures()
+        if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
+    }
+    Write-Host "Native empty directory rollback retry passed" -ForegroundColor Green
+
     $exactCleanupModes = @(
         "pre-registration",
         "pre-rekey",
@@ -1875,7 +1926,21 @@ function Undo-FreshInstallAttempt {
             $entry = $script:FreshInstallClaims[$index]
             if ($entry.Kind -ne $kind) { continue }
             try {
-                if (-not (Remove-FreshInstallClaim -Entry $entry)) {
+                # Windows can briefly report an installer-owned parent as
+                # nonempty while an exact child-tree deletion settles. Keep
+                # the same identity handle across a bounded retry window, but
+                # only for empty-directory deletion: file/tree retries could
+                # otherwise consume state that appeared concurrently.
+                $maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 5 } else { 1 }
+                $removed = $false
+                for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+                    $removed = Remove-FreshInstallClaim -Entry $entry
+                    if ($removed) { break }
+                    if ($attempt -lt $maximumAttempts) {
+                        Start-Sleep -Milliseconds (50 * $attempt)
+                    }
+                }
+                if (-not $removed) {
                     [void]$residue.Add(
                         "changed or nonempty attempt path was preserved: $($entry.Path)"
                     )

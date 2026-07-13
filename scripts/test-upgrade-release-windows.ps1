@@ -537,7 +537,7 @@ function Assert-ReleaseSet {
         Fail "Signed release authentication failed for $Version"
     }
     if((Compare-Version $Version $script:BridgeVersion)-ge 0){
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [void](Add-Type -AssemblyName System.IO.Compression.FileSystem)
         $protectedWheel=Join-Path $Directory "defenseclaw-$Version-2-py3-none-any.dcwheel"
         $protectedGateway=Join-Path $Directory "defenseclaw_$($Version)_protocol2_windows_amd64.dcgateway"
         foreach($path in @($protectedWheel,$protectedGateway)){
@@ -552,7 +552,7 @@ function Assert-ReleaseSet {
         $expandDestination=Join-Path $script:WorkRoot ("protected-expand-refusal-"+[guid]::NewGuid().ToString("N"))
         try{
             $expanded=$false
-            try{Expand-Archive -LiteralPath $protectedGateway -DestinationPath $expandDestination -ErrorAction Stop;$expanded=$true}catch{}
+            try{[void](Expand-Archive -LiteralPath $protectedGateway -DestinationPath $expandDestination -ErrorAction Stop);$expanded=$true}catch{}
             if($expanded){Fail "Protected .dcgateway remained directly consumable by Expand-Archive"}
         }finally{Remove-Item -LiteralPath $expandDestination -Recurse -Force -ErrorAction SilentlyContinue}
         foreach($name in @("defenseclaw-$Version-py3-none-any.whl","defenseclaw_${Version}_windows_amd64.zip")){
@@ -635,9 +635,8 @@ function Copy-CandidateRelease {
             Set-PrivatePathAcl -Path $copied
         }
     }
-    $manifest = Assert-ReleaseSet -Directory $destination -Version $TargetVersion
+    [void](Assert-ReleaseSet -Directory $destination -Version $TargetVersion)
     [void](Assert-SealedCandidateResolver -Directory $destination)
-    return $manifest
 }
 
 function Get-PublishedAsset {
@@ -2642,7 +2641,17 @@ function Main {
     $script:ReleaseRoot = New-PrivateDirectory -Path (Join-Path $script:WorkRoot "releases")
 
     Write-Step "Authenticating sealed candidate $TargetVersion"
-    $candidateManifest = Copy-CandidateRelease
+    [void](Copy-CandidateRelease)
+    $candidateManifestPath = Join-Path (Join-Path $script:ReleaseRoot $TargetVersion) "upgrade-manifest.json"
+    try {
+        $candidateManifest = Get-Content -LiteralPath $candidateManifestPath `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Fail "Authenticated sealed candidate manifest could not be read"
+    }
+    if ($candidateManifest -isnot [pscustomobject]) {
+        Fail "Authenticated sealed candidate manifest is not one JSON object"
+    }
     $hardCut = Assert-CandidatePolicy -Manifest $candidateManifest
     [void](Ensure-PublishedRelease -Version $script:OldBaseline)
     if ($hardCut) {

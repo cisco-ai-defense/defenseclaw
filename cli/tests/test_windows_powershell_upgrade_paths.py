@@ -118,6 +118,9 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "DeleteTreeExact",
         "ConfigureTestMoveOutAfterSnapshot",
         "ClearTestMoveOutAfterSnapshot",
+        "ConfigureTestEmptyDirectoryDeleteFailures",
+        "ClearTestEmptyDirectoryDeleteFailures",
+        "ConsumeTestEmptyDirectoryDeleteFailure",
         "DeleteEmptyDirectoryExact",
         "MAX_TREE_DEPTH",
         "MAX_TREE_NODES",
@@ -227,6 +230,7 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "Native private directory lifecycle passed" in source
     assert "Native snapshotted-child move-out refusal passed" in source
     assert "Native fresh directory fault boundaries passed" in source
+    assert "Native empty directory rollback retry passed" in source
     assert "Native private-directory self-test accepted a file as its parent" in source
     assert "Fresh-install payload rollback completed; retry is safe" in harness
     assert "Concurrent unclaimed shim disappeared during rollback" in harness
@@ -348,6 +352,14 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
     assert "InjectConcurrentUserPathBeforePublish" not in source
     assert 'SetEnvironmentVariable("Path"' not in source
     assert "FreshInstallPublishedProcessPath" in undo
+    assert '$maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 5 } else { 1 }' in undo
+    assert "$removed = Remove-FreshInstallClaim -Entry $entry" in undo
+    assert "Start-Sleep -Milliseconds (50 * $attempt)" in undo
+    retry = undo[
+        undo.index("$maximumAttempts = if") : undo.index("if (-not $removed)")
+    ]
+    assert retry.index("Remove-FreshInstallClaim") < retry.index("Start-Sleep")
+    assert undo.index("if (-not $removed)") < undo.index("$entry.Native.Dispose()")
 
     no_stage_identity = fresh_directory[
         fresh_directory.index("if (-not $stageIdentity)") : fresh_directory.index('$cleanupFailure = ""')
@@ -748,6 +760,46 @@ def test_windows_release_authentication_output_cannot_pollute_manifest_return() 
     assert capture in release_set
     assert release_set.index(capture) < release_set.index(status) < release_set.index(host)
     assert release_set.index(host) < release_set.index(gate)
+    assert "[void](Add-Type -AssemblyName System.IO.Compression.FileSystem)" in release_set
+    assert "[void](Expand-Archive -LiteralPath $protectedGateway" in release_set
+    assert "[void](Assert-ReleaseSet -Directory $destination -Version $TargetVersion)" in source
+    assert "[void](Copy-CandidateRelease)" in source
+    assert "$candidateManifestPath = Join-Path (Join-Path $script:ReleaseRoot $TargetVersion)" in source
+    assert "Get-Content -LiteralPath $candidateManifestPath" in source
+    assert "$candidateManifest -isnot [pscustomobject]" in source
+    assert source.index("[void](Copy-CandidateRelease)") < source.index(
+        "$hardCut = Assert-CandidatePolicy -Manifest $candidateManifest"
+    )
+    assert "$candidateReleaseOutput" not in source
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_powershell_archive_refusal_preserves_scalar_manifest_output() -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    command = (
+        "$archive=[IO.Path]::GetTempFileName(); "
+        "$destination=$archive + '-out'; "
+        "function Get-Manifest([string]$path,[string]$destination) { "
+        "try{[void](Expand-Archive -LiteralPath $path -DestinationPath $destination -ErrorAction Stop)}catch{}; "
+        "return [pscustomobject]@{schema_version=2} }; "
+        "try{$result=@(Get-Manifest $archive $destination); "
+        "if($result.Count -ne 1 -or $result[0].schema_version -ne 2){exit 1}} "
+        "finally{Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue; "
+        "Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue}"
+    )
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={**os.environ, "POWERSHELL_TELEMETRY_OPTOUT": "1"},
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_windows_release_harness_accepts_both_reviewed_config_map_topologies() -> None:
