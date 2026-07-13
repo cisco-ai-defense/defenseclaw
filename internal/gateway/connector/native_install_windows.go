@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -43,7 +44,7 @@ func nativeWindowsPathHasNoReparsePoints(path string) bool {
 		return false
 	}
 	for {
-		pointer, err := windows.UTF16PtrFromString(current)
+		pointer, err := winpath.UTF16Ptr(current)
 		if err != nil {
 			return false
 		}

@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const (
@@ -120,7 +121,7 @@ func windowsHookPathHasNoReparsePoints(path string) bool {
 		return false
 	}
 	for {
-		ptr, err := windows.UTF16PtrFromString(cursor)
+		ptr, err := winpath.UTF16Ptr(cursor)
 		if err != nil {
 			return false
 		}
