@@ -1030,6 +1030,7 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 		publishedGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 		gatewayPath := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
+		reconciliation := connectorReconciliationRecorder{}
 		if pathExists(transaction.TrashPath) {
 			state, err := loadTransactionInstallState(transaction.TrashPath, transaction)
 			if err != nil {
@@ -1041,29 +1042,22 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			if _, err := stopOwnedServices(gatewayPath, transaction.DataRoot); err != nil {
 				return err
 			}
-			previousChildEnv := transactionPreviousChildEnv(transaction)
-			for _, connectorName := range transaction.PreviousConnectors {
-				if err := runConnectorLifecycleWithEnv(
-					gatewayPath,
-					transaction.DataRoot,
-					connectorName,
-					"teardown",
-					previousChildEnv,
-				); err != nil {
-					return err
-				}
-				if err := runConnectorLifecycleWithEnv(
-					gatewayPath,
-					transaction.DataRoot,
-					connectorName,
-					"verify",
-					previousChildEnv,
-				); err != nil {
-					return err
-				}
-			}
+			reconciliation = reconcileRemovedConnectors(
+				transaction,
+				gatewayPath,
+				transactionPreviousChildEnv(transaction),
+				runConnectorLifecycleWithEnv,
+			)
 		} else if transaction.PreviousState != nil || len(transaction.PreviousConnectors) != 0 {
-			return errors.New("committed uninstall lost its transaction trash tree before connector teardown")
+			for _, connectorName := range transaction.PreviousConnectors {
+				configHome := connectorConfigHome(transaction, connectorName, true)
+				reconciliation.run(transaction.ID, connectorName, configHome, "payload-missing", func() error {
+					return errors.New("committed uninstall no longer has its owned payload tree; connector cleanup was not attempted")
+				})
+			}
+		}
+		if err := reconciliation.persist(); err != nil {
+			return fmt.Errorf("persist connector reconciliation residue: %w", err)
 		}
 		if _, _, err := configureGatewayAutoStart(publishedGateway, false); err != nil {
 			return err
@@ -1122,28 +1116,52 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		return fmt.Errorf("publish stable hook runtime: %w", err)
 	}
 	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
-	if err := teardownSupersededConnectors(
-		transaction,
-		gatewayPath,
-		previousChildEnv,
-		runConnectorLifecycleWithEnv,
-	); err != nil {
-		return err
+	reconciliation := connectorReconciliationRecorder{}
+	for _, connectorName := range transaction.PreviousConnectors {
+		if connectorName == transaction.TargetConnector && !connectorHomeChanged(transaction, connectorName) {
+			continue
+		}
+		configHome := connectorConfigHome(transaction, connectorName, true)
+		if !reconciliation.run(transaction.ID, connectorName, configHome, "teardown", func() error {
+			return runConnectorLifecycleWithEnv(
+				gatewayPath,
+				transaction.DataRoot,
+				connectorName,
+				"teardown",
+				previousChildEnv,
+			)
+		}) {
+			continue
+		}
+		reconciliation.run(transaction.ID, connectorName, configHome, "verify", func() error {
+			return runConnectorLifecycleWithEnv(
+				gatewayPath,
+				transaction.DataRoot,
+				connectorName,
+				"verify",
+				previousChildEnv,
+			)
+		})
 	}
 	if transaction.TargetConnector != "none" {
 		opts := options{Connector: transaction.TargetConnector, Mode: transaction.TargetMode, Quiet: true}
-		if err := runInitialConfigurationWithEnv(transaction.InstallRoot, transaction.DataRoot, opts, childEnv); err != nil {
-			return err
+		configHome := connectorConfigHome(transaction, transaction.TargetConnector, false)
+		if reconciliation.run(transaction.ID, transaction.TargetConnector, configHome, "configure", func() error {
+			return runInitialConfigurationWithEnv(transaction.InstallRoot, transaction.DataRoot, opts, childEnv)
+		}) {
+			reconciliation.run(transaction.ID, transaction.TargetConnector, configHome, "reconcile", func() error {
+				return runConnectorLifecycleWithEnv(
+					gatewayPath,
+					transaction.DataRoot,
+					transaction.TargetConnector,
+					"reconcile",
+					childEnv,
+				)
+			})
 		}
-		if err := runConnectorLifecycleWithEnv(
-			gatewayPath,
-			transaction.DataRoot,
-			transaction.TargetConnector,
-			"reconcile",
-			childEnv,
-		); err != nil {
-			return err
-		}
+	}
+	if err := reconciliation.persist(); err != nil {
+		return fmt.Errorf("persist connector reconciliation residue: %w", err)
 	}
 	if _, _, err := addUserPath(filepath.Join(transaction.InstallRoot, "bin")); err != nil {
 		return err
@@ -1618,8 +1636,17 @@ func cleanupCommittedSetupTransaction(transaction setupTransaction) error {
 		}
 	}
 	if transaction.DeleteUserData {
-		if err := removeAllSafe(transaction.DataRoot, filepath.Dir(transaction.DataRoot)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		residue, err := readConnectorReconciliation()
+		if err != nil {
 			return err
+		}
+		// Connector backups and token metadata are required for a safe retry.
+		// Preserve DataRoot when third-party configuration could not be cleaned;
+		// setup reports the precise residue after the core transaction completes.
+		if residue == nil || len(residue.Failures) == 0 {
+			if err := removeAllSafe(transaction.DataRoot, filepath.Dir(transaction.DataRoot)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 	}
 	maintenanceRoot := filepath.Dir(transaction.MaintenancePath)

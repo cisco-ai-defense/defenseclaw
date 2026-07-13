@@ -382,6 +382,9 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if _, err := finishCommittedSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, fmt.Errorf("installation committed but convergence is pending: %w", err)
 	}
+	if err := connectorReconciliationPendingError("installation"); err != nil {
+		return retryRequiredCode, err
+	}
 	if !opts.Quiet {
 		fmt.Println("DefenseClaw installed successfully.")
 		fmt.Println("Open a new terminal and run: defenseclaw")
@@ -456,6 +459,9 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 	deferred, err := finishCommittedSetupTransaction(transaction)
 	if err != nil {
 		return retryRequiredCode, fmt.Errorf("uninstall committed but convergence is pending: %w", err)
+	}
+	if err := connectorReconciliationPendingError("uninstall"); err != nil {
+		return retryRequiredCode, err
 	}
 	if deferred && !opts.Quiet {
 		fmt.Println("DefenseClaw cleanup will finish after this installer exits.")
