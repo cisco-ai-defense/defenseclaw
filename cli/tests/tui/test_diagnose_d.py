@@ -246,6 +246,46 @@ async def test_run_diagnose_background_failure_toast(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_diagnose_background_reaps_child_after_pipe_error(tmp_path: Path) -> None:
+    """A failed pipe read must reap the doctor child and close its transport."""
+
+    app = _make_app(tmp_path)
+    captured = _capture_toasts(app)
+    events: list[str] = []
+
+    class _Transport:
+        def close(self) -> None:
+            events.append("close")
+
+    class _BrokenProc:
+        returncode: int | None = None
+        _transport = _Transport()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            raise OSError("pipe read failed")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            self.returncode = -9
+            return self.returncode
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _BrokenProc:
+        return _BrokenProc()
+
+    import defenseclaw.tui.app as app_mod
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(app_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        await app._run_diagnose_background()
+
+    assert events == ["kill", "wait", "close"]
+    assert captured[-1] == ("error", "Diagnose failed while reading output: pipe read failed")
+
+
+@pytest.mark.asyncio
 async def test_run_diagnose_background_handles_missing_binary(tmp_path: Path) -> None:
     """If ``defenseclaw`` isn't on PATH the launcher raises and we
     must toast a clear error — not blow up with a traceback."""

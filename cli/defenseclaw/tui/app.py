@@ -4880,6 +4880,13 @@ class DefenseClawTUI(App[None]):
             except asyncio.CancelledError:
                 await _terminate_async_process(proc)
                 raise
+            except OSError as exc:
+                await _terminate_async_process(proc)
+                self.notify_toast("error", f"Diagnose failed while reading output: {exc}")
+                return
+            except BaseException:
+                await _terminate_async_process(proc)
+                raise
 
             _close_async_process_transport(proc)
             await asyncio.sleep(0)
