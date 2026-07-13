@@ -262,7 +262,7 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     user_scan_offset = text.index('local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"')
     assert guard_offset < text.index(directory_creation)
     assert guard_offset < text.index('ROLLBACK_DIR="$(/usr/bin/mktemp -d')
-    assert user_scan_offset < text.index('require_regular_source "$CONFIG_SOURCE"')
+    assert user_scan_offset < text.index('assert_trusted_file_source "$CONFIG_SOURCE"')
     atomic_install = text[
         text.index("install_file_atomic() {") : text.index("plist_pins_managed_mode() {")
     ]
@@ -297,6 +297,7 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     assert "per-user refusal mutated managed destination" in smoke
     assert "existing-install refusal modified managed config" in smoke
     assert "enterprise package repaired/overwrote existing damaged metadata" in smoke
+    assert 'trusted_fixture="/Library/DefenseClawPackagingSmoke.$$"' in smoke
 
 
 def test_launchd_enterprise_installer_matches_cisco_plist_layout():
