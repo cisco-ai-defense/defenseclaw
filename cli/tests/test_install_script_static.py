@@ -94,9 +94,21 @@ def test_windows_installer_smoke_never_stubs_schema2_provenance() -> None:
     assert "installer smoke stub" not in job
     assert "DEFENSECLAW-PROTECTED-ARTIFACT-V1" not in job
     assert "did not report exact 0.8.3" in job
+    assert "Native installer rollback self-test (PowerShell 5.1 + 7)" in job
+    assert '@("powershell.exe", "pwsh")' in job
+    assert "-TestMode" in job
+    assert "-NativePrivateDirectorySelfTestRoot $root" in job
+    assert "native installer self-test failed" in job
+    assert "native installer self-test left residue" in job
 
+    native = job.index("Native installer rollback self-test (PowerShell 5.1 + 7)")
     policy = job.index("Build and verify legacy installer policy fixture")
     install = job.index("Run install.ps1 against local artifacts")
+    assert native < job.index("actions/setup-go")
+    assert native < job.index("astral-sh/setup-uv")
+    assert native < job.index("Stamp legacy schema-1 installer fixture")
+    assert native < job.index("Build gateway binary + CLI wheel")
+    assert native < policy < install
     assert policy < job.index("upgrade-manifest.json", policy) < install
     assert policy < job.index("make dist-upgrade-manifest", policy) < install
     assert policy < job.index('root / "checksums.txt"', policy) < install

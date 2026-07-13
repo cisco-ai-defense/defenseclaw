@@ -445,6 +445,33 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - name: Native installer rollback self-test (PowerShell 5.1 + 7)
+        shell: pwsh
+        run: |
+          foreach ($engine in @("powershell.exe", "pwsh")) {
+            $root = Join-Path $env:RUNNER_TEMP (
+              "defenseclaw-native-" +
+              [IO.Path]::GetFileNameWithoutExtension($engine) +
+              "-" + [guid]::NewGuid().ToString("N")
+            )
+            [void][IO.Directory]::CreateDirectory($root)
+            try {
+              & $engine -NoProfile -NonInteractive `
+                -File .\scripts\install.ps1 `
+                -TestMode `
+                -NativePrivateDirectorySelfTestRoot $root
+              if ($LASTEXITCODE -ne 0) {
+                throw "$engine native installer self-test failed: $LASTEXITCODE"
+              }
+              if (@(Get-ChildItem -LiteralPath $root -Force).Count -ne 0) {
+                throw "$engine native installer self-test left residue"
+              }
+            } finally {
+              if (Test-Path -LiteralPath $root) {
+                [IO.Directory]::Delete($root, $true)
+              }
+            }
+          }
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod

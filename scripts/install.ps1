@@ -156,14 +156,33 @@ namespace DefenseClaw.Install.FreshV1 {
         private const int FILE_DISPOSITION_INFO_CLASS = 4;
         private const int ERROR_FILE_NOT_FOUND = 2;
         private const int ERROR_PATH_NOT_FOUND = 3;
+        private const int ERROR_ACCESS_DENIED = 5;
+        private const int ERROR_SHARING_VIOLATION = 32;
         private const int ERROR_FILE_EXISTS = 80;
         private const int ERROR_DIR_NOT_EMPTY = 145;
         private const int ERROR_ALREADY_EXISTS = 183;
+        private const int ERROR_DELETE_PENDING = 303;
         private const uint MOVEFILE_WRITE_THROUGH = 0x00000008;
         private const int MAX_TREE_DEPTH = 64;
         private const int MAX_TREE_NODES = 500000;
         private const long MAX_TREE_BYTES = 16L * 1024L * 1024L * 1024L;
-        private const int TREE_ROOT_DELETE_ATTEMPTS = 5;
+        private const int NAMESPACE_RETIRE_TIMEOUT_MS = 10000;
+        private const int NAMESPACE_RETIRE_POLL_MS = 50;
+
+        private enum RetirementState {
+            Bound,
+            DispositionAccepted,
+            Retired,
+            Replaced,
+            Unresolved
+        }
+
+        private enum NamespaceObservation {
+            Absent,
+            Expected,
+            Different,
+            Pending
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct FILETIME {
@@ -223,6 +242,11 @@ namespace DefenseClaw.Install.FreshV1 {
             public int Depth;
         }
 
+        private sealed class TestRetainer {
+            public SafeFileHandle Handle;
+            public int DelayMilliseconds;
+        }
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateFile(
             string fileName,
@@ -277,9 +301,14 @@ namespace DefenseClaw.Install.FreshV1 {
         private readonly bool directory;
         private readonly bool deleteAccess;
         private readonly string path;
+        private RetirementState retirementState = RetirementState.Bound;
+        private bool mutationStarted;
         private static string testMoveOutSource;
         private static string testMoveOutDestination;
         private static int testEmptyDirectoryDeleteFailures;
+        private static readonly object testNamespaceRetirementLock = new object();
+        private static string testNamespaceRetirementPath;
+        private static int testNamespaceRetirementDelayMs;
 
         private FreshPathClaim(
             string claimedPath,
@@ -307,6 +336,8 @@ namespace DefenseClaw.Install.FreshV1 {
         public string Identity {
             get { return volume.ToString("x8") + ":" + index.ToString("x16"); }
         }
+        public string RetirementStateValue { get { return retirementState.ToString(); } }
+        public bool MutationStarted { get { return mutationStarted; } }
 
         public static FreshPathClaim Open(string path, bool directory, bool deleteAccess) {
             SafeFileHandle opened = OpenHandle(path, directory, deleteAccess, false);
@@ -500,6 +531,30 @@ namespace DefenseClaw.Install.FreshV1 {
             System.Threading.Interlocked.Exchange(ref testEmptyDirectoryDeleteFailures, 0);
         }
 
+        public static void ConfigureTestNamespaceRetirementDelay(
+            string path,
+            int delayMilliseconds) {
+            if (String.IsNullOrWhiteSpace(path)) {
+                throw new ArgumentException("test namespace-retirement path is empty");
+            }
+            if (delayMilliseconds < 1 ||
+                delayMilliseconds >
+                    NAMESPACE_RETIRE_TIMEOUT_MS - (2 * NAMESPACE_RETIRE_POLL_MS)) {
+                throw new ArgumentOutOfRangeException("delayMilliseconds");
+            }
+            lock (testNamespaceRetirementLock) {
+                testNamespaceRetirementPath = Path.GetFullPath(path);
+                testNamespaceRetirementDelayMs = delayMilliseconds;
+            }
+        }
+
+        public static void ClearTestNamespaceRetirementDelay() {
+            lock (testNamespaceRetirementLock) {
+                testNamespaceRetirementPath = null;
+                testNamespaceRetirementDelayMs = 0;
+            }
+        }
+
         private static bool ConsumeTestEmptyDirectoryDeleteFailure() {
             while (true) {
                 int current = System.Threading.Volatile.Read(
@@ -528,6 +583,192 @@ namespace DefenseClaw.Install.FreshV1 {
                 throw new Win32Exception(
                     error,
                     "could not inject a snapshotted-child move-out");
+            }
+        }
+
+        private static SafeFileHandle OpenNamespaceObservationHandle(string candidate) {
+            return CreateFile(
+                Path.GetFullPath(candidate),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+        }
+
+        private static TestRetainer TakeTestNamespaceRetainer(string candidate) {
+            int delay = 0;
+            lock (testNamespaceRetirementLock) {
+                if (String.IsNullOrEmpty(testNamespaceRetirementPath) ||
+                    !String.Equals(
+                        Path.GetFullPath(candidate),
+                        testNamespaceRetirementPath,
+                        StringComparison.OrdinalIgnoreCase)) {
+                    return null;
+                }
+                delay = testNamespaceRetirementDelayMs;
+            }
+            SafeFileHandle retained = OpenNamespaceObservationHandle(candidate);
+            if (retained.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                retained.Dispose();
+                throw new Win32Exception(
+                    error,
+                    "could not create the namespace-retirement test retainer");
+            }
+            TestRetainer result = new TestRetainer();
+            result.Handle = retained;
+            result.DelayMilliseconds = delay;
+            return result;
+        }
+
+        private static void CommitTestNamespaceRetainer(string candidate) {
+            lock (testNamespaceRetirementLock) {
+                if (!String.IsNullOrEmpty(testNamespaceRetirementPath) &&
+                    String.Equals(
+                        Path.GetFullPath(candidate),
+                        testNamespaceRetirementPath,
+                        StringComparison.OrdinalIgnoreCase)) {
+                    testNamespaceRetirementPath = null;
+                    testNamespaceRetirementDelayMs = 0;
+                }
+            }
+        }
+
+        private static void DisposeTestRetainer(TestRetainer retained) {
+            if (retained != null && retained.Handle != null) {
+                retained.Handle.Dispose();
+                retained.Handle = null;
+            }
+        }
+
+        private static void ReleaseTestRetainerAfterDisposition(TestRetainer retained) {
+            if (retained == null || retained.Handle == null) {
+                return;
+            }
+            SafeFileHandle delayedHandle = retained.Handle;
+            int delay = retained.DelayMilliseconds;
+            retained.Handle = null;
+            System.Threading.Thread releaser = new System.Threading.Thread(delegate() {
+                try {
+                    System.Threading.Thread.Sleep(delay);
+                } finally {
+                    delayedHandle.Dispose();
+                }
+            });
+            releaser.IsBackground = true;
+            try {
+                releaser.Start();
+            } catch {
+                delayedHandle.Dispose();
+                throw;
+            }
+        }
+
+        private static NamespaceObservation ObserveNamespace(
+            string candidate,
+            uint expectedVolume,
+            ulong expectedIndex,
+            bool expectedDirectory,
+            bool expectedReparse) {
+            SafeFileHandle observed = OpenNamespaceObservationHandle(candidate);
+            if (observed.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                observed.Dispose();
+                if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+                    return NamespaceObservation.Absent;
+                }
+                if (error == ERROR_ACCESS_DENIED ||
+                    error == ERROR_SHARING_VIOLATION ||
+                    error == ERROR_DELETE_PENDING) {
+                    return NamespaceObservation.Pending;
+                }
+                throw new Win32Exception(
+                    error,
+                    "could not observe fresh-install namespace retirement: " + candidate);
+            }
+            try {
+                BY_HANDLE_FILE_INFORMATION information;
+                if (!GetFileInformationByHandle(observed, out information)) {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == ERROR_ACCESS_DENIED ||
+                        error == ERROR_SHARING_VIOLATION ||
+                        error == ERROR_DELETE_PENDING) {
+                        return NamespaceObservation.Pending;
+                    }
+                    throw new Win32Exception(
+                        error,
+                        "could not inspect fresh-install namespace retirement: " + candidate);
+                }
+                bool isDirectory =
+                    (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                bool isReparse =
+                    (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+                if (SameIdentity(information, expectedVolume, expectedIndex) &&
+                    isDirectory == expectedDirectory &&
+                    isReparse == expectedReparse) {
+                    return NamespaceObservation.Expected;
+                }
+                return NamespaceObservation.Different;
+            } finally {
+                observed.Dispose();
+            }
+        }
+
+        private static long NewNamespaceRetirementDeadline() {
+            long timeoutTicks =
+                (System.Diagnostics.Stopwatch.Frequency * NAMESPACE_RETIRE_TIMEOUT_MS) / 1000;
+            return System.Diagnostics.Stopwatch.GetTimestamp() + Math.Max(1L, timeoutTicks);
+        }
+
+        private static bool WaitForNamespaceRetirement(
+            string candidate,
+            uint expectedVolume,
+            ulong expectedIndex,
+            bool expectedDirectory,
+            bool expectedReparse,
+            long deadline,
+            out NamespaceObservation finalObservation) {
+            while (true) {
+                finalObservation = ObserveNamespace(
+                    candidate,
+                    expectedVolume,
+                    expectedIndex,
+                    expectedDirectory,
+                    expectedReparse);
+                if (finalObservation == NamespaceObservation.Absent) {
+                    return true;
+                }
+                if (finalObservation == NamespaceObservation.Different) {
+                    return false;
+                }
+                long remainingTicks = deadline - System.Diagnostics.Stopwatch.GetTimestamp();
+                if (remainingTicks <= 0) {
+                    return false;
+                }
+                long remainingMilliseconds =
+                    (remainingTicks * 1000) / System.Diagnostics.Stopwatch.Frequency;
+                int delay = (int)Math.Max(
+                    1L,
+                    Math.Min((long)NAMESPACE_RETIRE_POLL_MS, remainingMilliseconds));
+                System.Threading.Thread.Sleep(delay);
+            }
+        }
+
+        private void ValidateRetirementCompanion(FreshPathClaim companion) {
+            if (companion == null) {
+                return;
+            }
+            if (Object.ReferenceEquals(this, companion) ||
+                companion.handle == null ||
+                companion.handle.IsInvalid ||
+                companion.handle.IsClosed ||
+                companion.volume != volume ||
+                companion.index != index ||
+                companion.directory != directory) {
+                throw new InvalidOperationException(
+                    "fresh-install cleanup companion does not retain the exact claimed object");
             }
         }
 
@@ -622,6 +863,83 @@ namespace DefenseClaw.Install.FreshV1 {
             throw new Win32Exception(error, "could not delete exact fresh-install object");
         }
 
+        private bool RetireRootNamespaceExact(
+            FreshPathClaim companion,
+            bool allowNotEmpty,
+            bool consumeEmptyDirectoryFailure,
+            bool terminalOnDispositionRefusal,
+            long deadline) {
+            if (retirementState == RetirementState.Retired) {
+                return true;
+            }
+            if (retirementState != RetirementState.Bound) {
+                return false;
+            }
+            if (handle == null || handle.IsInvalid || handle.IsClosed) {
+                throw new InvalidOperationException(
+                    "fresh-install rollback claim closed before exact retirement");
+            }
+            ValidateRetirementCompanion(companion);
+            if (consumeEmptyDirectoryFailure && ConsumeTestEmptyDirectoryDeleteFailure()) {
+                if (terminalOnDispositionRefusal) {
+                    retirementState = RetirementState.Unresolved;
+                }
+                return false;
+            }
+
+            TestRetainer retained = TakeTestNamespaceRetainer(path);
+            bool accepted = false;
+            try {
+                accepted = MarkDelete(handle, allowNotEmpty);
+            } catch {
+                DisposeTestRetainer(retained);
+                throw;
+            }
+            if (!accepted) {
+                DisposeTestRetainer(retained);
+                if (terminalOnDispositionRefusal) {
+                    retirementState = RetirementState.Unresolved;
+                }
+                return false;
+            }
+
+            mutationStarted = true;
+            retirementState = RetirementState.DispositionAccepted;
+            CommitTestNamespaceRetainer(path);
+            Dispose();
+            if (companion != null) {
+                companion.Dispose();
+            }
+            try {
+                ReleaseTestRetainerAfterDisposition(retained);
+            } catch {
+                retirementState = RetirementState.Unresolved;
+                throw;
+            }
+
+            NamespaceObservation finalObservation;
+            try {
+                if (WaitForNamespaceRetirement(
+                    path,
+                    volume,
+                    index,
+                    directory,
+                    false,
+                    deadline,
+                    out finalObservation)) {
+                    retirementState = RetirementState.Retired;
+                    return true;
+                }
+            } catch {
+                retirementState = RetirementState.Unresolved;
+                throw;
+            }
+            retirementState = finalObservation == NamespaceObservation.Different
+                ? RetirementState.Replaced
+                : RetirementState.Unresolved;
+            return false;
+        }
+
         public bool DeleteFileExact() {
             if (directory) {
                 throw new InvalidOperationException("file rollback received a directory claim");
@@ -629,26 +947,37 @@ namespace DefenseClaw.Install.FreshV1 {
             if (!deleteAccess) {
                 throw new InvalidOperationException("file rollback claim lacks DELETE access");
             }
-            bool deleted = MarkDelete(handle, false);
-            Dispose();
-            return deleted;
+            if (mutationStarted && retirementState == RetirementState.Bound) {
+                return false;
+            }
+            return RetireRootNamespaceExact(
+                null,
+                false,
+                false,
+                true,
+                NewNamespaceRetirementDeadline());
         }
 
         public bool DeleteEmptyDirectoryExact() {
+            return DeleteEmptyDirectoryExact(null);
+        }
+
+        public bool DeleteEmptyDirectoryExact(FreshPathClaim companion) {
             if (!directory) {
                 throw new InvalidOperationException("directory rollback received a file claim");
             }
             if (!deleteAccess) {
                 throw new InvalidOperationException("directory rollback claim lacks DELETE access");
             }
-            if (ConsumeTestEmptyDirectoryDeleteFailure()) {
+            if (mutationStarted && retirementState == RetirementState.Bound) {
                 return false;
             }
-            bool deleted = MarkDelete(handle, true);
-            if (deleted) {
-                Dispose();
-            }
-            return deleted;
+            return RetireRootNamespaceExact(
+                companion,
+                true,
+                true,
+                false,
+                NewNamespaceRetirementDeadline());
         }
 
         private void SnapshotDirectory(
@@ -700,16 +1029,28 @@ namespace DefenseClaw.Install.FreshV1 {
         }
 
         public bool DeleteTreeExact() {
+            return DeleteTreeExact(null);
+        }
+
+        public bool DeleteTreeExact(FreshPathClaim companion) {
             if (!directory) {
                 throw new InvalidOperationException("tree rollback received a file claim");
             }
             if (!deleteAccess) {
                 throw new InvalidOperationException("tree rollback claim lacks DELETE access");
             }
+            if (retirementState == RetirementState.Retired) {
+                return true;
+            }
+            if (retirementState != RetirementState.Bound || mutationStarted) {
+                return false;
+            }
+            ValidateRetirementCompanion(companion);
             List<TreeEntry> entries = new List<TreeEntry>();
             long bytes = 0;
             SnapshotDirectory(path, 1, entries, ref bytes);
             InvokeTestMoveOutAfterSnapshot();
+            long deadline = NewNamespaceRetirementDeadline();
             entries.Sort(delegate(TreeEntry left, TreeEntry right) {
                 int depthOrder = right.Depth.CompareTo(left.Depth);
                 if (depthOrder != 0) {
@@ -724,37 +1065,71 @@ namespace DefenseClaw.Install.FreshV1 {
                     true,
                     true);
                 if (current == null) {
+                    retirementState = RetirementState.Replaced;
                     return false;
                 }
+                TestRetainer retained = null;
+                bool dispositionAccepted = false;
                 try {
                     BY_HANDLE_FILE_INFORMATION information = Information(current, entry.Path);
                     bool isDirectory = (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                     bool isReparse = (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
                     if (!SameIdentity(information, entry.Volume, entry.Index) ||
                         isDirectory != entry.IsDirectory || isReparse != entry.IsReparse) {
+                        retirementState = RetirementState.Replaced;
                         return false;
                     }
+                    retained = TakeTestNamespaceRetainer(entry.Path);
                     if (!MarkDelete(current, entry.IsDirectory)) {
+                        DisposeTestRetainer(retained);
+                        retained = null;
+                        retirementState = RetirementState.Unresolved;
                         return false;
                     }
+                    mutationStarted = true;
+                    CommitTestNamespaceRetainer(entry.Path);
+                    dispositionAccepted = true;
                 } finally {
                     current.Dispose();
+                    if (!dispositionAccepted) {
+                        DisposeTestRetainer(retained);
+                    }
+                }
+                try {
+                    ReleaseTestRetainerAfterDisposition(retained);
+                } catch {
+                    retirementState = RetirementState.Unresolved;
+                    throw;
+                }
+                NamespaceObservation finalObservation;
+                try {
+                    if (!WaitForNamespaceRetirement(
+                        entry.Path,
+                        entry.Volume,
+                        entry.Index,
+                        entry.IsDirectory,
+                        entry.IsReparse,
+                        deadline,
+                        out finalObservation)) {
+                        retirementState = finalObservation == NamespaceObservation.Different
+                            ? RetirementState.Replaced
+                            : RetirementState.Unresolved;
+                        return false;
+                    }
+                } catch {
+                    retirementState = RetirementState.Unresolved;
+                    throw;
                 }
             }
-            // Child delete-on-close operations can leave the exact tree root
-            // transiently nonempty on Windows. Retry only the final root
-            // disposition through this claim's existing identity handle. Do
-            // not snapshot or traverse the tree again: any concurrent child
-            // must keep the root nonempty and be preserved.
-            for (int attempt = 1; attempt <= TREE_ROOT_DELETE_ATTEMPTS; attempt++) {
-                if (DeleteEmptyDirectoryExact()) {
-                    return true;
-                }
-                if (attempt < TREE_ROOT_DELETE_ATTEMPTS) {
-                    System.Threading.Thread.Sleep(50 * attempt);
-                }
-            }
-            return false;
+            // Every snapshotted child is now proven absent. A nonempty root at
+            // this point therefore contains concurrent state and is terminal;
+            // never resnapshot or acquire fresh delete authority.
+            return RetireRootNamespaceExact(
+                companion,
+                true,
+                true,
+                true,
+                deadline);
         }
 
         public void Dispose() {
@@ -895,6 +1270,7 @@ function New-PrivateDirectory {
             Identity = $claim.Identity
             Native = $claim
             CleanupMode = "Tree"
+            CleanupTerminal = $false
         }
         $registered = $true
         $claim = $null
@@ -922,8 +1298,7 @@ function New-PrivateDirectory {
                     $true
                 )
                 if ($cleanupClaim -and $cleanupClaim.Identity -ceq $claim.Identity) {
-                    if ($cleanupClaim.DeleteEmptyDirectoryExact()) {
-                        $claim.Dispose()
+                    if ($cleanupClaim.DeleteEmptyDirectoryExact($claim)) {
                         $claim = $null
                         $retired = $true
                     }
@@ -1022,6 +1397,12 @@ function Remove-PrivateDirectoryClaimAt {
         )
     }
     $entry = $script:PrivateDirectoryClaims[$claimKeyFull]
+    if ($entry.CleanupTerminal) {
+        Die (
+            "Private install directory cleanup already mutated the exact claimed tree " +
+            "without proving namespace retirement; refusing a second traversal: $candidateFull"
+        )
+    }
     $cleanupClaim = $null
     try {
         $cleanupClaim = [DefenseClaw.Install.FreshV1.FreshPathClaim]::OpenIfExists(
@@ -1046,9 +1427,9 @@ function Remove-PrivateDirectoryClaimAt {
         }
         Assert-PrivateDirectoryAcl -Path $candidateFull
         $removed = if ($RequireEmpty) {
-            $cleanupClaim.DeleteEmptyDirectoryExact()
+            $cleanupClaim.DeleteEmptyDirectoryExact($entry.Native)
         } else {
-            $cleanupClaim.DeleteTreeExact()
+            $cleanupClaim.DeleteTreeExact($entry.Native)
         }
         if (-not $removed) {
             Die (
@@ -1060,7 +1441,12 @@ function Remove-PrivateDirectoryClaimAt {
         [void]$script:PrivateDirectoryClaims.Remove($claimKeyFull)
         Complete-RollbackSafetyBoundary -Token $cleanupSafety
     } finally {
-        if ($cleanupClaim) { $cleanupClaim.Dispose() }
+        if ($cleanupClaim) {
+            if ($cleanupClaim.MutationStarted) {
+                $entry.CleanupTerminal = $true
+            }
+            $cleanupClaim.Dispose()
+        }
     }
 }
 
@@ -1232,50 +1618,69 @@ function Invoke-NativeFreshDirectoryBoundarySelfTest {
     }
     Write-Host "Native empty directory rollback retry passed" -ForegroundColor Green
 
-    $treeRetryTarget = Join-Path $Root ("fresh-tree-retry-" + [guid]::NewGuid().ToString("N"))
+    $retirementParent = Join-Path $Root ("fresh-retirement-parent-" + [guid]::NewGuid().ToString("N"))
+    $retirementTree = Join-Path $retirementParent "tree"
     $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
     $script:FreshInstallAttemptActive = $true
     $script:FreshInstallOriginalProcessPath = $env:PATH
     $script:FreshInstallPublishedProcessPath = $null
     try {
-        New-FreshInstallOwnedDirectory -Path $treeRetryTarget -Kind Tree
-        [IO.File]::WriteAllText(
-            (Join-Path $treeRetryTarget "owned.txt"),
-            "owned",
-            [Text.Encoding]::ASCII
+        New-FreshInstallOwnedDirectory -Path $retirementParent -Kind EmptyDirectory
+        New-FreshInstallOwnedDirectory -Path $retirementTree -Kind Tree
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestNamespaceRetirementDelay(
+            $retirementTree,
+            250
         )
-        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestEmptyDirectoryDeleteFailures(1)
-        $treeRetryResidue = @(Undo-FreshInstallAttempt)
-        if ($treeRetryResidue.Count -ne 0 -or (Test-InstallMarker -Path $treeRetryTarget)) {
-            Die "Native tree-root rollback did not recover from a transient nonempty result"
+        $retirementWatch = [Diagnostics.Stopwatch]::StartNew()
+        $retirementResidue = @(Undo-FreshInstallAttempt)
+        $retirementWatch.Stop()
+        if ($retirementResidue.Count -ne 0 -or
+            (Test-InstallMarker -Path $retirementTree) -or
+            (Test-InstallMarker -Path $retirementParent) -or
+            $retirementWatch.ElapsedMilliseconds -lt 150) {
+            Die "Native rollback did not wait for a delayed tree-root namespace retirement"
         }
     } finally {
-        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestEmptyDirectoryDeleteFailures()
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestNamespaceRetirementDelay()
         if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
+        if (Test-InstallMarker -Path $retirementParent) {
+            [IO.Directory]::Delete($retirementParent, $true)
+        }
     }
-    Write-Host "Native tree-root rollback retry passed" -ForegroundColor Green
+    Write-Host "Native delayed tree-root namespace retirement passed" -ForegroundColor Green
 
-    $treeExhaustedTarget = Join-Path $Root ("fresh-tree-exhausted-" + [guid]::NewGuid().ToString("N"))
+    $nestedTree = Join-Path $Root ("fresh-retirement-nested-" + [guid]::NewGuid().ToString("N"))
+    $nestedDirectory = Join-Path $nestedTree "nested"
+    $nestedFile = Join-Path $nestedDirectory "owned.txt"
     $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
     $script:FreshInstallAttemptActive = $true
     $script:FreshInstallOriginalProcessPath = $env:PATH
     $script:FreshInstallPublishedProcessPath = $null
     try {
-        New-FreshInstallOwnedDirectory -Path $treeExhaustedTarget -Kind Tree
-        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestEmptyDirectoryDeleteFailures(5)
-        $treeExhaustedResidue = @(Undo-FreshInstallAttempt)
-        if ($treeExhaustedResidue.Count -eq 0 -or
-            -not (Test-InstallMarker -Path $treeExhaustedTarget)) {
-            Die "Native tree-root rollback did not preserve a root after bounded retry exhaustion"
+        New-FreshInstallOwnedDirectory -Path $nestedTree -Kind Tree
+        [void][IO.Directory]::CreateDirectory($nestedDirectory)
+        [IO.File]::WriteAllText($nestedFile, "owned", [Text.Encoding]::ASCII)
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestNamespaceRetirementDelay(
+            $nestedFile,
+            250
+        )
+        $nestedWatch = [Diagnostics.Stopwatch]::StartNew()
+        $nestedResidue = @(Undo-FreshInstallAttempt)
+        $nestedWatch.Stop()
+        if ($nestedResidue.Count -ne 0 -or
+            (Test-InstallMarker -Path $nestedTree) -or
+            $nestedWatch.ElapsedMilliseconds -lt 150) {
+            Die "Native tree rollback did not wait for a delayed child namespace retirement"
         }
     } finally {
-        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestEmptyDirectoryDeleteFailures()
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestNamespaceRetirementDelay()
         if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
-        if (Test-InstallMarker -Path $treeExhaustedTarget) {
-            [IO.Directory]::Delete($treeExhaustedTarget)
+        if (Test-InstallMarker -Path $nestedTree) {
+            [IO.Directory]::Delete($nestedTree, $true)
         }
     }
-    Write-Host "Native tree-root rollback retry exhaustion passed" -ForegroundColor Green
+    Write-Host "Native delayed child namespace retirement passed" -ForegroundColor Green
+    Write-Host "Native namespace retirement wait passed" -ForegroundColor Green
 
     # Mirror the real post-publication failure topology: an attempt-owned home
     # with an empty tree child, plus a sibling bin parent whose publication
@@ -2032,16 +2437,19 @@ function Undo-FreshInstallAttempt {
             $entry = $script:FreshInstallClaims[$index]
             if ($entry.Kind -ne $kind) { continue }
             try {
-                # Windows can briefly report an installer-owned parent as
-                # nonempty while an exact child-tree deletion settles. Keep
-                # the same identity handle across a bounded retry window, but
-                # only for empty-directory deletion: file/tree retries could
-                # otherwise consume state that appeared concurrently.
+                # A pre-disposition empty-directory refusal is safe to retry
+                # through the same identity handle. Once any mutation begins,
+                # the native claim owns its one bounded retirement wait and a
+                # caller must never restart a partial tree traversal.
                 $maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 20 } else { 1 }
                 $removed = $false
                 for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
                     $removed = Remove-FreshInstallClaim -Entry $entry
                     if ($removed) { break }
+                    if ($entry.Native.MutationStarted -or
+                        $entry.Native.RetirementStateValue -cne "Bound") {
+                        break
+                    }
                     if ($attempt -lt $maximumAttempts) {
                         Start-Sleep -Milliseconds (50 * $attempt)
                     }
