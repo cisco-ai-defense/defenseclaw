@@ -209,6 +209,42 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
         assert "scripts/release_candidate.py verify" in rendered
 
 
+def test_release_certificate_is_canonicalized_and_authenticated_before_seal() -> None:
+    assemble_job = _workflow()["jobs"]["assemble-release-candidate"]
+    steps = assemble_job["steps"]
+    sign_index, sign_step = next(
+        (index, step)
+        for index, step in enumerate(steps)
+        if step.get("name") == "Sign and authenticate public checksum manifest"
+    )
+    seal_index, seal_step = next(
+        (index, step)
+        for index, step in enumerate(steps)
+        if step.get("name") == "Seal all candidate bytes"
+    )
+    sign_script = sign_step["run"]
+    seal_script = seal_step["run"]
+
+    sign = sign_script.index("cosign sign-blob")
+    canonicalize = sign_script.index(
+        "scripts/release_candidate.py canonicalize-certificate"
+    )
+    authenticate = sign_script.index("cosign verify-blob")
+    assert sign < canonicalize < authenticate
+    assert sign_index + 1 == seal_index
+    assert sign_script.count("canonicalize-certificate") == 1
+    assert "--certificate release-candidate/dist/checksums.txt.pem" in sign_script
+    assert (
+        '--certificate-identity "https://github.com/$GITHUB_REPOSITORY/'
+        '.github/workflows/release.yaml@refs/heads/main"'
+    ) in sign_script
+    assert (
+        '--certificate-oidc-issuer "https://token.actions.githubusercontent.com"'
+    ) in sign_script
+    assert "--certificate-identity-regexp" not in sign_script
+    assert "scripts/release_candidate.py seal" in seal_script
+
+
 def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal() -> None:
     jobs = _workflow()["jobs"]
     posix = str(jobs["posix-fresh-install"])

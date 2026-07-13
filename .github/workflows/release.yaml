@@ -512,12 +512,21 @@ jobs:
             --commit "$RELEASE_COMMIT" \
             --macos-verification-status "$MACOS_STATUS"
 
-      - name: Sign public checksum manifest
+      - name: Sign and authenticate public checksum manifest
         run: |
+          set -euo pipefail
           cosign sign-blob \
             --yes \
             --output-certificate=release-candidate/dist/checksums.txt.pem \
             --output-signature=release-candidate/dist/checksums.txt.sig \
+            release-candidate/dist/checksums.txt
+          python3 scripts/release_candidate.py canonicalize-certificate \
+            --certificate release-candidate/dist/checksums.txt.pem
+          cosign verify-blob \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
 
       - name: Seal all candidate bytes

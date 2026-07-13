@@ -131,6 +131,10 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "NAMESPACE_RETIRE_TIMEOUT_MS",
         "ConfigureTestNamespaceRetirementDelay",
         "ClearTestNamespaceRetirementDelay",
+        "ConfigureTestDeleteBindingDelay",
+        "ClearTestDeleteBindingDelay",
+        "OpenSnapshotObservationHandle",
+        "OpenRetirementHandle",
         "ConfigureTestMoveOutAfterSnapshot",
         "ClearTestMoveOutAfterSnapshot",
         "ConfigureTestEmptyDirectoryDeleteFailures",
@@ -194,7 +198,26 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert tree_delete.index("current.Dispose()") < tree_delete.index("WaitForNamespaceRetirement(")
     assert "return RetireRootNamespaceExact(" in tree_delete
     assert "never resnapshot or acquire fresh delete authority" in tree_delete
-    assert tree_delete.count("SnapshotDirectory(path, 1, entries, ref bytes)") == 1
+    assert tree_delete.count("SnapshotDirectory(path, 1, entries, ref bytes, deadline)") == 1
+    assert "StartTestDeleteBindingDelay()" in tree_delete
+    snapshot = source[
+        source.index("private void SnapshotDirectory") : source.index(
+            "public bool DeleteTreeExact()"
+        )
+    ]
+    assert "OpenSnapshotObservationHandle(child, deadline)" in snapshot
+    assert "OpenRetirementHandle" not in snapshot
+    retirement_open = source[
+        source.index("private static SafeFileHandle OpenRetirementHandle") : source.index(
+            "private static SafeFileHandle OpenParentHandle"
+        )
+    ]
+    assert "FILE_SHARE_READ | FILE_SHARE_WRITE" in retirement_open
+    assert "FILE_SHARE_DELETE" not in retirement_open
+    assert "ERROR_ACCESS_DENIED" in retirement_open
+    assert "ERROR_SHARING_VIOLATION" in retirement_open
+    assert "ERROR_DELETE_PENDING" in retirement_open
+    assert "timed out binding exact fresh-install path for retirement" in retirement_open
     observer = source[
         source.index("private static NamespaceObservation ObserveNamespace") : source.index(
             "private static long NewNamespaceRetirementDeadline"
@@ -277,13 +300,17 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "Native empty directory rollback retry passed" in source
     assert "Native delayed tree-root namespace retirement passed" in source
     assert "Native delayed child namespace retirement passed" in source
+    assert "Native delayed exact DELETE binding passed" in source
     assert "Native namespace retirement wait passed" in source
     assert "Native post-move rollback topology passed" in source
     assert "Native private-directory self-test accepted a file as its parent" in source
     assert "Fresh-install payload rollback completed; retry is safe" in harness
     assert "Concurrent unclaimed shim disappeared during rollback" in harness
     assert "Failed fresh install left installer-created binary directories behind" in harness
-    assert "Assert-NoFreshPayload -Context $postMove.Output" in harness
+    assert '-Phase "post-directory-publication injection" -Context $postMove.Output' in harness
+    assert '-Phase "post-venv policy-cleanup injection"' in harness
+    assert '-Phase "moved policy-custody injection"' in harness
+    assert '-Phase "concurrent shim collision"' in harness
     assert "--- post-move installer output ---" in harness
     assert "bounded residual path inventory (names and kinds only)" in harness
 

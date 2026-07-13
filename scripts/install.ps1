@@ -309,6 +309,9 @@ namespace DefenseClaw.Install.FreshV1 {
         private static readonly object testNamespaceRetirementLock = new object();
         private static string testNamespaceRetirementPath;
         private static int testNamespaceRetirementDelayMs;
+        private static readonly object testDeleteBindingLock = new object();
+        private static string testDeleteBindingPath;
+        private static int testDeleteBindingDelayMs;
 
         private FreshPathClaim(
             string claimedPath,
@@ -555,6 +558,30 @@ namespace DefenseClaw.Install.FreshV1 {
             }
         }
 
+        public static void ConfigureTestDeleteBindingDelay(
+            string path,
+            int delayMilliseconds) {
+            if (String.IsNullOrWhiteSpace(path)) {
+                throw new ArgumentException("test delete-binding path is empty");
+            }
+            if (delayMilliseconds < 1 ||
+                delayMilliseconds >
+                    NAMESPACE_RETIRE_TIMEOUT_MS - (2 * NAMESPACE_RETIRE_POLL_MS)) {
+                throw new ArgumentOutOfRangeException("delayMilliseconds");
+            }
+            lock (testDeleteBindingLock) {
+                testDeleteBindingPath = Path.GetFullPath(path);
+                testDeleteBindingDelayMs = delayMilliseconds;
+            }
+        }
+
+        public static void ClearTestDeleteBindingDelay() {
+            lock (testDeleteBindingLock) {
+                testDeleteBindingPath = null;
+                testDeleteBindingDelayMs = 0;
+            }
+        }
+
         private static bool ConsumeTestEmptyDirectoryDeleteFailure() {
             while (true) {
                 int current = System.Threading.Volatile.Read(
@@ -663,6 +690,85 @@ namespace DefenseClaw.Install.FreshV1 {
             } catch {
                 delayedHandle.Dispose();
                 throw;
+            }
+        }
+
+        private static void StartTestDeleteBindingDelay() {
+            string candidate = null;
+            int delay = 0;
+            lock (testDeleteBindingLock) {
+                if (String.IsNullOrEmpty(testDeleteBindingPath)) {
+                    return;
+                }
+                candidate = testDeleteBindingPath;
+                delay = testDeleteBindingDelayMs;
+                testDeleteBindingPath = null;
+                testDeleteBindingDelayMs = 0;
+            }
+            SafeFileHandle retained = CreateFile(
+                Path.GetFullPath(candidate),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (retained.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                retained.Dispose();
+                throw new Win32Exception(
+                    error,
+                    "could not create the delete-binding test retainer");
+            }
+            System.Threading.Thread releaser = new System.Threading.Thread(delegate() {
+                try {
+                    System.Threading.Thread.Sleep(delay);
+                } finally {
+                    retained.Dispose();
+                }
+            });
+            releaser.IsBackground = true;
+            try {
+                releaser.Start();
+            } catch {
+                retained.Dispose();
+                throw;
+            }
+        }
+
+        private static SafeFileHandle OpenSnapshotObservationHandle(
+            string candidate,
+            long deadline) {
+            // Snapshot through read-only, share-delete handles. Scanner custody
+            // may briefly deny even this observation, but absence or a different
+            // identity is never inferred from a transient open failure.
+            string full = Path.GetFullPath(candidate);
+            while (true) {
+                SafeFileHandle opened = OpenNamespaceObservationHandle(full);
+                if (!opened.IsInvalid) {
+                    return opened;
+                }
+                int error = Marshal.GetLastWin32Error();
+                opened.Dispose();
+                if (error != ERROR_ACCESS_DENIED &&
+                    error != ERROR_SHARING_VIOLATION &&
+                    error != ERROR_DELETE_PENDING) {
+                    throw new Win32Exception(
+                        error,
+                        "could not observe fresh-install path for rollback snapshot: " + full);
+                }
+                long remainingTicks = deadline - System.Diagnostics.Stopwatch.GetTimestamp();
+                if (remainingTicks <= 0) {
+                    throw new Win32Exception(
+                        error,
+                        "timed out observing fresh-install path for rollback snapshot: " + full);
+                }
+                long remainingMilliseconds =
+                    (remainingTicks * 1000) / System.Diagnostics.Stopwatch.Frequency;
+                int delay = (int)Math.Max(
+                    1L,
+                    Math.Min((long)NAMESPACE_RETIRE_POLL_MS, remainingMilliseconds));
+                System.Threading.Thread.Sleep(delay);
             }
         }
 
@@ -798,6 +904,58 @@ namespace DefenseClaw.Install.FreshV1 {
                 return null;
             }
             throw new Win32Exception(error, "could not bind fresh-install path: " + path);
+        }
+
+        private static SafeFileHandle OpenRetirementHandle(
+            string path,
+            bool directory,
+            bool allowMissing,
+            long deadline) {
+            // Retry only acquisition of DELETE authority for this snapshotted
+            // pathname and only inside the tree's one monotonic budget. The
+            // caller revalidates identity, kind, and reparse state before the
+            // first disposition; a partial traversal is never restarted.
+            string full = Path.GetFullPath(path);
+            uint access = FILE_READ_ATTRIBUTES | (directory ? FILE_TRAVERSE : 0) | DELETE;
+            uint flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+            while (true) {
+                SafeFileHandle opened = CreateFile(
+                    full,
+                    access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    IntPtr.Zero,
+                    OPEN_EXISTING,
+                    flags,
+                    IntPtr.Zero);
+                if (!opened.IsInvalid) {
+                    return opened;
+                }
+                int error = Marshal.GetLastWin32Error();
+                opened.Dispose();
+                if (allowMissing &&
+                    (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) {
+                    return null;
+                }
+                if (error != ERROR_ACCESS_DENIED &&
+                    error != ERROR_SHARING_VIOLATION &&
+                    error != ERROR_DELETE_PENDING) {
+                    throw new Win32Exception(
+                        error,
+                        "could not bind fresh-install path for retirement: " + full);
+                }
+                long remainingTicks = deadline - System.Diagnostics.Stopwatch.GetTimestamp();
+                if (remainingTicks <= 0) {
+                    throw new Win32Exception(
+                        error,
+                        "timed out binding exact fresh-install path for retirement: " + full);
+                }
+                long remainingMilliseconds =
+                    (remainingTicks * 1000) / System.Diagnostics.Stopwatch.Frequency;
+                int delay = (int)Math.Max(
+                    1L,
+                    Math.Min((long)NAMESPACE_RETIRE_POLL_MS, remainingMilliseconds));
+                System.Threading.Thread.Sleep(delay);
+            }
         }
 
         private static SafeFileHandle OpenParentHandle(string path) {
@@ -984,12 +1142,13 @@ namespace DefenseClaw.Install.FreshV1 {
             string current,
             int depth,
             List<TreeEntry> entries,
-            ref long bytes) {
+            ref long bytes,
+            long deadline) {
             if (depth > MAX_TREE_DEPTH) {
                 throw new InvalidOperationException("fresh-install tree exceeds rollback depth bound");
             }
             foreach (string child in Directory.GetFileSystemEntries(current)) {
-                SafeFileHandle opened = OpenHandle(child, false, true, false);
+                SafeFileHandle opened = OpenSnapshotObservationHandle(child, deadline);
                 BY_HANDLE_FILE_INFORMATION information;
                 try {
                     information = Information(opened, child);
@@ -999,13 +1158,6 @@ namespace DefenseClaw.Install.FreshV1 {
                 }
                 bool isDirectory = (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                 bool isReparse = (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-                if (isDirectory) {
-                    opened.Dispose();
-                    opened = OpenHandle(child, true, true, false);
-                    information = Information(opened, child);
-                    isDirectory = (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                    isReparse = (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-                }
                 TreeEntry entry = new TreeEntry();
                 entry.Path = child;
                 entry.Volume = information.VolumeSerialNumber;
@@ -1023,7 +1175,7 @@ namespace DefenseClaw.Install.FreshV1 {
                     throw new InvalidOperationException("fresh-install tree crosses a volume boundary");
                 }
                 if (isDirectory && !isReparse) {
-                    SnapshotDirectory(child, depth + 1, entries, ref bytes);
+                    SnapshotDirectory(child, depth + 1, entries, ref bytes, deadline);
                 }
             }
         }
@@ -1048,9 +1200,10 @@ namespace DefenseClaw.Install.FreshV1 {
             ValidateRetirementCompanion(companion);
             List<TreeEntry> entries = new List<TreeEntry>();
             long bytes = 0;
-            SnapshotDirectory(path, 1, entries, ref bytes);
-            InvokeTestMoveOutAfterSnapshot();
             long deadline = NewNamespaceRetirementDeadline();
+            SnapshotDirectory(path, 1, entries, ref bytes, deadline);
+            StartTestDeleteBindingDelay();
+            InvokeTestMoveOutAfterSnapshot();
             entries.Sort(delegate(TreeEntry left, TreeEntry right) {
                 int depthOrder = right.Depth.CompareTo(left.Depth);
                 if (depthOrder != 0) {
@@ -1059,11 +1212,11 @@ namespace DefenseClaw.Install.FreshV1 {
                 return StringComparer.OrdinalIgnoreCase.Compare(right.Path, left.Path);
             });
             foreach (TreeEntry entry in entries) {
-                SafeFileHandle current = OpenHandle(
+                SafeFileHandle current = OpenRetirementHandle(
                     entry.Path,
                     entry.IsDirectory,
                     true,
-                    true);
+                    deadline);
                 if (current == null) {
                     retirementState = RetirementState.Replaced;
                     return false;
@@ -1680,6 +1833,38 @@ function Invoke-NativeFreshDirectoryBoundarySelfTest {
         }
     }
     Write-Host "Native delayed child namespace retirement passed" -ForegroundColor Green
+
+    $bindingTree = Join-Path $Root ("fresh-delete-binding-" + [guid]::NewGuid().ToString("N"))
+    $bindingDirectory = Join-Path $bindingTree "nested"
+    $bindingFile = Join-Path $bindingDirectory "owned.txt"
+    $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
+    $script:FreshInstallAttemptActive = $true
+    $script:FreshInstallOriginalProcessPath = $env:PATH
+    $script:FreshInstallPublishedProcessPath = $null
+    try {
+        New-FreshInstallOwnedDirectory -Path $bindingTree -Kind Tree
+        [void][IO.Directory]::CreateDirectory($bindingDirectory)
+        [IO.File]::WriteAllText($bindingFile, "owned", [Text.Encoding]::ASCII)
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestDeleteBindingDelay(
+            $bindingFile,
+            250
+        )
+        $bindingWatch = [Diagnostics.Stopwatch]::StartNew()
+        $bindingResidue = @(Undo-FreshInstallAttempt)
+        $bindingWatch.Stop()
+        if ($bindingResidue.Count -ne 0 -or
+            (Test-InstallMarker -Path $bindingTree) -or
+            $bindingWatch.ElapsedMilliseconds -lt 150) {
+            Die "Native tree rollback did not wait for an exact DELETE binding"
+        }
+    } finally {
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestDeleteBindingDelay()
+        if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
+        if (Test-InstallMarker -Path $bindingTree) {
+            [IO.Directory]::Delete($bindingTree, $true)
+        }
+    }
+    Write-Host "Native delayed exact DELETE binding passed" -ForegroundColor Green
     Write-Host "Native namespace retirement wait passed" -ForegroundColor Green
 
     # Mirror the real post-publication failure topology: an attempt-owned home

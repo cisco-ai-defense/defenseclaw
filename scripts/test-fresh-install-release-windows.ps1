@@ -141,7 +141,10 @@ function Assert-NoInstallerCustody {
 }
 
 function Assert-NoFreshPayload {
-    param([string]$Context = "")
+    param(
+        [string]$Phase = "fresh-install rollback",
+        [string]$Context = ""
+    )
     foreach ($path in @(
         $env:DEFENSECLAW_HOME,
         (Join-Path $HomeRoot ".local\bin\defenseclaw-gateway.exe"),
@@ -149,7 +152,7 @@ function Assert-NoFreshPayload {
     )) {
         if (Test-Path -LiteralPath $path) {
             $diagnostic = if ($Context) { "`nInstaller output:`n$Context" } else { "" }
-            throw "Failed fresh install left a managed payload marker: $path$diagnostic"
+            throw "Failed fresh install left a managed payload marker during ${Phase}: $path$diagnostic"
         }
     }
 }
@@ -307,7 +310,7 @@ try {
             Write-Host "$kind`t$relative"
         }
     }
-    Assert-NoFreshPayload -Context $postMove.Output
+    Assert-NoFreshPayload -Phase "post-directory-publication injection" -Context $postMove.Output
     if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
         throw "Post-move fresh-directory failure left .local or bin custody behind"
     }
@@ -330,7 +333,9 @@ try {
     }
     [void](Remove-InjectedPolicyResidue -Output $injected.Output)
     Assert-NoInstallerCustody
-    Assert-NoFreshPayload
+    Assert-NoFreshPayload `
+        -Phase "post-venv policy-cleanup injection" `
+        -Context $injected.Output
     if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
         throw "Failed fresh install left installer-created binary directories behind"
     }
@@ -353,7 +358,9 @@ try {
     }
     Remove-MovedPolicyCustodyResidue -Output $movedCustody.Output
     Assert-NoInstallerCustody
-    Assert-NoFreshPayload
+    Assert-NoFreshPayload `
+        -Phase "moved policy-custody injection" `
+        -Context $movedCustody.Output
     if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
         throw "Moved policy custody left installer-created binary directories behind"
     }
@@ -386,7 +393,7 @@ try {
     [IO.File]::Delete($unclaimedShim)
     [IO.Directory]::Delete((Join-Path $HomeRoot ".local\bin"))
     [IO.Directory]::Delete((Join-Path $HomeRoot ".local"))
-    Assert-NoFreshPayload
+    Assert-NoFreshPayload -Phase "concurrent shim collision" -Context $collision.Output
 
     $first = Invoke-FreshInstaller -InjectPolicyCleanupFailure
     $expectedInstallDir = Join-Path $HomeRoot ".local\bin"
