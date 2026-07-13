@@ -849,7 +849,7 @@ def test_every_setup_preset_builds_a_schema_valid_v8_destination(
     assert validated["observability"]["destinations"][0]["name"] == "target"
 
 
-def test_v8_otlp_default_is_all_capabilities_unredacted_and_explicit_signals_narrow() -> None:
+def test_v8_otlp_default_uses_capabilities_and_explicit_signals_inherit_redaction() -> None:
     preset = PRESETS["otlp"]
     default = _build_v8_preset_destination(
         preset,
@@ -872,7 +872,6 @@ def test_v8_otlp_default_is_all_capabilities_unredacted_and_explicit_signals_nar
     assert narrowed["send"] == {
         "signals": ["logs"],
         "buckets": ["*"],
-        "redaction_profile": "none",
     }
 
 
