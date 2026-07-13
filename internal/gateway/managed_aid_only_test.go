@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -192,6 +193,82 @@ func TestHookManagedAIDOnly_MessageContentFailOpen(t *testing.T) {
 	v2 := a2.inspectMessageContent(context.Background(), req)
 	if v2 == nil || v2.Action != "block" {
 		t.Fatalf("managed message content with AID block: want block, got %+v", v2)
+	}
+}
+
+// --- Fail-open observability ------------------------------------------------
+
+// managedFailOpenSignal scans captured events for the managed AID fail-open
+// diagnostic and returns its distinct reason + severity_hint labels. The
+// signal rides a diagnostic (not an error) so its Fields survive the managed
+// sink redaction that would otherwise erase an error Message/Cause.
+func managedFailOpenSignal(events []gatewaylog.Event) (reason, severity string, ok bool) {
+	for _, e := range events {
+		if e.EventType != gatewaylog.EventDiagnostic || e.Diagnostic == nil ||
+			e.Diagnostic.Component != managedAIDFailOpenComponent {
+			continue
+		}
+		r, _ := e.Diagnostic.Fields["reason"].(string)
+		s, _ := e.Diagnostic.Fields["severity_hint"].(string)
+		return r, s, true
+	}
+	return "", "", false
+}
+
+func TestManagedAIDFailOpen_EmitsDistinctReasons(t *testing.T) {
+	cases := []struct {
+		name         string
+		inspector    Inspector
+		msgs         []ChatMessage
+		wantReason   string
+		wantSeverity string
+	}{
+		{
+			name:         "unwired inspector",
+			inspector:    nil,
+			msgs:         []ChatMessage{{Role: "user", Content: "hello"}},
+			wantReason:   aidFailOpenUnwired,
+			wantSeverity: "high",
+		},
+		{
+			name:         "no content to inspect",
+			inspector:    &stubAIDInspector{verdict: blockVerdict()},
+			msgs:         nil,
+			wantReason:   aidFailOpenNoContent,
+			wantSeverity: "info",
+		},
+		{
+			name:         "AID returns no verdict",
+			inspector:    &stubAIDInspector{verdict: nil},
+			msgs:         []ChatMessage{{Role: "user", Content: "hello"}},
+			wantReason:   aidFailOpenUnavailable,
+			wantSeverity: "high",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			events := withCapturedEvents(t)
+			g := NewGuardrailInspector("both", nil, nil, "")
+			g.SetManagedMode(true)
+			if tc.inspector != nil {
+				g.SetCiscoInspector(tc.inspector)
+			}
+
+			v := g.inspectManagedAIDOnly(context.Background(), "prompt", tc.msgs)
+			if v == nil || v.Action != "allow" {
+				t.Fatalf("want fail-open allow, got %+v", v)
+			}
+			reason, severity, ok := managedFailOpenSignal(*events)
+			if !ok {
+				t.Fatalf("no managed AID fail-open signal emitted; events=%+v", *events)
+			}
+			if reason != tc.wantReason {
+				t.Fatalf("fail-open reason = %q, want %q", reason, tc.wantReason)
+			}
+			if severity != tc.wantSeverity {
+				t.Fatalf("fail-open severity_hint = %q, want %q", severity, tc.wantSeverity)
+			}
+		})
 	}
 }
 

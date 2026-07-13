@@ -568,7 +568,19 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 // client side, but traffic is never held hostage to AID availability in
 // managed mode.
 func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, direction string, messages []ChatMessage) *ScanVerdict {
-	if g.ciscoClient == nil || len(messages) == 0 {
+	if g.ciscoClient == nil {
+		// Managed mode with no wired inspector = no decision-maker at all.
+		// Fail open, but surface it loudly so operators can alert on a
+		// misconfigured managed install rather than silently running with
+		// no enforcement.
+		recordManagedAIDFailOpen(ctx, aidFailOpenUnwired, direction)
+		return allowVerdict("ai-defense")
+	}
+	if len(messages) == 0 {
+		// Nothing to inspect (e.g. an empty completion). This is a benign
+		// skipped scan, not an availability failure — record it at info
+		// level with a distinct reason so it stays out of AID-outage alerts.
+		recordManagedAIDFailOpen(ctx, aidFailOpenNoContent, direction)
 		return allowVerdict("ai-defense")
 	}
 	t0 := time.Now()
@@ -577,7 +589,11 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 	elapsed := float64(time.Since(t0).Milliseconds())
 	endCisco(phaseAction(v), phaseSeverity(v), int64(elapsed))
 	if v == nil {
-		// AID down / timeout / token failure → fail open.
+		// AID down / timeout / token failure → fail open. The client
+		// already emitted EmitCiscoError for the underlying transport
+		// failure; this records the decision-level fail-open so operators
+		// can alert on sustained AID unavailability driving allow decisions.
+		recordManagedAIDFailOpen(ctx, aidFailOpenUnavailable, direction)
 		return allowVerdict("ai-defense")
 	}
 	v.CiscoElapsedMs = elapsed
@@ -585,6 +601,55 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		v.ScannerSources = []string{"ai-defense"}
 	}
 	return v
+}
+
+// managedAIDFailOpenComponent is the stable diagnostic component / message
+// prefix under which every managed-mode AID fail-open is reported. Operators
+// build availability monitors on this value plus the per-branch reason label.
+const managedAIDFailOpenComponent = "managed_aid_fail_open"
+
+// Distinct reason labels for the managed AID-only fail-open branches, so a
+// dashboard/alert can separate sustained AID unavailability (something is
+// broken) from benign skipped scans (nothing to inspect):
+//   - aidFailOpenUnwired: managed_enterprise but no inspector wired.
+//   - aidFailOpenUnavailable: AID returned no verdict (down/timeout/token).
+//   - aidFailOpenNoContent: no messages to inspect (benign skip).
+const (
+	aidFailOpenUnwired     = "inspector_unwired"
+	aidFailOpenUnavailable = "aid_unavailable"
+	aidFailOpenNoContent   = "no_content"
+)
+
+// recordManagedAIDFailOpen emits an observable, distinctly-labeled signal for
+// a managed-mode fail-open decision so operators can monitor and alert.
+//
+// It rides a diagnostic event rather than an error event on purpose: the
+// gateway error path wholesale-redacts Message/Cause under the managed sink
+// policy (see emitEvent), which would erase the machine-readable reason. The
+// DiagnosticPayload.Fields bag is not redacted, so the reason/severity_hint
+// labels survive to every sink (gateway.jsonl, audit, AID) unchanged. The two
+// availability failures (unwired inspector, nil AID verdict) carry
+// severity_hint=high so a dashboard can alert on sustained AID unavailability;
+// the benign no-content skip carries severity_hint=info so it stays out of
+// those alerts. All three share the same component/reason schema so a single
+// monitor can pivot on `reason`.
+//
+// The underlying transport failure for aidFailOpenUnavailable is separately
+// surfaced as a HIGH-severity error by the client's EmitCiscoError; this adds
+// the decision-level fail-open signal on top of that.
+func recordManagedAIDFailOpen(ctx context.Context, reason, direction string) {
+	severityHint := "high"
+	if reason == aidFailOpenNoContent {
+		severityHint = "info"
+	}
+	emitDiagnostic(ctx, managedAIDFailOpenComponent,
+		"managed AID inspection failed open",
+		map[string]string{
+			"reason":        reason,
+			"severity_hint": severityHint,
+			"direction":     direction,
+			"decision":      "allow",
+		})
 }
 
 // clampPromptDirectionVerdict applies the prompt-surface UX contract to a
