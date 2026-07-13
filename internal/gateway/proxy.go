@@ -1078,7 +1078,19 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
-		passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
+		passthroughPromptID = meta.PromptID
+
+		// Managed Cisco AI Defense carve-out (scoped to managed_enterprise
+		// only): defer the llm_prompt emit until after Inspect so this
+		// prompt's own is_redaction_enabled directive governs its content
+		// fields, instead of failing closed to redact because the directive
+		// doesn't exist yet. See the structured chat-completion path for the
+		// full rationale. Outside managed_enterprise ordering/behavior are
+		// byte-for-byte unchanged.
+		deferManagedPrompt := managedEnterpriseActive.Load()
+		if !deferManagedPrompt {
+			passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
+		}
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
@@ -1091,6 +1103,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
+		if deferManagedPrompt {
+			// AID directive from this prompt's inspection is now known;
+			// stamp it so the deferred llm_prompt honors is_redaction_enabled
+			// (still fails closed to redact when AID returned no directive).
+			passthroughPromptID = emitLLMPromptEvent(
+				withRedactionDecision(r.Context(), verdict.RedactionEnabled),
+				meta, userText, body)
+		}
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
 		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, nil, nil,
@@ -2641,7 +2661,21 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
-		promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
+		promptID = meta.PromptID
+
+		// Managed Cisco AI Defense carve-out (scoped to managed_enterprise
+		// only): the per-inspection is_redaction_enabled directive does not
+		// exist until AID has inspected THIS prompt, so emitting llm_prompt
+		// up front — as the OSS path does — forces the event to fail closed
+		// to redact even when the cloud directive would allow raw. In
+		// managed_enterprise we defer the llm_prompt emit until after Inspect
+		// so the prompt's own directive governs its content fields. Outside
+		// managed_enterprise the ordering and redaction behavior are
+		// byte-for-byte unchanged (directive is always nil there anyway).
+		deferManagedPrompt := managedEnterpriseActive.Load()
+		if !deferManagedPrompt {
+			promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
+		}
 
 		t0 := time.Now()
 
@@ -2664,6 +2698,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
+		if deferManagedPrompt {
+			// The AID directive from this prompt's inspection is now known.
+			// Stamp it onto the emit context so the deferred llm_prompt event
+			// honors is_redaction_enabled (still fails closed to redact when
+			// AID returned no directive). Emitted before the block-return
+			// below so the prompt event is captured even on a block.
+			promptID = emitLLMPromptEvent(
+				withRedactionDecision(r.Context(), verdict.RedactionEnabled),
+				meta, userText, req.RawBody)
+		}
 		elapsed := time.Since(t0)
 
 		// End guardrail span with decision.

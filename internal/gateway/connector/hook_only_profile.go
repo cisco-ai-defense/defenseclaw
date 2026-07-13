@@ -83,7 +83,22 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		// which must fall through to the plain allow envelope.
 		switch in.Action {
 		case "block":
-			output = map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
+			// Cursor splits its blockable events into two wire contracts
+			// (https://cursor.com/docs/hooks): permission-gated tool events
+			// (beforeShellExecution / beforeMCPExecution / beforeReadFile)
+			// block via {"permission":"deny"}, but the continue-gated
+			// beforeSubmitPrompt blocks ONLY via {"continue":false} and
+			// ignores `permission` entirely. Sending the permission shape
+			// there leaves continue:true, so Cursor silently submits the
+			// prompt and the user_message (shown only on block) never
+			// appears. user_message is the documented user-facing field for
+			// beforeSubmitPrompt; agent_message is additive (unknown fields
+			// are ignored by Cursor).
+			if in.Req.HookEventName == "beforeSubmitPrompt" {
+				output = map[string]interface{}{"continue": false, "user_message": reason, "agent_message": reason}
+			} else {
+				output = map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
+			}
 		case "confirm":
 			output = map[string]interface{}{"continue": true, "permission": "ask", "user_message": reason, "agent_message": reason}
 		case "alert":

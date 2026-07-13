@@ -203,7 +203,21 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-connector emitters produced before the unified
 		// collector landed; every other connector uses the generic
 		// agentHookRequest-driven emitter.
-		runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+		//
+		// Managed Cisco AI Defense carve-out (managed_enterprise only):
+		// the per-inspection is_redaction_enabled directive does not exist
+		// until the evaluator has inspected THIS event, so emitting the LLM
+		// event up front — as the OSS path does — forces it to fail closed
+		// to redact even when the cloud directive would allow raw. In
+		// managed_enterprise we defer the emit until after safeEvaluateHook
+		// stamps the directive onto ctx (see below), so the event's own
+		// directive governs its content fields. Outside managed_enterprise
+		// the emit stays BEFORE the evaluator (audit-honest ordering) and
+		// behavior is byte-for-byte unchanged.
+		deferManagedHookEmit := managedEnterpriseActive.Load()
+		if !deferManagedHookEmit {
+			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+		}
 
 		// Dispatch evaluation through the profile runtime. Connector-
 		// specific event switches, scan triggers, and asset-policy
@@ -247,6 +261,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// local to that call) so finalizeAgentHook emits the
 		// hook_decision event + audit row under the same decision.
 		ctx = withRedactionDecision(ctx, resp.RedactionEnabled)
+
+		// Managed carve-out (see deferManagedHookEmit above): the directive
+		// from this event's evaluation is now on ctx, so emit the deferred
+		// LLM event here — before finalize so the prompt/tool/response event
+		// still precedes the hook_decision event, preserving the OSS event
+		// ordering. Fails closed to redact when the AID lane returned no
+		// directive (resp.RedactionEnabled == nil).
+		if deferManagedHookEmit {
+			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+		}
 
 		a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
 		finalized = true
@@ -2016,6 +2040,13 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 	case "cursor":
 		switch action {
 		case "block":
+			// beforeSubmitPrompt is continue-gated: Cursor ignores
+			// `permission` there and only blocks on {"continue":false}.
+			// See hookOnlyProfileRespond (the active path) for the full
+			// rationale; kept in sync here for the legacy shaper.
+			if req.HookEventName == "beforeSubmitPrompt" {
+				return map[string]interface{}{"continue": false, "user_message": reason, "agent_message": reason}
+			}
 			return map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
 		case "confirm":
 			return map[string]interface{}{"continue": true, "permission": "ask", "user_message": reason, "agent_message": reason}
