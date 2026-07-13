@@ -240,7 +240,9 @@ class TestSingleTargetJsonMode(_SkillScanUXBase):
         mock_scanner = MagicMock()
         mock_scanner.scan.side_effect = scan_impl
         mock_cls.return_value = mock_scanner
-        runner = CliRunner(mix_stderr=False)
+        # click >=8.2 removed the mix_stderr kwarg and always keeps stdout and
+        # stderr separated, so result.stdout / result.stderr work by default.
+        runner = CliRunner()
 
         result = runner.invoke(
             skill,
