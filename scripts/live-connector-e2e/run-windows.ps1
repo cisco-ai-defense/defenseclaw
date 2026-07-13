@@ -522,6 +522,9 @@ function Assert-DoctorWindowsHookRegistration {
                     $hookArgs = @($handler.args | ForEach-Object { [string]$_ })
                     if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
                         ($hookArgs -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
+                        if ($null -ne $handler.PSObject.Properties['shell']) {
+                            throw 'claudecode setup registered a shell field on the Windows native exec-form hook'
+                        }
                         $nativeHookFound = $true
                     }
                 }
