@@ -4,11 +4,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -146,7 +146,7 @@ func removeDirectoryAfterExit(path string, parentPID int) error {
 	script := "$target=$args[0]; $parent=[int]$args[1]; " +
 		"try { Wait-Process -Id $parent -Timeout 120 -ErrorAction SilentlyContinue } catch {}; " +
 		"if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue }"
-	cmd := exec.Command(powerShell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script, path, strconv.Itoa(parentPID))
+	cmd := newCapturedSetupCommand(context.Background(), powerShell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script, path, strconv.Itoa(parentPID))
 	if err := cmd.Start(); err != nil {
 		return err
 	}

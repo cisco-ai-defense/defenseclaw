@@ -6,6 +6,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -23,6 +24,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 //go:embed payload/*
@@ -38,7 +41,28 @@ const (
 	restartRequiredCode          = 3010
 	maxZipFiles                  = 100000
 	maxZipExpandedBytes          = int64(2 << 30)
+	setupControlCommandTimeout   = 2 * time.Minute
+	setupValidationTimeout       = 30 * time.Second
+	setupConfigurationTimeout    = 5 * time.Minute
+	setupMigrationTimeout        = 15 * time.Minute
 )
+
+func newCapturedSetupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return processutil.CommandContext(ctx, name, args...)
+}
+
+func runCapturedSetupCommand(timeout time.Duration, env []string, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := newCapturedSetupCommand(ctx, name, args...)
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return output, fmt.Errorf("command timed out after %s: %w", timeout, ctxErr)
+	}
+	return output, err
+}
 
 func gatewayAutoStartCommand(gatewayPath string) string {
 	return `"` + gatewayPath + `" start`
@@ -533,9 +557,7 @@ func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) 
 		"--data-dir", dataRoot,
 		"--json",
 	}
-	cmd := exec.Command(gatewayPath, args...)
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedSetupCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, args...)
 	if err != nil {
 		return fmt.Errorf("connector %s %s failed: %w: %s", connectorName, action, err, strings.TrimSpace(string(output)))
 	}
@@ -854,9 +876,8 @@ func validateInstall(root, version string) error {
 		return fmt.Errorf("managed Sigstore verifier is missing or invalid: %s", cosign)
 	}
 	launcher := filepath.Join(root, "bin", "defenseclaw.exe")
-	cmd := exec.Command(launcher, "--version")
-	cmd.Env = sanitizePythonEnv(os.Environ())
-	output, err := cmd.CombinedOutput()
+	childEnv := sanitizePythonEnv(os.Environ())
+	output, err := runCapturedSetupCommand(setupValidationTimeout, childEnv, launcher, "--version")
 	if err != nil {
 		return fmt.Errorf("managed CLI version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -864,8 +885,7 @@ func validateInstall(root, version string) error {
 		return fmt.Errorf("managed CLI version %q does not report packaged version %s", strings.TrimSpace(string(output)), version)
 	}
 	gateway := filepath.Join(root, "bin", "defenseclaw-gateway.exe")
-	cmd = exec.Command(gateway, "--version")
-	output, err = cmd.CombinedOutput()
+	output, err = runCapturedSetupCommand(setupValidationTimeout, childEnv, gateway, "--version")
 	if err != nil {
 		return fmt.Errorf("gateway version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -885,9 +905,7 @@ func runInitialConfiguration(root, dataRoot string, opts options) error {
 		"--profile", opts.Mode,
 		"--no-start-gateway", "--no-verify",
 	}
-	cmd := exec.Command(filepath.Join(root, "bin", "defenseclaw.exe"), args...)
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedSetupCommand(setupConfigurationTimeout, managedChildEnv(dataRoot), filepath.Join(root, "bin", "defenseclaw.exe"), args...)
 	if err != nil {
 		return fmt.Errorf("connector configuration failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -915,18 +933,24 @@ func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error 
 	if err != nil {
 		return err
 	}
-	cmd := newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVersion)
+	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
+	defer cancel()
+	cmd := newPackagedMigrationCommand(ctx, root, dataRoot, openClawRoot, fromVersion, toVersion)
 	output, err := cmd.CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("run packaged migrations timed out after %s: %w: %s", setupMigrationTimeout, ctxErr, strings.TrimSpace(string(output)))
+	}
 	if err != nil {
 		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
-func newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVersion string) *exec.Cmd {
+func newPackagedMigrationCommand(ctx context.Context, root, dataRoot, openClawRoot, fromVersion, toVersion string) *exec.Cmd {
 	python := filepath.Join(root, "runtime", "python", "python.exe")
 	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
-	cmd := exec.Command(
+	cmd := newCapturedSetupCommand(
+		ctx,
 		python,
 		"-I",
 		// Isolated mode implies -E, so Python intentionally ignores the
@@ -947,9 +971,7 @@ func newPackagedMigrationCommand(root, dataRoot, openClawRoot, fromVersion, toVe
 }
 
 func startGateway(gatewayPath, dataRoot string) error {
-	cmd := exec.Command(gatewayPath, "start")
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedSetupCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "start")
 	if err != nil {
 		return fmt.Errorf("start gateway: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -957,9 +979,7 @@ func startGateway(gatewayPath, dataRoot string) error {
 }
 
 func startWatchdog(gatewayPath, dataRoot string) error {
-	cmd := exec.Command(gatewayPath, "watchdog", "start")
-	cmd.Env = managedChildEnv(dataRoot)
-	output, err := cmd.CombinedOutput()
+	output, err := runCapturedSetupCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "watchdog", "start")
 	if err != nil {
 		return fmt.Errorf("start watchdog: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -980,18 +1000,14 @@ func stopOwnedServices(gatewayPath, dataRoot string) (serviceState, error) {
 	}
 	stopped := serviceState{}
 	if watchdogOwned {
-		cmd := exec.Command(gatewayPath, "watchdog", "stop")
-		cmd.Env = managedChildEnv(dataRoot)
-		output, stopErr := cmd.CombinedOutput()
+		output, stopErr := runCapturedSetupCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "watchdog", "stop")
 		if stopErr != nil {
 			return serviceState{}, fmt.Errorf("stop managed watchdog: %w: %s", stopErr, strings.TrimSpace(string(output)))
 		}
 		stopped.Watchdog = true
 	}
 	if gatewayOwned {
-		cmd := exec.Command(gatewayPath, "stop")
-		cmd.Env = managedChildEnv(dataRoot)
-		output, stopErr := cmd.CombinedOutput()
+		output, stopErr := runCapturedSetupCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "stop")
 		if stopErr != nil {
 			if stopped.Watchdog {
 				_ = startWatchdog(gatewayPath, dataRoot)
@@ -1038,9 +1054,7 @@ func verifySelectedServices(gatewayPath, dataRoot string, wanted serviceState) e
 		commands = append(commands, []string{"watchdog", "status"})
 	}
 	for _, args := range commands {
-		cmd := exec.Command(gatewayPath, args...)
-		cmd.Env = managedChildEnv(dataRoot)
-		output, err := cmd.CombinedOutput()
+		output, err := runCapturedSetupCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, args...)
 		if err != nil {
 			return fmt.Errorf("verify %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		}

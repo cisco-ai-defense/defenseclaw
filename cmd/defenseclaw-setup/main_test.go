@@ -5,6 +5,7 @@ package main
 
 import (
 	"archive/zip"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -354,7 +355,7 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 	root := t.TempDir()
 	dataRoot := filepath.Join(root, "profile", ".defenseclaw")
 	openClawRoot := filepath.Join(root, "profile", ".openclaw")
-	cmd := newPackagedMigrationCommand(root, dataRoot, openClawRoot, "0.7.0", "0.8.0")
+	cmd := newPackagedMigrationCommand(context.Background(), root, dataRoot, openClawRoot, "0.7.0", "0.8.0")
 
 	wantPrefix := []string{
 		filepath.Join(root, "runtime", "python", "python.exe"),
@@ -387,6 +388,24 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 		if !found {
 			t.Fatalf("packaged migration environment is missing %q", entry)
 		}
+	}
+}
+
+func TestRunCapturedSetupCommandTimesOut(t *testing.T) {
+	const helperEnv = "DEFENSECLAW_SETUP_TIMEOUT_TEST_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	env := append(os.Environ(), helperEnv+"=1")
+	started := time.Now()
+	_, err := runCapturedSetupCommand(100*time.Millisecond, env, os.Args[0], "-test.run=^TestRunCapturedSetupCommandTimesOut$")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runCapturedSetupCommand error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("timed-out setup command returned after %s, want a bounded wait", elapsed)
 	}
 }
 
