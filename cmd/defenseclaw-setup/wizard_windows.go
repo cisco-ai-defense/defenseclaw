@@ -338,7 +338,7 @@ func (w *setupWizard) createControls() error {
 	w.connector = w.control("COMBOBOX", "", wsChild|wsVisible|wsTabStop|cbsDropDownList|cbsHasStrings, 24, 198, 230, 160, idConnector)
 	w.modeLabel = w.control("STATIC", "Mode", wsChild|wsVisible|ssLeft, 294, 178, 180, 18, 0)
 	w.mode = w.control("COMBOBOX", "", wsChild|wsVisible|wsTabStop|cbsDropDownList|cbsHasStrings, 294, 198, 230, 160, idMode)
-	w.start = w.control("BUTTON", "Start gateway after install", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 260, 24, idStart)
+	w.start = w.control("BUTTON", "Start gateway now and at sign-in", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 300, 24, idStart)
 	w.deleteData = w.control("BUTTON", "Delete user data under %USERPROFILE%\\.defenseclaw", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 430, 24, idDeleteData)
 	w.progress = w.control("msctls_progress32", "", wsChild|pbsMarquee, 24, 286, 500, 20, idProgress)
 	w.primary = w.control("BUTTON", "", wsChild|wsVisible|wsTabStop|wsGroup|bsDefPushButton, 300, 334, 100, 30, idPrimary)
@@ -660,7 +660,7 @@ func optionsFromWizardSelections(opts options, connectorSelection, modeSelection
 	opts.Quiet = true
 	opts.Connector = connectorValue(connectorSelection)
 	opts.Mode = modeValue(modeSelection)
-	opts.StartGateway = startGateway
+	opts.StartGateway = startGateway || opts.Connector != "none"
 	opts.ConnectorSet = true
 	opts.ModeSet = true
 	opts.StartGatewaySet = true

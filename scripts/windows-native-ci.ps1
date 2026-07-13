@@ -1414,6 +1414,27 @@ function Assert-SetupInstallState(
     }
 }
 
+function Get-DefenseClawGatewayAutoStart {
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (-not (Test-Path -LiteralPath $runKey)) { return $null }
+    return (Get-ItemProperty -LiteralPath $runKey -Name 'DefenseClawGateway' `
+        -ErrorAction SilentlyContinue).DefenseClawGateway
+}
+
+function Assert-GatewayAutoStart([string]$Gateway) {
+    $actual = Get-DefenseClawGatewayAutoStart
+    $expected = '"' + $Gateway + '" start'
+    if (-not [string]::Equals([string]$actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "gateway logon registration mismatch: '$actual', expected '$expected'"
+    }
+}
+
+function Assert-NoGatewayAutoStart {
+    if ($null -ne (Get-DefenseClawGatewayAutoStart)) {
+        throw 'DefenseClaw gateway logon registration remains'
+    }
+}
+
 function Assert-WizardHookRegistration(
     [object]$Specification,
     [string]$DataRoot
@@ -1569,6 +1590,7 @@ function Invoke-WizardConfigureLaterAcceptance(
     }
     Assert-NoInstalledGatewayProcess $Gateway
     Assert-NoDefenseClawRegistration $ConnectorConfigPaths
+    Assert-NoGatewayAutoStart
 
     Invoke-WindowsNativeProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
         -TimeoutSeconds 600 -LogPath (Join-Path $Logs 'wizard-configure-later-uninstall.log') | Out-Null
@@ -1618,6 +1640,7 @@ function Invoke-WizardConnectorAcceptance(
         }
     }
     Assert-SetupInstallState $InstallRoot $ConnectorName $Mode
+    Assert-GatewayAutoStart $gateway
     $beforeState = Get-PackagedConnectorState $python `
         (Join-Path $Logs "wizard-$ConnectorName-before-state.log")
     Assert-WizardConnectorState $beforeState $ConnectorName $Mode
@@ -1656,6 +1679,7 @@ function Invoke-WizardConnectorAcceptance(
         throw "setup repair changed the selected $ConnectorName connector/mode/roster"
     }
     Assert-SetupInstallState $InstallRoot $ConnectorName $Mode
+    Assert-GatewayAutoStart $gateway
     Assert-WizardHookRegistration $specification $DataRoot
     Assert-WizardConnectorHealth $launcher $specification $Mode $Logs 'after-repair'
     if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) {
@@ -1676,18 +1700,8 @@ function Invoke-WizardConnectorAcceptance(
         $afterWatchdog.ProcessId
     )
 
-    Invoke-Installed $gateway @('watchdog', 'stop') @(0, 1) 60 `
-        (Join-Path $Logs "wizard-$ConnectorName-watchdog-stop.log") | Out-Null
-    Invoke-Installed $gateway @('stop') @(0, 1) 60 `
-        (Join-Path $Logs "wizard-$ConnectorName-gateway-stop.log") | Out-Null
-    Invoke-Installed $gateway @('connector', 'teardown', '--connector', $ConnectorName) `
-        @(0, 1) 120 (Join-Path $Logs "wizard-$ConnectorName-teardown.log") | Out-Null
-    Invoke-Installed $gateway @('connector', 'verify', '--connector', $ConnectorName) `
-        -Timeout 120 -Log (Join-Path $Logs "wizard-$ConnectorName-teardown-verify.log") | Out-Null
-    Assert-NoDefenseClawRegistration @(
-        $specification.ConfigPath,
-        $specification.OtherConfigPath
-    )
+    # The setup uninstaller must stop services and clean connector wiring
+    # itself. Pre-teardown here previously hid dangling hooks in production.
     Invoke-WindowsNativeProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
         -TimeoutSeconds 600 -LogPath (Join-Path $Logs "wizard-$ConnectorName-uninstall.log") | Out-Null
     if (Test-Path -LiteralPath $InstallRoot) {
@@ -1699,6 +1713,11 @@ function Invoke-WizardConnectorAcceptance(
     if (Test-Path -LiteralPath $ARPKey) {
         throw "wizard $ConnectorName uninstall left Installed Apps registration behind"
     }
+    Assert-NoDefenseClawRegistration @(
+        $specification.ConfigPath,
+        $specification.OtherConfigPath
+    )
+    Assert-NoGatewayAutoStart
     Assert-NoInstalledGatewayProcess $gateway
     if (-not [string]::Equals(
         $UserPathBefore,
@@ -1736,6 +1755,7 @@ function Invoke-SetupAcceptance {
     if (Test-Path -LiteralPath $installRoot) { throw "refusing to overwrite an existing current-user install: $installRoot" }
     if (Test-Path -LiteralPath $dataRoot) { throw "refusing to overwrite existing current-user data: $dataRoot" }
     if (Test-Path -LiteralPath $arpKey) { throw 'refusing to overwrite existing DefenseClaw Installed Apps registration' }
+    Assert-NoGatewayAutoStart
     $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
     $processPathBefore = $env:PATH
     $trustedPrefixesBefore = [Environment]::GetEnvironmentVariable('DEFENSECLAW_TRUSTED_BIN_PREFIXES')
@@ -1787,6 +1807,7 @@ function Invoke-SetupAcceptance {
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
             'MODE=observe', 'STARTGATEWAY=0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-install.log') | Out-Null
+        Assert-NoGatewayAutoStart
 
         foreach ($required in @(
             $launcher, $gateway, $hook, $python, $cosign,
@@ -1906,23 +1927,13 @@ function Invoke-SetupAcceptance {
             throw 'setup repair did not preserve user data'
         }
 
-        Invoke-Installed $gateway @('watchdog', 'stop') @(0, 1) 60 `
-            (Join-Path $logs 'setup-watchdog-stop-before-teardown.log') | Out-Null
-        Invoke-Installed $gateway @('stop') @(0, 1) 60 `
-            (Join-Path $logs 'setup-gateway-stop-before-teardown.log') | Out-Null
-        foreach ($configuredConnector in @('codex', 'claudecode')) {
-            Invoke-Installed $gateway @('connector', 'teardown', '--connector', $configuredConnector) `
-                @(0, 1) 120 (Join-Path $logs "setup-$configuredConnector-teardown.log") | Out-Null
-            Invoke-Installed $gateway @('connector', 'verify', '--connector', $configuredConnector) `
-                -Timeout 120 -Log (Join-Path $logs "setup-$configuredConnector-teardown-verify.log") | Out-Null
-        }
-        Assert-NoDefenseClawRegistration $connectorConfigPaths
-
         Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet') `
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
         if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
+        Assert-NoDefenseClawRegistration $connectorConfigPaths
+        Assert-NoGatewayAutoStart
         if (-not [string]::Equals($userPathBefore, [Environment]::GetEnvironmentVariable('Path', 'User'), [StringComparison]::Ordinal)) {
             throw 'setup uninstall did not restore the original user PATH exactly'
         }
@@ -1935,6 +1946,7 @@ function Invoke-SetupAcceptance {
             -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
+        Assert-NoGatewayAutoStart
     } finally {
         $env:PATH = $processPathBefore
         Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue

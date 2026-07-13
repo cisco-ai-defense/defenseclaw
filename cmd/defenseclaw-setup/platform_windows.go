@@ -424,6 +424,78 @@ func unregisterInstalledApp() error {
 	return err
 }
 
+const gatewayAutoStartValueName = "DefenseClawGateway"
+
+func gatewayAutoStartCommand(gatewayPath string) string {
+	return quote(gatewayPath) + " start"
+}
+
+func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
+	key, _, err := registry.CreateKey(
+		registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Run`,
+		registry.QUERY_VALUE|registry.SET_VALUE,
+	)
+	if err != nil {
+		return gatewayAutoStartSnapshot{}, false, err
+	}
+	defer key.Close()
+
+	previous, _, readErr := key.GetStringValue(gatewayAutoStartValueName)
+	snapshot := gatewayAutoStartSnapshot{Existed: readErr == nil, Value: previous}
+	if readErr != nil && readErr != registry.ErrNotExist {
+		return gatewayAutoStartSnapshot{}, false, readErr
+	}
+	want := ""
+	if enabled {
+		want = gatewayAutoStartCommand(gatewayPath)
+	}
+	ownedValue := gatewayAutoStartCommand(gatewayPath)
+	if snapshot.Existed && previous != ownedValue {
+		if enabled {
+			return snapshot, false, fmt.Errorf("refusing to replace unrelated %s startup registration", gatewayAutoStartValueName)
+		}
+		// Uninstall only removes the exact value this installation owns.
+		return snapshot, false, nil
+	}
+	if snapshot.Existed && previous == want {
+		return snapshot, false, nil
+	}
+	if want == "" {
+		if !snapshot.Existed {
+			return snapshot, false, nil
+		}
+		if err := key.DeleteValue(gatewayAutoStartValueName); err != nil && err != registry.ErrNotExist {
+			return snapshot, false, err
+		}
+		return snapshot, true, nil
+	}
+	if err := key.SetStringValue(gatewayAutoStartValueName, want); err != nil {
+		return snapshot, false, err
+	}
+	return snapshot, true, nil
+}
+
+func restoreGatewayAutoStart(snapshot gatewayAutoStartSnapshot) error {
+	key, _, err := registry.CreateKey(
+		registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Run`,
+		registry.SET_VALUE,
+	)
+	if err != nil {
+		return err
+	}
+	defer key.Close()
+	if snapshot.Existed {
+		return key.SetStringValue(gatewayAutoStartValueName, snapshot.Value)
+	}
+	err = key.DeleteValue(gatewayAutoStartValueName)
+	if err == registry.ErrNotExist {
+		return nil
+	}
+	return err
+}
+
 func estimateInstallKB(root string) uint32 {
 	var total uint64
 	_ = filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {

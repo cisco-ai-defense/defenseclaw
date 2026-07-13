@@ -170,7 +170,6 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		return 1, err
 	}
 	hadInstall := pathExists(installRoot)
-	hadData := pathExists(dataRoot)
 	if hadInstall && oldState == nil {
 		return 1, fmt.Errorf("refusing to replace an existing directory without valid DefenseClaw installer state: %s", installRoot)
 	}
@@ -185,7 +184,11 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 			opts.FromVersion = oldState.Version
 		}
 	}
-	configureFresh := !hadInstall && !hadData && opts.ConnectorSet && opts.Connector != "none"
+	// Every install/repair/upgrade refreshes the selected connector. Existing
+	// data is not evidence that hooks are configured: it also covers legacy
+	// installs and data-preserving uninstalls.
+	configureConnector := opts.Connector != "none"
+	upgradeFrom := opts.FromVersion
 	pathEntryOwned := oldState != nil && oldState.PathEntryOwned
 	pathSeparatorReused := oldState != nil && oldState.PathSeparatorReused
 
@@ -221,6 +224,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 			payload.Manifest.Version,
 		)
 	}
+	upgradeFrom = migrationSource(oldState, payload.Manifest.Version, upgradeFrom)
 
 	if err := stageInstallTree(payload, staging, installRoot, dataRoot, maintenancePath, pathEntryOwned, pathSeparatorReused, opts); err != nil {
 		return 1, err
@@ -245,9 +249,19 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	registrationChanged := false
 	maintenance := maintenancePublication{}
 	startedNew := serviceState{}
+	autoStartSnapshot := gatewayAutoStartSnapshot{}
+	autoStartChanged := false
+	previousConnectors := connectorsForNativeUninstall(oldState, dataRoot)
+	connectorConfigurationAttempted := false
 	tryRestore := func(cause error) (int, error) {
 		if startedNew.any() {
 			_, _ = stopOwnedServices(gatewayPath, dataRoot)
+		}
+		if autoStartChanged {
+			_ = restoreGatewayAutoStart(autoStartSnapshot)
+		}
+		if connectorConfigurationAttempted {
+			_ = runConnectorLifecycle(gatewayPath, dataRoot, opts.Connector, "teardown")
 		}
 		if registrationChanged {
 			if oldState != nil {
@@ -269,6 +283,9 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 		if _, err := os.Stat(backup); err == nil {
 			_ = renameInstallTree(backup, installRoot)
+		}
+		for _, connectorName := range previousConnectors {
+			_ = runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "reconcile")
 		}
 		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
 		if isSharingViolation(cause) {
@@ -294,12 +311,13 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err := validateInstall(installRoot, payload.Manifest.Version); err != nil {
 		return tryRestore(err)
 	}
-	if opts.Action == "upgrade" && opts.FromVersion != "" {
-		if err := runPackagedMigrations(installRoot, dataRoot, opts.FromVersion, payload.Manifest.Version); err != nil {
+	if upgradeFrom != "" && compareVersions(upgradeFrom, payload.Manifest.Version) < 0 {
+		if err := runPackagedMigrations(installRoot, dataRoot, upgradeFrom, payload.Manifest.Version); err != nil {
 			return tryRestore(err)
 		}
 	}
-	if configureFresh {
+	if configureConnector {
+		connectorConfigurationAttempted = true
 		if err := runInitialConfiguration(installRoot, dataRoot, opts); err != nil {
 			return tryRestore(err)
 		}
@@ -323,6 +341,10 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		return tryRestore(err)
 	}
 	wanted := requestedServices(opts, restartOld)
+	autoStartSnapshot, autoStartChanged, err = configureGatewayAutoStart(gatewayPath, wanted.Gateway)
+	if err != nil {
+		return tryRestore(err)
+	}
 	startedNew, err = startSelectedServices(gatewayPath, dataRoot, wanted)
 	if err != nil {
 		return tryRestore(err)
@@ -338,7 +360,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	}
 	if !opts.Quiet {
 		fmt.Println("DefenseClaw installed successfully.")
-		fmt.Printf("Open a new terminal and run: %s\n", filepath.Join(installRoot, "bin", "defenseclaw.exe"))
+		fmt.Println("Open a new terminal and run: defenseclaw")
 	}
 	return 0, nil
 }
@@ -362,15 +384,48 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	connectors := connectorsForNativeUninstall(oldState, dataRoot)
+	tornDown := make([]string, 0, len(connectors))
+	reconcileTornDown := func() {
+		for _, connectorName := range tornDown {
+			_ = runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "reconcile")
+		}
+	}
+	for _, connectorName := range connectors {
+		if err := runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "teardown"); err != nil {
+			reconcileTornDown()
+			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
+			return 1, err
+		}
+		tornDown = append(tornDown, connectorName)
+		if err := runConnectorLifecycle(gatewayPath, dataRoot, connectorName, "verify"); err != nil {
+			reconcileTornDown()
+			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
+			return 1, err
+		}
+	}
+	autoStartSnapshot, autoStartChanged, err := configureGatewayAutoStart(gatewayPath, false)
+	if err != nil {
+		reconcileTornDown()
+		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
+		return 1, err
+	}
+	rollbackUninstall := func() {
+		if autoStartChanged {
+			_ = restoreGatewayAutoStart(autoStartSnapshot)
+		}
+		reconcileTornDown()
+		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
+	}
 	if pathExists(installRoot) {
 		if err := ensureTreeReplaceable(installRoot); err != nil {
-			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
+			rollbackUninstall()
 			return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry: %w", err)
 		}
 		trash := installRoot + ".uninstall." + strconv.Itoa(os.Getpid())
 		_ = removeAllSafe(trash, filepath.Dir(installRoot))
 		if err := renameInstallTree(installRoot, trash); err != nil {
-			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
+			rollbackUninstall()
 			if isTransientInstallTreeRenameError(err) {
 				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
 			}
@@ -378,7 +433,7 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 		if err := removeAllSafe(trash, filepath.Dir(installRoot)); err != nil {
 			_ = renameInstallTree(trash, installRoot)
-			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
+			rollbackUninstall()
 			if isSharingViolation(err) {
 				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
 			}
@@ -436,9 +491,56 @@ func (state serviceState) any() bool {
 
 func requestedServices(opts options, previous serviceState) serviceState {
 	return serviceState{
-		Gateway:  opts.StartGateway || previous.Gateway,
+		// A configured hook connector requires the local gateway after every
+		// logon. "none" remains the explicit opt-out for a CLI-only install.
+		Gateway:  opts.StartGateway || previous.Gateway || opts.Connector != "none",
 		Watchdog: previous.Watchdog,
 	}
+}
+
+func connectorsForNativeUninstall(state *installState, dataRoot string) []string {
+	seen := map[string]bool{}
+	connectors := make([]string, 0, 2)
+	add := func(name string) {
+		if (name == "codex" || name == "claudecode") && !seen[name] {
+			seen[name] = true
+			connectors = append(connectors, name)
+		}
+	}
+	if state != nil {
+		add(state.Connector)
+	}
+	if pathExists(filepath.Join(dataRoot, "codex_config_backup.json")) {
+		add("codex")
+	}
+	if pathExists(filepath.Join(dataRoot, "claudecode_backup.json")) {
+		add("claudecode")
+	}
+	return connectors
+}
+
+func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) error {
+	if !pathExists(gatewayPath) {
+		return fmt.Errorf("connector %s %s requires the installed gateway binary", connectorName, action)
+	}
+	args := []string{
+		"connector", action,
+		"--connector", connectorName,
+		"--data-dir", dataRoot,
+		"--json",
+	}
+	cmd := exec.Command(gatewayPath, args...)
+	cmd.Env = managedChildEnv(dataRoot)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("connector %s %s failed: %w: %s", connectorName, action, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+type gatewayAutoStartSnapshot struct {
+	Existed bool
+	Value   string
 }
 
 func pathExists(path string) bool {
@@ -483,6 +585,16 @@ func compareVersions(a, b string) int {
 		}
 	}
 	return 0
+}
+
+func migrationSource(state *installState, packagedVersion, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if state != nil && compareVersions(state.Version, packagedVersion) < 0 {
+		return state.Version
+	}
+	return ""
 }
 
 func loadExistingInstallState(installRoot string) (*installState, error) {

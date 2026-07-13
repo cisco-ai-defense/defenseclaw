@@ -17,9 +17,15 @@ func isReparsePoint(_ string) (bool, error)              { return false, nil }
 func addUserPath(_ string) (bool, bool, error) {
 	return false, false, errors.New("Windows-only operation")
 }
-func removeUserPath(_ string, _ bool) error              { return errors.New("Windows-only operation") }
-func registerInstalledApp(_, _, _ string, _ bool) error  { return errors.New("Windows-only operation") }
-func unregisterInstalledApp() error                      { return errors.New("Windows-only operation") }
+func removeUserPath(_ string, _ bool) error             { return errors.New("Windows-only operation") }
+func registerInstalledApp(_, _, _ string, _ bool) error { return errors.New("Windows-only operation") }
+func unregisterInstalledApp() error                     { return errors.New("Windows-only operation") }
+func configureGatewayAutoStart(_ string, _ bool) (gatewayAutoStartSnapshot, bool, error) {
+	return gatewayAutoStartSnapshot{}, false, errors.New("Windows-only operation")
+}
+func restoreGatewayAutoStart(_ gatewayAutoStartSnapshot) error {
+	return errors.New("Windows-only operation")
+}
 func defaultInstallRoot() (string, error)                { return "", errors.New("Windows-only operation") }
 func defaultDataRoot() (string, error)                   { return "", errors.New("Windows-only operation") }
 func defaultOpenClawRoot() (string, error)               { return "", errors.New("Windows-only operation") }

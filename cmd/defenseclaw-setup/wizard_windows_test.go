@@ -126,7 +126,8 @@ func TestOptionsFromWizardSelectionsMatrix(t *testing.T) {
 					if opts.Action != "install" || !opts.Quiet {
 						t.Fatalf("wizard options lost action/quiet state: %+v", opts)
 					}
-					if opts.Connector != connector || opts.Mode != mode || opts.StartGateway != startGateway {
+					wantGateway := startGateway || connector != "none"
+					if opts.Connector != connector || opts.Mode != mode || opts.StartGateway != wantGateway {
 						t.Fatalf("wizard options mapped incorrectly: %+v", opts)
 					}
 					if !opts.ConnectorSet || !opts.ModeSet || !opts.StartGatewaySet {

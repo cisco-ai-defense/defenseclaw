@@ -193,6 +193,50 @@ func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
 	}
 }
 
+func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
+	for _, connectorName := range []string{"codex", "claudecode"} {
+		wanted := requestedServices(options{Connector: connectorName}, serviceState{})
+		if !wanted.Gateway {
+			t.Fatalf("connector %s did not require gateway startup", connectorName)
+		}
+	}
+	if wanted := requestedServices(options{Connector: "none"}, serviceState{}); wanted.Gateway {
+		t.Fatal("CLI-only install unexpectedly required gateway startup")
+	}
+}
+
+func TestOrdinaryInstallOfNewerPackageRunsMigrations(t *testing.T) {
+	state := &installState{Version: "0.8.3"}
+	if got := migrationSource(state, "0.8.4", ""); got != "0.8.3" {
+		t.Fatalf("migration source = %q, want installed version", got)
+	}
+	if got := migrationSource(state, "0.8.3", ""); got != "" {
+		t.Fatalf("equal-version repair unexpectedly selected migrations from %q", got)
+	}
+	if got := migrationSource(state, "0.8.4", "0.7.9"); got != "0.7.9" {
+		t.Fatalf("explicit migration source = %q", got)
+	}
+}
+
+func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
+	dataRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataRoot, "claudecode_backup.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := connectorsForNativeUninstall(&installState{Connector: "codex"}, dataRoot)
+	want := []string{"codex", "claudecode"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("connectors = %v, want %v", got, want)
+	}
+}
+
+func TestGatewayAutoStartCommandQuotesPath(t *testing.T) {
+	path := `C:\Users\Jane Doe\DefenseClaw\defenseclaw-gateway.exe`
+	if got, want := gatewayAutoStartCommand(path), `"C:\Users\Jane Doe\DefenseClaw\defenseclaw-gateway.exe" start`; got != want {
+		t.Fatalf("auto-start command = %q, want %q", got, want)
+	}
+}
+
 func TestParseArgsRejectsMachineScope(t *testing.T) {
 	if _, err := parseArgs([]string{"INSTALLSCOPE=machine"}); err == nil {
 		t.Fatal("machine-wide install should require a separate enterprise MSI path")
