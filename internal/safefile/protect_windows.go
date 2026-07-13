@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -38,7 +39,7 @@ func protectDirectory(path string) error {
 }
 
 func withLockedDirectory(path string, write func() error) error {
-	ptr, err := windows.UTF16PtrFromString(path)
+	ptr, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return err
 	}
@@ -62,7 +63,11 @@ func withLockedDirectory(path string, write func() error) error {
 }
 
 func windowsPathOwnedByCurrentUser(path string) (bool, error) {
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		return false, err
 	}
@@ -87,7 +92,15 @@ func preserveExistingProtection(source, destination string) error {
 	if err != nil || !safe {
 		return err
 	}
-	sd, err := windows.GetNamedSecurityInfo(source, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	extendedSource, err := winpath.Extended(source)
+	if err != nil {
+		return err
+	}
+	extendedDestination, err := winpath.Extended(destination)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extendedSource, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
@@ -96,14 +109,14 @@ func preserveExistingProtection(source, destination string) error {
 		return err
 	}
 	return windows.SetNamedSecurityInfo(
-		destination, windows.SE_FILE_OBJECT,
+		extendedDestination, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, dacl, nil,
 	)
 }
 
 func rejectReparsePath(path string) error {
-	ptr, err := windows.UTF16PtrFromString(path)
+	ptr, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return err
 	}
@@ -204,7 +217,7 @@ func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting 
 	targetCreated := false
 	for index := len(missing) - 1; index >= 0; index-- {
 		directory := missing[index]
-		ptr, err := windows.UTF16PtrFromString(directory)
+		ptr, err := winpath.UTF16Ptr(directory)
 		if err != nil {
 			return false, err
 		}
@@ -233,6 +246,10 @@ func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting 
 }
 
 func setPrivateDACL(path string, inherit bool) error {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return err
@@ -263,7 +280,7 @@ func setPrivateDACL(path string, inherit bool) error {
 		return err
 	}
 	if err := windows.SetNamedSecurityInfo(
-		path,
+		extended,
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION,
 		user.User.Sid,
@@ -274,7 +291,7 @@ func setPrivateDACL(path string, inherit bool) error {
 		return err
 	}
 	return windows.SetNamedSecurityInfo(
-		path,
+		extended,
 		windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil,
@@ -285,8 +302,12 @@ func setPrivateDACL(path string, inherit bool) error {
 }
 
 func privateDACLIsSafe(path string) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
 	sd, err := windows.GetNamedSecurityInfo(
-		path, windows.SE_FILE_OBJECT,
+		extended, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
@@ -320,6 +341,13 @@ func privateDACLIsSafe(path string) (bool, error) {
 		}
 		if ace == nil {
 			continue
+		}
+		// Object, callback, conditional, and other extended ACE layouts do not
+		// share ACCESS_ALLOWED_ACE's SID offset. Treat them as unsafe instead of
+		// mis-parsing or silently skipping a potentially writable principal.
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE &&
+			ace.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE {
+			return false, nil
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE &&

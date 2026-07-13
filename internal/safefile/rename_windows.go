@@ -7,9 +7,9 @@ package safefile
 
 import (
 	"errors"
-	"os"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -19,7 +19,23 @@ const (
 )
 
 func replaceFile(source, destination string) error {
-	return replaceFileWith(source, destination, os.Rename, time.Sleep)
+	return replaceFileWith(source, destination, replaceFileOnce, time.Sleep)
+}
+
+func replaceFileOnce(source, destination string) error {
+	from, err := winpath.UTF16Ptr(source)
+	if err != nil {
+		return err
+	}
+	to, err := winpath.UTF16Ptr(destination)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(
+		from,
+		to,
+		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
+	)
 }
 
 func replaceFileWith(
