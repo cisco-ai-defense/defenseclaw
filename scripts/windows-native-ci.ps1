@@ -1868,6 +1868,15 @@ function Invoke-SetupAcceptance {
             'MODE=observe', 'STARTGATEWAY=0'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-install.log') | Out-Null
         Assert-NoGatewayAutoStart
+        $managedBin = Join-Path $installRoot 'bin'
+        $persistedUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $firstUserPathEntry = @($persistedUserPath -split ';')[0].Trim(' ', '"')
+        if (-not ([IO.Path]::GetFullPath($firstUserPathEntry)).Equals(
+            [IO.Path]::GetFullPath($managedBin),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "setup did not give the managed launcher user-PATH precedence: $persistedUserPath"
+        }
 
         foreach ($required in @(
             $launcher, $gateway, $hook, $python, $cosign,

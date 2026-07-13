@@ -262,7 +262,7 @@ func addUserPath(commandDir string) (bool, bool, error) {
 		updateCurrentProcessPath(commandDir, true)
 		return false, false, nil
 	}
-	next, reusedSeparator := appendUserPathEntry(current, commandDir)
+	next, reusedSeparator := prependUserPathEntry(current, commandDir)
 	if err := setRegistryPath(key, next, valueType); err != nil {
 		return false, false, err
 	}
@@ -271,15 +271,16 @@ func addUserPath(commandDir string) (bool, bool, error) {
 	return true, reusedSeparator, nil
 }
 
-func appendUserPathEntry(current, commandDir string) (string, bool) {
-	// Reuse a trailing separator instead of creating an empty PATH component,
-	// which Windows may interpret as the current working directory.
-	reusedSeparator := strings.HasSuffix(current, ";")
+func prependUserPathEntry(current, commandDir string) (string, bool) {
+	// Put the managed launcher before legacy user-scoped DefenseClaw installs.
+	// Reuse a leading separator instead of adding a second separator; removal
+	// can then restore the operator's original PATH byte for byte.
+	reusedSeparator := strings.HasPrefix(current, ";")
 	separator := ";"
 	if current == "" || reusedSeparator {
 		separator = ""
 	}
-	return current + separator + commandDir, reusedSeparator
+	return commandDir + separator + current, reusedSeparator
 }
 
 func removeUserPath(commandDir string, reusedSeparator bool) error {
@@ -315,8 +316,13 @@ func removeUserPathEntry(current, commandDir string, reusedSeparator bool) strin
 		}
 		if reusedSeparator && !ownedEntrySeen {
 			ownedEntrySeen = true
-			if index == len(entries)-1 {
-				// The separator preceded the owned entry before it was appended.
+			if index == 0 {
+				// Current installs prepend the owned entry and may reuse an
+				// operator-supplied leading separator.
+				next = append(next, "")
+			} else if index == len(entries)-1 {
+				// Backwards compatibility for pre-prepend installs that reused a
+				// trailing separator when they appended the owned entry.
 				next = append(next, "")
 			}
 		}

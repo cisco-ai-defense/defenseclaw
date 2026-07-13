@@ -8,6 +8,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,10 +17,10 @@ func TestOwnedUserPathRoundTripPreservesExactSeparators(t *testing.T) {
 	for _, before := range []string{
 		"",
 		`C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`,
-		`C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;`,
-		`C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;;`,
+		`;C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`,
+		`;;C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`,
 	} {
-		installed, reusedSeparator := appendUserPathEntry(before, commandDir)
+		installed, reusedSeparator := prependUserPathEntry(before, commandDir)
 		got := removeUserPathEntry(installed, commandDir, reusedSeparator)
 		if got != before {
 			t.Fatalf("PATH round trip for %q = %q, want exact original", before, got)
@@ -29,12 +30,37 @@ func TestOwnedUserPathRoundTripPreservesExactSeparators(t *testing.T) {
 
 func TestOwnedUserPathRemovalPreservesLaterEntries(t *testing.T) {
 	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
-	before := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;`
-	installed, reusedSeparator := appendUserPathEntry(before, commandDir)
+	before := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`
+	installed, reusedSeparator := prependUserPathEntry(before, commandDir)
 	current := installed + `;C:\Users\runneradmin\bin`
 	want := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;C:\Users\runneradmin\bin`
 	if got := removeUserPathEntry(current, commandDir, reusedSeparator); got != want {
 		t.Fatalf("PATH removal after a later user edit = %q, want %q", got, want)
+	}
+}
+
+func TestLegacyAppendedUserPathRemovalPreservesTrailingSeparator(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	before := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;`
+	legacyInstalled := before + commandDir
+
+	if got := removeUserPathEntry(legacyInstalled, commandDir, true); got != before {
+		t.Fatalf("legacy PATH round trip = %q, want %q", got, before)
+	}
+}
+
+func TestManagedUserPathPrecedesLegacyDefenseClawBin(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	legacyDir := `C:\Users\runneradmin\.local\bin`
+	before := legacyDir + `;C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`
+
+	installed, reusedSeparator := prependUserPathEntry(before, commandDir)
+	entries := strings.Split(installed, ";")
+	if len(entries) == 0 || !samePathEntry(entries[0], commandDir) {
+		t.Fatalf("managed PATH entry did not win precedence: %q", installed)
+	}
+	if got := removeUserPathEntry(installed, commandDir, reusedSeparator); got != before {
+		t.Fatalf("PATH round trip = %q, want %q", got, before)
 	}
 }
 
