@@ -153,6 +153,30 @@ try {
     Assert-True ($nativeWorkflowText -notmatch 'continue-on-error') 'required Windows jobs are not advisory'
     Assert-True ($nativeWorkflowText -notmatch 'shell:\s*bash') 'dedicated Windows workflow never selects Bash'
     Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
+    Assert-True ([regex]::Matches(
+        $nativeWorkflowText,
+        '\$stateBase = Join-Path \$env:LOCALAPPDATA ''DefenseClawNativeCI'''
+    ).Count -eq 6) 'every native Windows job roots mutable state below per-user LOCALAPPDATA'
+    Assert-True ([regex]::Matches(
+        $nativeWorkflowText,
+        '"DC_WINDOWS_NATIVE_BASE_ROOT=\$stateBase" >> \$env:GITHUB_ENV'
+    ).Count -eq 6) 'every native Windows job exports the cleanup-approved state base'
+    Assert-True ([regex]::Matches(
+        $nativeWorkflowText,
+        '"DC_STATE_ROOT=\$\(Join-Path \$stateBase '
+    ).Count -eq 6 -and
+        $nativeWorkflowText -notmatch '"DC_STATE_ROOT=\$\(Join-Path \$env:RUNNER_TEMP') `
+        'native runtime state never inherits the hosted runner temp volume owner'
+    Assert-True ([regex]::Matches(
+        $nativeWorkflowText,
+        '"DC_DIAGNOSTICS=\$\(Join-Path \$env:RUNNER_TEMP '
+    ).Count -eq 6 -and [regex]::Matches(
+        $nativeWorkflowText,
+        '"DC_ARTIFACT_ROOT=\$\(Join-Path \$env:RUNNER_TEMP '
+    ).Count -eq 3) 'artifacts and diagnostics remain under RUNNER_TEMP'
+    Assert-True ($nativeHarnessText -match '\$approvedStateBase' -and
+        $nativeHarnessText -match 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
+        'interactive setup cleanup accepts only the pre-validated runner temp or explicit state base'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
     foreach ($testName in @(
         'TestWriteWindowsRemovesInheritedUnauthorizedWriter',

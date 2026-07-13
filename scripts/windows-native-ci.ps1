@@ -130,7 +130,7 @@ function Assert-SafeStateRoot([string]$Path) {
         )
     if (-not $equalsExplicitBase -and
         -not ($allowedRoots | Where-Object { Test-PathWithin $full $_ } | Select-Object -First 1)) {
-        throw "StateRoot must be a child of RUNNER_TEMP or the system temp directory: $full"
+        throw "StateRoot must be a child of RUNNER_TEMP, DC_WINDOWS_NATIVE_BASE_ROOT, or the system temp directory: $full"
     }
     foreach ($protected in @($WorkspaceRoot, $env:USERPROFILE, [IO.Path]::GetTempPath())) {
         if (-not [string]::IsNullOrWhiteSpace($protected) -and
@@ -1758,6 +1758,7 @@ function Invoke-SetupAcceptance {
     if (-not $AllowCurrentUserSetupAcceptance -and $env:GITHUB_ACTIONS -ne 'true') {
         throw 'setup-acceptance mutates the current Windows user. Run only on a disposable CI user, or pass -AllowCurrentUserSetupAcceptance explicitly.'
     }
+    $approvedStateBase = [Environment]::GetEnvironmentVariable('DC_WINDOWS_NATIVE_BASE_ROOT')
     $root = Assert-SafeStateRoot $StateRoot
     $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
     $setup = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) 'DefenseClawSetup-x64.exe'
@@ -1792,9 +1793,18 @@ function Invoke-SetupAcceptance {
         $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
     $fixtureBin = ''
     if ($disposableGithubRunner) {
-        if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or
-            -not (Test-PathWithin $root $env:RUNNER_TEMP)) {
-            throw 'interactive setup acceptance requires StateRoot below RUNNER_TEMP'
+        $belowRunnerTemp = -not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -and
+            (Test-PathWithin $root $env:RUNNER_TEMP)
+        $belowApprovedBase = $false
+        if (-not [string]::IsNullOrWhiteSpace($approvedStateBase)) {
+            $approvedFull = [IO.Path]::GetFullPath($approvedStateBase).TrimEnd('\')
+            $belowApprovedBase = $root.Equals(
+                $approvedFull,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or (Test-PathWithin $root $approvedFull)
+        }
+        if (-not $belowRunnerTemp -and -not $belowApprovedBase) {
+            throw 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT'
         }
         Assert-NoDefenseClawRegistration $connectorConfigPaths
         Set-CurrentUserAsDefaultOwner
