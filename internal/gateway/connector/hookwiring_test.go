@@ -742,6 +742,10 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 
 	table := buildCodexHooksTable(configPath, cmd)
+	wantCommand := cmd
+	if runtime.GOOS == "windows" {
+		wantCommand = windowsCodexHookCommand()
+	}
 
 	for _, group := range codexHookGroups {
 		raw, ok := table[group.eventType].([]interface{})
@@ -751,8 +755,8 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 		mg := raw[0].(map[string]interface{})
 		hooks := mg["hooks"].([]interface{})
 		h0 := hooks[0].(map[string]interface{})
-		if got := h0["command"].(string); got != cmd {
-			t.Errorf("event %s command = %q, want %q", group.eventType, got, cmd)
+		if got := h0["command"].(string); got != wantCommand {
+			t.Errorf("event %s command = %q, want %q", group.eventType, got, wantCommand)
 		}
 		if runtime.GOOS == "windows" {
 			if got := h0["command_windows"].(string); got != windowsCodexHookCommand() {
@@ -973,11 +977,6 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			lower := strings.ToLower(text)
 			forbiddenDependencies := []string{".sh", `"bash"`, "curl", "jq"}
-			if connectorName == "codex" {
-				// Codex keeps the portable command for non-Windows clients and
-				// selects command_windows on Windows.
-				forbiddenDependencies = []string{`"bash"`, "curl", "jq"}
-			}
 			for _, forbidden := range forbiddenDependencies {
 				if strings.Contains(lower, forbidden) {
 					t.Errorf("config contains forbidden Windows hook dependency %q:\n%s", forbidden, text)

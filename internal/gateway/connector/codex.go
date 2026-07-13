@@ -814,6 +814,13 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 func buildCodexHooksTable(configPath, hookCommand string) map[string]interface{} {
 	out := map[string]interface{}{}
 	_ = configPath // retained for source-compatible migration tests
+	if runtime.GOOS == "windows" {
+		// Codex prefers command_windows on native Windows, but command remains
+		// part of the persisted registration and is inspected by lifecycle and
+		// compatibility tooling. Keep both fields native so a fallback can never
+		// select the Unix hook script on a Windows installation.
+		hookCommand = windowsCodexHookCommand()
+	}
 	for _, group := range codexHookGroups {
 		handler := map[string]interface{}{
 			"type":    "command",
