@@ -581,6 +581,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # This checkout is the v8 hard-cut source (epoch 2/runtime 8), while
+          # the unsigned local-layout smoke intentionally exercises the last
+          # schema-1 installer contract. Materialize the exact legacy source
+          # identity in this disposable fixture before stamping every version
+          # source; the production stamp helper and validator remain strict.
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("release/source-install-identity.json")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          expected = {
+              "runtime_config_version",
+              "schema_version",
+              "source_install_compatibility_epoch",
+              "source_release",
+          }
+          if not isinstance(payload, dict) or set(payload) != expected or payload.get("schema_version") != 1:
+              raise SystemExit("unsupported source-install identity fixture")
+          payload["source_install_compatibility_epoch"] = 1
+          payload["runtime_config_version"] = 7
+          path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
           scripts/stamp-version.sh 0.8.3
           python3 scripts/source_release_identity.py check --expected-release 0.8.3
 
