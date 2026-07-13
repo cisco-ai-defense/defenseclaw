@@ -2878,6 +2878,34 @@ func TestCodex_Setup_HonorsCodexHome(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Setup_HonorsClaudeConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	claudeConfigDir := filepath.Join(dir, "custom-claude-config")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = ""
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	settingsPath := filepath.Join(claudeConfigDir, "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read CLAUDE_CONFIG_DIR settings: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("parse CLAUDE_CONFIG_DIR settings: %v", err)
+	}
+	if _, ok := parsed["hooks"].(map[string]interface{}); !ok {
+		t.Fatalf("CLAUDE_CONFIG_DIR settings have no hooks object: %s", raw)
+	}
+}
+
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
 // regression test for the codex/claude-code observability-only
 // architecture. Codex is hook-only as of PR #265 — Setup must

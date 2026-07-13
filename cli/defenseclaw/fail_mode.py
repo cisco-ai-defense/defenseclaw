@@ -177,7 +177,7 @@ def _read_baked_hook_mode(path: Path) -> str | None:
 
 
 def _claude_registration_state() -> tuple[str | None, bool]:
-    data = _read_small_file(Path.home() / ".claude" / "settings.json")
+    data = _read_small_file(Path(connector_config_files("claudecode")[0]))
     if data is None:
         return None, False
     try:
@@ -201,7 +201,7 @@ def _claude_registration_state() -> tuple[str | None, bool]:
 
 
 def _codex_registration_current() -> bool:
-    data = _read_small_file(Path.home() / ".codex" / "config.toml")
+    data = _read_small_file(Path(connector_config_files("codex")[0]))
     if data is None:
         return False
     return "[hooks]" in data and "defenseclaw" in data.lower()
@@ -339,10 +339,10 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     """Verify the live Unix agent registration points at this data dir's hook."""
 
     if connector == "claudecode":
-        registration_path = Path.home() / ".claude" / "settings.json"
+        registration_path = Path(connector_config_files("claudecode")[0])
         script_name = "claude-code-hook.sh"
     else:
-        registration_path = Path.home() / ".codex" / "config.toml"
+        registration_path = Path(connector_config_files("codex")[0])
         script_name = "codex-hook.sh"
     registration = _read_small_file(registration_path)
     if registration is None:
@@ -488,7 +488,7 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
         if name == "claudecode":
             paths.update(
                 {
-                    Path.home() / ".claude" / "settings.json",
+                    Path(connector_config_files("claudecode")[0]),
                     hook_dir / "claude-code-hook.sh",
                     Path(cfg.data_dir) / "claudecode_backup.json",
                     Path(cfg.data_dir) / "connector_backups" / "claudecode" / "settings.json.json",
@@ -497,7 +497,7 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
         elif name == "codex":
             paths.update(
                 {
-                    Path.home() / ".codex" / "config.toml",
+                    Path(connector_config_files("codex")[0]),
                     hook_dir / "codex-hook.sh",
                     Path(cfg.data_dir) / "codex_config_backup.json",
                     Path(cfg.data_dir) / "codex_backup.json",

@@ -316,6 +316,34 @@ def test_each_connector_tracks_meaningful_config_separately_from_installation(
     assert ad._path_key(signal.config_path) == ad._path_key(str(config))
 
 
+@pytest.mark.parametrize(
+    ("connector", "variable", "file_name"),
+    [
+        ("codex", "CODEX_HOME", "config.toml"),
+        ("claudecode", "CLAUDE_CONFIG_DIR", "settings.json"),
+    ],
+)
+def test_codex_and_claude_discovery_honor_client_config_homes(
+    monkeypatch,
+    tmp_path,
+    connector,
+    variable,
+    file_name,
+):
+    _pin_home(monkeypatch, tmp_path / "default-home")
+    configured_home = tmp_path / f"custom-{connector}"
+    monkeypatch.setenv(variable, str(configured_home))
+    config = configured_home / file_name
+    config.parent.mkdir(parents=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent(connector)
+
+    assert signal.configured is True
+    assert signal.config_path == str(config)
+
+
 def test_hermes_legacy_windows_config_is_not_current_configuration_evidence(
     monkeypatch,
     tmp_path,

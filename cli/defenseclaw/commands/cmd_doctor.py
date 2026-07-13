@@ -43,6 +43,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_paths import (
+    connector_config_files,
     hermes_config_path,
     hermes_legacy_config_path,
     omnigent_config_path,
@@ -1378,11 +1379,7 @@ def _windows_native_hook_check(
     """
     paths = _hook_health_paths_from_lock(cfg, connector)
     if config_path is None:
-        config_path = (
-            paths[0]
-            if paths
-            else os.path.expanduser("~/.codex/config.toml" if connector == "codex" else "~/.claude/settings.json")
-        )
+        config_path = paths[0] if paths else connector_config_files(connector)[0]
     if install_root is None:
         install_root = _packaged_windows_install_root(getattr(cfg, "data_dir", "") or "")
     if install_root is None:
@@ -1419,7 +1416,7 @@ def _check_claudecode_hooks(
             pathext=pathext,
         )
         return
-    settings_path = os.path.expanduser("~/.claude/settings.json")
+    settings_path = connector_config_files("claudecode")[0]
     if not os.path.isfile(settings_path):
         _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
         return

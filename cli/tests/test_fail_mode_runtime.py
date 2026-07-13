@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -35,6 +36,8 @@ def _runtime_cfg(tmp_path: Path, modes: dict[str, str]) -> tuple[SimpleNamespace
     (data_dir / "hooks").mkdir(parents=True)
     (home / ".claude").mkdir(parents=True)
     (home / ".codex").mkdir(parents=True)
+    os.environ["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+    os.environ["CODEX_HOME"] = str(home / ".codex")
 
     guardrail = dcconfig.GuardrailConfig()
     guardrail.enabled = True

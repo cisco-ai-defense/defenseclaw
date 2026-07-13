@@ -45,6 +45,7 @@ from defenseclaw.config import config_path_for_data_dir, default_data_path
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
     _expand,
+    connector_config_files,
     hermes_config_path,
     omnigent_config_path,
 )
@@ -192,9 +193,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
 
 
 _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
-    _windows_default_trusted_bin_prefixes()
-    if os.name == "nt"
-    else _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
+    _windows_default_trusted_bin_prefixes() if os.name == "nt" else _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
 )
 
 
@@ -398,11 +397,7 @@ def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
     and their effective observe/action modes.
     """
     try:
-        active = {
-            _normalize_connector(str(name))
-            for name in cfg.active_connectors()
-            if str(name).strip()
-        }
+        active = {_normalize_connector(str(name)) for name in cfg.active_connectors() if str(name).strip()}
     except (AttributeError, TypeError):
         active = set()
 
@@ -467,7 +462,16 @@ def _scan_agent(
 ) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
-    if name == "hermes":
+    if name == "codex":
+        config_candidates = (connector_config_files("codex")[0],)
+    elif name == "claudecode":
+        config_candidates = (
+            connector_config_files("claudecode")[0],
+            "~/.claude.json",
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+        )
+    elif name == "hermes":
         config_candidates = (hermes_config_path(),)
     elif name == "omnigent":
         config_path = omnigent_config_path()
@@ -748,11 +752,7 @@ def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, in
             # GetExplicitEntriesFromAcl normally returns SID trustees.  An
             # unknown form with write rights is retained as an empty identity
             # and rejected conservatively by the caller.
-            sid = (
-                _sid_string(entry.Trustee.ptstrName)
-                if entry.Trustee.TrusteeForm == 0
-                else ""
-            )
+            sid = _sid_string(entry.Trustee.ptstrName) if entry.Trustee.TrusteeForm == 0 else ""
             entries.append(
                 (
                     int(entry.grfAccessPermissions),
@@ -904,11 +904,7 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
         return resolved, f"cannot stat path ({exc})"
     if not os.path.isdir(resolved):
         return resolved, "path is not a directory"
-    mode_err = (
-        _windows_acl_write_error(resolved)
-        if os.name == "nt"
-        else _trusted_prefix_dir_mode_error(st)
-    )
+    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(st)
     if mode_err:
         return resolved, mode_err
     return resolved, None
@@ -1272,9 +1268,7 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
     roaming_app_data = os.environ.get("APPDATA", "")
     home = os.path.expanduser("~")
     program_roots = [
-        root
-        for root in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", ""))
-        if root
+        root for root in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")) if root
     ]
 
     prefixes: list[str] = []
@@ -1442,9 +1436,7 @@ def _display_path(path: str) -> str:
 
 def _render_plain_table(disc: AgentDiscovery) -> str:
     lines = ["Agent discovery (cached)" if disc.cache_hit else "Agent discovery"]
-    lines.append(
-        "connector | installed | configured | active/mode | config | binary | version/error"
-    )
+    lines.append("connector | installed | configured | active/mode | config | binary | version/error")
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
         lines.append(

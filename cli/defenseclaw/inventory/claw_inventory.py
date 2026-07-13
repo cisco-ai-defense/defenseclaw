@@ -1557,9 +1557,9 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     home = os.path.expanduser("~")
     name = (connector or "").lower()
     if name == "claudecode":
-        return _agents_from_md_dir(os.path.join(home, ".claude", "agents"))
+        return _agents_from_md_dir(os.path.join(connector_paths.connector_home(name), "agents"))
     if name == "codex":
-        return _agents_from_md_dir(os.path.join(home, ".codex", "agents"))
+        return _agents_from_md_dir(os.path.join(connector_paths.connector_home(name), "agents"))
     if name == "zeptoclaw":
         return _agents_from_zeptoclaw_json(
             os.path.join(home, ".zeptoclaw", "agents.json"),
@@ -1594,11 +1594,11 @@ def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     name = (connector or "").lower()
     if name == "claudecode":
         return _tools_from_claude_settings(
-            os.path.join(home, ".claude", "settings.json"),
+            os.path.join(connector_paths.connector_home(name), "settings.json"),
         )
     if name == "codex":
         return _tools_from_codex_config(
-            os.path.join(home, ".codex", "config.toml"),
+            os.path.join(connector_paths.connector_home(name), "config.toml"),
         )
     if name == "zeptoclaw":
         return _tools_from_zeptoclaw_json(
@@ -1657,11 +1657,12 @@ def _memory_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     name = (connector or "").lower()
     candidates: list[str] = []
     if name == "claudecode":
-        candidates = [os.path.join(home, ".claude", "memory")]
+        candidates = [os.path.join(connector_paths.connector_home(name), "memory")]
     elif name == "codex":
+        connector_home = connector_paths.connector_home(name)
         candidates = [
-            os.path.join(home, ".codex", "memory"),
-            os.path.join(home, ".codex", "history"),
+            os.path.join(connector_home, "memory"),
+            os.path.join(connector_home, "history"),
         ]
     elif name == "zeptoclaw":
         candidates = [os.path.join(home, ".zeptoclaw", "memory")]
@@ -2136,12 +2137,14 @@ def _build_aibom_from_filesystem(
         result = results.get(cat_key)
         if result is None or result.items or result.error is not None:
             continue
-        limitations.append({
-            "connector": connector,
-            "category": cat_key,
-            "status": InventoryCapabilityStatus.UNSUPPORTED,
-            "reason": note,
-        })
+        limitations.append(
+            {
+                "connector": connector,
+                "category": cat_key,
+                "status": InventoryCapabilityStatus.UNSUPPORTED,
+                "reason": note,
+            }
+        )
 
     out: dict[str, Any] = {
         "version": INVENTORY_VERSION,
