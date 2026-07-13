@@ -80,6 +80,12 @@ def test_windows_installer_smoke_never_stubs_schema2_provenance() -> None:
     job = match.group(0)
 
     assert "must never stub provenance verification" in job
+    legacy_epoch = job.index('payload["source_install_compatibility_epoch"] = 1')
+    legacy_runtime = job.index('payload["runtime_config_version"] = 7')
+    stamp = job.index("scripts/stamp-version.sh 0.8.3")
+    assert legacy_epoch < stamp
+    assert legacy_runtime < stamp
+    assert 'payload.get("schema_version") != 1' in job
     assert "scripts/stamp-version.sh 0.8.3" in job
     assert "scripts/source_release_identity.py check --expected-release 0.8.3" in job
     assert "main.version=0.8.3" in job
