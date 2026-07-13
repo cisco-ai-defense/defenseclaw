@@ -426,10 +426,6 @@ func unregisterInstalledApp() error {
 
 const gatewayAutoStartValueName = "DefenseClawGateway"
 
-func gatewayAutoStartCommand(gatewayPath string) string {
-	return quote(gatewayPath) + " start"
-}
-
 func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
 	key, _, err := registry.CreateKey(
 		registry.CURRENT_USER,

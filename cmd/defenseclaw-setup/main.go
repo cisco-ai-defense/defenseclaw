@@ -40,6 +40,10 @@ const (
 	maxZipExpandedBytes          = int64(2 << 30)
 )
 
+func gatewayAutoStartCommand(gatewayPath string) string {
+	return `"` + gatewayPath + `" start`
+}
+
 type options struct {
 	Action          string
 	Quiet           bool
