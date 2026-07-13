@@ -849,6 +849,51 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 	}
 }
 
+func TestRemoveOwnedHooksPreservesForeignHandlersInSharedMatcherGroup(t *testing.T) {
+	const hooksDir = "/home/u/.defenseclaw/hooks"
+	const foreignCommand = "/usr/bin/user-shared-hook"
+	mixed := map[string]interface{}{
+		"matcher":       "*",
+		"user_metadata": "preserve-me",
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": hooksDir + "/codex-hook.sh"},
+			map[string]interface{}{"type": "command", "command": foreignCommand, "user_option": true},
+		},
+	}
+	empty := map[string]interface{}{"matcher": "Empty", "hooks": []interface{}{}}
+	result := removeOwnedHooks([]interface{}{
+		mixed,
+		"preserve-malformed-entry",
+		empty,
+		map[string]interface{}{"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": hooksDir + "/inspect-hook.sh"},
+		}},
+	}, hooksDir)
+
+	if len(result) != 3 {
+		t.Fatalf("matcher-group count=%d, want 3: %#v", len(result), result)
+	}
+	group := result[0].(map[string]interface{})
+	if group["matcher"] != "*" || group["user_metadata"] != "preserve-me" {
+		t.Fatalf("shared matcher-group metadata was not preserved: %#v", group)
+	}
+	handlers := group["hooks"].([]interface{})
+	if len(handlers) != 1 {
+		t.Fatalf("handler count=%d, want 1: %#v", len(handlers), handlers)
+	}
+	handler := handlers[0].(map[string]interface{})
+	if handler["command"] != foreignCommand || handler["user_option"] != true {
+		t.Fatalf("foreign handler was not preserved intact: %#v", handler)
+	}
+	if result[1] != "preserve-malformed-entry" {
+		t.Fatalf("malformed outer entry was not preserved: %#v", result[1])
+	}
+	preservedEmpty := result[2].(map[string]interface{})
+	if preservedEmpty["matcher"] != "Empty" || len(preservedEmpty["hooks"].([]interface{})) != 0 {
+		t.Fatalf("originally empty matcher group was not preserved: %#v", result[2])
+	}
+}
+
 func TestCodexNativeNotifyOwnership(t *testing.T) {
 	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 	opts := SetupOpts{DataDir: `C:\Users\me\.defenseclaw`}

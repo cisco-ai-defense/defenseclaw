@@ -904,28 +904,35 @@ func isOwnedHook(hookEntry interface{}, hooksDir string) bool {
 	}
 	hooksList, _ := m["hooks"].([]interface{})
 	for _, h := range hooksList {
-		hm, _ := h.(map[string]interface{})
-		cmd, _ := hm["command"].(string)
-		if cmd == "" {
-			continue
-		}
-		if hooksDir != "" && strings.HasPrefix(cmd, hooksDir+"/") {
-			return true
-		}
-		// Native Go hook commands (Windows) are not a file path under hooksDir
-		// and carry no on-disk marker, so recognize them by their entrypoint
-		// invocation fragment.
-		if isNativeHookCommand(cmd) {
-			return true
-		}
-		if isClaudeCodeNativeExecHook(hm) {
-			return true
-		}
-		if scriptHasMarker(cmd) {
+		if isOwnedHookHandler(h, hooksDir) {
 			return true
 		}
 	}
 	return false
+}
+
+func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
+	hook, ok := rawHook.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	command, _ := hook["command"].(string)
+	if command == "" {
+		return false
+	}
+	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
+		return true
+	}
+	// Native Go hook commands (Windows) are not a file path under hooksDir
+	// and carry no on-disk marker, so recognize them by their entrypoint
+	// invocation fragment.
+	if isNativeHookCommand(command) {
+		return true
+	}
+	if isClaudeCodeNativeExecHook(hook) {
+		return true
+	}
+	return scriptHasMarker(command)
 }
 
 // isClaudeCodeNativeExecHook recognizes the shell-free Windows hook shape.
@@ -984,21 +991,12 @@ func scriptHasMarker(path string) bool {
 	return strings.Contains(string(buf[:n]), hookMarker)
 }
 
-// removeOwnedHooks removes DefenseClaw-owned entries from a hook event's list
-// and returns the compacted slice.
+// removeOwnedHooks removes DefenseClaw-owned handlers from a hook event's
+// matcher groups and returns the compacted slice.
 func removeOwnedHooks(hookEventValue interface{}, hooksDir string) []interface{} {
-	list, ok := hookEventValue.([]interface{})
-	if !ok {
-		return nil
-	}
-	n := 0
-	for _, entry := range list {
-		if !isOwnedHook(entry, hooksDir) {
-			list[n] = entry
-			n++
-		}
-	}
-	return list[:n]
+	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
+		return isOwnedHookHandler(rawHook, hooksDir)
+	})
 }
 
 // removeOwnedClaudeCodeHooks extends the generic marker/path recognizer with
@@ -1009,36 +1007,72 @@ func removeOwnedClaudeCodeHooks(
 	hooksDir string,
 	managedCommands []string,
 ) []interface{} {
+	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
+		return isOwnedHookHandler(rawHook, hooksDir) ||
+			hookUsesExactCommand(rawHook, managedCommands) ||
+			hookUsesLegacyClaudeCodeNativeCommand(rawHook)
+	})
+}
+
+// removeMatchingHookHandlers surgically filters handlers inside each matcher
+// group. A matcher group can be shared by DefenseClaw and user-managed hooks;
+// dropping the outer group when one owned handler matches would delete those
+// unrelated hooks and their matcher metadata.
+func removeMatchingHookHandlers(
+	hookEventValue interface{},
+	shouldRemove func(interface{}) bool,
+) []interface{} {
 	list, ok := hookEventValue.([]interface{})
 	if !ok {
 		return nil
 	}
-	n := 0
-	for _, entry := range list {
-		if !isOwnedHook(entry, hooksDir) &&
-			!hookEntryUsesExactCommand(entry, managedCommands) &&
-			!hookEntryUsesLegacyClaudeCodeNativeCommand(entry) {
-			list[n] = entry
-			n++
+	filteredEntries := make([]interface{}, 0, len(list))
+	for _, rawEntry := range list {
+		entry, ok := rawEntry.(map[string]interface{})
+		if !ok {
+			filteredEntries = append(filteredEntries, rawEntry)
+			continue
 		}
+		hooks, ok := entry["hooks"].([]interface{})
+		if !ok {
+			filteredEntries = append(filteredEntries, rawEntry)
+			continue
+		}
+
+		keptHooks := make([]interface{}, 0, len(hooks))
+		removed := false
+		for _, rawHook := range hooks {
+			if shouldRemove(rawHook) {
+				removed = true
+				continue
+			}
+			keptHooks = append(keptHooks, rawHook)
+		}
+		if !removed {
+			filteredEntries = append(filteredEntries, rawEntry)
+			continue
+		}
+		if len(keptHooks) == 0 {
+			continue
+		}
+
+		filteredEntry := make(map[string]interface{}, len(entry))
+		for key, value := range entry {
+			filteredEntry[key] = value
+		}
+		filteredEntry["hooks"] = keptHooks
+		filteredEntries = append(filteredEntries, filteredEntry)
 	}
-	return list[:n]
+	return filteredEntries
 }
 
-func hookEntryUsesLegacyClaudeCodeNativeCommand(hookEntry interface{}) bool {
-	entry, ok := hookEntry.(map[string]interface{})
+func hookUsesLegacyClaudeCodeNativeCommand(rawHook interface{}) bool {
+	hook, ok := rawHook.(map[string]interface{})
 	if !ok {
 		return false
 	}
-	hooks, _ := entry["hooks"].([]interface{})
-	for _, rawHook := range hooks {
-		hook, _ := rawHook.(map[string]interface{})
-		command, _ := hook["command"].(string)
-		if isLegacyClaudeCodeNativeHookCommand(command) {
-			return true
-		}
-	}
-	return false
+	command, _ := hook["command"].(string)
+	return isLegacyClaudeCodeNativeHookCommand(command)
 }
 
 // isLegacyClaudeCodeNativeHookCommand recognizes the exact native command
@@ -1087,22 +1121,18 @@ func isLegacyClaudeCodeNativeHookCommand(command string) bool {
 	return base == "defenseclaw-gateway.exe" || base == "defenseclaw-gateway"
 }
 
-func hookEntryUsesExactCommand(hookEntry interface{}, commands []string) bool {
-	entry, ok := hookEntry.(map[string]interface{})
+func hookUsesExactCommand(rawHook interface{}, commands []string) bool {
+	hook, ok := rawHook.(map[string]interface{})
 	if !ok || len(commands) == 0 {
 		return false
 	}
-	hooks, _ := entry["hooks"].([]interface{})
-	for _, rawHook := range hooks {
-		hook, _ := rawHook.(map[string]interface{})
-		command, _ := hook["command"].(string)
-		if command == "" {
-			continue
-		}
-		for _, managed := range commands {
-			if managed != "" && command == managed {
-				return true
-			}
+	command, _ := hook["command"].(string)
+	if command == "" {
+		return false
+	}
+	for _, managed := range commands {
+		if managed != "" && command == managed {
+			return true
 		}
 	}
 	return false

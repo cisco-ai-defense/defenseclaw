@@ -1414,6 +1414,91 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 	}
 }
 
+func TestClaudeCode_SetupRefreshPreservesForeignHandlerInManagedMatcherGroup(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	sharedGroup := entries[0].(map[string]interface{})
+	sharedGroup["user_metadata"] = "preserve-me"
+	foreignCommand := "/usr/bin/user-shared-hook"
+	foreignHandler := map[string]interface{}{
+		"type":        "command",
+		"command":     foreignCommand,
+		"timeout":     17,
+		"user_option": "preserve-me-too",
+	}
+	sharedHandlers := sharedGroup["hooks"].([]interface{})
+	sharedGroup["hooks"] = append(sharedHandlers, foreignHandler)
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal mixed settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
+		t.Fatalf("write mixed settings: %v", err)
+	}
+
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("refresh Setup: %v", err)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read refreshed settings: %v", err)
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse refreshed settings: %v", err)
+	}
+	hooks = settings["hooks"].(map[string]interface{})
+	entries = hooks["PreToolUse"].([]interface{})
+	foreignCount := 0
+	managedCount := 0
+	for _, rawEntry := range entries {
+		entry := rawEntry.(map[string]interface{})
+		if isOwnedHook(entry, filepath.Join(dir, "hooks")) {
+			managedCount++
+		}
+		for _, rawHandler := range entry["hooks"].([]interface{}) {
+			handler := rawHandler.(map[string]interface{})
+			if handler["command"] == foreignCommand {
+				foreignCount++
+				if entry["matcher"] != "*" || entry["user_metadata"] != "preserve-me" {
+					t.Fatalf("foreign matcher-group metadata was not preserved: %#v", entry)
+				}
+				if handler["user_option"] != "preserve-me-too" {
+					t.Fatalf("foreign handler metadata was not preserved: %#v", handler)
+				}
+			}
+		}
+	}
+	if foreignCount != 1 {
+		t.Fatalf("foreign handler count=%d, want 1; entries=%#v", foreignCount, entries)
+	}
+	if managedCount != 1 {
+		t.Fatalf("managed matcher-group count=%d, want 1; entries=%#v", managedCount, entries)
+	}
+}
+
 func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("canonical native install command is Windows-specific")
@@ -2139,12 +2224,18 @@ func TestClaudeCode_Teardown_UsesTrackedManagedCommandsDuringSurgicalCleanup(t *
 	settings := map[string]interface{}{
 		"hooks": map[string]interface{}{
 			"PreToolUse": []interface{}{
-				map[string]interface{}{"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": managedCommand},
-				}},
-				map[string]interface{}{"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": foreignCommand},
-				}},
+				map[string]interface{}{
+					"matcher":       "*",
+					"user_metadata": "preserve-me",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": managedCommand},
+						map[string]interface{}{
+							"type":        "command",
+							"command":     foreignCommand,
+							"user_option": "preserve-me-too",
+						},
+					},
+				},
 			},
 		},
 	}
@@ -2180,6 +2271,30 @@ func TestClaudeCode_Teardown_UsesTrackedManagedCommandsDuringSurgicalCleanup(t *
 	}
 	if !strings.Contains(string(restored), foreignCommand) {
 		t.Fatalf("foreign hook was removed:\n%s", restored)
+	}
+	var restoredSettings map[string]interface{}
+	if err := json.Unmarshal(restored, &restoredSettings); err != nil {
+		t.Fatalf("parse restored settings: %v", err)
+	}
+	restoredHooks := restoredSettings["hooks"].(map[string]interface{})
+	entries := restoredHooks["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("restored matcher-group count=%d, want 1: %#v", len(entries), entries)
+	}
+	entry := entries[0].(map[string]interface{})
+	if entry["matcher"] != "*" || entry["user_metadata"] != "preserve-me" {
+		t.Fatalf("foreign matcher-group metadata was not preserved: %#v", entry)
+	}
+	handlers := entry["hooks"].([]interface{})
+	if len(handlers) != 1 {
+		t.Fatalf("restored handler count=%d, want 1: %#v", len(handlers), handlers)
+	}
+	handler := handlers[0].(map[string]interface{})
+	if handler["command"] != foreignCommand || handler["user_option"] != "preserve-me-too" {
+		t.Fatalf("foreign handler metadata was not preserved: %#v", handler)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after surgical teardown: %v", err)
 	}
 }
 
