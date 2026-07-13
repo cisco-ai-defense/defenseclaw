@@ -516,7 +516,16 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 	// verdict. Done here (rather than in each call site) so the clamp is
 	// applied uniformly across regex-only / regex+judge / judge-first
 	// strategies and across pre-call, post-call, and mid-stream paths.
-	clampPromptDirectionVerdict(verdict, direction)
+	//
+	// The clamp is a UX contract for LOCAL detection: a prompt-direction
+	// block is demoted to alert so a user's prompt is never hard-blocked
+	// on a local heuristic. It must NOT apply to managed_enterprise: there
+	// the AID cloud verdict is the sole, authoritative decision-maker, so
+	// demoting a non-CRITICAL AID block to alert would leave HIGH/MEDIUM
+	// AID blocks non-enforcing while local enforcement is already off.
+	if !g.managedMode {
+		clampPromptDirectionVerdict(verdict, direction)
+	}
 
 	if endSpan != nil {
 		var action, sev, reason string

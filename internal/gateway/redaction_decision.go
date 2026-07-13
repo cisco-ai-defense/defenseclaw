@@ -73,9 +73,23 @@ func withRedactionDecision(ctx context.Context, redactionEnabled *bool) context.
 	ctx = context.WithValue(ctx, redactionDecisionKey{}, redactionEnabled)
 	policy := redaction.SinkPolicyDefault
 	if managedEnterpriseActive.Load() {
-		policy = redaction.SinkPolicyForDirective(redactionEnabled)
+		policy = managedSinkPolicy(redactionEnabled)
 	}
 	return redaction.WithSinkPolicy(ctx, policy)
+}
+
+// managedSinkPolicy resolves a cloud directive to a fail-closed SinkPolicy
+// for managed_enterprise: an explicit false => Raw (cloud says store raw),
+// while explicit true OR an ABSENT/nil directive => Redact. Treating a
+// missing directive as Redact is the managed "fail closed" contract: a
+// failed/absent inspect directive must never let a persistent sink emit raw
+// post-inspection content under a local DisableAll opt-out. Only callers
+// that have already gated on managed_enterprise should use this.
+func managedSinkPolicy(directive *bool) redaction.SinkPolicy {
+	if directive != nil && !*directive {
+		return redaction.SinkPolicyRaw
+	}
+	return redaction.SinkPolicyRedact
 }
 
 // redactionDecisionFromContext returns the per-inspection cloud
@@ -109,8 +123,10 @@ func notificationSinkPolicy(policy []redaction.SinkPolicy) redaction.SinkPolicy 
 //     explicit event directive wins over the ctx-resolved policy; a
 //     present directive maps to SinkPolicyRaw (cloud=false => store raw)
 //     or SinkPolicyRedact (cloud=true => force redact, overriding a
-//     local DisableAll). Absent directive falls back to the ctx-resolved
-//     policy (SinkPolicyDefault when none was stamped).
+//     local DisableAll). An absent event directive honors an explicitly
+//     ctx-stamped policy, but FAILS CLOSED to SinkPolicyRedact when no
+//     policy was stamped (e.g. a detached/async sink with no inspect
+//     directive) so missing directives redact by default.
 //
 // eventDirective is the decision stamped on the event itself (used by
 // the async/mirror sinks that don't share the request ctx); it takes
@@ -120,7 +136,13 @@ func sinkPolicyFor(ctx context.Context, eventDirective *bool) redaction.SinkPoli
 		return redaction.SinkPolicyDefault
 	}
 	if eventDirective != nil {
-		return redaction.SinkPolicyForDirective(eventDirective)
+		return managedSinkPolicy(eventDirective)
 	}
-	return redaction.SinkPolicyFromContext(ctx)
+	// No event directive: prefer an explicitly stamped ctx policy
+	// (withRedactionDecision already resolved it), else fail closed so a
+	// managed sink never silently emits raw under a local DisableAll.
+	if p := redaction.SinkPolicyFromContext(ctx); p != redaction.SinkPolicyDefault {
+		return p
+	}
+	return redaction.SinkPolicyRedact
 }

@@ -408,7 +408,13 @@ type ContinuousDiscoveryService struct {
 	// this package does not depend on gateway/connector or the config
 	// surfaces those inventories are built from. Nil is the normal
 	// non-managed / library-import state and is a clean no-op.
-	managedInventoryEmit func(context.Context)
+	//
+	// managedInventoryEmitMu guards the callback: config reload writes
+	// it (SetManagedInventoryEmitHook) concurrently with the scan
+	// fanout reading it in emitGatewayEvents, so both accesses take the
+	// lock to avoid a data race and a torn/stale callback invocation.
+	managedInventoryEmitMu sync.RWMutex
+	managedInventoryEmit   func(context.Context)
 
 	mu              sync.RWMutex
 	last            AIDiscoveryReport
@@ -2392,7 +2398,9 @@ func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context
 	if s == nil {
 		return
 	}
+	s.managedInventoryEmitMu.Lock()
 	s.managedInventoryEmit = fn
+	s.managedInventoryEmitMu.Unlock()
 }
 
 func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot) {
@@ -2403,8 +2411,15 @@ func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, repo
 	// ship the connector / MCP endpoint inventory on the same scan
 	// cadence so AI Defense sees a fresh full picture each cycle. The
 	// hook is a no-op outside managed mode (never installed there).
-	if s.opts.ManagedEnterprise && s.managedInventoryEmit != nil {
-		defer s.managedInventoryEmit(ctx)
+	// Snapshot the callback under the lock so a concurrent config
+	// reload can't swap it mid-read.
+	if s.opts.ManagedEnterprise {
+		s.managedInventoryEmitMu.RLock()
+		emit := s.managedInventoryEmit
+		s.managedInventoryEmitMu.RUnlock()
+		if emit != nil {
+			defer emit(ctx)
+		}
 	}
 	opts := s.opts
 	// snap.Scores is non-nil only when DisableRedaction is true

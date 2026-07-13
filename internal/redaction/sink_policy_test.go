@@ -149,6 +149,8 @@ func TestSinkPolicyForDirective(t *testing.T) {
 }
 
 func TestSinkPolicyContextRoundTrip(t *testing.T) {
+	//nolint:staticcheck // SA1012: intentionally passing a nil context to
+	// verify the documented nil-context fallback returns SinkPolicyDefault.
 	if got := SinkPolicyFromContext(nil); got != SinkPolicyDefault {
 		t.Fatalf("nil ctx = %v, want SinkPolicyDefault", got)
 	}

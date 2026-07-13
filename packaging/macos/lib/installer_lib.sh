@@ -284,7 +284,13 @@ resolve_aid_endpoint() {
   local env="$1"
   local override="$2"
   if [[ -n "${override}" ]]; then
-    local re='^https?://[^[:space:]"]+$'
+    # Require a non-empty URL authority (host) right after "//": the
+    # first authority char must not be a delimiter (/ ? #), so hostless
+    # values like "https:///" or "https://?tenant=x" are rejected. The
+    # whole value must also be free of whitespace, double quotes, and
+    # backslashes — it is rendered into a double-quoted YAML scalar where
+    # a backslash would be an escape sequence and a quote would break out.
+    local re='^https?://[^[:space:]/?#"\]+[^[:space:]"\]*$'
     [[ "${override}" =~ ${re} ]] || return 2
     printf '%s\n' "${override%/}"
     return 0

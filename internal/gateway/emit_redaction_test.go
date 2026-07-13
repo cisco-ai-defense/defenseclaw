@@ -111,11 +111,13 @@ func TestEmitEvent_CloudDirectiveControlsReason(t *testing.T) {
 		}
 	})
 
-	t.Run("managed + no directive falls back to global", func(t *testing.T) {
+	t.Run("managed + no directive fails closed (redacts even under DisableAll)", func(t *testing.T) {
 		events := withCapturedEvents(t)
 		SetManagedEnterpriseActive(true)
 		t.Cleanup(func() { SetManagedEnterpriseActive(false) })
-		redaction.SetDisableAll(false)
+		// DisableAll on: a missing/failed cloud directive must still
+		// redact in managed mode (fail closed), NOT fall through to raw.
+		redaction.SetDisableAll(true)
 		t.Cleanup(func() { redaction.SetDisableAll(false) })
 
 		emitTestVerdict(context.Background(), nil)
@@ -124,8 +126,8 @@ func TestEmitEvent_CloudDirectiveControlsReason(t *testing.T) {
 		if !ok {
 			t.Fatal("no verdict event captured")
 		}
-		if got != baselineRedacted {
-			t.Fatalf("managed no-directive: got %q, want baseline redacted %q", got, baselineRedacted)
+		if got == rawReason || !strings.Contains(got, "<redacted") {
+			t.Fatalf("managed no-directive under DisableAll: got %q, want redacted (fail closed)", got)
 		}
 	})
 }

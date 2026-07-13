@@ -212,6 +212,20 @@ t_resolve_aid_endpoint_precedence() {
   assert_status "${rc}" 2 "override with whitespace -> rc 2"
   rc=0; resolve_aid_endpoint prod 'https://a".com'   >/dev/null 2>&1 || rc=$?
   assert_status "${rc}" 2 "override with double-quote -> rc 2"
+  rc=0; resolve_aid_endpoint prod 'https://a\.com'   >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with backslash -> rc 2"
+
+  # Hostless overrides must be rejected: without an authority the rendered
+  # cisco_ai_defense.endpoint has no usable host and inspection/export
+  # silently fails at runtime.
+  rc=0; resolve_aid_endpoint prod "https:///"          >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with empty authority -> rc 2"
+  rc=0; resolve_aid_endpoint prod "https:///api"       >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with empty authority + path -> rc 2"
+  rc=0; resolve_aid_endpoint prod "https://?tenant=x"  >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with query but no host -> rc 2"
+  rc=0; resolve_aid_endpoint prod "https://#frag"      >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "override with fragment but no host -> rc 2"
 
   # No override + unknown env -> rc 1 (delegates to aid_endpoint_for_env).
   rc=0; resolve_aid_endpoint staging "" >/dev/null 2>&1 || rc=$?

@@ -4513,9 +4513,15 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		_ = p.store.LogEvent(evt)
 	}
 
-	if p.logger != nil {
-		_ = p.logger.LogActionWithCorrelationConnector(string(audit.ActionGuardrailVerdict), model, details, "", requestID, p.connectorName())
-	}
+	// NB: the canonical guardrail-verdict row is emitted above via
+	// LogActionCtx, which threads the request ctx (and thus the
+	// per-inspection redaction SinkPolicy stamped by
+	// withRedactionDecision) into the logger sink chain. The former
+	// legacy LogActionWithCorrelationConnector emission here was a
+	// duplicate that dropped both the extra envelope dimensions and the
+	// redaction directive, so it emitted raw details under the default
+	// sink policy. It is intentionally removed to keep this path in
+	// lockstep with api.go and the store twin above.
 	_ = persistAuditEvent(p.logger, p.store, audit.Event{
 		Action:           string(audit.ActionGuardrailInspection),
 		Target:           model,

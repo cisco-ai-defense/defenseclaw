@@ -90,23 +90,23 @@
     "agent_inventory":     { "$ref": "#/$defs/AgentInventoryPayload" }
   },
   "oneOf": [
-    { "required": ["verdict"] },
-    { "required": ["judge"] },
-    { "required": ["lifecycle"] },
-    { "required": ["error"] },
-    { "required": ["diagnostic"] },
-    { "required": ["scan"] },
-    { "required": ["scan_finding"] },
-    { "required": ["activity"] },
-    { "required": ["egress"] },
-    { "required": ["llm_prompt"] },
-    { "required": ["llm_response"] },
-    { "required": ["tool_invocation"] },
-    { "required": ["hook_decision"] },
-    { "required": ["ai_discovery"] },
-    { "required": ["connector_inventory"] },
-    { "required": ["mcp_inventory"] },
-    { "required": ["agent_inventory"] }
+    { "properties": { "event_type": { "const": "verdict" } },         "required": ["event_type", "verdict"] },
+    { "properties": { "event_type": { "const": "judge" } },           "required": ["event_type", "judge"] },
+    { "properties": { "event_type": { "const": "lifecycle" } },       "required": ["event_type", "lifecycle"] },
+    { "properties": { "event_type": { "const": "error" } },           "required": ["event_type", "error"] },
+    { "properties": { "event_type": { "const": "diagnostic" } },      "required": ["event_type", "diagnostic"] },
+    { "properties": { "event_type": { "const": "scan" } },            "required": ["event_type", "scan"] },
+    { "properties": { "event_type": { "const": "scan_finding" } },    "required": ["event_type", "scan_finding"] },
+    { "properties": { "event_type": { "const": "activity" } },        "required": ["event_type", "activity"] },
+    { "properties": { "event_type": { "const": "egress" } },          "required": ["event_type", "egress"] },
+    { "properties": { "event_type": { "const": "llm_prompt" } },      "required": ["event_type", "llm_prompt"] },
+    { "properties": { "event_type": { "const": "llm_response" } },    "required": ["event_type", "llm_response"] },
+    { "properties": { "event_type": { "const": "tool_invocation" } }, "required": ["event_type", "tool_invocation"] },
+    { "properties": { "event_type": { "const": "hook_decision" } },   "required": ["event_type", "hook_decision"] },
+    { "properties": { "event_type": { "const": "ai_discovery" } },    "required": ["event_type", "ai_discovery"] },
+    { "properties": { "event_type": { "const": "connector_inventory" } }, "required": ["event_type", "connector_inventory"] },
+    { "properties": { "event_type": { "const": "mcp_inventory" } },       "required": ["event_type", "mcp_inventory"] },
+    { "properties": { "event_type": { "const": "agent_inventory" } },     "required": ["event_type", "agent_inventory"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -396,7 +396,7 @@
               "name":               { "type": "string", "maxLength": 256 },
               "transport":          { "type": ["string", "null"], "maxLength": 64 },
               "command":            { "type": ["string", "null"], "maxLength": 256, "pattern": "^[^/\\\\]*$" },
-              "url_host":           { "type": ["string", "null"], "maxLength": 256 },
+              "url_host":           { "type": ["string", "null"], "maxLength": 256, "pattern": "^[^\\s/@?#\\\\]*$" },
               "auth_provider_type": { "type": ["string", "null"], "maxLength": 64 },
               "disabled":           { "type": ["boolean", "null"] }
             }
@@ -412,7 +412,7 @@
         "device_id":  { "type": ["string", "null"], "maxLength": 128 },
         "hostname":   { "type": ["string", "null"], "maxLength": 256 },
         "source":     { "type": ["string", "null"], "maxLength": 64 },
-        "scanned_at": { "type": ["string", "null"], "maxLength": 64 },
+        "scanned_at": { "type": ["string", "null"], "format": "date-time", "maxLength": 64 },
         "count":      { "type": "integer", "minimum": 0 },
         "installed":  { "type": "integer", "minimum": 0 },
         "agents": {

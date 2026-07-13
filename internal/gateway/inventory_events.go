@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -127,10 +129,18 @@ func emitMCPInventory(ctx context.Context, cfg *config.Config, deviceID, hostnam
 	}
 	servers, err := cfg.ReadMCPServers()
 	if err != nil {
-		// Missing / unreadable MCP config is a normal steady state
-		// (no servers configured). Still emit an empty inventory so
-		// AI Defense can distinguish "scanned, none present" from
-		// "never reported".
+		// A confirmed-absent config (no MCP file) is the normal steady
+		// state — emit an empty inventory so AI Defense can distinguish
+		// "scanned, none present" from "never reported". A parse /
+		// permission / transient I/O failure, however, must NOT be
+		// laundered into an authoritative empty snapshot: that would
+		// wrongly retract every previously reported server. Record the
+		// failure and skip this cycle instead.
+		if !errors.Is(err, fs.ErrNotExist) {
+			emitDiagnostic(ctx, "mcp_inventory", "skipped: MCP config read failed",
+				map[string]string{"error": err.Error()})
+			return
+		}
 		servers = nil
 	}
 	items := make([]gatewaylog.MCPInventoryItem, 0, len(servers))

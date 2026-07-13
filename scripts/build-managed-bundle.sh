@@ -87,14 +87,30 @@ fi
 
 # ---- ai-common checkout -------------------------------------------------
 
+# clone_ai_common URL -> checks out ${REF} (branch, tag, OR commit sha)
+# into ${AI_COMMON_DIR}. `git clone --branch` only accepts branch/tag
+# refs, so --ref <commit-sha> failed before checkout; instead we clone
+# without --branch and explicitly fetch + detach-checkout the ref, which
+# GitHub serves for reachable commit shas as well as named refs.
+clone_ai_common() {
+  local url="$1"
+  # Start from a clean empty dir so a retry after a partial clone
+  # doesn't trip git's "destination path exists and is not empty".
+  rm -rf "${AI_COMMON_DIR}"
+  mkdir -p "${AI_COMMON_DIR}"
+  git clone --quiet --depth 50 --no-checkout "${url}" "${AI_COMMON_DIR}" || return 1
+  git -C "${AI_COMMON_DIR}" fetch --quiet --depth 50 origin "${REF}" || return 1
+  git -C "${AI_COMMON_DIR}" checkout --quiet --detach FETCH_HEAD || return 1
+}
+
 CLEANUP_AI_COMMON="false"
 if [[ -z "${AI_COMMON_DIR}" ]]; then
   AI_COMMON_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ai-common-cmid.XXXXXX")"
   CLEANUP_AI_COMMON="true"
-  echo "==> cloning cisco-aispg/ai-common into ${AI_COMMON_DIR}"
-  if ! git clone --quiet --depth 50 --branch "${REF}" "${AI_COMMON_REPO_SSH}" "${AI_COMMON_DIR}" 2>/dev/null; then
+  echo "==> cloning cisco-aispg/ai-common (${REF}) into ${AI_COMMON_DIR}"
+  if ! clone_ai_common "${AI_COMMON_REPO_SSH}" 2>/dev/null; then
     echo "    ssh clone failed, falling back to https"
-    git clone --quiet --depth 50 --branch "${REF}" "${AI_COMMON_REPO_HTTPS}" "${AI_COMMON_DIR}"
+    clone_ai_common "${AI_COMMON_REPO_HTTPS}"
   fi
 else
   if [[ ! -d "${AI_COMMON_DIR}/.git" ]]; then
@@ -140,9 +156,14 @@ fi
 # zero net dependencies on a resolvable proxy.
 
 echo "==> computing pseudo-version for ai-common/cmid @ ${REF}"
-COMMIT_SHA="$(git -C "${AI_COMMON_DIR}" log -1 --format=%H -- cmid/)"
+# Use the checked-out commit (HEAD) rather than `git log -- cmid/`: the
+# clone is shallow (--depth 50), so a path-filtered log returns empty
+# whenever cmid/ hasn't changed within the retained history — and even
+# when it resolves, it picks an ancestor of the requested ref instead of
+# the ref itself. HEAD is exactly the ref the operator asked to build.
+COMMIT_SHA="$(git -C "${AI_COMMON_DIR}" rev-parse HEAD)"
 if [[ -z "${COMMIT_SHA}" ]]; then
-  echo "build-managed-bundle: could not resolve a commit sha for cmid/ on ${REF}" >&2
+  echo "build-managed-bundle: could not resolve HEAD commit sha on ${REF}" >&2
   exit 1
 fi
 COMMIT_SHORT="${COMMIT_SHA:0:12}"
