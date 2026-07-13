@@ -25,6 +25,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
 
 function Get-RedactionValues {
     $names = @(
@@ -50,32 +51,6 @@ function Assert-NativeWindowsX64 {
     if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
         throw 'Windows Native CI certifies only native Windows x64'
     }
-}
-
-function Test-PathWithin([string]$Path, [string]$Root) {
-    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-    return $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
-}
-
-function Test-PathWithinOrEquals([string]$Path, [string]$Root) {
-    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-    return $candidate.Equals($parent, [StringComparison]::OrdinalIgnoreCase) -or
-        (Test-PathWithin $candidate $parent)
-}
-
-function Resolve-SafeWindowsNativeBase([AllowNull()][string]$Path) {
-    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
-    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $userProfile = [Environment]::GetFolderPath(
-        [Environment+SpecialFolder]::UserProfile
-    ).TrimEnd('\')
-    if ([string]::IsNullOrWhiteSpace($userProfile) -or
-        -not (Test-PathWithin $full $userProfile)) {
-        throw "DC_WINDOWS_NATIVE_BASE_ROOT must be a strict child of the current user's profile: $full"
-    }
-    return $full
 }
 
 function Assert-NoReparseAncestors([string]$Path) {
@@ -145,7 +120,7 @@ function Assert-SafeStateRoot([string]$Path) {
         [IO.Path]::GetTempPath()
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     $withinExplicitBase = -not [string]::IsNullOrWhiteSpace($explicitBase) -and
-        (Test-PathWithinOrEquals $full $explicitBase)
+        (Test-PathWithinOrEqual $full $explicitBase)
     if (-not $withinExplicitBase -and
         -not ($allowedRoots | Where-Object { Test-PathWithin $full $_ } | Select-Object -First 1)) {
         throw "StateRoot must be a child of RUNNER_TEMP, DC_WINDOWS_NATIVE_BASE_ROOT, or the system temp directory: $full"
@@ -1817,7 +1792,7 @@ function Invoke-SetupAcceptance {
             (Test-PathWithin $root $env:RUNNER_TEMP)
         $belowApprovedBase = $false
         if (-not [string]::IsNullOrWhiteSpace($approvedStateBase)) {
-            $belowApprovedBase = Test-PathWithinOrEquals $root $approvedStateBase
+            $belowApprovedBase = Test-PathWithin $root $approvedStateBase
         }
         if (-not $belowRunnerTemp -and -not $belowApprovedBase) {
             throw 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT'
@@ -2038,34 +2013,89 @@ function Invoke-SetupAcceptance {
 function Invoke-Contract {
     Assert-NativeWindowsX64
     if (-not $ArtifactRoot) { throw 'ArtifactRoot is required for contract' }
-    foreach ($name in @(
-        'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
-        'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
-        'AWS_SESSION_TOKEN', 'LLM_API_KEY'
-    )) {
-        Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+    $originalEnvironment = @{}
+    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $originalEnvironment[[string]$entry.Key] = [string]$entry.Value
     }
-    $root = Assert-SafeStateRoot $StateRoot
-    $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
-    $profile = Install-PackagedArtifacts (Join-Path $root 'install') ([IO.Path]::GetFullPath($ArtifactRoot))
-    $contractRoot = $profile.Root
-    $contractHome = $profile.Profile
-    foreach ($path in @($contractHome, (Join-Path $contractHome 'AppData\Roaming'), (Join-Path $contractHome 'AppData\Local'), (Join-Path $contractRoot 'temp'))) {
-        [IO.Directory]::CreateDirectory($path) | Out-Null
+    try {
+        foreach ($name in @(
+            'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
+            'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+            'AWS_SESSION_TOKEN', 'LLM_API_KEY'
+        )) {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        }
+        $root = Assert-SafeStateRoot $StateRoot
+        $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
+        $profile = Install-PackagedArtifacts (Join-Path $root 'install') ([IO.Path]::GetFullPath($ArtifactRoot))
+        $contractRoot = [IO.Path]::GetFullPath($profile.Root).TrimEnd('\')
+        $contractHome = [IO.Path]::GetFullPath($profile.Profile).TrimEnd('\')
+        $codexHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'codex-home')).TrimEnd('\')
+        $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'claude-home')).TrimEnd('\')
+        $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
+        foreach ($path in @(
+            $contractHome,
+            (Join-Path $contractHome 'AppData\Roaming'),
+            (Join-Path $contractHome 'AppData\Local'),
+            (Join-Path $contractRoot 'temp'),
+            $codexHome,
+            $claudeHome
+        )) {
+            [IO.Directory]::CreateDirectory($path) | Out-Null
+            Protect-TestDirectory $path
+        }
+        $defaultCodexHome = Join-Path $contractHome '.codex'
+        $defaultClaudeHome = Join-Path $contractHome '.claude'
+        if ((Test-Path -LiteralPath $defaultCodexHome) -or
+            (Test-Path -LiteralPath $defaultClaudeHome)) {
+            throw 'contract installation touched a default connector home before connector setup'
+        }
+
+        $env:USERPROFILE = $contractHome
+        $env:HOME = $contractHome
+        $env:APPDATA = Join-Path $contractHome 'AppData\Roaming'
+        $env:LOCALAPPDATA = Join-Path $contractHome 'AppData\Local'
+        $env:TEMP = Join-Path $contractRoot 'temp'
+        $env:TMP = $env:TEMP
+        $env:CODEX_HOME = $codexHome
+        $env:CLAUDE_CONFIG_DIR = $claudeHome
+        $env:PATH = "$($profile.VenvScripts);$($profile.Bin);$env:PATH"
+        $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
+        & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
+            -StateRoot $contractRoot -HomeRoot $contractHome -ResultsPath (Join-Path $root 'results.jsonl') `
+            -ArtifactPath (Join-Path $root 'contract-diagnostics')
+
+        foreach ($defaultHome in @($defaultCodexHome, $defaultClaudeHome)) {
+            if (Test-Path -LiteralPath $defaultHome) {
+                throw "connector contract wrote to the default agent home: $defaultHome"
+            }
+        }
+        $unrelatedConfig = if ($Connector -eq 'codex') {
+            Join-Path $claudeHome 'settings.json'
+        } else {
+            Join-Path $codexHome 'config.toml'
+        }
+        if (Test-Path -LiteralPath $unrelatedConfig) {
+            throw "connector contract wrote to the unrelated agent home: $unrelatedConfig"
+        }
+    } finally {
+        $currentNames = @(
+            [Environment]::GetEnvironmentVariables('Process').Keys |
+                ForEach-Object { [string]$_ }
+        )
+        foreach ($name in $currentNames) {
+            if (-not $originalEnvironment.ContainsKey($name)) {
+                [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            }
+        }
+        foreach ($name in $originalEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable(
+                [string]$name,
+                [string]$originalEnvironment[$name],
+                'Process'
+            )
+        }
     }
-    $env:USERPROFILE = $contractHome
-    $env:HOME = $contractHome
-    $env:APPDATA = Join-Path $contractHome 'AppData\Roaming'
-    $env:LOCALAPPDATA = Join-Path $contractHome 'AppData\Local'
-    $env:TEMP = Join-Path $contractRoot 'temp'
-    $env:TMP = $env:TEMP
-    $env:CODEX_HOME = Join-Path $contractHome '.codex'
-    $env:CLAUDE_CONFIG_DIR = Join-Path $contractHome '.claude'
-    $env:PATH = "$($profile.VenvScripts);$($profile.Bin);$env:PATH"
-    $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
-    & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
-        -StateRoot $contractRoot -HomeRoot $contractHome -ResultsPath (Join-Path $root 'results.jsonl') `
-        -ArtifactPath (Join-Path $root 'contract-diagnostics')
 }
 
 function Get-StateProcesses([string]$Root) {

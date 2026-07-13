@@ -35,25 +35,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Test-PathWithin([string]$Path, [string]$Root) {
-    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-    return $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
-}
-
-function Resolve-SafeWindowsNativeBase([AllowNull()][string]$Path) {
-    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
-    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $userProfile = [Environment]::GetFolderPath(
-        [Environment+SpecialFolder]::UserProfile
-    ).TrimEnd('\')
-    if ([string]::IsNullOrWhiteSpace($userProfile) -or
-        -not (Test-PathWithin $full $userProfile)) {
-        throw "DC_WINDOWS_NATIVE_BASE_ROOT must be a strict child of the current user's profile: $full"
-    }
-    return $full
-}
+. (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
 
 if (-not $IsWindows) {
     throw 'The setup wizard probe requires native Windows.'

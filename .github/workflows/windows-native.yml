@@ -31,17 +31,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - name: Initialize isolated paths
-        run: |
-          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
-          $stateRoot = Join-Path $stateBase 'go'
-          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
-          "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-go')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf go -DiagnosticsLeaf windows-native-diagnostics-go
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
@@ -120,17 +114,11 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - name: Initialize isolated paths
-        run: |
-          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
-          $stateRoot = Join-Path $stateBase ('py-' + $env:PYTHON_SHARD)
-          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
-          "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD))" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('py-' + $env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD)
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
@@ -205,17 +193,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - name: Initialize isolated paths
-        run: |
-          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
-          $stateRoot = Join-Path $stateBase 'ps'
-          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
-          "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-powershell')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
@@ -252,18 +234,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 35
     steps:
-      - name: Initialize isolated paths
-        run: |
-          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
-          $stateRoot = Join-Path $stateBase 'pkg'
-          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
-          "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
-          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-package')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
@@ -306,18 +281,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 75
     steps:
-      - name: Initialize isolated paths
-        run: |
-          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
-          $stateRoot = Join-Path $stateBase 'acc'
-          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
-          "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
-          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP 'windows-native-diagnostics-acceptance')" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
@@ -357,18 +325,11 @@ jobs:
       matrix:
         connector: [codex, claudecode]
     steps:
-      - name: Initialize isolated paths
-        run: |
-          $stateBase = Join-Path $env:USERPROFILE '.dc-ci'
-          $stateRoot = Join-Path $stateBase ('ct-' + $env:CONNECTOR)
-          if ($stateRoot.Length -gt 48) { throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot" }
-          "DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase" >> $env:GITHUB_ENV
-          "DC_STATE_ROOT=$stateRoot" >> $env:GITHUB_ENV
-          "DC_ARTIFACT_ROOT=$(Join-Path $env:RUNNER_TEMP 'windows-native-dist')" >> $env:GITHUB_ENV
-          "DC_DIAGNOSTICS=$(Join-Path $env:RUNNER_TEMP ('windows-native-diagnostics-' + $env:CONNECTOR))" >> $env:GITHUB_ENV
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true

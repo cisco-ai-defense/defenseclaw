@@ -38,6 +38,32 @@ function Protect-LogText([AllowNull()][string]$Text) {
     return $safe
 }
 
+function Resolve-EffectiveConnectorHome(
+    [ValidateSet('codex', 'claudecode')][string]$ConnectorName
+) {
+    $environmentName = if ($ConnectorName -eq 'codex') {
+        'CODEX_HOME'
+    } else {
+        'CLAUDE_CONFIG_DIR'
+    }
+    $configured = [Environment]::GetEnvironmentVariable($environmentName)
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        return [IO.Path]::GetFullPath($configured).TrimEnd('\')
+    }
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        throw "$environmentName is unset and USERPROFILE is unavailable"
+    }
+    $defaultLeaf = if ($ConnectorName -eq 'codex') { '.codex' } else { '.claude' }
+    return [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE $defaultLeaf)).TrimEnd('\')
+}
+
+function Get-EffectiveConnectorConfigPath(
+    [ValidateSet('codex', 'claudecode')][string]$ConnectorName
+) {
+    $fileName = if ($ConnectorName -eq 'codex') { 'config.toml' } else { 'settings.json' }
+    return Join-Path (Resolve-EffectiveConnectorHome $ConnectorName) $fileName
+}
+
 function Protect-TestDirectory([string]$Path) {
     $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -345,11 +371,7 @@ function Assert-DoctorHookRegistration {
         throw "doctor returned obsolete Unix guidance for native Windows $Connector hooks"
     }
 
-    $config = if ($Connector -eq 'codex') {
-        Join-Path $env:CODEX_HOME 'config.toml'
-    } else {
-        Join-Path $env:CLAUDE_CONFIG_DIR 'settings.json'
-    }
+    $config = Get-EffectiveConnectorConfigPath $Connector
     if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw "setup did not create $config" }
     $registration = [IO.File]::ReadAllText($config)
     if ($Connector -eq 'codex') {
@@ -397,7 +419,7 @@ function Invoke-Teardown {
     Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 60 | Out-Null
     Invoke-Tool 'defenseclaw-gateway' @('connector', 'teardown', '--connector', $Connector) @(0, 1) | Out-Null
     Invoke-Tool 'defenseclaw-gateway' @('connector', 'verify', '--connector', $Connector) | Out-Null
-    $config = if ($Connector -eq 'codex') { Join-Path $env:USERPROFILE '.codex\config.toml' } else { Join-Path $env:USERPROFILE '.claude\settings.json' }
+    $config = Get-EffectiveConnectorConfigPath $Connector
     if (Test-Path -LiteralPath $config) {
         $content = [IO.File]::ReadAllText($config)
         if ($content -match '(?i)defenseclaw') { throw "teardown left managed state in $config" }
@@ -533,7 +555,7 @@ function Get-TreeFingerprint([string]$Root) {
 
 function Assert-DoctorWindowsHookRegistration {
     $label = if ($Connector -eq 'claudecode') { 'Claude Code hooks' } else { 'Codex hooks' }
-    $configPath = if ($Connector -eq 'codex') { Join-Path $env:USERPROFILE '.codex\config.toml' } else { Join-Path $env:USERPROFILE '.claude\settings.json' }
+    $configPath = Get-EffectiveConnectorConfigPath $Connector
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Doctor contract hook config is missing: $configPath" }
     $originalConfig = [IO.File]::ReadAllBytes($configPath)
     $config = [Text.Encoding]::UTF8.GetString($originalConfig)

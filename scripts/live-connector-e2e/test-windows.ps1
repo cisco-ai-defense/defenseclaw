@@ -10,6 +10,8 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $harness = Join-Path $PSScriptRoot 'run-windows.ps1'
 $nativeHarness = Join-Path $root 'scripts\windows-native-ci.ps1'
 $wizardHarness = Join-Path $root 'scripts\test-windows-setup-wizard.ps1'
+$nativePathHelpers = Join-Path $root 'scripts\windows-native-paths.ps1'
+$nativePathInitializer = Join-Path $root 'scripts\initialize-windows-native-ci-paths.ps1'
 $nativeWorkflow = Join-Path $root '.github\workflows\windows-native.yml'
 $liveWorkflow = Join-Path $root '.github\workflows\connector-live-e2e.yml'
 $ciWorkflow = Join-Path $root '.github\workflows\ci.yml'
@@ -23,12 +25,76 @@ function Assert-True([bool]$Condition, [string]$Message) {
 }
 
 try {
-    foreach ($scriptPath in @($harness, $nativeHarness, $wizardHarness, $installer)) {
+    foreach ($scriptPath in @(
+        $harness,
+        $nativeHarness,
+        $wizardHarness,
+        $nativePathHelpers,
+        $nativePathInitializer,
+        $installer
+    )) {
         $tokens = $null; $errors = $null
         [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors) | Out-Null
         Assert-True (@($errors).Count -eq 0) "PowerShell parser errors in ${scriptPath}: $($errors -join '; ')"
     }
     . $harness -NoRun
+
+    $originalUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE')
+    $originalCodexHome = [Environment]::GetEnvironmentVariable('CODEX_HOME')
+    $originalClaudeHome = [Environment]::GetEnvironmentVariable('CLAUDE_CONFIG_DIR')
+    try {
+        $resolverProfile = Join-Path $temp 'resolver-profile'
+        $resolverCodexHome = Join-Path $temp 'resolver-codex-home'
+        $resolverClaudeHome = Join-Path $temp 'resolver-claude-home'
+        $env:USERPROFILE = $resolverProfile
+        $env:CODEX_HOME = $resolverCodexHome
+        $env:CLAUDE_CONFIG_DIR = $resolverClaudeHome
+        Assert-True ((Resolve-EffectiveConnectorHome codex).Equals(
+            [IO.Path]::GetFullPath($resolverCodexHome),
+            [StringComparison]::OrdinalIgnoreCase
+        )) 'Codex effective home honors CODEX_HOME'
+        Assert-True ((Resolve-EffectiveConnectorHome claudecode).Equals(
+            [IO.Path]::GetFullPath($resolverClaudeHome),
+            [StringComparison]::OrdinalIgnoreCase
+        )) 'Claude effective home honors CLAUDE_CONFIG_DIR'
+        Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue
+        Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+        Assert-True ((Resolve-EffectiveConnectorHome codex).Equals(
+            [IO.Path]::GetFullPath((Join-Path $resolverProfile '.codex')),
+            [StringComparison]::OrdinalIgnoreCase
+        )) 'Codex effective home falls back to the isolated OS profile'
+        Assert-True ((Resolve-EffectiveConnectorHome claudecode).Equals(
+            [IO.Path]::GetFullPath((Join-Path $resolverProfile '.claude')),
+            [StringComparison]::OrdinalIgnoreCase
+        )) 'Claude effective home falls back to the isolated OS profile'
+    } finally {
+        [Environment]::SetEnvironmentVariable('USERPROFILE', $originalUserProfile)
+        [Environment]::SetEnvironmentVariable('CODEX_HOME', $originalCodexHome)
+        [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $originalClaudeHome)
+    }
+    . $nativePathHelpers
+    $disjointRoots = @(Assert-WindowsNativePathsDisjoint @(
+        (Join-Path $temp 'disjoint-profile'),
+        (Join-Path $temp 'disjoint-codex'),
+        (Join-Path $temp 'disjoint-claude')
+    ))
+    Assert-True ($disjointRoots.Count -eq 3) 'pairwise-disjoint root validation returns every normalized root'
+    $equalRootsRejected = $false
+    try {
+        $null = Assert-WindowsNativePathsDisjoint @(
+            (Join-Path $temp 'same'),
+            (Join-Path $temp 'same')
+        )
+    } catch { $equalRootsRejected = $true }
+    Assert-True $equalRootsRejected 'pairwise-disjoint root validation rejects equal roots'
+    $nestedRootsRejected = $false
+    try {
+        $null = Assert-WindowsNativePathsDisjoint @(
+            (Join-Path $temp 'parent'),
+            (Join-Path $temp 'parent\child')
+        )
+    } catch { $nestedRootsRejected = $true }
+    Assert-True $nestedRootsRejected 'pairwise-disjoint root validation rejects nested roots'
 
     $privateRoot = Join-Path $temp 'private-state'
     Protect-TestDirectory $privateRoot
@@ -97,6 +163,17 @@ try {
         Assert-True ($approvedWizardResult.ExitCode -eq 0 -and
             ($approvedWizardResult.StdOut | ConvertFrom-Json).unicode_window_text -eq 'pass') `
             'install-driving wizard accepts state below the explicit user-profile base'
+
+        $equalBaseWizardResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoProfile', '-File', $wizardHarness,
+            '-SetupPath', $pwsh,
+            '-StateRoot', $approvedNativeBase,
+            '-ActivateInstall',
+            '-InteropSelfTestOnly'
+        ) -TimeoutSeconds 15 -AllowedExitCodes @(1)
+        Assert-True ($equalBaseWizardResult.StdErr -match
+            'must be a child of RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
+            'install-driving wizard rejects equality with its multi-job approved base'
 
         $outsideApprovedRoots = Join-Path $temp 'wizard-outside-approved-roots'
         $outsideWizardResult = Invoke-NativeProcess -FilePath $pwsh -ArgumentList @(
@@ -226,6 +303,8 @@ try {
     $harnessText = [IO.File]::ReadAllText($harness)
     $nativeHarnessText = [IO.File]::ReadAllText($nativeHarness)
     $wizardHarnessText = [IO.File]::ReadAllText($wizardHarness)
+    $nativePathHelpersText = [IO.File]::ReadAllText($nativePathHelpers)
+    $nativePathInitializerText = [IO.File]::ReadAllText($nativePathInitializer)
     $installerText = [IO.File]::ReadAllText($installer)
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode\].*?windows-native-required:') 'required Windows contract matrix contains Codex and Claude'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
@@ -238,35 +317,47 @@ try {
     Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
-        '\$stateBase = Join-Path \$env:USERPROFILE ''\.dc-ci'''
-    ).Count -eq 6) 'every native Windows job roots mutable state below the trusted user profile'
-    Assert-True ([regex]::Matches(
-        $nativeWorkflowText,
-        '"DC_WINDOWS_NATIVE_BASE_ROOT=\$stateBase" >> \$env:GITHUB_ENV'
-    ).Count -eq 6) 'every native Windows job exports the cleanup-approved state base'
-    Assert-True ([regex]::Matches(
-        $nativeWorkflowText,
-        '"DC_STATE_ROOT=\$stateRoot" >> \$env:GITHUB_ENV'
-    ).Count -eq 6 -and [regex]::Matches(
-        $nativeWorkflowText,
-        'if \(\$stateRoot\.Length -gt 48\)'
-    ).Count -eq 6 -and
-        $nativeWorkflowText -notmatch '"DC_STATE_ROOT=\$\(Join-Path \$env:RUNNER_TEMP') `
-        'native runtime state stays short and never inherits the hosted runner temp volume owner'
-    Assert-True ([regex]::Matches(
-        $nativeWorkflowText,
-        '"DC_DIAGNOSTICS=\$\(Join-Path \$env:RUNNER_TEMP '
-    ).Count -eq 6 -and [regex]::Matches(
-        $nativeWorkflowText,
-        '"DC_ARTIFACT_ROOT=\$\(Join-Path \$env:RUNNER_TEMP '
-    ).Count -eq 3) 'artifacts and diagnostics remain under RUNNER_TEMP'
+        '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
+    ).Count -eq 6) 'every native Windows job uses the shared isolated-path initializer'
+    foreach ($leafContract in @(
+        '-Leaf go -DiagnosticsLeaf windows-native-diagnostics-go',
+        "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
+        '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
+        '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
+        '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
+        "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist"
+    )) {
+        Assert-True ($nativeWorkflowText.Contains($leafContract)) `
+            "native Windows workflow preserves isolated path contract: $leafContract"
+    }
+    Assert-True ($nativePathInitializerText -match
+        "Resolve-SafeWindowsNativeBase \(Join-Path \`$env:USERPROFILE '\.dc-ci'\)" -and
+        $nativePathInitializerText -match 'Test-PathWithin \$stateRoot \$stateBase' -and
+        $nativePathInitializerText -match 'if \(\$stateRoot\.Length -gt 48\)' -and
+        $nativePathInitializerText -match 'DC_WINDOWS_NATIVE_BASE_ROOT=\$stateBase' -and
+        $nativePathInitializerText -match 'DC_STATE_ROOT=\$stateRoot') `
+        'shared initializer roots short mutable state below the trusted user profile'
+    Assert-True ($nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$DiagnosticsLeaf' -and
+        $nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$ArtifactLeaf' -and
+        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 3) `
+        'shared initializer keeps diagnostics and artifacts under RUNNER_TEMP'
     Assert-True ($nativeHarnessText -match '\$approvedStateBase' -and
         $nativeHarnessText -match 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
         'interactive setup cleanup accepts only the pre-validated runner temp or explicit state base'
-    Assert-True ($nativeHarnessText -match 'function Test-PathWithinOrEquals' -and
-        [regex]::Matches($nativeHarnessText, 'Test-PathWithinOrEquals \$root \$approvedStateBase').Count -eq 1 -and
-        [regex]::Matches($nativeHarnessText, 'Test-PathWithinOrEquals \$full \$explicitBase').Count -eq 1) `
-        'state-root and setup cleanup gates share identical equals-or-descendant semantics'
+    Assert-True ($nativePathHelpersText -match 'function Test-PathWithin\b' -and
+        $nativePathHelpersText -match 'function Resolve-SafeWindowsNativeBase\b' -and
+        $nativeHarnessText -notmatch 'function Test-PathWithin\b' -and
+        $wizardHarnessText -notmatch 'function Test-PathWithin\b' -and
+        $nativeHarnessText -match "\. \(Join-Path \`$PSScriptRoot 'windows-native-paths\.ps1'\)" -and
+        $wizardHarnessText -match "\. \(Join-Path \`$PSScriptRoot 'windows-native-paths\.ps1'\)") `
+        'native cleanup and wizard gates dot-source one authoritative path helper'
+    Assert-True ($nativeHarnessText -notmatch 'Test-PathWithinOrEquals' -and
+        $wizardHarnessText -notmatch 'Test-PathWithinOrEqual' -and
+        $nativePathHelpersText -notmatch 'Test-PathWithinOrEquals' -and
+        [regex]::Matches($nativeHarnessText, 'Test-PathWithinOrEqual \$full \$explicitBase').Count -eq 1 -and
+        [regex]::Matches($nativeHarnessText, 'Test-PathWithin \$root \$approvedStateBase').Count -eq 1 -and
+        [regex]::Matches($wizardHarnessText, 'Test-PathWithin \$state \$_').Count -eq 1) `
+        'setup cleanup and wizard gates require strict descendants while general state validation can recheck its exact approved root'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
     foreach ($testName in @(
         'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
@@ -482,7 +573,26 @@ try {
     Assert-True ($harnessText -match 'function Wait-Gateway\(\[int\]\$Timeout = 90\)' -and $harnessText -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)') 'gateway readiness uses bounded Windows-native status probes'
     Assert-True ($harnessText -match 'doctor:windows-hook-tamper' -and $harnessText -match 'obsolete gateway launcher' -and $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) 'Doctor connector contract rejects a tampered registered hook command with exit 1'
     Assert-True ($harnessText -match 'WriteAllBytes\(\$configPath, \$originalConfig\)' -and $harnessText -match 'doctor:windows-hook-recovery') 'Doctor connector contract restores the registration byte-for-byte and validates recovery'
-    Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome' -and $harnessText -match 'HomeRoot must be contained by StateRoot') 'connector contract keeps the installed runtime and agent home in one disposable ownership root'
+    Assert-True ($nativeHarnessText -match '-StateRoot \$contractRoot -HomeRoot \$contractHome' -and
+        $harnessText -match 'HomeRoot must be contained by StateRoot') `
+        'connector contract keeps the installed runtime and agent homes in one disposable ownership root'
+    Assert-True ($nativeHarnessText -match 'Join-Path \$contractRoot ''codex-home''' -and
+        $nativeHarnessText -match 'Join-Path \$contractRoot ''claude-home''' -and
+        $nativeHarnessText -match 'Assert-WindowsNativePathsDisjoint @\(\$contractHome, \$codexHome, \$claudeHome\)' -and
+        $nativeHarnessText -match '\$env:CODEX_HOME = \$codexHome' -and
+        $nativeHarnessText -match '\$env:CLAUDE_CONFIG_DIR = \$claudeHome') `
+        'connector contract uses pairwise disjoint OS, Codex, and Claude homes'
+    Assert-True ($nativeHarnessText -match '\$originalEnvironment = @\{\}' -and
+        $nativeHarnessText -match 'GetEnvironmentVariables\(''Process''\)' -and
+        $nativeHarnessText -match 'SetEnvironmentVariable\(\s*\[string\]\$name,\s*\[string\]\$originalEnvironment\[\$name\],\s*''Process''') `
+        'connector contract restores the complete process environment in finally'
+    Assert-True ($nativeHarnessText -match 'connector contract wrote to the default agent home' -and
+        $nativeHarnessText -match 'connector contract wrote to the unrelated agent home' -and
+        $harnessText -match 'function Resolve-EffectiveConnectorHome\b' -and
+        [regex]::Matches($harnessText, 'Get-EffectiveConnectorConfigPath \$Connector').Count -eq 3 -and
+        $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.codex\\config\.toml''' -and
+        $harnessText -notmatch 'Join-Path \$env:USERPROFILE ''\.claude\\settings\.json''') `
+        'contract setup, Doctor, and teardown share effective homes and never fall back behind explicit overrides'
     Assert-True ($harnessText -match 'Assert-DoctorHookRegistration' -and $harnessText -match 'doctor-hooks pass') 'contract validates setup-created hooks with Doctor'
     $workflowText = $nativeWorkflowText + "`n" + $liveWorkflowText
     Assert-True ([regex]::Matches($workflowText, 'failure\(\) \|\| cancelled\(\)').Count -ge 2) 'failure and cancellation diagnostics are uploaded'
