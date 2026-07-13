@@ -235,9 +235,10 @@ func (s NativeOTLPSpec) pathTokenBaseEndpoint() string {
 // ~/.config/goose/config.yaml, etc. The returned map is a fresh copy.
 //
 // When PerSignal is true the renderer emits the three per-signal exporter
-// vars AND OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT vars in addition to the
-// combined endpoint. This matches what Claude Code, Copilot CLI, and
-// Goose all accept.
+// vars and the higher-precedence OTEL_EXPORTER_OTLP_<SIGNAL>_{ENDPOINT,
+// PROTOCOL,HEADERS} vars in addition to the combined values. Emitting the
+// complete signal tuple prevents an inherited or previously configured
+// per-signal value from silently overriding the managed collector.
 //
 // Returns an error if the spec is not an env-block. Callers that want a
 // non-strict renderer (e.g. tests that check parity across kinds) should
@@ -268,13 +269,20 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 		out["OTEL_METRICS_EXPORTER"] = "otlp"
 		out["OTEL_LOGS_EXPORTER"] = "otlp"
 		out["OTEL_TRACES_EXPORTER"] = "otlp"
+		serializedHeaders := ""
+		if len(s.Headers) > 0 {
+			serializedHeaders = serializeOTLPHeaders(s.Headers)
+		}
 		for _, signal := range AllNativeOTLPSignals() {
+			prefix := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(string(signal))
 			ep := s.signalEndpoint(signal)
-			if ep == "" {
-				continue
+			if ep != "" {
+				out[prefix+"_ENDPOINT"] = ep
 			}
-			key := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(string(signal)) + "_ENDPOINT"
-			out[key] = ep
+			out[prefix+"_PROTOCOL"] = s.normalizedProtocol()
+			if serializedHeaders != "" {
+				out[prefix+"_HEADERS"] = serializedHeaders
+			}
 		}
 	}
 

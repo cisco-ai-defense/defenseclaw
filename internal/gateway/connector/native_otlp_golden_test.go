@@ -159,8 +159,18 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_HEADERS",
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
 		"OTEL_LOGS_EXPORTER",
 		"OTEL_METRICS_EXPORTER",
+		"OTEL_TRACES_EXPORTER",
 		"OTEL_RESOURCE_ATTRIBUTES",
 		"OTEL_SERVICE_NAME",
 	} {
@@ -177,6 +187,9 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	}
 	if env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/json" {
 		t.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL = %q; want \"http/json\"", env["OTEL_EXPORTER_OTLP_PROTOCOL"])
+	}
+	if env["OTEL_TRACES_EXPORTER"] != "none" {
+		t.Errorf("OTEL_TRACES_EXPORTER = %q; want none", env["OTEL_TRACES_EXPORTER"])
 	}
 	if !strings.HasPrefix(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://"+opts.APIAddr) {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want http://%s prefix",
@@ -200,6 +213,19 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	}
 	if strings.Contains(env["OTEL_EXPORTER_OTLP_HEADERS"], "x-defenseclaw-token=") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS leaked the general API token: %s", env["OTEL_EXPORTER_OTLP_HEADERS"])
+	}
+	for _, signal := range []string{"LOGS", "METRICS", "TRACES"} {
+		prefix := "OTEL_EXPORTER_OTLP_" + signal
+		wantEndpoint := env["OTEL_EXPORTER_OTLP_ENDPOINT"] + "/v1/" + strings.ToLower(signal)
+		if got := env[prefix+"_ENDPOINT"]; got != wantEndpoint {
+			t.Errorf("%s_ENDPOINT = %q; want %q", prefix, got, wantEndpoint)
+		}
+		if got := env[prefix+"_PROTOCOL"]; got != "http/json" {
+			t.Errorf("%s_PROTOCOL = %q; want http/json", prefix, got)
+		}
+		if got := env[prefix+"_HEADERS"]; got != env["OTEL_EXPORTER_OTLP_HEADERS"] {
+			t.Errorf("%s_HEADERS = %q; want managed common headers", prefix, got)
+		}
 	}
 
 	resAttrs := splitOTelHeader(env["OTEL_RESOURCE_ATTRIBUTES"])

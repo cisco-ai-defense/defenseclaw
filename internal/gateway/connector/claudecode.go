@@ -334,15 +334,12 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 	extra := map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 		"DEFENSECLAW_FAIL_MODE":        failMode,
-		// Match V1's exporter selection: metrics + logs only.
-		// Claude Code does not currently consume traces from its
-		// CLI process; setting OTEL_TRACES_EXPORTER would force
-		// the OTel SDK to push every span the CLI emits and the
-		// gateway receiver would have to filter them out. Adding
-		// traces is a future spec extension; today the parity test
-		// pins the exact V1 keys.
+		// DefenseClaw currently consumes metrics + logs only. Explicitly
+		// disable traces so an inherited enhanced-telemetry switch cannot
+		// activate a separately configured trace exporter.
 		"OTEL_METRICS_EXPORTER": "otlp",
 		"OTEL_LOGS_EXPORTER":    "otlp",
+		"OTEL_TRACES_EXPORTER":  "none",
 	}
 	if redaction.DisableAll() {
 		extra["OTEL_LOG_USER_PROMPTS"] = "1"
@@ -358,7 +355,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			Headers:            headers,
 			PathToken:          otlpToken,
 			PathScope:          OTLPScopeClaude,
-			PerSignal:          false,
+			PerSignal:          true,
 			ServiceName:        "claudecode",
 			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},
 			ExtraEnv:           extra,
@@ -890,9 +887,19 @@ var claudeCodeOtelEnvKeys = []string{
 	"DEFENSECLAW_FAIL_MODE",
 	"OTEL_METRICS_EXPORTER",
 	"OTEL_LOGS_EXPORTER",
+	"OTEL_TRACES_EXPORTER",
 	"OTEL_EXPORTER_OTLP_PROTOCOL",
 	"OTEL_EXPORTER_OTLP_ENDPOINT",
 	"OTEL_EXPORTER_OTLP_HEADERS",
+	"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+	"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
 	"OTEL_LOG_USER_PROMPTS",
 	"OTEL_RESOURCE_ATTRIBUTES",
 	"OTEL_SERVICE_NAME",
@@ -1021,9 +1028,16 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			backupNeedsSave = true
 			backupToSave = backup
 
-			// Overwrite our OTel keys with current values. Operator-set
-			// keys outside our list (PATH, NODE_OPTIONS, etc.) are
-			// preserved verbatim — we never touch them.
+			// Replace the complete managed OTel surface. Deleting first is
+			// important for values that are intentionally absent in the
+			// current policy (for example prompt logging while redaction is
+			// enabled); merely assigning the rendered map would preserve a
+			// stale higher-precedence value from the pristine environment.
+			// Operator-set keys outside our list (PATH, NODE_OPTIONS, etc.)
+			// are preserved verbatim.
+			for _, key := range claudeCodeOtelEnvKeys {
+				delete(existing, key)
+			}
 			for k, v := range managedEnv {
 				existing[k] = v
 			}

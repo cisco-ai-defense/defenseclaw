@@ -5943,6 +5943,53 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 	}
 }
 
+func TestClaudeCode_VerifyCleanChecksManagedEnvWithoutHooks(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	opts := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: "verify-clean-token",
+	}
+	managed := buildClaudeCodeOtelEnv(opts)
+	settings := map[string]interface{}{
+		"env": map[string]interface{}{
+			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": managed["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"],
+		},
+	}
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewClaudeCodeConnector().VerifyClean(opts); err == nil ||
+		!strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") {
+		t.Fatalf("VerifyClean managed per-signal endpoint error = %v", err)
+	}
+
+	// Generic operator values are not ownership markers and may legitimately
+	// equal DefenseClaw's exporter/protocol choices after a pristine restore.
+	settings["env"] = map[string]interface{}{
+		"OTEL_LOGS_EXPORTER":               "otlp",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
+	}
+	body, err = json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewClaudeCodeConnector().VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean operator-only env: %v", err)
+	}
+}
+
 func TestClaudeCode_Teardown_MissingSettingsParentDoesNotRecreateIt(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -6082,7 +6129,12 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 	pristine := `{
 		"env": {
 			"OTEL_LOGS_EXPORTER": "console",
+			"OTEL_TRACES_EXPORTER": "otlp",
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.example/v1",
+			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "https://logs.example/v1/logs",
+			"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc",
+			"OTEL_EXPORTER_OTLP_TRACES_HEADERS": "Authorization=secret",
+			"OTEL_LOG_USER_PROMPTS": "1",
 			"OTEL_SERVICE_NAME": "operator-claude",
 			"PATH": "/custom/bin:/usr/bin"
 		}
@@ -6103,6 +6155,29 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	managedEnv := buildClaudeCodeOtelEnv(opts)
+	for _, key := range claudeCodeOtelEnvKeys {
+		got, present := env[key]
+		want, managed := managedEnv[key]
+		if managed && (!present || got != want) {
+			t.Errorf("managed %s = %v, want %q", key, got, want)
+		}
+		if !managed && present {
+			t.Errorf("disabled managed %s survived setup with value %v", key, got)
+		}
+	}
+	if env["PATH"] != "/custom/bin:/usr/bin" {
+		t.Errorf("PATH = %v after setup, want pristine value", env["PATH"])
+	}
 
 	// Force the surgical backup path instead of exact managed-file
 	// restore so this test exercises claudecode_backup.json's env
@@ -6117,20 +6192,31 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 		t.Fatalf("VerifyClean: %v", err)
 	}
 
-	data, err := os.ReadFile(settingsPath)
+	data, err = os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var settings map[string]interface{}
+	settings = map[string]interface{}{}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatal(err)
 	}
-	env, _ := settings["env"].(map[string]interface{})
+	env, _ = settings["env"].(map[string]interface{})
 	if env["OTEL_LOGS_EXPORTER"] != "console" {
 		t.Errorf("OTEL_LOGS_EXPORTER = %v, want pristine value", env["OTEL_LOGS_EXPORTER"])
 	}
 	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example/v1" {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %v, want pristine value", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	for key, want := range map[string]interface{}{
+		"OTEL_TRACES_EXPORTER":                "otlp",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    "https://logs.example/v1/logs",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   "Authorization=secret",
+		"OTEL_LOG_USER_PROMPTS":               "1",
+	} {
+		if env[key] != want {
+			t.Errorf("%s = %v, want pristine value %v", key, env[key], want)
+		}
 	}
 	if env["OTEL_SERVICE_NAME"] != "operator-claude" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want pristine value", env["OTEL_SERVICE_NAME"])
