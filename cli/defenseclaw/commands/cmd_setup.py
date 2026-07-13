@@ -21,6 +21,7 @@ Mirrors internal/cli/setup.go.
 
 from __future__ import annotations
 
+import http.client
 import json as _json
 import os
 import secrets
@@ -96,6 +97,7 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 # below honors this flag and becomes a no-op to avoid a double bounce.
 _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
+_GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 
 
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
@@ -8275,8 +8277,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
-            click.echo(" ✓")
-            return True
+            if _wait_for_defense_gateway_api(data_dir):
+                click.echo(" ✓")
+                return True
+            click.echo(" ✗ (API health timed out)")
+            click.echo("    The gateway process started but its sidecar API never became ready.")
+            return False
         click.echo(" ✗")
         err = (result.stderr or result.stdout or "").strip()
         if err:
@@ -8290,6 +8296,64 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
     except subprocess.TimeoutExpired:
         click.echo(" ✗ (timed out)")
         return False
+
+
+def _wait_for_defense_gateway_api(
+    data_dir: str,
+    timeout: float = _GATEWAY_API_READY_TIMEOUT_SECONDS,
+) -> bool:
+    """Wait until the replacement gateway can admit canonical v8 facts.
+
+    The daemon start command returns after spawning its child, before that
+    child necessarily binds the sidecar API. Connector setup also observes an
+    ``active_connector.json`` marker written earlier in gateway startup, so
+    neither signal proves that the API is ready. Returning from setup during
+    that window makes the command's own mandatory v8 audit handoff fail with
+    ``connection refused``.
+
+    Require the replacement process's health document to report the API
+    subsystem as running. This also covers the platform socket-reclaim retry
+    in the Go API server, which may legitimately take up to 30 seconds.
+    """
+    try:
+        cfg = load_config(data_dir=data_dir)
+        gateway = cfg.gateway
+        from defenseclaw.logger import _gateway_api_host
+
+        host = _gateway_api_host(cfg)
+        port = int(getattr(gateway, "api_port", 18970) or 18970)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+    if not 1 <= port <= 65535:
+        return False
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        connection = http.client.HTTPConnection(
+            host,
+            port,
+            timeout=max(0.05, min(1.0, remaining)),
+        )
+        try:
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            body = response.read(1 << 20)
+            if response.status == 200:
+                health = _json.loads(body)
+                api = health.get("api") if isinstance(health, dict) else None
+                state = api.get("state") if isinstance(api, dict) else None
+                if isinstance(state, str) and state.strip().lower() == "running":
+                    return True
+        except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
+            pass
+        finally:
+            connection.close()
+        sleep_for = min(0.2, max(0.0, deadline - time.monotonic()))
+        if sleep_for:
+            time.sleep(sleep_for)
+    return False
 
 
 @setup.result_callback()

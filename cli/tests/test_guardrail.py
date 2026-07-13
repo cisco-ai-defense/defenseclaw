@@ -1769,16 +1769,21 @@ class TestIsPidAlive(unittest.TestCase):
 
 
 class TestRestartDefenseGateway(unittest.TestCase):
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=True,
+    )
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
-    def test_starts_when_not_running(self, mock_run):
+    def test_starts_when_not_running(self, mock_run, mock_ready):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         mock_run.return_value = MagicMock(returncode=0)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_defense_gateway(tmpdir)
+            self.assertTrue(_restart_defense_gateway(tmpdir))
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["defenseclaw-gateway", "start"])
+            mock_ready.assert_called_once_with(tmpdir)
 
     # F-0721: a live PID is only treated as the running gateway when its
     # identity verifies as the gateway binary. The legitimate "already
@@ -1787,8 +1792,12 @@ class TestRestartDefenseGateway(unittest.TestCase):
         "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
         return_value=True,
     )
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=True,
+    )
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
-    def test_restarts_when_running(self, mock_run, _mock_identity):
+    def test_restarts_when_running(self, mock_run, mock_ready, _mock_identity):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         mock_run.return_value = MagicMock(returncode=0)
 
@@ -1797,10 +1806,24 @@ class TestRestartDefenseGateway(unittest.TestCase):
             with open(pid_file, "w") as f:
                 f.write(str(os.getpid()))
 
-            _restart_defense_gateway(tmpdir)
+            self.assertTrue(_restart_defense_gateway(tmpdir))
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["defenseclaw-gateway", "restart"])
+            mock_ready.assert_called_once_with(tmpdir)
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=False,
+    )
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_fails_when_spawned_gateway_api_never_becomes_ready(self, mock_run, mock_ready):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        mock_run.return_value = MagicMock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(_restart_defense_gateway(tmpdir))
+            mock_ready.assert_called_once_with(tmpdir)
 
     @patch(
         "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
@@ -1824,6 +1847,44 @@ class TestRestartDefenseGateway(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         with tempfile.TemporaryDirectory() as tmpdir:
             _restart_defense_gateway(tmpdir)
+
+
+class TestWaitForDefenseGatewayAPI(unittest.TestCase):
+    @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
+    @patch("defenseclaw.commands.cmd_setup.load_config")
+    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    def test_accepts_only_running_api_health(self, connection_cls, mock_load, _mock_host):
+        from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
+
+        mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
+        connection = connection_cls.return_value
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.read.return_value = b'{"api":{"state":"running"}}'
+
+        self.assertTrue(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.1))
+        connection_cls.assert_called_once()
+        args, kwargs = connection_cls.call_args
+        self.assertEqual(args, ("127.0.0.1", 19001))
+        self.assertGreater(kwargs["timeout"], 0)
+        self.assertLessEqual(kwargs["timeout"], 0.1)
+        connection.request.assert_called_once_with("GET", "/health")
+        connection.close.assert_called_once()
+
+    @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
+    @patch("defenseclaw.commands.cmd_setup.load_config")
+    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    def test_rejects_health_while_api_is_still_starting(self, connection_cls, mock_load, _mock_host):
+        from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
+
+        mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
+        connection = connection_cls.return_value
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.read.return_value = b'{"api":{"state":"starting"}}'
+
+        self.assertFalse(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.01))
+        self.assertGreaterEqual(connection.request.call_count, 1)
 
 
 class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
