@@ -581,7 +581,7 @@ func wizardCompletionDescription(connector string) string {
 	const installed = " Run defenseclaw to open the TUI and review activity. DefenseClaw is a CLI/TUI product; setup did not install a separate GUI application."
 	switch connector {
 	case "codex":
-		return "Codex CLI is configured. On first use, open /hooks in Codex and approve the DefenseClaw hooks." + installed
+		return "Codex CLI is configured and the DefenseClaw hooks are trusted automatically." + installed
 	case "claudecode":
 		return "Claude Code is configured and its native Windows hooks are ready." + installed
 	default:

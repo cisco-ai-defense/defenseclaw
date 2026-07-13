@@ -246,7 +246,7 @@ func TestWizardCompletionDescriptionMatchesConfiguredConnector(t *testing.T) {
 		want      string
 		reject    string
 	}{
-		{connector: "codex", want: "open /hooks", reject: "defenseclaw init"},
+		{connector: "codex", want: "trusted automatically", reject: "open /hooks"},
 		{connector: "claudecode", want: "Claude Code is configured", reject: "defenseclaw init"},
 		{connector: "none", want: "defenseclaw init", reject: "open /hooks"},
 	} {
