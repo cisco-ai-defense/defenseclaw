@@ -754,13 +754,6 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 // Uses file locking to match patchClaudeCodeHooks and prevent corruption.
 func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	settingsPath := claudeCodeSettingsPath()
-	if _, err := os.Stat(filepath.Dir(settingsPath)); err != nil {
-		if os.IsNotExist(err) {
-			return c.discardRestoreMetadata(opts)
-		}
-		return fmt.Errorf("stat Claude Code settings directory: %w", err)
-	}
-
 	backup, err := c.loadBackup(opts.DataDir)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -769,7 +762,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 		backup = claudeCodeBackup{}
 	}
 
-	return withFileLock(settingsPath, func() error {
+	err = withFileLock(settingsPath, func() error {
 		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
 			return fmt.Errorf("managed settings restore: %w", err)
 		} else if restored {
@@ -847,6 +840,21 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 
 		return c.discardRestoreMetadata(opts)
 	})
+	// The settings parent can disappear before the lock file is opened (for
+	// example, when Claude is uninstalled concurrently). Treat that the same
+	// as a missing settings file and discard only DefenseClaw restore metadata.
+	if err == nil {
+		return nil
+	}
+	if os.IsNotExist(err) {
+		return c.discardRestoreMetadata(opts)
+	}
+	// On Windows, opening a child of a missing directory can report
+	// ERROR_PATH_NOT_FOUND, which os.IsNotExist does not classify.
+	if _, statErr := os.Stat(filepath.Dir(settingsPath)); os.IsNotExist(statErr) {
+		return c.discardRestoreMetadata(opts)
+	}
+	return err
 }
 
 func (c *ClaudeCodeConnector) discardRestoreMetadata(opts SetupOpts) error {
@@ -912,6 +920,8 @@ func isClaudeCodeNativeExecHook(hook map[string]interface{}) bool {
 	}
 	command, _ := hook["command"].(string)
 	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
+	// Setup now writes defenseclaw-hook.exe, but teardown must also recognize
+	// defenseclaw-gateway.exe entries created by earlier Windows releases.
 	if base != strings.ToLower(windowsHookBinaryName) && base != "defenseclaw-gateway.exe" {
 		return false
 	}
