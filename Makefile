@@ -546,7 +546,7 @@ packaging-macos-test:
 # time. Layout:
 #
 #   defenseclaw-macos-$(VERSION)-$(GOOS)-$(GOARCH)/
-#     defenseclaw-gateway              (binary)
+#     defenseclaw                      (binary; installed as .../bin/defenseclaw-gateway)
 #     install.sh                       (calls the binary next to it)
 #     uninstall.sh
 #     com.defenseclaw.gateway.plist    (installed to /Library/LaunchDaemons)

@@ -171,7 +171,8 @@ t_scrub_py_syntax() {
 # _setup_bundle_fixture WITH_BINARY
 #   Prints the fresh tmpdir path on stdout, populated with the installer
 #   scaffolding (install.sh, installer_lib.sh, plist stub). When
-#   WITH_BINARY=true, also drops in a stub defenseclaw-gateway. Tests
+#   WITH_BINARY=true, also drops in a stub defenseclaw (the bundle artifact
+#   name; install.sh resolves the bundle binary under this name). Tests
 #   drive install.sh with DC_INSTALLER_SKIP_ROOT_CHECK=1 (an explicit
 #   test-only env seam in install.sh) so no sudo is needed AND the
 #   fixture doesn't have to keep chasing changes to the production
@@ -201,8 +202,8 @@ _setup_bundle_fixture() {
   printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.cisco.secureclient.defenseclaw.plist"
   chmod 0755 "${bundle}/install.sh"
   if [[ "${with_binary}" == "true" ]]; then
-    printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw-gateway"
-    chmod 0755 "${bundle}/defenseclaw-gateway"
+    printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw"
+    chmod 0755 "${bundle}/defenseclaw"
   fi
   printf '%s\n' "${bundle}"
 }
@@ -224,7 +225,7 @@ t_bundle_layout_resolves_locally() {
     grep -E "PLIST_SRC=|BINARY_SRC=/" || true)"
 
   assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
-  assert_contains "${trace}" "BINARY_SRC=${bundle}/defenseclaw-gateway"          "binary resolved from bundle"
+  assert_contains "${trace}" "BINARY_SRC=${bundle}/defenseclaw"          "binary resolved from bundle"
 }
 
 # Complementary: with NO bundle-local binary AND no repo tree, install.sh

@@ -456,13 +456,18 @@ unset _existing_install_markers _marker _label _local_users _local_user _candida
 
 # Resolve the binary. Lookup order matches PLIST_SRC:
 #   1. --binary                              (explicit override)
-#   2. ${SCRIPT_DIR}/defenseclaw-gateway     (standalone bundle)
+#   2. ${SCRIPT_DIR}/defenseclaw             (standalone bundle artifact)
 #   3. ${REPO_ROOT}/defenseclaw-gateway      (dev tree)
 #   4. `go build` from ${REPO_ROOT}/cmd/defenseclaw  (dev-tree fallback)
+#
+# The shipped bundle names the artifact "defenseclaw" (see
+# scripts/build-macos-bundle.sh); the dev-tree build keeps the
+# "defenseclaw-gateway" name to match `make gateway`. Either way it is
+# installed to the runtime path ${GATEWAY_BIN} (.../bin/defenseclaw-gateway).
 if [[ -z "${BINARY_SRC}" ]]; then
-  if [[ -x "${SCRIPT_DIR}/defenseclaw-gateway" ]]; then
+  if [[ -x "${SCRIPT_DIR}/defenseclaw" ]]; then
     # Standalone bundle layout — trust the shipped binary.
-    BINARY_SRC="${SCRIPT_DIR}/defenseclaw-gateway"
+    BINARY_SRC="${SCRIPT_DIR}/defenseclaw"
     SKIP_BUILD="true"
   else
     # Repo-tree layout — either a pre-built binary at REPO_ROOT
