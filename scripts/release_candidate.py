@@ -28,16 +28,20 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
+import binascii
 import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import ssl
 import stat
 import struct
 import sys
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -69,6 +73,10 @@ RESOLVER_ASSET_SOURCES = {
     "defenseclaw-upgrade.ps1": ROOT / "scripts" / "upgrade.ps1",
 }
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
+MAX_RELEASE_CERTIFICATE_BYTES = 64 * 1024
+STRICT_BASE64_RE = re.compile(
+    rb"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
+)
 MACOS_VERIFICATION_STATUSES = ("notarized", "unverified")
 
 
@@ -91,6 +99,199 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        info.st_size,
+        info.st_mtime_ns,
+    )
+
+
+def _file_state(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (*_file_identity(info), info.st_ctime_ns)
+
+
+def _directory_identity(info: os.stat_result) -> tuple[int, int, int]:
+    return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+
+
+def _read_release_certificate(path: Path) -> tuple[bytes, os.stat_result, os.stat_result]:
+    """Read one bounded regular certificate file without following a symlink."""
+
+    try:
+        parent_info = path.parent.lstat()
+    except OSError as exc:
+        raise CandidateError(f"release certificate parent is unavailable: {path.parent}") from exc
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise CandidateError(f"release certificate parent must be a real directory: {path.parent}")
+    try:
+        named_before = path.lstat()
+    except OSError as exc:
+        raise CandidateError(f"release certificate is unavailable: {path}") from exc
+    if not stat.S_ISREG(named_before.st_mode):
+        raise CandidateError(f"release certificate must be a regular file: {path}")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CandidateError(f"release certificate is unavailable: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise CandidateError(f"release certificate must be a regular file: {path}")
+        if not 0 < opened.st_size <= MAX_RELEASE_CERTIFICATE_BYTES:
+            raise CandidateError(f"release certificate has an invalid size: {path}")
+        chunks: list[bytes] = []
+        bytes_read = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, MAX_RELEASE_CERTIFICATE_BYTES + 1 - bytes_read),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+            if bytes_read > MAX_RELEASE_CERTIFICATE_BYTES:
+                raise CandidateError(f"release certificate has an invalid size: {path}")
+        opened_after = os.fstat(descriptor)
+        try:
+            named_after = path.lstat()
+        except OSError as exc:
+            raise CandidateError(f"release certificate disappeared while being read: {path}") from exc
+        if (
+            # CPython on Windows exposes creation time as pathname st_ctime,
+            # but NTFS change time as descriptor st_ctime. Bind the pathname
+            # to the descriptor without comparing those incompatible fields,
+            # then retain ctime in each same-API mutation check.
+            _file_identity(named_before) != _file_identity(opened)
+            or _file_identity(named_after) != _file_identity(opened_after)
+            or _file_state(named_before) != _file_state(named_after)
+            or _file_state(opened) != _file_state(opened_after)
+            or bytes_read != opened_after.st_size
+        ):
+            raise CandidateError(f"release certificate changed while being read: {path}")
+        return b"".join(chunks), named_after, parent_info
+    finally:
+        os.close(descriptor)
+
+
+def _canonical_pem_certificate(raw: bytes) -> bytes:
+    try:
+        text = raw.decode("ascii")
+        der = ssl.PEM_cert_to_DER_cert(text)
+        canonical = ssl.DER_cert_to_PEM_cert(der).encode("ascii")
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise CandidateError("release certificate is not exactly one PEM certificate") from exc
+    if not der or raw != canonical:
+        raise CandidateError("release certificate is not canonical raw PEM")
+    return canonical
+
+
+def _release_certificate_payload(raw: bytes, *, allow_base64_wrapper: bool) -> bytes:
+    if not 0 < len(raw) <= MAX_RELEASE_CERTIFICATE_BYTES:
+        raise CandidateError("release certificate has an invalid size")
+    if raw.startswith(b"-----BEGIN CERTIFICATE-----\n"):
+        return _canonical_pem_certificate(raw)
+    if not allow_base64_wrapper:
+        raise CandidateError("sealed release certificate must be canonical raw PEM")
+    if STRICT_BASE64_RE.fullmatch(raw) is None:
+        raise CandidateError("post-cosign release certificate is not strict base64 or raw PEM")
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise CandidateError("post-cosign release certificate has invalid base64") from exc
+    if base64.b64encode(decoded) != raw:
+        raise CandidateError("post-cosign release certificate base64 is noncanonical")
+    canonical = _canonical_pem_certificate(decoded)
+    if decoded != canonical:
+        raise CandidateError("post-cosign release certificate does not wrap canonical PEM")
+    return canonical
+
+
+def _atomic_replace_release_certificate(
+    path: Path,
+    payload: bytes,
+    *,
+    expected_file: os.stat_result,
+    expected_parent: os.stat_result,
+) -> None:
+    descriptor = -1
+    temporary_name = ""
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.canonical-",
+            dir=path.parent,
+        )
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, stat.S_IMODE(expected_file.st_mode))
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("short write while canonicalizing release certificate")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+
+        current_file = path.lstat()
+        current_parent = path.parent.lstat()
+        if (
+            _file_state(current_file) != _file_state(expected_file)
+            or _directory_identity(current_parent) != _directory_identity(expected_parent)
+        ):
+            raise CandidateError("release certificate path changed before atomic publication")
+        os.replace(temporary_name, path)
+        temporary_name = ""
+        if os.name == "posix":
+            parent_descriptor = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+    except CandidateError:
+        raise
+    except OSError as exc:
+        raise CandidateError(f"could not atomically publish canonical release certificate: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name)
+            except OSError:
+                pass
+
+
+def canonicalize_release_certificate(path: Path) -> None:
+    """Canonicalize trusted Cosign output before candidate bytes are sealed."""
+
+    raw, file_info, parent_info = _read_release_certificate(path)
+    canonical = _release_certificate_payload(raw, allow_base64_wrapper=True)
+    _atomic_replace_release_certificate(
+        path,
+        canonical,
+        expected_file=file_info,
+        expected_parent=parent_info,
+    )
+    published, _, _ = _read_release_certificate(path)
+    if published != canonical:
+        raise CandidateError("canonical release certificate changed after atomic publication")
+
+
+def _require_canonical_release_certificate(path: Path) -> None:
+    raw, _, _ = _read_release_certificate(path)
+    _release_certificate_payload(raw, allow_base64_wrapper=False)
 
 
 def _protected_payload(path: Path) -> bytes:
@@ -2728,6 +2929,7 @@ def seal(root: Path, version: str, commit: str) -> None:
             "release candidate contains an unexpected file set: "
             f"got {actual_names!r}, want {names!r}"
         )
+    _require_canonical_release_certificate(dist / "checksums.txt.pem")
 
     checksums = _parse_checksums(dist / "checksums.txt")
     payload_names = payload_asset_names(version, macos_verification_status)
@@ -2776,6 +2978,7 @@ def verify(root: Path, version: str, commit: str) -> None:
     actual_names = _strict_file_names(dist, "release candidate")
     if actual_names != expected_names:
         raise CandidateError("release candidate file set changed after sealing")
+    _require_canonical_release_certificate(dist / "checksums.txt.pem")
 
     assets = manifest.get("assets")
     if not isinstance(assets, list):
@@ -2898,6 +3101,9 @@ def _parser() -> argparse.ArgumentParser:
     assemble_parser.add_argument("--commit", required=True)
     assemble_parser.add_argument("--macos-verification-status", required=True)
 
+    canonicalize_certificate_parser = subparsers.add_parser("canonicalize-certificate")
+    canonicalize_certificate_parser.add_argument("--certificate", type=Path, required=True)
+
     seal_parser = subparsers.add_parser("seal")
     seal_parser.add_argument("--root", type=Path, required=True)
     seal_parser.add_argument("--version", required=True)
@@ -2958,6 +3164,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.macos_verification_status,
             )
             print(f"release candidate assembled: {args.root}")
+        elif args.command == "canonicalize-certificate":
+            canonicalize_release_certificate(args.certificate)
+            print(f"release certificate canonicalized: {args.certificate}")
         elif args.command == "seal":
             seal(args.root, args.version, args.commit)
             print(f"release candidate sealed: {args.version} at {args.commit}")

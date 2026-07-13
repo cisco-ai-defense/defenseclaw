@@ -404,7 +404,9 @@ function Download {
     try { Invoke-WebRequest -Uri $url -OutFile $Destination -UseBasicParsing | Out-Null } catch { Fail "Failed to download $url" }
 }
 function Read-Checksums {
-    param([string]$Path)
+    param([string]$Path,[string]$ReleaseVersion)
+    Assert-Version $ReleaseVersion "checksum release version"
+    $allowLegacyGoReleaserRows = (Compare-Version $ReleaseVersion "0.8.4") -lt 0
     $result = @{}
     foreach ($raw in Get-Content -LiteralPath $Path -Encoding UTF8) {
         $line = $raw.Trim()
@@ -413,7 +415,16 @@ function Read-Checksums {
         $digest = $Matches[1].ToLowerInvariant(); $name = $Matches[2].Trim()
         if ($name.StartsWith("*")) { $name = $name.Substring(1) }
         if ($name.StartsWith("./")) { $name = $name.Substring(2) }
-        if (-not $name -or $name -in @(".", "..") -or [IO.Path]::GetFileName($name) -ne $name -or $result.ContainsKey($name)) { Fail "Invalid checksum artifact name." }
+        $legacyGoReleaserRow = $name -cmatch '^(?:defenseclaw_(?:darwin|linux)_(?:amd64_v1|arm64_v8\.0)/defenseclaw|defenseclaw_windows_(?:amd64_v1|arm64_v8\.0)/defenseclaw\.exe)$'
+        if ($allowLegacyGoReleaserRows -and $legacyGoReleaserRow) { continue }
+        if (
+            -not $name -or
+            $name -in @(".", "..") -or
+            $name.Contains("/") -or
+            $name.Contains('\') -or
+            [IO.Path]::GetFileName($name) -ne $name -or
+            $result.ContainsKey($name)
+        ) { Fail "Invalid checksum artifact name." }
         $result[$name] = $digest
     }
     if ($result.Count -eq 0) { Fail "checksums.txt has no valid entries." }
@@ -742,7 +753,7 @@ function Stage-Release {
     foreach ($name in @("checksums.txt","checksums.txt.sig","checksums.txt.pem")) { Download $ReleaseVersion $name (Join-Path $directory $name) }
     $certificate=Normalize-ReleaseCertificate $ReleaseVersion (Join-Path $directory "checksums.txt.pem") $directory
     Verify-Signature $ReleaseVersion (Join-Path $directory "checksums.txt") (Join-Path $directory "checksums.txt.sig") $certificate
-    $checksums = Read-Checksums (Join-Path $directory "checksums.txt")
+    $checksums = Read-Checksums (Join-Path $directory "checksums.txt") $ReleaseVersion
     $checksumsSha256=(Get-FileHash -LiteralPath (Join-Path $directory "checksums.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
     $provenance=$null
     if((Compare-Version $ReleaseVersion "0.8.5") -ge 0){

@@ -37,9 +37,11 @@ legacy_log_dir=/Library/Logs/DefenseClaw
 legacy_gateway_plist=/Library/LaunchDaemons/com.defenseclaw.gateway.plist
 legacy_guardian_plist=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-packaging.XXXXXX")"
+trusted_fixture="/Library/DefenseClawPackagingSmoke.$$"
 probe_marker=""
 probe_owned=false
 installation_owned=false
+trusted_fixture_owned=false
 
 cleanup() {
     local status=$?
@@ -53,6 +55,9 @@ cleanup() {
     if [ "$probe_owned" = true ]; then
         rm -f -- "${probe_marker}/existing-state" >/dev/null 2>&1 || true
         rmdir -- "$probe_marker" >/dev/null 2>&1 || true
+    fi
+    if [ "$trusted_fixture_owned" = true ]; then
+        sudo -n rm -rf -- "$trusted_fixture"
     fi
     rm -rf -- "$fixture"
     exit "$status"
@@ -142,6 +147,33 @@ done
 rm -f -- "${probe_marker}/existing-state"
 rmdir -- "$probe_marker"
 probe_owned=false
+
+if sudo -n "$installer" \
+    --binary "$binary" \
+    --config "$config_source" \
+    --manifest "$manifest_source" \
+    --no-start >"${fixture}/untrusted-source.stdout" 2>"${fixture}/untrusted-source.stderr"; then
+    fail "enterprise package accepted writable config and manifest sources"
+fi
+grep -Fq "managed config is not root-owned" "${fixture}/untrusted-source.stderr" \
+    || grep -Fq "managed config is group/other writable" "${fixture}/untrusted-source.stderr" \
+    || fail "untrusted source refusal did not identify managed config trust"
+for path in \
+    "$managed_root" "$log_dir" \
+    "$legacy_binary_root" "$legacy_managed_root" "$legacy_log_dir" \
+    "$gateway_plist" "$guardian_plist" \
+    "$legacy_gateway_plist" "$legacy_guardian_plist"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "untrusted-source refusal mutated managed destination: $path"
+done
+
+sudo -n mkdir -m 0700 -- "$trusted_fixture"
+trusted_fixture_owned=true
+sudo -n cp -- "$config_source" "${trusted_fixture}/config.yaml"
+sudo -n cp -- "$manifest_source" "${trusted_fixture}/targets.yaml"
+sudo -n chown root:wheel "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
+sudo -n chmod 0644 "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
+config_source="${trusted_fixture}/config.yaml"
+manifest_source="${trusted_fixture}/targets.yaml"
 
 sudo -n "$installer" \
     --binary "$binary" \

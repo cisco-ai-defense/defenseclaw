@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import io
 import json
 import os
@@ -23,6 +24,14 @@ from scripts import release_candidate
 ROOT = Path(__file__).resolve().parents[2]
 VERSION = "0.8.4"
 COMMIT = "a" * 40
+TEST_CERTIFICATE_PEM = (
+    b"-----BEGIN CERTIFICATE-----\n"
+    b"MAMCAQA=\n"
+    b"-----END CERTIFICATE-----\n"
+)
+# The unit fixture only exercises canonical PEM/DER framing.  The release workflow
+# immediately asks Cosign to validate the real X.509 certificate and exact OIDC identity.
+TEST_CERTIFICATE_WRAPPER = base64.b64encode(TEST_CERTIFICATE_PEM)
 RELEASE_ARTIFACTS = release_candidate._expected_release_artifacts(VERSION)
 PROTECTED_WHEEL = RELEASE_ARTIFACTS["wheel"]
 PHASE_TWO_MUTATOR_SOURCE = (ROOT / "cli/defenseclaw/phase_two_mutator.py").read_text(encoding="utf-8")
@@ -416,7 +425,7 @@ def _macos_dir(tmp_path: Path, macos_verification_status: str = "notarized") -> 
     return macos
 
 
-def _sealed_candidate(
+def _candidate_before_seal(
     tmp_path: Path,
     macos_verification_status: str = "notarized",
 ) -> Path:
@@ -430,7 +439,17 @@ def _sealed_candidate(
         macos_verification_status,
     )
     (root / "dist/checksums.txt.sig").write_bytes(b"sigstore signature")
-    (root / "dist/checksums.txt.pem").write_bytes(b"sigstore certificate")
+    return root
+
+
+def _sealed_candidate(
+    tmp_path: Path,
+    macos_verification_status: str = "notarized",
+) -> Path:
+    root = _candidate_before_seal(tmp_path, macos_verification_status)
+    certificate = root / "dist/checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+    release_candidate.canonicalize_release_certificate(certificate)
     release_candidate.seal(root, VERSION, COMMIT)
     return root
 
@@ -439,6 +458,7 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     root = _sealed_candidate(tmp_path)
 
     release_candidate.verify(root, VERSION, COMMIT)
+    assert (root / "dist/checksums.txt.pem").read_bytes() == TEST_CERTIFICATE_PEM
 
     manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
     assert [item["name"] for item in manifest["assets"]] == list(
@@ -471,6 +491,162 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     release_candidate.verify_published_release(root, release_json, VERSION, COMMIT)
+
+
+def test_certificate_command_canonicalizes_strict_cosign_wrapper_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+    original_replace = release_candidate.os.replace
+    replacements: list[tuple[Path, Path]] = []
+
+    def record_replace(source: str | Path, destination: str | Path) -> None:
+        replacements.append((Path(source), Path(destination)))
+        original_replace(source, destination)
+
+    monkeypatch.setattr(release_candidate.os, "replace", record_replace)
+    status = release_candidate.main(
+        ["canonicalize-certificate", "--certificate", str(certificate)]
+    )
+
+    assert status == 0
+    assert certificate.read_bytes() == TEST_CERTIFICATE_PEM
+    assert len(replacements) == 1
+    assert replacements[0][0].parent == certificate.parent
+    assert replacements[0][1] == certificate
+    assert "release certificate canonicalized" in capsys.readouterr().out
+
+
+def test_certificate_canonicalization_accepts_canonical_raw_pem(tmp_path: Path) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_PEM)
+
+    release_candidate.canonicalize_release_certificate(certificate)
+
+    assert certificate.read_bytes() == TEST_CERTIFICATE_PEM
+
+
+def test_windows_named_and_opened_certificate_timestamp_views_do_not_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+    real_lstat = Path.lstat
+
+    def timestamp_skewed_lstat(candidate: Path):
+        info = real_lstat(candidate)
+        if candidate != certificate:
+            return info
+
+        class _TimestampSkewedStat:
+            st_ctime_ns = info.st_ctime_ns + 1
+
+            def __getattr__(self, name: str):
+                return getattr(info, name)
+
+        return _TimestampSkewedStat()
+
+    monkeypatch.setattr(Path, "lstat", timestamp_skewed_lstat)
+
+    release_candidate.canonicalize_release_certificate(certificate)
+
+    assert certificate.read_bytes() == TEST_CERTIFICATE_PEM
+
+
+def test_release_certificate_same_api_timestamp_change_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+    real_lstat = Path.lstat
+    certificate_lstat_calls = 0
+
+    def timestamp_mutating_lstat(candidate: Path):
+        nonlocal certificate_lstat_calls
+        info = real_lstat(candidate)
+        if candidate != certificate:
+            return info
+        certificate_lstat_calls += 1
+        changed = certificate_lstat_calls > 1
+
+        class _TimestampMutatedStat:
+            st_ctime_ns = info.st_ctime_ns + int(changed)
+
+            def __getattr__(self, name: str):
+                return getattr(info, name)
+
+        return _TimestampMutatedStat()
+
+    monkeypatch.setattr(Path, "lstat", timestamp_mutating_lstat)
+
+    with pytest.raises(release_candidate.CandidateError, match="changed while being read"):
+        release_candidate.canonicalize_release_certificate(certificate)
+
+    assert certificate.read_bytes() == TEST_CERTIFICATE_WRAPPER
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        TEST_CERTIFICATE_WRAPPER + b"\n",
+        base64.b64encode(TEST_CERTIFICATE_PEM.rstrip(b"\n")),
+        base64.b64encode(TEST_CERTIFICATE_PEM + TEST_CERTIFICATE_PEM),
+        TEST_CERTIFICATE_PEM + TEST_CERTIFICATE_PEM,
+        TEST_CERTIFICATE_PEM.replace(b"\n", b"\r\n"),
+        b"\xef\xbb\xbf" + TEST_CERTIFICATE_PEM,
+        b"A" * (release_candidate.MAX_RELEASE_CERTIFICATE_BYTES + 1),
+    ],
+)
+def test_certificate_canonicalization_rejects_noncanonical_or_ambiguous_input(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="release certificate"):
+        release_candidate.canonicalize_release_certificate(certificate)
+
+    assert certificate.read_bytes() == payload
+
+
+def test_certificate_atomic_publication_failure_preserves_cosign_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+
+    def fail_replace(_source: str | Path, _destination: str | Path) -> None:
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(release_candidate.os, "replace", fail_replace)
+    with pytest.raises(release_candidate.CandidateError, match="atomically publish"):
+        release_candidate.canonicalize_release_certificate(certificate)
+
+    assert certificate.read_bytes() == TEST_CERTIFICATE_WRAPPER
+    assert not list(tmp_path.glob(".checksums.txt.pem.canonical-*"))
+
+
+def test_seal_and_verify_reject_base64_wrapped_modern_certificate(tmp_path: Path) -> None:
+    unsealed = _candidate_before_seal(tmp_path)
+    certificate = unsealed / "dist/checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+    with pytest.raises(release_candidate.CandidateError, match="canonical raw PEM"):
+        release_candidate.seal(unsealed, VERSION, COMMIT)
+
+    sealed_root = tmp_path / "sealed-case"
+    sealed_root.mkdir()
+    sealed = _sealed_candidate(sealed_root)
+    (sealed / "dist/checksums.txt.pem").write_bytes(TEST_CERTIFICATE_WRAPPER)
+    with pytest.raises(release_candidate.CandidateError, match="canonical raw PEM"):
+        release_candidate.verify(sealed, VERSION, COMMIT)
 
 
 def test_candidate_seals_and_verifies_explicit_unverified_macos_assets(

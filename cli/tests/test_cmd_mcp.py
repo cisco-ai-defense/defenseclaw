@@ -38,7 +38,7 @@ from defenseclaw.config import MCPServerEntry
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import Finding, ScanResult
 
-from tests.helpers import cleanup_app, make_app_context
+from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
 
 
 class MCPCommandTestBase(unittest.TestCase):
@@ -398,9 +398,7 @@ class TestMCPScan(MCPCommandTestBase):
         ]
         mock_scan.side_effect = ValueError("connection refused")
 
-        # click >=8.2 removed the mix_stderr kwarg and always keeps stdout and
-        # stderr separated, so result.stdout / result.stderr work by default.
-        runner = CliRunner()
+        runner = make_separate_stderr_runner()
         result = runner.invoke(
             mcp,
             ["scan", "--all", "--connector", "codex", "--json"],
@@ -1045,9 +1043,7 @@ class TestMCPScan(MCPCommandTestBase):
 
         mock_scan.side_effect = _fail
 
-        # click >=8.2 removed the mix_stderr kwarg and always keeps stdout and
-        # stderr separated, so result.stdout / result.stderr work by default.
-        runner = CliRunner()
+        runner = make_separate_stderr_runner()
         result = runner.invoke(
             mcp,
             ["scan", "node_repl", "--connector", "codex", "--json"],

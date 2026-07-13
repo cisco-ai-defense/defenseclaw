@@ -53,7 +53,7 @@ from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.config import SeverityAction
 from defenseclaw.models import Finding, ScanResult
 
-from tests.helpers import cleanup_app, make_app_context
+from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
 
 
 class _SkillScanUXBase(unittest.TestCase):
@@ -240,9 +240,7 @@ class TestSingleTargetJsonMode(_SkillScanUXBase):
         mock_scanner = MagicMock()
         mock_scanner.scan.side_effect = scan_impl
         mock_cls.return_value = mock_scanner
-        # click >=8.2 removed the mix_stderr kwarg and always keeps stdout and
-        # stderr separated, so result.stdout / result.stderr work by default.
-        runner = CliRunner()
+        runner = make_separate_stderr_runner()
 
         result = runner.invoke(
             skill,
