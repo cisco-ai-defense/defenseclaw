@@ -79,22 +79,24 @@ try {
         (Join-Path $temp 'disjoint-claude')
     ))
     Assert-True ($disjointRoots.Count -eq 3) 'pairwise-disjoint root validation returns every normalized root'
-    $equalRootsRejected = $false
+    $equalRootsError = $null
     try {
         $null = Assert-WindowsNativePathsDisjoint @(
             (Join-Path $temp 'same'),
             (Join-Path $temp 'same')
         )
-    } catch { $equalRootsRejected = $true }
-    Assert-True $equalRootsRejected 'pairwise-disjoint root validation rejects equal roots'
-    $nestedRootsRejected = $false
+    } catch { $equalRootsError = $_.Exception.Message }
+    Assert-True ($equalRootsError -match '^Windows-native roots must be pairwise non-equal and non-nested:') `
+        'pairwise-disjoint root validation rejects equal roots with the expected diagnostic'
+    $nestedRootsError = $null
     try {
         $null = Assert-WindowsNativePathsDisjoint @(
             (Join-Path $temp 'parent'),
             (Join-Path $temp 'parent\child')
         )
-    } catch { $nestedRootsRejected = $true }
-    Assert-True $nestedRootsRejected 'pairwise-disjoint root validation rejects nested roots'
+    } catch { $nestedRootsError = $_.Exception.Message }
+    Assert-True ($nestedRootsError -match '^Windows-native roots must be pairwise non-equal and non-nested:') `
+        'pairwise-disjoint root validation rejects nested roots with the expected diagnostic'
 
     $privateRoot = Join-Path $temp 'private-state'
     Protect-TestDirectory $privateRoot

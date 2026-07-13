@@ -1331,6 +1331,58 @@ func TestClaudeCode_Setup_PatchesSettings(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Setup_HonorsClaudeConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	claudeConfigDir := filepath.Join(dir, "custom-claude-config")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = ""
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	settingsPath := filepath.Join(claudeConfigDir, "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read CLAUDE_CONFIG_DIR settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse CLAUDE_CONFIG_DIR settings: %v", err)
+	}
+	if _, ok := settings["hooks"].(map[string]interface{}); !ok {
+		t.Fatalf("CLAUDE_CONFIG_DIR settings have no hooks object: %s", raw)
+	}
+
+	targets := c.ComponentTargets(filepath.Join(dir, "workspace"))
+	for component, expected := range map[string]string{
+		"skill":   filepath.Join(claudeConfigDir, "skills"),
+		"plugin":  filepath.Join(claudeConfigDir, "plugins"),
+		"mcp":     settingsPath,
+		"agent":   filepath.Join(claudeConfigDir, "agents"),
+		"command": filepath.Join(claudeConfigDir, "commands"),
+		"config":  settingsPath,
+	} {
+		if !slices.Contains(targets[component], expected) {
+			t.Errorf("ComponentTargets(%q) = %v, missing CLAUDE_CONFIG_DIR path %q", component, targets[component], expected)
+		}
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after CLAUDE_CONFIG_DIR teardown: %v", err)
+	}
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("CLAUDE_CONFIG_DIR settings remained after teardown: %v", err)
+	}
+}
+
 func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native absolute hook-command refresh is Windows-specific")

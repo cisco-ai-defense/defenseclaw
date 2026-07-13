@@ -80,6 +80,10 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	hookScript := filepath.Join(hookDir, "claude-code-hook.sh")
+	settingsDir := filepath.Dir(claudeCodeSettingsPath())
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		return fmt.Errorf("create Claude Code configuration directory %s: %w", settingsDir, err)
+	}
 	// Hooks register unconditionally — they post to
 	// /api/v1/claudecode/hook (or the equivalent route) and are the
 	// entry point for tool-call telemetry on every install. The hook
@@ -377,8 +381,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 func (c *ClaudeCodeConnector) SupportsComponentScanning() bool { return true }
 
 func (c *ClaudeCodeConnector) ComponentTargets(cwd string) map[string][]string {
-	home := userHomeDir()
-	userDir := filepath.Join(home, ".claude")
+	userDir := claudeCodeConfigDir()
 	workspaceDir := filepath.Join(cwd, ".claude")
 
 	targets := map[string][]string{
@@ -456,11 +459,25 @@ func (c *ClaudeCodeConnector) loadBackup(dataDir string) (claudeCodeBackup, erro
 // ClaudeCodeSettingsPathOverride allows tests to redirect the settings path.
 var ClaudeCodeSettingsPathOverride string
 
+// claudeCodeConfigDir returns the same user-scoped configuration directory
+// Claude Code resolves. CLAUDE_CONFIG_DIR is a supported first-class override;
+// honoring it here keeps hook setup, teardown, health checks, and component
+// discovery pointed at the configuration the running agent actually reads.
+func claudeCodeConfigDir() string {
+	if ClaudeCodeSettingsPathOverride != "" {
+		return filepath.Dir(ClaudeCodeSettingsPathOverride)
+	}
+	if configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configDir != "" {
+		return configDir
+	}
+	return filepath.Join(userHomeDir(), ".claude")
+}
+
 func claudeCodeSettingsPath() string {
 	if ClaudeCodeSettingsPathOverride != "" {
 		return ClaudeCodeSettingsPathOverride
 	}
-	return filepath.Join(userHomeDir(), ".claude", "settings.json")
+	return filepath.Join(claudeCodeConfigDir(), "settings.json")
 }
 
 // fileChangedMatcher targets config files that affect Claude Code's

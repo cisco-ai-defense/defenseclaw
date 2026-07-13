@@ -2027,9 +2027,9 @@ function Invoke-Contract {
         }
         $root = Assert-SafeStateRoot $StateRoot
         $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
-        $profile = Install-PackagedArtifacts (Join-Path $root 'install') ([IO.Path]::GetFullPath($ArtifactRoot))
-        $contractRoot = [IO.Path]::GetFullPath($profile.Root).TrimEnd('\')
-        $contractHome = [IO.Path]::GetFullPath($profile.Profile).TrimEnd('\')
+        $installedProfile = Install-PackagedArtifacts (Join-Path $root 'install') ([IO.Path]::GetFullPath($ArtifactRoot))
+        $contractRoot = [IO.Path]::GetFullPath($installedProfile.Root).TrimEnd('\')
+        $contractHome = [IO.Path]::GetFullPath($installedProfile.Profile).TrimEnd('\')
         $codexHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'codex-home')).TrimEnd('\')
         $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractRoot 'claude-home')).TrimEnd('\')
         $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
@@ -2059,7 +2059,7 @@ function Invoke-Contract {
         $env:TMP = $env:TEMP
         $env:CODEX_HOME = $codexHome
         $env:CLAUDE_CONFIG_DIR = $claudeHome
-        $env:PATH = "$($profile.VenvScripts);$($profile.Bin);$env:PATH"
+        $env:PATH = "$($installedProfile.VenvScripts);$($installedProfile.Bin);$env:PATH"
         $harness = Join-Path $WorkspaceRoot 'scripts\live-connector-e2e\run-windows.ps1'
         & $harness -Layer contract -Connector $Connector -WorkspaceRoot $WorkspaceRoot `
             -StateRoot $contractRoot -HomeRoot $contractHome -ResultsPath (Join-Path $root 'results.jsonl') `
