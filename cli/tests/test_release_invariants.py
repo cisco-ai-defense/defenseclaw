@@ -253,6 +253,10 @@ class TestReleaseInvariants(unittest.TestCase):
         self.assertEqual(manifest["required_bridge_version"], "0.8.4")
         self.assertIn("0.8.3", manifest["auto_bridge_from"])
         self.assertNotIn("0.8.4", manifest["auto_bridge_from"])
+        self.assertEqual(
+            manifest["platform_tested_source_versions"],
+            {"windows": []},
+        )
         self.assertEqual(manifest["migration_failure_policy"], "fail")
         self.assertIn("0.8.5", manifest["required_cli_migrations"])
 

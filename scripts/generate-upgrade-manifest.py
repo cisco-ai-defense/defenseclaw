@@ -340,7 +340,7 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
         platform: [baseline for baseline in baselines if _ver_tuple(baseline) < version_t]
         for platform, baselines in platform_published_upgrade_baselines().items()
     }
-    if not tested_sources or any(not values for values in platform_tested_sources.values()):
+    if not tested_sources:
         raise RuntimeError(f"release {version} has an empty tested-source matrix")
     policy: dict[str, Any] = {
         "min_upgrade_protocol": LEGACY_UPGRADE_PROTOCOL_VERSION,
@@ -348,6 +348,8 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
         "platform_tested_source_versions": platform_tested_sources,
     }
     if version_t < _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION):
+        if any(not values for values in platform_tested_sources.values()):
+            raise RuntimeError(f"release {version} has an empty tested-source matrix")
         return policy
 
     auto_bridge_from = [
@@ -362,12 +364,13 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
             f"required bridge {OBSERVABILITY_V8_BRIDGE_VERSION} is absent from the "
             "global tested-source matrix"
         )
-    for platform, sources in platform_tested_sources.items():
+    for platform, sources in tuple(platform_tested_sources.items()):
         if OBSERVABILITY_V8_BRIDGE_VERSION not in sources:
-            raise RuntimeError(
-                f"required bridge {OBSERVABILITY_V8_BRIDGE_VERSION} is absent from the "
-                f"{platform} tested-source matrix"
-            )
+            # A platform cannot traverse the hard cut when the immutable
+            # bridge was not published for it. Encode that platform as
+            # unsupported instead of claiming its older releases were tested
+            # through a bridge that users cannot install.
+            platform_tested_sources[platform] = []
     policy.update(
         {
             "min_upgrade_protocol": HARD_CUT_UPGRADE_PROTOCOL_VERSION,

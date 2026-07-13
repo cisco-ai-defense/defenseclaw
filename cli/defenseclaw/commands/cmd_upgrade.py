@@ -2306,6 +2306,7 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
             platform_tested_raw.get("windows"),
             label="platform_tested_source_versions.windows",
             target_version=version,
+            allow_empty=True,
         )
         if any(item not in tested_source_versions for item in windows_sources):
             ux.err(
@@ -2371,6 +2372,15 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
             indent="  ",
         )
         raise SystemExit(1)
+    if _version_key(version) >= _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION) and (
+        min_protocol != 2 or not all(bridge_fields_present)
+    ):
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} 0.8.5+ hard-cut releases require "
+            "upgrade protocol 2 and a complete bridge contract.",
+            indent="  ",
+        )
+        raise SystemExit(1)
 
     minimum_source = payload.get("minimum_source_version")
     required_bridge = payload.get("required_bridge_version")
@@ -2431,7 +2441,7 @@ def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, objec
                 indent="  ",
             )
             raise SystemExit(1)
-        if expected_schema == 2 and required_bridge not in windows_sources:
+        if expected_schema == 2 and windows_sources and required_bridge not in windows_sources:
             ux.err(
                 f"{_UPGRADE_MANIFEST_FILENAME} required bridge {required_bridge} is absent from "
                 "the signed Windows tested-source matrix.",
@@ -2472,8 +2482,9 @@ def _validate_manifest_source_versions(
     *,
     label: str,
     target_version: str,
+    allow_empty: bool = False,
 ) -> list[str]:
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, list) or (not value and not allow_empty):
         ux.err(f"{_UPGRADE_MANIFEST_FILENAME} {label} must be a non-empty version list.", indent="  ")
         raise SystemExit(1)
     sources: list[str] = []
@@ -2649,6 +2660,22 @@ def _enforce_upgrade_source_contract(
             tested_sources = platform_tested_raw.get("windows") if isinstance(platform_tested_raw, dict) else None
         else:
             tested_sources = tested_raw
+        if os_name == "windows" and tested_sources == []:
+            required_bridge = manifest.get("required_bridge_version")
+            ux.err(
+                f"Windows upgrades to {target_version} are unsupported by the signed release policy.",
+                indent="  ",
+            )
+            if isinstance(required_bridge, str):
+                ux.subhead(
+                    f"Required bridge {required_bridge} was not published for Windows.",
+                    indent="    ",
+                )
+            ux.subhead(
+                "No changes were made: no services were stopped and no installed artifacts were changed.",
+                indent="    ",
+            )
+            raise SystemExit(1)
         if not isinstance(tested_sources, list) or not tested_sources:
             ux.err("Upgrade manifest tested-source policy is incomplete; refusing to change state.", indent="  ")
             raise SystemExit(1)

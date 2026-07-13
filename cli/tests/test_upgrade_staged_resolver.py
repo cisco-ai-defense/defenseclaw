@@ -56,7 +56,7 @@ def _manifest(version: str) -> dict[str, object]:
     windows_sources = ["0.8.3", "0.8.2", "0.8.1", "0.8.0"]
     if version == "0.8.5":
         published_sources.insert(0, "0.8.4")
-        windows_sources.insert(0, "0.8.4")
+        windows_sources = []
     gateways = {
         platform_name: {
             arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")

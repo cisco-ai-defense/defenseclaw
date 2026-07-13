@@ -378,6 +378,7 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "runtime_config_version does not attest the expected bridge/hard-cut runtime" in text
     assert "required bridge is absent from the signed Windows matrix" in text
     assert "signed Windows matrix has no pre-bridge source" in text
+    assert "unpublished Windows bridge requires an empty signed Windows matrix" in text
     assert "windows_prebridge_baselines" in text
     assert "CurrentConfigVersion" in text
     assert "ObservabilityV8ConfigVersion" in text

@@ -783,6 +783,12 @@ def _validate_upgrade_manifest(path: Path, version: str) -> None:
             for item in platform_configured["windows"]
             if tuple(map(int, item.split("."))) < version_key
         ]
+        manifest_bridge = document.get("required_bridge_version")
+        if manifest_bridge and manifest_bridge not in expected_windows:
+            # An unpublished platform bridge makes the entire hard-cut path
+            # unsupported on that platform. Do not retain pre-bridge sources:
+            # that would falsely attest a staged upgrade path.
+            expected_windows = []
         if tested != expected_tested:
             raise CandidateError(
                 "tested_source_versions must exactly match every reviewed baseline older than the candidate"
@@ -840,6 +846,12 @@ def _validate_upgrade_manifest(path: Path, version: str) -> None:
 
     bridge_keys = ("minimum_source_version", "required_bridge_version", "auto_bridge_from")
     bridge_presence = [key in document for key in bridge_keys]
+    if version_key >= (0, 8, 5) and (
+        min_protocol != 2 or not all(bridge_presence)
+    ):
+        raise CandidateError(
+            "0.8.5+ hard-cut release requires upgrade protocol 2 and a complete bridge contract"
+        )
     if any(bridge_presence) and not all(bridge_presence):
         raise CandidateError("upgrade manifest bridge contract is incomplete")
     if min_protocol > 1 and not all(bridge_presence):
@@ -875,9 +887,15 @@ def _validate_upgrade_manifest(path: Path, version: str) -> None:
         raise CandidateError(
             f"required bridge {bridge} is absent from the signed global tested-source matrix"
         )
-    if bridge not in platform_tested["windows"]:
+    if bridge in platform_configured["windows"]:
+        if bridge not in platform_tested["windows"]:
+            raise CandidateError(
+                f"required bridge {bridge} is absent from the tested Windows baseline matrix"
+            )
+    elif platform_tested["windows"]:
         raise CandidateError(
-            f"required bridge {bridge} is absent from the tested Windows baseline matrix"
+            f"Windows bridge {bridge} is unpublished; the tested Windows baseline matrix "
+            "must be empty"
         )
     bridge_key = tuple(map(int, bridge.split(".")))
     expected_automatic = [

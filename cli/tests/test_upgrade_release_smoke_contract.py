@@ -310,7 +310,6 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
         "0.4.0": 5,
     }
     assert policy["platform_published_baselines"]["windows"] == [
-        "0.8.4",
         "0.8.3",
         "0.8.2",
         "0.8.1",

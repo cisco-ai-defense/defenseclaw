@@ -2166,7 +2166,7 @@ def test_hard_cut_auto_bridge_exactly_matches_older_published_baselines(
                     "0.8.3": 7,
                     "0.8.2": 6,
                 },
-                "platform_published_baselines": {"windows": ["0.8.4", "0.8.3"]},
+                "platform_published_baselines": {"windows": ["0.8.3"]},
             }
         ),
         encoding="utf-8",
@@ -2200,7 +2200,7 @@ def test_hard_cut_auto_bridge_exactly_matches_older_published_baselines(
         "required_bridge_version": "0.8.4",
         "auto_bridge_from": ["0.8.3"],
         "tested_source_versions": ["0.8.4", "0.8.3", "0.8.2"],
-        "platform_tested_source_versions": {"windows": ["0.8.4", "0.8.3"]},
+        "platform_tested_source_versions": {"windows": []},
         "release_artifacts": release_candidate._expected_release_artifacts("0.8.5"),
     }
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -2217,6 +2217,14 @@ def test_hard_cut_auto_bridge_exactly_matches_older_published_baselines(
     manifest["auto_bridge_from"] = ["0.8.3", "0.8.2"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     release_candidate._validate_upgrade_manifest(manifest_path, "0.8.5")
+
+    manifest["platform_tested_source_versions"]["windows"] = ["0.8.3"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="must exactly match the reviewed Windows matrix",
+    ):
+        release_candidate._validate_upgrade_manifest(manifest_path, "0.8.5")
 
 
 def test_bridge_candidate_accepts_schema_two_policy_before_bridge_is_published(
@@ -2260,6 +2268,35 @@ def test_bridge_candidate_accepts_schema_two_policy_before_bridge_is_published(
         ["0.8.3", "0.8.2"],
         {"windows": ["0.8.3", "0.8.2"]},
     )
+
+
+def test_hard_cut_rejects_protocol_one_schema_two_manifest_without_bridge(
+    tmp_path: Path,
+) -> None:
+    configured, platforms = release_candidate._load_upgrade_baseline_policy()
+    manifest_path = tmp_path / "upgrade-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "runtime_config_version": 8,
+                "release_version": "0.8.5",
+                "min_upgrade_protocol": 1,
+                "controller_upgrade_protocol": 2,
+                "migration_failure_policy": "fail",
+                "tested_source_versions": configured,
+                "platform_tested_source_versions": platforms,
+                "release_artifacts": release_candidate._expected_release_artifacts("0.8.5"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="hard-cut release requires upgrade protocol 2 and a complete bridge contract",
+    ):
+        release_candidate._validate_upgrade_manifest(manifest_path, "0.8.5")
 
 
 def test_schema1_bridge_contract_without_tested_policy_has_normalized_error(

@@ -63,6 +63,107 @@ def _powershell_checksum_parser(source: str) -> str:
     )
 
 
+def _powershell_manifest_validator(source: str) -> str:
+    version_helpers = source[
+        source.index("function Assert-Version {") : source.index("function Get-Home {")
+    ]
+    manifest_validator = source[
+        source.index("function Property {") : source.index("function Assert-SafeZip {")
+    ]
+    return (
+        "Set-StrictMode -Version Latest\n"
+        "$ErrorActionPreference='Stop'\n"
+        "$script:VersionPattern='^\\d+\\.\\d+\\.\\d+$'\n"
+        "$script:ResolverProtocol=2\n"
+        "function Fail { param([string]$Message) throw $Message }\n"
+        + version_helpers
+        + manifest_validator
+    )
+
+
+def _hard_cut_manifest(windows_sources: object) -> dict[str, object]:
+    version = "0.8.5"
+    return {
+        "schema_version": 2,
+        "release_version": version,
+        "min_upgrade_protocol": 2,
+        "controller_upgrade_protocol": 2,
+        "migration_failure_policy": "fail",
+        "required_cli_migrations": [version],
+        "tested_source_versions": ["0.8.4", "0.8.3"],
+        "platform_tested_source_versions": {"windows": windows_sources},
+        "runtime_config_version": 8,
+        "release_artifacts": {
+            "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
+            "gateways": {
+                platform: {
+                    arch: f"defenseclaw_{version}_protocol2_{platform}_{arch}.dcgateway"
+                    for arch in ("amd64", "arm64")
+                }
+                for platform in ("darwin", "linux", "windows")
+            },
+        },
+        "minimum_source_version": "0.8.4",
+        "required_bridge_version": "0.8.4",
+        "auto_bridge_from": ["0.8.3"],
+    }
+
+
+def _run_powershell_manifest_validation(
+    tmp_path: Path,
+    windows_sources: object,
+) -> subprocess.CompletedProcess[str]:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    manifest = tmp_path / "upgrade-manifest.json"
+    manifest.write_text(json.dumps(_hard_cut_manifest(windows_sources)), encoding="utf-8")
+    command = (
+        _powershell_manifest_validator(source)
+        + "\n$raw=Get-Content -Raw -LiteralPath $env:MANIFEST | ConvertFrom-Json\n"
+        + "Validate-Manifest -Raw $raw -ReleaseVersion '0.8.5'\n"
+    )
+    return subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "MANIFEST": str(manifest),
+        },
+    )
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_manifest_refuses_unpublished_bridge_before_mutation(tmp_path: Path) -> None:
+    completed = _run_powershell_manifest_validation(tmp_path, [])
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0
+    assert "Windows upgrades to 0.8.5 are unsupported by the signed release policy" in output
+    assert "Required bridge 0.8.4 was not published for Windows" in output
+    assert "No changes were made" in output
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_manifest_rejects_nonempty_matrix_without_bridge(tmp_path: Path) -> None:
+    completed = _run_powershell_manifest_validation(tmp_path, ["0.8.3"])
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0
+    assert "Required bridge is absent from the signed Windows tested-source matrix" in output
+    assert "was not published for Windows" not in output
+
+
 @pytest.mark.skipif(
     not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
     reason="PowerShell is unavailable on this host",
@@ -635,6 +736,9 @@ def test_windows_phase_one_custody_keeps_pep427_wheel_names() -> None:
 def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract() -> None:
     source = RESOLVER.read_text(encoding="utf-8")
     main = _main_body(source)
+    validator = source[
+        source.index("function Validate-Manifest {") : source.index("function Assert-SafeZip {")
+    ]
 
     assert "$versionMatches" in source
     assert "$gatewayProcesses" in source
@@ -678,6 +782,20 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     assert "contact DefenseClaw support for a validated state-aware recovery path" in source
     assert "Bridge $bridgeVersion does not declare $installed in its tested Windows source matrix" in source
     assert "-I -m defenseclaw.main upgrade" in source
+    unsupported_windows = (
+        'Fail "Windows upgrades to $ReleaseVersion are unsupported by the signed release policy. '
+        'Required bridge $bridge was not published for Windows. No changes were made: '
+        'no services were stopped and no installed artifacts were changed."'
+    )
+    assert unsupported_windows in validator
+    assert "platform_tested_source_versions must contain exactly the Windows source list" in validator
+    assert "Required bridge is absent from the signed Windows tested-source matrix" in validator
+    assert validator.index("if($tested -notcontains $bridge){") < validator.index(
+        unsupported_windows
+    )
+    assert validator.index(unsupported_windows) < validator.index(
+        'Fail "Windows tested-source list must not be empty."'
+    )
 
     release_gate = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(encoding="utf-8")
     assert "defenseclaw-$TargetVersion-2-py3-none-any.whl" in release_gate

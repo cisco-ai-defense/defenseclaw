@@ -4676,7 +4676,7 @@ class TestUpgradeManifest(unittest.TestCase):
                 "0.6.6",
                 "0.4.0",
             ],
-            "platform_tested_source_versions": {"windows": ["0.8.4", "0.8.3", "0.8.2", "0.8.0"]},
+            "platform_tested_source_versions": {"windows": []},
             "release_artifacts": _expected_release_artifacts("0.8.5"),
         }
         payload.update(overrides)
@@ -4690,6 +4690,7 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertEqual(manifest["auto_bridge_from"], ["0.8.3", "0.8.2", "0.7.2"])
         self.assertEqual(manifest["min_upgrade_protocol"], 2)
         self.assertEqual(manifest["controller_upgrade_protocol"], 2)
+        self.assertEqual(manifest["platform_tested_source_versions"], {"windows": []})
         _require_hard_cut_manifest_contract(manifest, target_version="0.8.5", required=True)
 
     def test_hard_cut_contract_is_mandatory_even_with_unsafe_override(self):
@@ -4823,6 +4824,9 @@ class TestUpgradeManifest(unittest.TestCase):
             self._hard_cut_manifest(auto_bridge_from=["0.8.3", "0.8.3"]),
             self._hard_cut_manifest(auto_bridge_from=["0.8.4"]),
             self._hard_cut_manifest(minimum_source_version="0.9.0", required_bridge_version="0.9.0"),
+            self._hard_cut_manifest(
+                platform_tested_source_versions={"windows": ["0.8.3"]}
+            ),
         ]
         partial = self._hard_cut_manifest()
         del partial["required_bridge_version"]
@@ -4833,6 +4837,27 @@ class TestUpgradeManifest(unittest.TestCase):
                 _validate_upgrade_manifest(payload, "0.8.5")
             self.assertEqual(raised.exception.code, 1)
 
+    def test_validate_rejects_protocol_one_schema_two_manifest_without_bridge(self):
+        runner = CliRunner()
+        payload = self._hard_cut_manifest(min_upgrade_protocol=1)
+        for key in (
+            "minimum_source_version",
+            "required_bridge_version",
+            "auto_bridge_from",
+        ):
+            payload.pop(key)
+
+        with runner.isolation() as (out, _err, _):
+            with self.assertRaises(SystemExit) as raised:
+                _validate_upgrade_manifest(payload, "0.8.5")
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(
+            "hard-cut releases require upgrade protocol 2 and a complete bridge contract",
+            output,
+        )
+
     def test_bridge_source_can_proceed(self):
         _enforce_upgrade_source_contract(
             _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5"),
@@ -4840,6 +4865,26 @@ class TestUpgradeManifest(unittest.TestCase):
             target_version="0.8.5",
             explicit_target=True,
         )
+
+    def test_windows_hard_cut_without_published_bridge_fails_closed(self):
+        runner = CliRunner()
+        manifest = _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5")
+
+        with runner.isolation() as (out, _err, _):
+            with self.assertRaises(SystemExit) as raised:
+                _enforce_upgrade_source_contract(
+                    manifest,
+                    source_version="0.8.3",
+                    target_version="0.8.5",
+                    explicit_target=False,
+                    os_name="windows",
+                )
+            output = out.getvalue().decode()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("Windows upgrades to 0.8.5 are unsupported", output)
+        self.assertIn("Required bridge 0.8.4 was not published for Windows", output)
+        self.assertIn("No changes were made", output)
 
     def test_explicit_hard_cut_from_supported_old_source_has_exact_bridge_guidance(self):
         runner = CliRunner()
@@ -5217,9 +5262,13 @@ class TestUpgradeManifest(unittest.TestCase):
             "schema_version": 2,
             "runtime_config_version": 8,
             "release_version": "9.9.9",
-            "min_upgrade_protocol": 1,
+            "min_upgrade_protocol": 2,
+            "controller_upgrade_protocol": 2,
             "migration_failure_policy": "fail",
             "required_cli_migrations": ["9.9.9"],
+            "minimum_source_version": "0.8.4",
+            "required_bridge_version": "0.8.4",
+            "auto_bridge_from": [],
             "tested_source_versions": ["0.8.4"],
             "platform_tested_source_versions": {"windows": ["0.8.4"]},
             "release_artifacts": _expected_release_artifacts("9.9.9"),

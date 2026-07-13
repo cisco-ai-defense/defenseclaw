@@ -710,7 +710,11 @@ jobs:
               raise SystemExit("tested_source_versions does not match the reviewed release matrix")
           if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
               raise SystemExit("signed platform tested-source policy must contain exactly windows")
-          if platform_tested["windows"] != reviewed_windows:
+          if not isinstance(platform_tested["windows"], list):
+              raise SystemExit("platform_tested_source_versions.windows must be a list")
+          windows_bridge_available = not bridge or bridge in reviewed_windows
+          expected_windows = reviewed_windows if windows_bridge_available else []
+          if platform_tested["windows"] != expected_windows:
               raise SystemExit(
                   "platform_tested_source_versions.windows does not match the reviewed Windows matrix"
               )
@@ -760,10 +764,10 @@ jobs:
               raise SystemExit(
                   "release_artifacts does not bind the exact protected candidate payload"
               )
-          if bridge and bridge not in platform_tested["windows"]:
-              raise SystemExit("required bridge is absent from the signed Windows matrix")
           windows_prebridge = list(platform_tested["windows"])
-          if bridge:
+          if bridge and windows_bridge_available:
+              if bridge not in platform_tested["windows"]:
+                  raise SystemExit("required bridge is absent from the signed Windows matrix")
               bridge_key = tuple(map(int, bridge.split(".")))
               windows_prebridge = [
                   item
@@ -772,6 +776,12 @@ jobs:
               ]
               if not windows_prebridge:
                   raise SystemExit("signed Windows matrix has no pre-bridge source")
+          elif bridge:
+              if platform_tested["windows"]:
+                  raise SystemExit(
+                      "unpublished Windows bridge requires an empty signed Windows matrix"
+                  )
+              windows_prebridge = []
           if automatic is not None:
               if not isinstance(automatic, list) or not automatic:
                   raise SystemExit("hard-cut auto_bridge_from must be a non-empty list")

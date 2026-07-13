@@ -3660,8 +3660,8 @@ if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
         "platform_tested_source_versions must contain exactly the Windows source list"
     )
 windows = platform_tested["windows"]
-if not isinstance(windows, list) or not windows:
-    raise SystemExit("platform_tested_source_versions.windows must be a non-empty list")
+if not isinstance(windows, list):
+    raise SystemExit("platform_tested_source_versions.windows must be a list")
 
 
 def validate_versions(label, values):
