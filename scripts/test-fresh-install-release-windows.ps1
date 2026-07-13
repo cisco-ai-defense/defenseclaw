@@ -141,13 +141,15 @@ function Assert-NoInstallerCustody {
 }
 
 function Assert-NoFreshPayload {
+    param([string]$Context = "")
     foreach ($path in @(
         $env:DEFENSECLAW_HOME,
         (Join-Path $HomeRoot ".local\bin\defenseclaw-gateway.exe"),
         (Join-Path $HomeRoot ".local\bin\defenseclaw.cmd")
     )) {
         if (Test-Path -LiteralPath $path) {
-            throw "Failed fresh install left a managed payload marker: $path"
+            $diagnostic = if ($Context) { "`nInstaller output:`n$Context" } else { "" }
+            throw "Failed fresh install left a managed payload marker: $path$diagnostic"
         }
     }
 }
@@ -265,7 +267,7 @@ try {
         throw "Post-move fresh-directory cleanup was not exact:`n$($postMove.Output)"
     }
     Assert-NoInstallerCustody
-    Assert-NoFreshPayload
+    Assert-NoFreshPayload -Context $postMove.Output
     if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
         throw "Post-move fresh-directory failure left .local or bin custody behind"
     }

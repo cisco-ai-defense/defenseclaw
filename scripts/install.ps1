@@ -163,6 +163,7 @@ namespace DefenseClaw.Install.FreshV1 {
         private const int MAX_TREE_DEPTH = 64;
         private const int MAX_TREE_NODES = 500000;
         private const long MAX_TREE_BYTES = 16L * 1024L * 1024L * 1024L;
+        private const int TREE_ROOT_DELETE_ATTEMPTS = 5;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct FILETIME {
@@ -740,7 +741,20 @@ namespace DefenseClaw.Install.FreshV1 {
                     current.Dispose();
                 }
             }
-            return DeleteEmptyDirectoryExact();
+            // Child delete-on-close operations can leave the exact tree root
+            // transiently nonempty on Windows. Retry only the final root
+            // disposition through this claim's existing identity handle. Do
+            // not snapshot or traverse the tree again: any concurrent child
+            // must keep the root nonempty and be preserved.
+            for (int attempt = 1; attempt <= TREE_ROOT_DELETE_ATTEMPTS; attempt++) {
+                if (DeleteEmptyDirectoryExact()) {
+                    return true;
+                }
+                if (attempt < TREE_ROOT_DELETE_ATTEMPTS) {
+                    System.Threading.Thread.Sleep(50 * attempt);
+                }
+            }
+            return false;
         }
 
         public void Dispose() {
@@ -1217,6 +1231,98 @@ function Invoke-NativeFreshDirectoryBoundarySelfTest {
         if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
     }
     Write-Host "Native empty directory rollback retry passed" -ForegroundColor Green
+
+    $treeRetryTarget = Join-Path $Root ("fresh-tree-retry-" + [guid]::NewGuid().ToString("N"))
+    $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
+    $script:FreshInstallAttemptActive = $true
+    $script:FreshInstallOriginalProcessPath = $env:PATH
+    $script:FreshInstallPublishedProcessPath = $null
+    try {
+        New-FreshInstallOwnedDirectory -Path $treeRetryTarget -Kind Tree
+        [IO.File]::WriteAllText(
+            (Join-Path $treeRetryTarget "owned.txt"),
+            "owned",
+            [Text.Encoding]::ASCII
+        )
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestEmptyDirectoryDeleteFailures(1)
+        $treeRetryResidue = @(Undo-FreshInstallAttempt)
+        if ($treeRetryResidue.Count -ne 0 -or (Test-InstallMarker -Path $treeRetryTarget)) {
+            Die "Native tree-root rollback did not recover from a transient nonempty result"
+        }
+    } finally {
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestEmptyDirectoryDeleteFailures()
+        if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
+    }
+    Write-Host "Native tree-root rollback retry passed" -ForegroundColor Green
+
+    $treeExhaustedTarget = Join-Path $Root ("fresh-tree-exhausted-" + [guid]::NewGuid().ToString("N"))
+    $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
+    $script:FreshInstallAttemptActive = $true
+    $script:FreshInstallOriginalProcessPath = $env:PATH
+    $script:FreshInstallPublishedProcessPath = $null
+    try {
+        New-FreshInstallOwnedDirectory -Path $treeExhaustedTarget -Kind Tree
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ConfigureTestEmptyDirectoryDeleteFailures(5)
+        $treeExhaustedResidue = @(Undo-FreshInstallAttempt)
+        if ($treeExhaustedResidue.Count -eq 0 -or
+            -not (Test-InstallMarker -Path $treeExhaustedTarget)) {
+            Die "Native tree-root rollback did not preserve a root after bounded retry exhaustion"
+        }
+    } finally {
+        [DefenseClaw.Install.FreshV1.FreshPathClaim]::ClearTestEmptyDirectoryDeleteFailures()
+        if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
+        if (Test-InstallMarker -Path $treeExhaustedTarget) {
+            [IO.Directory]::Delete($treeExhaustedTarget)
+        }
+    }
+    Write-Host "Native tree-root rollback retry exhaustion passed" -ForegroundColor Green
+
+    # Mirror the real post-publication failure topology: an attempt-owned home
+    # with an empty tree child, plus a sibling bin parent whose publication
+    # fails after its staging directory has moved and been rekeyed. This is the
+    # boundary exercised by the signed fresh-release gate.
+    $topologyRoot = Join-Path $Root ("fresh-post-move-" + [guid]::NewGuid().ToString("N"))
+    $topologyHome = Join-Path $topologyRoot ".defenseclaw"
+    $topologyVenv = Join-Path $topologyHome ".venv"
+    $topologyLocal = Join-Path $topologyRoot ".local"
+    $topologyBin = Join-Path $topologyLocal "bin"
+    [void][IO.Directory]::CreateDirectory($topologyRoot)
+    $script:FreshInstallClaims = New-Object 'System.Collections.Generic.List[object]'
+    $script:FreshInstallAttemptActive = $true
+    $script:FreshInstallOriginalProcessPath = $env:PATH
+    $script:FreshInstallPublishedProcessPath = $null
+    $script:FreshDirectoryFaultMode = "open-failure"
+    $script:FreshDirectoryFaultTarget = $topologyBin
+    $topologyFailure = ""
+    try {
+        New-FreshInstallOwnedDirectory -Path $topologyHome -Kind EmptyDirectory
+        New-FreshInstallOwnedDirectory -Path $topologyVenv -Kind Tree
+        New-FreshInstallOwnedDirectory -Path $topologyLocal -Kind EmptyDirectory
+        try {
+            New-FreshInstallOwnedDirectory -Path $topologyBin -Kind EmptyDirectory
+        } catch {
+            $topologyFailure = [string]$_.Exception.Message
+        }
+        $topologyResidue = @(Undo-FreshInstallAttempt)
+        $topologySafetyResidue = @($topologyResidue | Where-Object {
+            $_ -match 'rollback safety boundary did not complete'
+        })
+        if (-not $topologyFailure -or
+            $topologySafetyResidue.Count -eq 0 -or
+            (Test-InstallMarker -Path $topologyHome) -or
+            (Test-InstallMarker -Path $topologyLocal)) {
+            Die "Native post-move rollback topology left attempt-owned payload"
+        }
+    } finally {
+        if ($script:FreshInstallAttemptActive) { [void](Undo-FreshInstallAttempt) }
+        $script:FreshDirectoryFaultMode = ""
+        $script:FreshDirectoryFaultTarget = ""
+        $script:RollbackSafetyLedger.Clear()
+        if (Test-InstallMarker -Path $topologyRoot) {
+            [IO.Directory]::Delete($topologyRoot)
+        }
+    }
+    Write-Host "Native post-move rollback topology passed" -ForegroundColor Green
 
     $exactCleanupModes = @(
         "pre-registration",
@@ -1931,7 +2037,7 @@ function Undo-FreshInstallAttempt {
                 # the same identity handle across a bounded retry window, but
                 # only for empty-directory deletion: file/tree retries could
                 # otherwise consume state that appeared concurrently.
-                $maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 5 } else { 1 }
+                $maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 20 } else { 1 }
                 $removed = $false
                 for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
                     $removed = Remove-FreshInstallClaim -Entry $entry

@@ -116,6 +116,7 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "MOVEFILE_WRITE_THROUGH",
         "DeleteFileExact",
         "DeleteTreeExact",
+        "TREE_ROOT_DELETE_ATTEMPTS",
         "ConfigureTestMoveOutAfterSnapshot",
         "ClearTestMoveOutAfterSnapshot",
         "ConfigureTestEmptyDirectoryDeleteFailures",
@@ -174,6 +175,10 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "return false" in missing_child
     assert "continue" not in missing_child
     assert "InvokeTestMoveOutAfterSnapshot()" in tree_delete
+    assert "for (int attempt = 1; attempt <= TREE_ROOT_DELETE_ATTEMPTS; attempt++)" in tree_delete
+    assert "if (DeleteEmptyDirectoryExact())" in tree_delete
+    assert "System.Threading.Thread.Sleep(50 * attempt)" in tree_delete
+    assert tree_delete.count("SnapshotDirectory(path, 1, entries, ref bytes)") == 1
     assert "FreshInstallDestination" in source
     assert "$sourceStream" in source
     assert "$checksumDigests" in source
@@ -231,10 +236,14 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "Native snapshotted-child move-out refusal passed" in source
     assert "Native fresh directory fault boundaries passed" in source
     assert "Native empty directory rollback retry passed" in source
+    assert "Native tree-root rollback retry passed" in source
+    assert "Native tree-root rollback retry exhaustion passed" in source
+    assert "Native post-move rollback topology passed" in source
     assert "Native private-directory self-test accepted a file as its parent" in source
     assert "Fresh-install payload rollback completed; retry is safe" in harness
     assert "Concurrent unclaimed shim disappeared during rollback" in harness
     assert "Failed fresh install left installer-created binary directories behind" in harness
+    assert "Assert-NoFreshPayload -Context $postMove.Output" in harness
 
 
 def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() -> None:
@@ -352,7 +361,7 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
     assert "InjectConcurrentUserPathBeforePublish" not in source
     assert 'SetEnvironmentVariable("Path"' not in source
     assert "FreshInstallPublishedProcessPath" in undo
-    assert '$maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 5 } else { 1 }' in undo
+    assert '$maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 20 } else { 1 }' in undo
     assert "$removed = Remove-FreshInstallClaim -Entry $entry" in undo
     assert "Start-Sleep -Milliseconds (50 * $attempt)" in undo
     retry = undo[
@@ -771,6 +780,59 @@ def test_windows_release_authentication_output_cannot_pollute_manifest_return() 
         "$hardCut = Assert-CandidatePolicy -Manifest $candidateManifest"
     )
     assert "$candidateReleaseOutput" not in source
+
+
+def test_windows_release_snapshot_accumulators_accept_their_initial_empty_list() -> None:
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    snapshot_path = source[
+        source.index("function Add-SnapshotPath") : source.index("function Add-SnapshotTree")
+    ]
+    snapshot_tree = source[
+        source.index("function Add-SnapshotTree") : source.index("function Write-InstalledStateSnapshot")
+    ]
+
+    for helper in (snapshot_path, snapshot_tree):
+        rows_type = helper.index("[System.Collections.Generic.List[object]]$Rows")
+        rows_parameter = helper[:rows_type]
+        assert "[Parameter(Mandatory = $true)]" in rows_parameter
+        assert "[AllowEmptyCollection()]" in rows_parameter
+
+    assert "$rows = New-Object System.Collections.Generic.List[object]" in source
+    assert "Add-SnapshotPath -Rows $rows" in source
+    assert "Add-SnapshotTree -Rows $rows" in source
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_powershell_release_snapshot_helpers_bind_an_empty_accumulator() -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    helpers = source[
+        source.index("function Add-SnapshotPath") : source.index("function Write-InstalledStateSnapshot")
+    ]
+    command = (
+        "$ErrorActionPreference='Stop'\n"
+        + helpers
+        + "\n$rows=New-Object System.Collections.Generic.List[object]\n"
+        + "$seen=@{}\n"
+        + "$case=[pscustomobject]@{Root=[IO.Path]::GetTempPath()}\n"
+        + "$missing=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))\n"
+        + "Add-SnapshotPath -Rows $rows -Seen $seen -Case $case -Path $missing\n"
+        + "Add-SnapshotTree -Rows $rows -Seen $seen -Case $case -Path $missing\n"
+        + "if($rows.Count -ne 0){exit 9}\n"
+    )
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={**os.environ, "POWERSHELL_TELEMETRY_OPTOUT": "1"},
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.mark.skipif(

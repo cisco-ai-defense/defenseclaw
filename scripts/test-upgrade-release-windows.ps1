@@ -979,7 +979,9 @@ notifications:
 
 function Add-SnapshotPath {
     param(
-        [Parameter(Mandatory = $true)][System.Collections.Generic.List[object]]$Rows,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[object]]$Rows,
         [Parameter(Mandatory = $true)][hashtable]$Seen,
         [Parameter(Mandatory = $true)][object]$Case,
         [Parameter(Mandatory = $true)][string]$Path
@@ -1016,7 +1018,9 @@ function Add-SnapshotPath {
 
 function Add-SnapshotTree {
     param(
-        [Parameter(Mandatory = $true)][System.Collections.Generic.List[object]]$Rows,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[object]]$Rows,
         [Parameter(Mandatory = $true)][hashtable]$Seen,
         [Parameter(Mandatory = $true)][object]$Case,
         [Parameter(Mandatory = $true)][string]$Path
