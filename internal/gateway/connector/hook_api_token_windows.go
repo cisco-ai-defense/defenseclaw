@@ -150,16 +150,22 @@ func hookAPIWindowsWriteLikeAccess(mask windows.ACCESS_MASK, protectChildren boo
 	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
 	unsafe := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
+			windows.GENERIC_WRITE |
 			windows.DELETE |
 			windows.WRITE_DAC |
-			windows.WRITE_OWNER,
+			windows.WRITE_OWNER |
+			windows.FILE_WRITE_EA |
+			windows.FILE_WRITE_ATTRIBUTES,
 	)
 	if protectChildren {
-		unsafe |= windows.GENERIC_WRITE |
-			windows.FILE_WRITE_DATA |
-			windows.FILE_APPEND_DATA |
-			windows.FILE_WRITE_EA |
-			windows.FILE_WRITE_ATTRIBUTES
+		// On an ancestor directory, FILE_WRITE_DATA and FILE_APPEND_DATA
+		// mean add-file and add-subdirectory. Windows drive roots commonly
+		// grant add-subdirectory to Authenticated Users; without DELETE_CHILD
+		// that does not permit replacing the already protected token path.
+		// The immediate data/hooks directory must reject those child-creation
+		// rights too. Rights that mutate the ancestor object itself remain
+		// unsafe above regardless of protectChildren.
+		unsafe |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
 	}
 	return mask&(unsafe|fileDeleteChild) != 0
 }

@@ -7,6 +7,8 @@
 package connector
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,12 +38,62 @@ func TestLoadOTLPPathTokenWindowsRejectsUntrustedWriteDACL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			setOTLPTokenWindowsDACL(t, path, tc.mask)
+			setOTLPTokenWindowsDACL(t, path, tc.mask, false)
 
 			if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
 				t.Fatalf("LoadOTLPPathToken accepted untrusted %s access; token=%q", tc.name, token)
 			}
 		})
+	}
+}
+
+func TestLoadOTLPPathTokenWindowsRejectsWritableAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mask windows.ACCESS_MASK
+	}{
+		{name: "generic_write", mask: windows.GENERIC_WRITE},
+		{name: "write_extended_attributes", mask: windows.FILE_WRITE_EA},
+		{name: "write_attributes", mask: windows.FILE_WRITE_ATTRIBUTES},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			ancestor := filepath.Join(root, "ancestor")
+			dataDir := filepath.Join(ancestor, "data")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatalf("create token data path: %v", err)
+			}
+			if _, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex); err != nil {
+				t.Fatalf("seed token: %v", err)
+			}
+			setOTLPTokenWindowsDACL(t, ancestor, tc.mask, true)
+
+			if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err == nil {
+				t.Fatalf("LoadOTLPPathToken accepted an Everyone-writable ancestor; token=%q", token)
+			}
+		})
+	}
+}
+
+func TestLoadOTLPPathTokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	ancestor := filepath.Join(root, "ancestor")
+	dataDir := filepath.Join(ancestor, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("create token data path: %v", err)
+	}
+	want, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	setOTLPTokenWindowsDACL(t, ancestor, windows.FILE_WRITE_DATA, true)
+
+	got, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("LoadOTLPPathToken rejected shared ancestor create-child access: %v", err)
+	}
+	if got != want {
+		t.Fatalf("token = %q, want %q", got, want)
 	}
 }
 
@@ -55,7 +107,7 @@ func TestLoadOTLPPathTokenWindowsAllowsUntrustedReadOnlyDACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setOTLPTokenWindowsDACL(t, path, windows.GENERIC_READ)
+	setOTLPTokenWindowsDACL(t, path, windows.GENERIC_READ, false)
 
 	got, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex)
 	if err != nil {
@@ -107,8 +159,12 @@ func TestOTLPPathTokenWindowsRejectsUnsupportedWriteAllowACETypes(t *testing.T) 
 	}
 }
 
-func setOTLPTokenWindowsDACL(t *testing.T, path string, untrustedMask windows.ACCESS_MASK) {
+func setOTLPTokenWindowsDACL(t *testing.T, path string, untrustedMask windows.ACCESS_MASK, inheritOwner bool) {
 	t.Helper()
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if inheritOwner {
+		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	}
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatalf("current token user: %v", err)
@@ -121,6 +177,7 @@ func setOTLPTokenWindowsDACL(t *testing.T, path string, untrustedMask windows.AC
 		{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       inheritance,
 			Trustee: windows.TRUSTEE{
 				TrusteeForm:  windows.TRUSTEE_IS_SID,
 				TrusteeType:  windows.TRUSTEE_IS_USER,
