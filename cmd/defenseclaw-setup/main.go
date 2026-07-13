@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"golang.org/x/mod/semver"
 )
 
 //go:embed payload/*
@@ -554,28 +555,11 @@ func validMode(value string) bool {
 }
 
 func compareVersions(a, b string) int {
-	parse := func(value string) [3]int {
-		var result [3]int
-		core := strings.SplitN(value, "-", 2)[0]
-		for index, part := range strings.Split(core, ".") {
-			if index >= len(result) {
-				break
-			}
-			result[index], _ = strconv.Atoi(part)
-		}
-		return result
-	}
-	aVersion := parse(a)
-	bVersion := parse(b)
-	for index := range aVersion {
-		if aVersion[index] < bVersion[index] {
-			return -1
-		}
-		if aVersion[index] > bVersion[index] {
-			return 1
-		}
-	}
-	return 0
+	// All production callers receive versions from a validated payload,
+	// installer state, or FROMVERSION property. x/mod implements complete
+	// SemVer precedence, including prerelease identifiers and the rule that
+	// build metadata does not affect ordering.
+	return semver.Compare("v"+a, "v"+b)
 }
 
 func migrationSource(state *installState, packagedVersion, explicit string) string {
@@ -836,20 +820,48 @@ func validateInstall(root, version string) error {
 	}
 	launcher := filepath.Join(root, "bin", "defenseclaw.exe")
 	childEnv := sanitizePythonEnv(os.Environ())
-	output, err := runCapturedSetupCommand(setupValidationTimeout, childEnv, launcher, "--version")
+	output, err := runCapturedSetupCommand(setupValidationTimeout, childEnv, launcher, "--version-json")
 	if err != nil {
 		return fmt.Errorf("managed CLI version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if !strings.Contains(string(output), version) {
-		return fmt.Errorf("managed CLI version %q does not report packaged version %s", strings.TrimSpace(string(output)), version)
+	if err := validateMachineVersion(output, "defenseclaw-cli", version); err != nil {
+		return fmt.Errorf("managed CLI version check: %w", err)
 	}
 	gateway := filepath.Join(root, "bin", "defenseclaw-gateway.exe")
-	output, err = runCapturedSetupCommand(setupValidationTimeout, childEnv, gateway, "--version")
+	output, err = runCapturedSetupCommand(setupValidationTimeout, childEnv, gateway, "--version-json")
 	if err != nil {
 		return fmt.Errorf("gateway version check failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if !strings.Contains(string(output), version) {
-		return fmt.Errorf("gateway version %q does not report packaged version %s", strings.TrimSpace(string(output)), version)
+	if err := validateMachineVersion(output, "defenseclaw-gateway", version); err != nil {
+		return fmt.Errorf("gateway version check: %w", err)
+	}
+	return nil
+}
+
+type machineVersionReport struct {
+	SchemaVersion int    `json:"schema_version"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Commit        string `json:"commit,omitempty"`
+	Built         string `json:"built,omitempty"`
+}
+
+func validateMachineVersion(output []byte, expectedName, expectedVersion string) error {
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	var report machineVersionReport
+	if err := decoder.Decode(&report); err != nil {
+		return fmt.Errorf("decode machine-readable version %q: %w", strings.TrimSpace(string(output)), err)
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("machine-readable version contains trailing content")
+	}
+	if report.SchemaVersion != 1 || report.Name != expectedName {
+		return fmt.Errorf("unexpected version identity schema=%d name=%q", report.SchemaVersion, report.Name)
+	}
+	if !validPayloadVersion(report.Version) || report.Version != expectedVersion {
+		return fmt.Errorf("reported version %q does not exactly match packaged version %q", report.Version, expectedVersion)
 	}
 	return nil
 }
@@ -1192,37 +1204,23 @@ func extractZipReader(reader *zip.Reader, dest string) error {
 }
 
 func validPayloadVersion(value string) bool {
-	parts := strings.SplitN(value, "-", 2)
-	core := strings.Split(parts[0], ".")
-	if len(core) != 3 {
+	if value == "" || len(value) > 192 || strings.HasPrefix(value, "v") {
 		return false
 	}
-	for _, part := range core {
-		if part == "" || len(part) > 10 {
-			return false
-		}
-		for _, char := range part {
-			if char < '0' || char > '9' {
-				return false
-			}
-		}
-		if _, err := strconv.ParseUint(part, 10, 31); err != nil {
-			return false
-		}
+	core := value
+	if index := strings.IndexAny(core, "-+"); index >= 0 {
+		core = core[:index]
 	}
-	if len(parts) == 1 {
-		return true
-	}
-	if parts[1] == "" || len(parts[1]) > 128 {
+	coreParts := strings.Split(core, ".")
+	if len(coreParts) != 3 {
 		return false
 	}
-	for _, char := range parts[1] {
-		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
-			(char < '0' || char > '9') && char != '.' && char != '_' && char != '-' {
+	for _, part := range coreParts {
+		if len(part) == 0 || len(part) > 10 {
 			return false
 		}
 	}
-	return true
+	return semver.IsValid("v" + value)
 }
 
 func writeNewFile(path string, src io.Reader, mode fs.FileMode) error {

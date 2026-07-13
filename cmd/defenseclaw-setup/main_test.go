@@ -182,6 +182,19 @@ func TestCompareVersionsRejectsDowngrade(t *testing.T) {
 	if compareVersions("2.0.0", "2.0.0") != 0 {
 		t.Fatal("compareVersions did not report equal releases")
 	}
+	for _, pair := range [][2]string{
+		{"2.0.0-alpha", "2.0.0-alpha.1"},
+		{"2.0.0-alpha.1", "2.0.0-alpha.beta"},
+		{"2.0.0-beta.2", "2.0.0-beta.11"},
+		{"2.0.0-rc.1", "2.0.0"},
+	} {
+		if compareVersions(pair[0], pair[1]) >= 0 {
+			t.Fatalf("compareVersions(%q, %q) did not preserve SemVer prerelease order", pair[0], pair[1])
+		}
+	}
+	if compareVersions("2.0.0+build.1", "2.0.0+build.2") != 0 {
+		t.Fatal("compareVersions allowed build metadata to change precedence")
+	}
 }
 
 func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
@@ -433,7 +446,7 @@ func TestRunCapturedSetupCommandTimesOut(t *testing.T) {
 }
 
 func TestValidPayloadVersion(t *testing.T) {
-	for _, value := range []string{"0.8.0", "1.2.3-rc.1"} {
+	for _, value := range []string{"0.8.0", "1.2.3-rc.1", "1.2.3+windows.x64", "1.2.3-rc.1+build.7"} {
 		if !validPayloadVersion(value) {
 			t.Fatalf("validPayloadVersion(%q) = false", value)
 		}
@@ -443,11 +456,36 @@ func TestValidPayloadVersion(t *testing.T) {
 		"1.2",
 		`1.2.3/escape`,
 		"1.2.3-rc 1",
+		"1.2.3-rc_1",
+		"1.2.3-01",
+		"01.2.3",
+		"v1.2.3",
+		"1.2.3-",
+		"1.2.3+",
 		"999999999999999999999.2.3",
 	} {
 		if validPayloadVersion(value) {
 			t.Fatalf("validPayloadVersion(%q) = true", value)
 		}
+	}
+}
+
+func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
+	valid := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"abc","built":"now"}`)
+	if err := validateMachineVersion(valid, "defenseclaw-gateway", "1.2.3-rc.1"); err != nil {
+		t.Fatalf("validateMachineVersion valid report: %v", err)
+	}
+	for name, body := range map[string][]byte{
+		"substring": []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"11.2.30"}`),
+		"identity":  []byte(`{"schema_version":1,"name":"foreign-gateway","version":"1.2.3-rc.1"}`),
+		"trailing":  append(append([]byte(nil), valid...), []byte(` {}`)...),
+		"unknown":   []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","surprise":true}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateMachineVersion(body, "defenseclaw-gateway", "1.2.3-rc.1"); err == nil {
+				t.Fatal("validateMachineVersion accepted invalid report")
+			}
+		})
 	}
 }
 
