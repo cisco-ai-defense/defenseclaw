@@ -519,9 +519,9 @@ function Assert-DoctorWindowsHookRegistration {
         foreach ($eventProperty in @($settings.hooks.PSObject.Properties)) {
             foreach ($group in @($eventProperty.Value)) {
                 foreach ($handler in @($group.hooks)) {
-                    $args = @($handler.args | ForEach-Object { [string]$_ })
+                    $hookArgs = @($handler.args | ForEach-Object { [string]$_ })
                     if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
-                        ($args -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
+                        ($hookArgs -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
                         $nativeHookFound = $true
                     }
                 }
