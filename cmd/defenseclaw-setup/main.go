@@ -38,13 +38,16 @@ const (
 	userExitCode                 = 1602
 	installTreeRenameMaxAttempts = 40
 	installTreeRenameRetryDelay  = 100 * time.Millisecond
-	restartRequiredCode          = 3010
-	maxZipFiles                  = 100000
-	maxZipExpandedBytes          = int64(2 << 30)
-	setupControlCommandTimeout   = 2 * time.Minute
-	setupValidationTimeout       = 30 * time.Second
-	setupConfigurationTimeout    = 5 * time.Minute
-	setupMigrationTimeout        = 15 * time.Minute
+	// 1603 is the standard fatal-install result. Never use 3010 here: Windows
+	// deployment systems interpret it as a successful install requiring reboot,
+	// while these paths leave the requested operation incomplete and need retry.
+	retryRequiredCode          = 1603
+	maxZipFiles                = 100000
+	maxZipExpandedBytes        = int64(2 << 30)
+	setupControlCommandTimeout = 2 * time.Minute
+	setupValidationTimeout     = 30 * time.Second
+	setupConfigurationTimeout  = 5 * time.Minute
+	setupMigrationTimeout      = 15 * time.Minute
 )
 
 func newCapturedSetupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -184,7 +187,7 @@ func run(opts options) (int, error) {
 
 func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
-		return restartRequiredCode, err
+		return retryRequiredCode, err
 	}
 	maintenancePath, err := defaultMaintenancePath()
 	if err != nil {
@@ -267,7 +270,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		if err := ensureTreeReplaceable(installRoot); err != nil {
 			_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
 			_ = removeAllSafe(staging, filepath.Dir(installRoot))
-			return restartRequiredCode, fmt.Errorf("installed files are in use; close running DefenseClaw terminals and retry: %w", err)
+			return retryRequiredCode, fmt.Errorf("installed files are in use; close running DefenseClaw terminals and retry: %w", err)
 		}
 	}
 
@@ -317,7 +320,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		}
 		_, _ = startSelectedServices(gatewayPath, dataRoot, restartOld)
 		if isSharingViolation(cause) {
-			return restartRequiredCode, fmt.Errorf("%w; close running DefenseClaw terminals and retry", cause)
+			return retryRequiredCode, fmt.Errorf("%w; close running DefenseClaw terminals and retry", cause)
 		}
 		return 1, cause
 	}
@@ -326,7 +329,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 		if err := renameInstallTree(installRoot, backup); err != nil {
 			_ = removeAllSafe(staging, filepath.Dir(installRoot))
 			if isTransientInstallTreeRenameError(err) {
-				return restartRequiredCode, fmt.Errorf("existing install files are locked; close running DefenseClaw terminals and retry")
+				return retryRequiredCode, fmt.Errorf("existing install files are locked; close running DefenseClaw terminals and retry")
 			}
 			return 1, fmt.Errorf("move existing install aside: %w", err)
 		}
@@ -395,7 +398,7 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 
 func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
-		return restartRequiredCode, err
+		return retryRequiredCode, err
 	}
 	if !opts.Quiet {
 		fmt.Printf("Uninstalling DefenseClaw from %s\n", installRoot)
@@ -448,14 +451,14 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 	if pathExists(installRoot) {
 		if err := ensureTreeReplaceable(installRoot); err != nil {
 			rollbackUninstall()
-			return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry: %w", err)
+			return retryRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry: %w", err)
 		}
 		trash := installRoot + ".uninstall." + strconv.Itoa(os.Getpid())
 		_ = removeAllSafe(trash, filepath.Dir(installRoot))
 		if err := renameInstallTree(installRoot, trash); err != nil {
 			rollbackUninstall()
 			if isTransientInstallTreeRenameError(err) {
-				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
+				return retryRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
 			}
 			return 1, err
 		}
@@ -463,7 +466,7 @@ func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
 			_ = renameInstallTree(trash, installRoot)
 			rollbackUninstall()
 			if isSharingViolation(err) {
-				return restartRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
+				return retryRequiredCode, fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry")
 			}
 			return 1, err
 		}

@@ -1925,7 +1925,7 @@ function Invoke-SetupAcceptance {
         )
         try {
             Invoke-WindowsNativeProcess $setup @('/repair', '/quiet', 'INSTALLSCOPE=user') `
-                -AllowedExitCodes @(3010) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-locked-file.log') | Out-Null
+                -AllowedExitCodes @(1603) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-locked-file.log') | Out-Null
         } finally {
             $lockStream.Dispose()
         }
@@ -1997,7 +1997,7 @@ function Invoke-SetupAcceptance {
         if (Test-Path -LiteralPath $installRoot) {
             try {
                 Invoke-WindowsNativeProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-                    -AllowedExitCodes @(0, 3010) -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
+                    -AllowedExitCodes @(0, 1603) -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
             } catch { Write-Warning "setup acceptance cleanup failed: $($_.Exception.Message)" }
         }
         for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {

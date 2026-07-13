@@ -556,7 +556,7 @@ func (w *setupWizard) finish() {
 	if resultErr != nil {
 		setText(w.heading, "Setup could not finish")
 		message := fmt.Sprintf("%v", resultErr)
-		if code == restartRequiredCode {
+		if code == retryRequiredCode {
 			message += "\r\n\r\nClose running DefenseClaw terminals and run setup again."
 		}
 		setText(w.description, message)

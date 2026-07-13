@@ -118,7 +118,7 @@ unnecessary quoting and command-injection boundary.
 Before mutation, setup validates gateway and watchdog PID records against the
 live executable path and process creation identity. It stops the watchdog and
 gateway, probes installed executables, DLLs, and Python extensions for file
-locks, and returns exit code 3010 without publishing a partial tree when files
+locks, and returns the fatal-install exit code 1603 without publishing a partial tree when files
 remain in use.
 
 The new tree is validated with both CLI and gateway version commands. Repair
