@@ -97,6 +97,47 @@ require_regular_source() {
     [ -f "$path" ] || die "$label is not a regular file: $path"
 }
 
+assert_trusted_file_source() {
+    local path="$1"
+    local label="$2"
+    local uid mode parent current component trimmed_parent
+    local -a source_parts
+    require_regular_source "$path" "$label"
+    assert_no_write_acl "$path"
+    uid="$(/usr/bin/stat -f '%u' "$path")"
+    mode="$(/usr/bin/stat -f '%Lp' "$path")"
+    [ "$uid" = 0 ] || die "$label is not root-owned: $path"
+    [ $((8#$mode & 8#022)) -eq 0 ] || die "$label is group/other writable: $path ($mode)"
+
+    parent="$(dirname "$path")"
+    case "$path" in
+        /*)
+            current="/"
+            assert_trusted_system_dir "$current"
+            trimmed_parent="${parent#/}"
+            ;;
+        *)
+            current="$(pwd -P)"
+            assert_trusted_system_dir "$current"
+            trimmed_parent="$parent"
+            ;;
+    esac
+    IFS='/' read -r -a source_parts <<<"$trimmed_parent"
+    for component in "${source_parts[@]}"; do
+        [ -n "$component" ] || continue
+        case "$component" in
+            .) continue ;;
+            ..) die "$label path must not contain parent traversal: $path" ;;
+        esac
+        if [ "$current" = "/" ]; then
+            current="/${component}"
+        else
+            current="${current}/${component}"
+        fi
+        assert_trusted_system_dir "$current"
+    done
+}
+
 assert_trusted_system_dir() {
     local path="$1"
     local uid mode
@@ -403,8 +444,8 @@ for existing_label in \
 done
 unset existing_path existing_label local_users local_user local_home
 
-require_regular_source "$CONFIG_SOURCE" "managed config"
-require_regular_source "$MANIFEST_SOURCE" "guardian manifest"
+assert_trusted_file_source "$CONFIG_SOURCE" "managed config"
+assert_trusted_file_source "$MANIFEST_SOURCE" "guardian manifest"
 require_regular_source "$BINARY_SOURCE" "gateway binary"
 require_regular_source "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" "gateway plist"
 require_regular_source "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" "guardian plist"
