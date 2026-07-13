@@ -26,6 +26,36 @@ type pidState struct {
 	StartIdentity string `json:"start_identity"`
 }
 
+func acquireSetupLock() (func() error, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, fmt.Errorf("resolve setup lock identity: %w", err)
+	}
+	name, err := windows.UTF16PtrFromString(`Global\Cisco.DefenseClaw.Setup.` + user.User.Sid.String())
+	if err != nil {
+		return nil, fmt.Errorf("encode setup lock name: %w", err)
+	}
+	handle, err := windows.CreateMutex(nil, true, name)
+	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("another DefenseClaw setup operation is already in progress")
+	}
+	if err != nil {
+		if handle != 0 {
+			_ = windows.CloseHandle(handle)
+		}
+		return nil, fmt.Errorf("acquire setup lock: %w", err)
+	}
+	return func() error {
+		releaseErr := windows.ReleaseMutex(handle)
+		closeErr := windows.CloseHandle(handle)
+		if releaseErr != nil {
+			return releaseErr
+		}
+		return closeErr
+	}, nil
+}
+
 func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) {
 	pidPath := filepath.Join(dataRoot, pidFile)
 	info, err := os.Lstat(pidPath)

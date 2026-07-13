@@ -123,6 +123,11 @@ unnecessary quoting and command-injection boundary.
 
 ## Lifecycle and rollback
 
+Setup serializes install, repair, upgrade, and uninstall with a per-user global
+Windows mutex. A concurrent invocation exits with code 1618 before reading or
+mutating product state, including when the same user has sessions on multiple
+desktops.
+
 Before mutation, setup validates gateway and watchdog PID records against the
 live executable path and process creation identity. It stops the watchdog and
 gateway, probes installed executables, DLLs, and Python extensions for file

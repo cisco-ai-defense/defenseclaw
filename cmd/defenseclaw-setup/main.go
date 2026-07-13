@@ -36,6 +36,7 @@ const (
 	setupArtifactName            = "DefenseClawSetup-x64.exe"
 	defaultPublisher             = "Cisco Systems, Inc."
 	userExitCode                 = 1602
+	installAlreadyRunningCode    = 1618
 	installTreeRenameMaxAttempts = 40
 	installTreeRenameRetryDelay  = 100 * time.Millisecond
 	// 1603 is the standard fatal-install result. Never use 3010 here: Windows
@@ -168,6 +169,17 @@ func main() {
 }
 
 func run(opts options) (int, error) {
+	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
+		return retryRequiredCode, err
+	}
+	releaseSetupLock, err := acquireSetupLock()
+	if err != nil {
+		return installAlreadyRunningCode, err
+	}
+	defer func() {
+		_ = releaseSetupLock()
+	}()
+
 	installRoot, err := defaultInstallRoot()
 	if err != nil {
 		return 1, err
@@ -192,9 +204,6 @@ func run(opts options) (int, error) {
 }
 
 func runInstall(opts options, installRoot, dataRoot string) (int, error) {
-	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
-		return retryRequiredCode, err
-	}
 	maintenancePath, err := defaultMaintenancePath()
 	if err != nil {
 		return 1, err
@@ -403,9 +412,6 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 }
 
 func runUninstall(opts options, installRoot, dataRoot string) (int, error) {
-	if err := waitForProcessExit(opts.WaitPID, 2*time.Minute); err != nil {
-		return retryRequiredCode, err
-	}
 	if !opts.Quiet {
 		fmt.Printf("Uninstalling DefenseClaw from %s\n", installRoot)
 	}

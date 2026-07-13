@@ -11,9 +11,12 @@ import (
 )
 
 func managedProcessOwnedBy(_, _, _ string) (bool, error) { return false, nil }
-func rejectReparseAncestors(_ string) error              { return nil }
-func rejectReparseExisting(_ string) error               { return nil }
-func isReparsePoint(_ string) (bool, error)              { return false, nil }
+func acquireSetupLock() (func() error, error) {
+	return func() error { return nil }, nil
+}
+func rejectReparseAncestors(_ string) error { return nil }
+func rejectReparseExisting(_ string) error  { return nil }
+func isReparsePoint(_ string) (bool, error) { return false, nil }
 func addUserPath(_ string) (bool, bool, error) {
 	return false, false, errors.New("Windows-only operation")
 }
