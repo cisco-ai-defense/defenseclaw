@@ -392,7 +392,11 @@ def _commands_from_hooks(document: dict[str, Any], connector: str) -> list[str]:
                 target, _args, _kind = _command_target(command, connector)
             except _InspectionError:
                 continue
-            if ntpath.basename(target).casefold() == "defenseclaw-hook.exe":
+            if ntpath.basename(target).casefold() in {
+                "defenseclaw-hook.exe",
+                "defenseclaw-gateway.exe",
+                "defenseclaw-gateway.cmd",
+            }:
                 managed.append(command)
     if not managed:
         raise _InspectionError("foreign", "hook registration contains commands, but none target DefenseClaw")

@@ -218,6 +218,31 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
 
+    def test_codex_encoded_obsolete_gateway_is_classified_as_stale(self) -> None:
+        legacy = self._runtime("defenseclaw-gateway.exe")
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+            f"& '{legacy}' hook --connector codex; exit $LASTEXITCODE"
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        command = (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
+            f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        )
+        config = self._config("codex", "codex-hook.sh")
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        config.write_text(
+            "[hooks]\n"
+            'PreToolUse = [{ hooks = [{ type = "command", command = "codex-hook.sh", '
+            f'command_windows = "{escaped}", timeout = 30 }}] }}]\n',
+            encoding="utf-8",
+        )
+
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("obsolete gateway launcher", check.detail)
+
     def test_healthy_managed_cmd_registration(self) -> None:
         runtime = self._runtime("defenseclaw-hook.cmd")
         config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
