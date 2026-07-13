@@ -370,6 +370,11 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		events.WithFanoutContext(logger.ForwardGatewayEventToSinks)
 	}
 	SetEventWriter(events)
+	// Endpoint-inventory device anchor: stamp discovery-inventory
+	// events (connector/mcp/agent) with the same device.id the
+	// telemetry resource carries so AI Defense can bind them to this
+	// endpoint whether it keys on the resource or the body.
+	SetEndpointInventoryAnchor(client.device.DeviceID)
 	// Layer 3 egress observability: wire the OTel provider so
 	// RecordEgress fires alongside every EventEgress emission.
 	// Resets to no-op on shutdown via the matching SetEventWriter(nil) path.
@@ -493,6 +498,17 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] ai discovery init failed: %v\n", err)
 		emitError(context.Background(), "ai_discovery", "init-failed", "continuous AI discovery disabled", err)
+	}
+	// managed_enterprise: ship the connector / MCP endpoint inventory
+	// to AI Defense. Wire it onto the scan cadence (when the discovery
+	// service is running) and emit an initial snapshot at boot so the
+	// cloud sees the endpoint immediately, before the first scan tick.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		inventoryEmit := makeEndpointInventoryEmitter(cfg)
+		if aiDiscovery != nil {
+			aiDiscovery.SetManagedInventoryEmitHook(inventoryEmit)
+		}
+		inventoryEmit(context.Background())
 	}
 
 	sidecar := &Sidecar{
@@ -1309,6 +1325,21 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 			api.SetAIDiscoveryService(nextAIDiscovery)
 		}
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
+	}
+
+	// managed_enterprise: refresh the connector / MCP endpoint inventory
+	// on every reload — MCP servers and connectors can change via config
+	// without restarting the discovery scanner. Rebuild the emitter from
+	// the just-published config, re-arm the scan-cadence hook (the
+	// discovery service may have been recreated above), and emit an
+	// immediate snapshot so AI Defense sees the change without waiting
+	// for the next scan tick.
+	if nextManagedEnterprise {
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig())
+		if svc := s.aiDiscoverySnapshot(); svc != nil {
+			svc.SetManagedInventoryEmitHook(inventoryEmit)
+		}
+		inventoryEmit(ctx)
 	}
 
 	if watcherRestart {

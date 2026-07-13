@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -152,6 +153,13 @@ type AIDiscoveryOptions struct {
 	DisableRedaction bool
 	DataDir          string
 	HomeDir          string
+	// ManagedEnterprise mirrors deployment_mode == managed_enterprise.
+	// In managed mode the gateway ships the FULL endpoint inventory to
+	// AI Defense as discovery events (every active signal, including
+	// steady-state `seen`), not just lifecycle deltas — see
+	// emitGatewayEvents. Non-managed keeps the delta-only behavior so
+	// user-owned SIEMs are not flooded on every full scan.
+	ManagedEnterprise bool
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -392,6 +400,16 @@ type ContinuousDiscoveryService struct {
 	otel             *telemetry.Provider
 	events           *gatewaylog.Writer
 
+	// managedInventoryEmit, when set, is invoked at the end of each
+	// scan's gateway-event fanout in managed_enterprise mode. The
+	// sidecar installs it (SetManagedInventoryEmitHook) to ship the
+	// connector / MCP-server endpoint inventory alongside the
+	// per-signal ai_discovery snapshot. Kept as an opaque callback so
+	// this package does not depend on gateway/connector or the config
+	// surfaces those inventories are built from. Nil is the normal
+	// non-managed / library-import state and is a clean no-op.
+	managedInventoryEmit func(context.Context)
+
 	mu              sync.RWMutex
 	last            AIDiscoveryReport
 	lastErr         error
@@ -550,9 +568,10 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		// Mirror the global redaction kill-switch so detectors and
 		// emitters know whether they should scrub raw_path / full
 		// evidence before a payload leaves the local process.
-		DisableRedaction: cfg.Privacy.DisableRedaction,
-		DataDir:          cfg.DataDir,
-		HomeDir:          home,
+		DisableRedaction:  cfg.Privacy.DisableRedaction,
+		DataDir:           cfg.DataDir,
+		HomeDir:           home,
+		ManagedEnterprise: managed.IsManagedEnterprise(cfg.DeploymentMode),
 	})
 }
 
@@ -2364,9 +2383,28 @@ func (s *ContinuousDiscoveryService) emitTelemetry(ctx context.Context, report A
 	}
 }
 
+// SetManagedInventoryEmitHook installs the callback invoked after each
+// scan's ai_discovery fanout to emit the connector / MCP endpoint
+// inventory in managed_enterprise mode. Safe to call with nil to clear
+// it. Set by the sidecar at boot and on config reload so the closure
+// always captures the current config + connector registry.
+func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context.Context)) {
+	if s == nil {
+		return
+	}
+	s.managedInventoryEmit = fn
+}
+
 func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot) {
 	if s.events == nil {
 		return
+	}
+	// managed_enterprise: after the per-signal ai_discovery snapshot,
+	// ship the connector / MCP endpoint inventory on the same scan
+	// cadence so AI Defense sees a fresh full picture each cycle. The
+	// hook is a no-op outside managed mode (never installed there).
+	if s.opts.ManagedEnterprise && s.managedInventoryEmit != nil {
+		defer s.managedInventoryEmit(ctx)
 	}
 	opts := s.opts
 	// snap.Scores is non-nil only when DisableRedaction is true
@@ -2374,7 +2412,14 @@ func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, repo
 	// payload ships without Confidence anyway, so a nil Scores
 	// map is the correct skip-the-lookup signal.
 	for _, sig := range report.Signals {
-		if sig.State != AIStateNew && sig.State != AIStateChanged && sig.State != AIStateGone {
+		// managed_enterprise ships the FULL inventory to AI Defense:
+		// every active signal (`seen` + `new` + `changed`, plus `gone`
+		// as a lifecycle delta) becomes its own ai_discovery event so
+		// the cloud always has the complete endpoint snapshot. Outside
+		// managed mode we stay delta-only (skip steady-state `seen`) to
+		// avoid flooding user-owned SIEMs on every full scan.
+		if !opts.ManagedEnterprise &&
+			sig.State != AIStateNew && sig.State != AIStateChanged && sig.State != AIStateGone {
 			continue
 		}
 		payload := BuildAIDiscoveryPayload(sig, report.Summary.ScanID, PayloadOpts{

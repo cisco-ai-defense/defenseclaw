@@ -164,6 +164,17 @@ t_otel_block_enabled_for_managed_sink() {
   assert_not_contains "${out}" "destinations:"                       "no user otel destinations rendered"
 }
 
+t_ai_discovery_enabled_for_endpoint_inventory() {
+  # render_config must emit an ai_discovery block with enabled: true so the
+  # continuous discovery scanner runs and ships the endpoint inventory to AI
+  # Defense as discovery events over the managed AID log sink. Without this the
+  # scanner is a no-op (NewContinuousDiscoveryService returns nil when
+  # ai_discovery.enabled is false) and no inventory flows.
+  local out
+  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
+  assert_contains "${out}" "$(printf 'ai_discovery:\n  enabled: true')" "ai_discovery block enables the inventory scanner"
+}
+
 t_resolve_aid_endpoint_precedence() {
   # resolve_aid_endpoint backs the --override-endpoint adhoc-testing seam.
   # An empty override falls back to the --env-derived host; a non-empty
@@ -267,6 +278,7 @@ run_case "renderer pass-through: redaction off" t_redaction_pass_through_off
 run_case "cisco_ai_defense block emitted with installer endpoint" t_cisco_ai_defense_block_emitted
 run_case "aid_endpoint_for_env maps flags to hosts"               t_aid_endpoint_env_selection
 run_case "otel block enabled for managed AID sink"               t_otel_block_enabled_for_managed_sink
+run_case "ai_discovery enabled for endpoint inventory"           t_ai_discovery_enabled_for_endpoint_inventory
 run_case "resolve_aid_endpoint override precedence + validation"  t_resolve_aid_endpoint_precedence
 run_case "--env preview lands in rendered config"                 t_preview_env_endpoint_ends_up_in_config
 run_case "rendered YAML parses"     t_yaml_parses

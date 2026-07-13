@@ -402,6 +402,17 @@ cisco_ai_defense:
 otel:
   enabled: true
 
+# Continuous AI discovery (endpoint inventory). Enabled in managed_enterprise
+# so the sidecar scans for supported connectors and broader "shadow AI" usage
+# signals and ships the inventory to AI Defense as discovery events over the
+# managed AID log sink above (see internal/inventory/ai_discovery.go and
+# internal/telemetry/cisco_aid_log_exporter.go). emit_otel defaults on, which is
+# what carries the inventory to that sink; other ai_discovery.* keys keep their
+# built-in defaults (mode enhanced, scan intervals). The scanner is a no-op
+# unless enabled, so this block is required for endpoint inventory to flow.
+ai_discovery:
+  enabled: true
+
 # asset_policy is intentionally disabled in this managed_enterprise
 # rollout. The AID cloud is the single authoritative source of block
 # verdicts on this branch; asset_policy's mcp/skill/plugin allow-lists
