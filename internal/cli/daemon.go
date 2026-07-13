@@ -40,7 +40,7 @@ const (
 	defaultStartReadinessTimeout = 60 * time.Second
 	defaultReadinessPollInterval = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout  = time.Second
-	restartPortReleaseTimeout    = 2 * time.Second
+	restartPortReleaseTimeout    = defaultStopTimeout
 	restartPortReleaseInterval   = 25 * time.Millisecond
 )
 

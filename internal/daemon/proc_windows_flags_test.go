@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -87,5 +88,31 @@ func TestWindowsDaemonChildSelfRegistersStrongIdentity(t *testing.T) {
 	}
 	if info.StartIdentity == "" || !d.HasManagedProcessIdentity(info.PID) {
 		t.Fatalf("registered process identity is not strong: %+v", info)
+	}
+}
+
+func TestWaitForProcessExitUsesOriginalWindowsHandle(t *testing.T) {
+	const helperEnv = "DEFENSECLAW_TEST_WAIT_PROCESS_EXIT"
+	if os.Getenv(helperEnv) == "1" {
+		time.Sleep(150 * time.Millisecond)
+		os.Exit(0)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestWaitForProcessExitUsesOriginalWindowsHandle")
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	started := time.Now()
+	if !waitForProcessExit(cmd.Process, cmd.Process.Pid, 5*time.Second) {
+		t.Fatal("process handle did not become signaled")
+	}
+	if elapsed := time.Since(started); elapsed < 100*time.Millisecond {
+		t.Fatalf("wait returned before helper exited: %s", elapsed)
 	}
 }

@@ -507,21 +507,17 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 		return fmt.Errorf("daemon: send term signal: %w", err)
 	}
 
-	// Wait for process to exit
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !processExists(pid) {
-			_ = os.Remove(d.pidFile)
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	// Wait on the original process handle on Windows. TerminateProcess is
+	// asynchronous, and reopening the PID can report "gone" before the
+	// original kernel object is signaled and its listener is released.
+	if waitForProcessExit(proc, pid, timeout) {
+		_ = os.Remove(d.pidFile)
+		return nil
 	}
 
 	// Force kill if still running
 	_ = sendKillSignal(proc)
-	time.Sleep(100 * time.Millisecond)
-
-	if processExists(pid) {
+	if !waitForProcessExit(proc, pid, 100*time.Millisecond) {
 		return ErrStopTimeout
 	}
 
@@ -544,21 +540,16 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 	if err := sendTermSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("daemon: stop started process: %w", err)
 	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !d.verifyProcess(info) {
-			d.removePIDFileIfStarted(info)
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	if waitForProcessExit(proc, pid, timeout) {
+		d.removePIDFileIfStarted(info)
+		return nil
 	}
 	if !d.verifyProcess(info) {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
 	_ = sendKillSignal(proc)
-	time.Sleep(100 * time.Millisecond)
-	if d.verifyProcess(info) {
+	if !waitForProcessExit(proc, pid, 100*time.Millisecond) && d.verifyProcess(info) {
 		return ErrStopTimeout
 	}
 	d.removePIDFileIfStarted(info)
