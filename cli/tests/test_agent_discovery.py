@@ -476,6 +476,54 @@ def test_codex_desktop_runtime_is_a_narrow_trusted_prefix(monkeypatch, tmp_path)
     assert ad._path_key(str(local_app_data)) not in prefixes
 
 
+def test_codex_windows_discovery_skips_nonlaunchable_path_alias(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    local_app_data = tmp_path / "local-app-data"
+    alias = local_app_data / "Microsoft" / "WindowsApps" / "codex.exe"
+    desktop = local_app_data / "OpenAI" / "Codex" / "bin" / "release-hash" / "codex.exe"
+    alias.parent.mkdir(parents=True)
+    desktop.parent.mkdir(parents=True)
+    alias.write_bytes(b"protected alias")
+    desktop.write_bytes(b"desktop cli")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: str(alias))
+
+    probes: list[str] = []
+
+    def version(name, path, _args, **_kwargs):
+        assert name == "codex"
+        probes.append(path)
+        if ad._path_key(path) == ad._path_key(str(alias)):
+            return "", "version probe failed: [WinError 5] Access is denied"
+        if ad._path_key(path) == ad._path_key(str(desktop)):
+            return "codex-cli 0.144.3", ""
+        return "", "not launchable"
+
+    monkeypatch.setattr(ad, "_version_for_agent_binary", version)
+
+    signal = ad._scan_agent("codex")
+
+    assert signal.installed is True
+    assert signal.version == "codex-cli 0.144.3"
+    assert ad._path_key(signal.binary_path) == ad._path_key(str(desktop))
+    assert probes[0] == str(alias)
+    assert str(desktop) in probes
+
+
+def test_codex_desktop_bin_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    desktop_bin = local_app_data / "OpenAI" / "Codex" / "bin"
+
+    assert ad._path_key(str(desktop_bin)) in prefixes
+    assert ad._path_key(str(desktop_bin.parent)) not in prefixes
+
+
 def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     local_app_data = tmp_path / "local-app-data"
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))

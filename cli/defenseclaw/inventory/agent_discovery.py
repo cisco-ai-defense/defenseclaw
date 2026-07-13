@@ -139,6 +139,7 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
         candidates.extend(
             (
                 os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                os.path.join(local_app_data, "OpenAI", "Codex", "bin"),
                 # Codex Desktop installs its bundled native MCP executables
                 # below this product-specific runtime root.  Never trust all
                 # of LOCALAPPDATA; executable admission still validates the
@@ -477,20 +478,31 @@ def _scan_agent(
         config_path = omnigent_config_path()
         config_candidates = (config_path,)
     config_path = _first_existing_file(config_candidates)
-    binary_path = _binary_path_for_agent(name, spec)
+    binary_candidates = _binary_candidates_for_agent(name, spec)
+    binary_path = binary_candidates[0] if binary_candidates else ""
     version = ""
     error = ""
     version_ok = False
 
-    if binary_path:
-        version, error = _version_for_agent_binary(
+    probe_errors: list[str] = []
+    for candidate in binary_candidates:
+        candidate_version, candidate_error = _version_for_agent_binary(
             name,
-            binary_path,
+            candidate,
             spec.version_args,
             require_trusted_binary_paths=require_trusted_binary_paths,
             data_dir=data_dir,
         )
-        version_ok = bool(version) and not error
+        if candidate_version and not candidate_error:
+            binary_path = candidate
+            version = candidate_version
+            error = ""
+            version_ok = True
+            break
+        if candidate_error:
+            probe_errors.append(f"{candidate}: {candidate_error}")
+    if not version_ok and probe_errors:
+        error = "; ".join(probe_errors)
 
     installed = bool(binary_path) and version_ok
     return AgentSignal(
@@ -1223,29 +1235,61 @@ def _which(binary_name: str) -> str:
 def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
     """Resolve PATH first, then narrow documented connector locations."""
 
+    candidates = _binary_candidates_for_agent(name, spec)
+    return candidates[0] if candidates else ""
+
+
+def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]:
+    """Enumerate launchable-location candidates without trusting the first alias.
+
+    Windows App Execution Aliases can exist on PATH while being protected or
+    otherwise nonlaunchable. Version validation is deliberately performed by
+    the caller for every candidate until one succeeds.
+    """
+
     if not spec.binary_name:
-        return ""
+        return ()
+    candidates: list[str] = []
     path = _which(spec.binary_name)
-    if path or not _is_windows_host():
-        return path
+    if path:
+        candidates.append(path)
+    if not _is_windows_host():
+        return tuple(candidates)
 
     for candidate in _windows_binary_candidates(name, spec.binary_name):
         if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+            candidates.append(os.path.abspath(candidate))
 
-    if name != "antigravity":
-        return ""
+    if name == "codex":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            desktop_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+            # Codex Desktop stores versioned native CLIs one directory below
+            # the product bin root. Prefer a stable lexical order; the version
+            # probe, not directory naming, decides whether a candidate works.
+            for candidate in sorted(desktop_bin.glob("*/codex.exe")):
+                if candidate.is_file():
+                    candidates.append(os.path.abspath(candidate))
 
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    if not local_app_data:
-        return ""
-    for candidate in (
-        os.path.join(local_app_data, "agy", "bin", "agy.exe"),
-        os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
-    ):
-        if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
-    return ""
+    if name == "antigravity":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            for candidate in (
+                os.path.join(local_app_data, "agy", "bin", "agy.exe"),
+                os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
+            ):
+                if os.path.isfile(candidate):
+                    candidates.append(os.path.abspath(candidate))
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = _path_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(candidate)
+    return tuple(deduplicated)
 
 
 def _is_windows_host() -> bool:
