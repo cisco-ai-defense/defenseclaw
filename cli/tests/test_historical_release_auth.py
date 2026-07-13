@@ -79,33 +79,29 @@ def test_windows_named_and_opened_timestamp_views_do_not_false_positive(
     path = tmp_path / "checksums.txt"
     payload = b"authenticated checksums\n"
     path.write_bytes(payload)
-    real_os = os
+    real_lstat = Path.lstat
+    lstat_calls: list[Path] = []
 
-    class _WindowsOsProxy:
-        name = "nt"
-        path = real_os.path
+    def timestamp_skewed_lstat(candidate: Path):
+        lstat_calls.append(candidate)
+        info = real_lstat(candidate)
 
-        def lstat(self, candidate: str | os.PathLike[str]):
-            info = real_os.lstat(candidate)
+        class _TimestampSkewedStat:
+            st_ctime_ns = info.st_ctime_ns + 1
 
-            class _TimestampSkewedStat:
-                st_ctime_ns = info.st_ctime_ns + 1
+            def __getattr__(self, name: str):
+                return getattr(info, name)
 
-                def __getattr__(self, name: str):
-                    return getattr(info, name)
+        return _TimestampSkewedStat()
 
-            return _TimestampSkewedStat()
-
-        def __getattr__(self, name: str):
-            return getattr(real_os, name)
-
-    monkeypatch.setattr(historical_release_auth, "os", _WindowsOsProxy())
+    monkeypatch.setattr(Path, "lstat", timestamp_skewed_lstat)
 
     assert historical_release_auth._read_bounded_regular_file(
         path,
         "historical checksums",
         max_bytes=1024,
     ) == payload
+    assert lstat_calls == [path, path]
 
 
 def test_oversized_historical_trust_input_fails_before_verification(tmp_path: Path) -> None:

@@ -642,7 +642,7 @@ for arg in "$@"; do
 done
 if [[ "${url}" == http://127.0.0.1:*/health ]]; then
   if [[ "${FORCE_ORPHAN_HEALTH:-0}" == '1' ]]; then
-    printf '%s\n' '{"gateway":{"state":"running"},"provenance":{"binary_version":"0.8.3"}}' > "${out}"
+    printf '%s\n' '{"gateway":{"state":"starting"},"provenance":{"binary_version":"0.8.3"}}' > "${out}"
     printf '200'
     exit 0
   fi
@@ -666,7 +666,7 @@ PY
           && "${url}" != "${TARGET_HEALTH_URL}" ]]; then
       : > "${out}"
       printf '000'
-      exit 0
+      exit 7
     fi
     printf '{"gateway":{"state":"running"},"provenance":{"binary_version":"%s"}}\n' \
       "${gateway_version}" > "${out}"
@@ -674,6 +674,7 @@ PY
   else
     : > "${out}"
     printf '000'
+    exit 7
   fi
   exit 0
 fi
@@ -894,7 +895,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
     if orphan_health:
         output = result.stdout + result.stderr
         assert result.returncode == 1, output
-        assert "healthy without verified live PID custody" in output
+        assert "not proven unreachable (starting) without verified live PID custody" in output
         assert not event_log.exists() or "source-stop" not in event_log.read_text(encoding="utf-8")
         assert not (controller_home / ".upgrade-recovery" / "phase-one-active.json").exists()
         assert (install_dir / "defenseclaw-gateway").read_bytes() == source_gateway_bytes

@@ -135,7 +135,18 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert 'gateway_health.get("state") in {"running", "disabled"}' in resolver
     assert 'gateway.get("state") in {"running", "disabled"}' in resolver
     assert '"${health_state}" == "running" || "${health_state}" == "disabled"' in resolver
-    assert '"${health_state}" != "running" && "${health_state}" != "disabled"' in resolver
+    assert '[[ "${health_state}" == "unreachable" ]]' in resolver
+    assert "health_probe.returncode != 7" in resolver
+    assert "gateway health endpoint was not proven unreachable during phase-one recovery" in resolver
+    assert "The source health endpoint is not proven unreachable (${health_state})" in resolver
+    post_stop = resolver[
+        resolver.index('post_stop_health="$(bridge_source_health_observation)"') : resolver.index(
+            "bridge_phase1_state_transaction snapshot"
+        )
+    ]
+    assert 'post_stop_state="${post_stop_health%%$\'\\t\'*}"' in post_stop
+    assert '[[ "${post_stop_state}" == "unreachable" ]]' in post_stop
+    assert "remains live without PID custody after stop" in post_stop
 
 
 def _posix_protected_materializer_program() -> str:

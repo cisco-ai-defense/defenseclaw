@@ -2355,6 +2355,31 @@ for _attempt in range(6):
 else:
     raise RuntimeError("gateway did not quiesce during phase-one recovery")
 
+curl = shutil.which("curl")
+if not curl:
+    raise RuntimeError("curl is required for phase-one recovery health verification")
+health_probe = subprocess.run(
+    [
+        curl,
+        "-s",
+        "-o",
+        os.devnull,
+        "-w",
+        "%{http_code}",
+        "--max-time",
+        "2",
+        source_health_url,
+    ],
+    capture_output=True,
+    text=True,
+    timeout=5,
+    check=False,
+)
+if health_probe.returncode != 7 or (health_probe.stdout or "").strip() != "000":
+    raise RuntimeError(
+        "gateway health endpoint was not proven unreachable during phase-one recovery"
+    )
+
 restore_state_before_artifacts()
 
 if resume_unsealed_bridge:
@@ -4980,11 +5005,15 @@ PY
 }
 
 bridge_source_health_observation() {
-    local response_file http_code health_fields
+    local response_file http_code curl_status health_fields
     response_file="$(mktemp "${STAGING_DIR}/phase1-source-health.XXXXXX")" || return 1
-    http_code="$(DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+    if http_code="$(DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
         curl -s -o "${response_file}" -w "%{http_code}" --max-time 2 \
-        "${BRIDGE_SOURCE_HEALTH_URL}" 2>/dev/null || echo "000")"
+        "${BRIDGE_SOURCE_HEALTH_URL}" 2>/dev/null)"; then
+        curl_status=0
+    else
+        curl_status=$?
+    fi
     health_fields="$(python3 - "${response_file}" <<'PY' 2>/dev/null || true
 import json
 import os
@@ -5007,8 +5036,12 @@ print(f"{state}\t{version}")
 PY
 )"
     rm -f "${response_file}"
-    if [[ "${http_code}" != "200" ]]; then
+    if [[ "${curl_status}" -eq 7 && "${http_code}" == "000" ]]; then
         printf 'unreachable\tmissing\n'
+    elif [[ "${curl_status}" -ne 0 ]]; then
+        printf 'indeterminate\tmissing\n'
+    elif [[ "${http_code}" != "200" ]]; then
+        printf 'reachable\tmissing\n'
     elif [[ -z "${health_fields}" ]]; then
         printf 'invalid\tmissing\n'
     else
@@ -5106,8 +5139,8 @@ PY
         BRIDGE_SOURCE_WAS_RUNNING=1
     elif [[ "${pid_state}" == "live" ]]; then
         die "Verified source gateway PID ${pid} is live but version-bound health is ${health_state}; refusing before stopping services."
-    elif [[ "${health_state}" == "invalid" ]]; then
-        die "The source health endpoint returned an invalid response without verified PID custody; refusing before stopping services."
+    elif [[ "${health_state}" != "unreachable" ]]; then
+        die "The source health endpoint is not proven unreachable (${health_state}) without verified live PID custody; refusing before stopping services."
     fi
     register_bridge_phase1_recovery_journal
     # The durable journal is the recovery authority. Arm the ordinary EXIT
@@ -5216,7 +5249,7 @@ bridge_phase1_gateway_quiesced() {
     [[ "${pid_state}" != "live" ]] || return 1
     health_fields="$(bridge_source_health_observation)" || return 1
     health_state="${health_fields%%$'\t'*}"
-    [[ "${health_state}" != "running" && "${health_state}" != "disabled" ]]
+    [[ "${health_state}" == "unreachable" ]]
 }
 
 bridge_phase1_gateway_activation_owned() {
@@ -5461,8 +5494,7 @@ PY
         [[ "${pid_state}" != "live" ]] || rollback_failed=1
         health_fields="$(bridge_source_health_observation)" || rollback_failed=1
         health_state="${health_fields%%$'\t'*}"
-        [[ "${health_state}" != "running" && "${health_state}" != "disabled" ]] \
-            || rollback_failed=1
+        [[ "${health_state}" == "unreachable" ]] || rollback_failed=1
     fi
     if [[ "${rollback_failed}" -eq 0 ]] && command -v openclaw >/dev/null 2>&1; then
         OPENCLAW_HOME="${OPENCLAW_HOME}" openclaw gateway restart 9>&- >/dev/null 2>&1 \
@@ -5753,8 +5785,9 @@ assert_gateway_quiesced
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
     post_stop_health="$(bridge_source_health_observation)" \
         || die "Could not verify source health quiescence after stop; the source will be restored."
-    [[ "${post_stop_health%%$'\t'*}" != "running" ]] \
-        || die "The source health endpoint remains running without PID custody after stop; the source will be restored."
+    post_stop_state="${post_stop_health%%$'\t'*}"
+    [[ "${post_stop_state}" == "unreachable" ]] \
+        || die "The source health endpoint remains live without PID custody after stop; the source will be restored."
     bridge_phase1_state_transaction snapshot \
         || die "Could not create an exact quiesced phase-one state snapshot; the source will be restored."
     seal_bridge_phase1_state_snapshot_journal \

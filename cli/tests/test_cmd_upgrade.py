@@ -3791,6 +3791,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         ]
         with (
             patch("defenseclaw.gateway.OrchestratorClient", return_value=client),
+            patch("defenseclaw.commands.cmd_upgrade.ux.ok") as ok,
             patch(
                 "defenseclaw.commands.cmd_upgrade.time.monotonic",
                 side_effect=[0.0, 0.0, 0.0, 0.0],
@@ -3804,6 +3805,9 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             )
 
         self.assertEqual(client.health.call_count, 3)
+        ok.assert_called_once_with(
+            "Gateway API is healthy; fleet uplink is disabled by configuration"
+        )
 
     def test_restart_and_health_use_fresh_post_migration_config_and_dotenv(self):
         app = AppContext()
