@@ -236,6 +236,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or
         $legacyNative -notmatch 'Native private directory lifecycle passed' -or
         $legacyNative -notmatch 'Native snapshotted-child move-out refusal passed' -or
+        $legacyNative -notmatch 'Native namespace retirement wait passed' -or
         $legacyNative -notmatch 'Native fresh directory fault boundaries passed') {
         throw "Windows PowerShell 5.1 native private lifecycle failed:`n$legacyNative"
     }
@@ -243,6 +244,26 @@ try {
         throw "Windows PowerShell 5.1 native private lifecycle left custody behind"
     }
     [IO.Directory]::Delete($legacyNativeRoot)
+
+    $modernNativeRoot = Join-Path $TempRoot "powershell-native-private"
+    [void](New-Item -ItemType Directory -Path $modernNativeRoot)
+    $modernNative = (& $PowerShell `
+        -NoProfile `
+        -NonInteractive `
+        -File $Installer `
+        -TestMode `
+        -NativePrivateDirectorySelfTestRoot $modernNativeRoot 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or
+        $modernNative -notmatch 'Native private directory lifecycle passed' -or
+        $modernNative -notmatch 'Native snapshotted-child move-out refusal passed' -or
+        $modernNative -notmatch 'Native namespace retirement wait passed' -or
+        $modernNative -notmatch 'Native fresh directory fault boundaries passed') {
+        throw "PowerShell 7 native private lifecycle failed:`n$modernNative"
+    }
+    if (@(Get-ChildItem -LiteralPath $modernNativeRoot -Force).Count -ne 0) {
+        throw "PowerShell 7 native private lifecycle left custody behind"
+    }
+    [IO.Directory]::Delete($modernNativeRoot)
 
     $mismatch = Invoke-FreshInstaller -RequestedVersion "999.999.999"
     if ($mismatch.ExitCode -eq 0 -or $mismatch.Output -notmatch 'does not match -Version') {
@@ -267,6 +288,25 @@ try {
         throw "Post-move fresh-directory cleanup was not exact:`n$($postMove.Output)"
     }
     Assert-NoInstallerCustody
+    if (Test-Path -LiteralPath $env:DEFENSECLAW_HOME) {
+        Write-Host "--- post-move installer output ---" -ForegroundColor Yellow
+        Write-Host $postMove.Output
+        Write-Host "--- bounded residual path inventory (names and kinds only) ---" -ForegroundColor Yellow
+        @(
+            Get-ChildItem -LiteralPath $HomeRoot -Force -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 100
+        ) | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($HomeRoot, $_.FullName)
+            $kind = if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                "reparse"
+            } elseif ($_.PSIsContainer) {
+                "directory"
+            } else {
+                "file"
+            }
+            Write-Host "$kind`t$relative"
+        }
+    }
     Assert-NoFreshPayload -Context $postMove.Output
     if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
         throw "Post-move fresh-directory failure left .local or bin custody behind"

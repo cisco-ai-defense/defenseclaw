@@ -135,13 +135,32 @@ function Resolve-InstalledRuntimePaths {
     $requestedOpenClaw=if($openClawWasExplicit){[IO.Path]::GetFullPath($env:OPENCLAW_HOME)}else{"__DEFENSECLAW_UNSET__"}
     $resolver=@'
 import json
+import inspect
 import os
 import sys
 
-from defenseclaw.config import load
+import defenseclaw.config as config_module
 
 controller_home, config_path, openclaw_explicit, requested_openclaw = sys.argv[1:]
-cfg = load(data_dir=controller_home)
+loader_parameters = inspect.signature(config_module.load).parameters
+if "data_dir" in loader_parameters:
+    cfg = config_module.load(data_dir=controller_home)
+elif not loader_parameters:
+    # Published 0.8.0-0.8.3 loaders have no scoped-load argument and ignore
+    # DEFENSECLAW_CONFIG.  Their loader joins CONFIG_FILE_NAME to
+    # DEFENSECLAW_HOME, and os.path.join preserves an absolute second path.
+    # Point that process-local constant at the already-validated active file
+    # so legacy upgrades retain both a split data_dir and an external config.
+    legacy_config_name = getattr(config_module, "CONFIG_FILE_NAME", None)
+    if not isinstance(legacy_config_name, str) or not legacy_config_name:
+        raise RuntimeError("installed source config loader lacks its legacy config-path contract")
+    try:
+        config_module.CONFIG_FILE_NAME = config_path
+        cfg = config_module.load()
+    finally:
+        config_module.CONFIG_FILE_NAME = legacy_config_name
+else:
+    raise RuntimeError("installed source config loader has an unsupported signature")
 configured_data_dir = os.path.expanduser(cfg.data_dir or controller_home)
 if not os.path.isabs(configured_data_dir):
     raise RuntimeError("configured data_dir must be absolute for a staged upgrade")
