@@ -313,11 +313,16 @@ function Test-ObsoleteWindowsHookGuidance([string]$Text) {
 function Get-CodexWindowsHookCommand([string]$Config) {
     $tomlString = [regex]::Match(
         $Config,
-        '(?m)^\s*command_windows\s*=\s*("(?:\\.|[^"\\])*")'
+        '(?m)^\s*command_windows\s*=\s*(?<literal>"(?:\\.|[^"\\])*"|''[^'']*'')\s*$'
     )
     if (-not $tomlString.Success) { throw 'Codex config has no command_windows hook override' }
-    try { $command = $tomlString.Groups[1].Value | ConvertFrom-Json -ErrorAction Stop }
-    catch { throw "Codex command_windows is not a valid TOML basic string: $($_.Exception.Message)" }
+    $literal = $tomlString.Groups['literal'].Value
+    if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
+        $command = $literal.Substring(1, $literal.Length - 2)
+    } else {
+        try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "Codex command_windows is not a valid TOML basic string: $($_.Exception.Message)" }
+    }
     $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
     if (-not $encoded.Success) { throw 'Codex command_windows does not use the managed EncodedCommand form' }
     try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }

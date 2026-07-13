@@ -1459,11 +1459,16 @@ function Assert-WizardHookRegistration(
     if ($Specification.Connector -eq 'codex') {
         $tomlString = [regex]::Match(
             $registration,
-            '(?m)^\s*command_windows\s*=\s*("(?:\\.|[^"\\])*")'
+            '(?m)^\s*command_windows\s*=\s*(?<literal>"(?:\\.|[^"\\])*"|''[^'']*'')\s*$'
         )
         if (-not $tomlString.Success) { throw 'wizard-selected Codex registration has no command_windows override' }
-        try { $command = $tomlString.Groups[1].Value | ConvertFrom-Json -ErrorAction Stop }
-        catch { throw "wizard-selected Codex command_windows is malformed: $($_.Exception.Message)" }
+        $literal = $tomlString.Groups['literal'].Value
+        if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
+            $command = $literal.Substring(1, $literal.Length - 2)
+        } else {
+            try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
+            catch { throw "wizard-selected Codex command_windows is malformed: $($_.Exception.Message)" }
+        }
         $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
         if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
         try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
