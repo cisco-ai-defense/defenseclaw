@@ -18,6 +18,9 @@ the broader shell tests.
 
 from __future__ import annotations
 
+import asyncio
+
+import defenseclaw.tui.app as app_mod
 import pytest
 from defenseclaw.tui.app import DefenseClawTUI
 from defenseclaw.tui.services.catalog_state import SkillRow
@@ -164,6 +167,32 @@ async def test_catalog_clear_filter_button_disabled_when_no_filter(panel: str) -
         await pilot.pause()
         clear = app.query_one(f"#{panel}-filter-clear", Button)
         assert clear.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_catalog_loader_does_not_render_after_shutdown_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker finishing during Textual teardown must not query removed widgets."""
+
+    app = DefenseClawTUI()
+    load_started = asyncio.Event()
+
+    async def _finish_during_shutdown(
+        *_args: object, **_kwargs: object
+    ) -> tuple[int, bytes, bytes]:
+        load_started.set()
+        while app.is_running:
+            await asyncio.sleep(0)
+        return 1, b"", b"Failed to open audit store"
+
+    monkeypatch.setattr(app_mod, "_communicate_captured", _finish_during_shutdown)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("plugins")
+        await asyncio.wait_for(load_started.wait(), timeout=2)
+        await pilot.pause()
+    assert "Failed to open audit store" in str(app.plugins_model.message)
 
 
 @pytest.mark.asyncio

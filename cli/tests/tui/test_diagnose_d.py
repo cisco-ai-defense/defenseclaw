@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from defenseclaw.tui.app import DefenseClawTUI, _diagnose_summary_line
+from defenseclaw.tui.app import DefenseClawTUI, _communicate_captured, _diagnose_summary_line
 
 
 @dataclass
@@ -151,6 +151,44 @@ class _FakeProc:
 
     def kill(self) -> None:  # pragma: no cover - kill only fires on timeout
         pass
+
+
+@pytest.mark.asyncio
+async def test_communicate_captured_reaps_child_after_communication_error() -> None:
+    """Pipe/decoder failures must not leave a Windows child or transport alive."""
+
+    events: list[str] = []
+
+    class _Transport:
+        def close(self) -> None:
+            events.append("close")
+
+    class _BrokenProc:
+        returncode: int | None = None
+        _transport = _Transport()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            raise OSError("pipe read failed")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            self.returncode = -9
+            return self.returncode
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _BrokenProc:
+        return _BrokenProc()
+
+    import defenseclaw.tui.app as app_mod
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(app_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        with pytest.raises(OSError, match="pipe read failed"):
+            await _communicate_captured("defenseclaw", ("doctor",))
+
+    assert events == ["kill", "wait", "close"]
 
 
 @pytest.mark.asyncio

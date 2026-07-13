@@ -200,7 +200,7 @@ async def _communicate_captured(
     )
     try:
         stdout, stderr = await process.communicate()
-    except asyncio.CancelledError:
+    except BaseException:
         await _terminate_async_process(process)
         raise
     _close_async_process_transport(process)
@@ -3455,6 +3455,11 @@ class DefenseClawTUI(App[None]):
             self._refresh_hint()
 
     def _render_chrome(self) -> None:
+        # Textual clears ``is_running`` before it starts removing screen
+        # widgets. A catalog worker can finish in that shutdown window; no UI
+        # update is valid once the app has left its running lifecycle.
+        if not self.is_running or getattr(self, "_app_shutting_down", False):
+            return
         if not self._applying_panel_snapshot:
             # A direct render represents newer UI/model state than any queued
             # background projection (for example a filter key pressed while an
