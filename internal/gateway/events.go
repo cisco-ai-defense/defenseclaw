@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -611,6 +612,11 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	if len(p.TargetHost) > 253 {
 		p.TargetHost = p.TargetHost[:253]
 	}
+	if ip := net.ParseIP(p.ResolvedIP); ip != nil {
+		p.ResolvedIP = ip.String()
+	} else {
+		p.ResolvedIP = ""
+	}
 	if len(p.Reason) > 512 {
 		p.Reason = p.Reason[:512]
 	}
@@ -621,7 +627,7 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	// shipping a leak. In production we log and continue — the
 	// canary fires once, the operator reads the warning, and the
 	// follow-up fix lands without an outage.
-	redaction.MustAssertNoCredentials(p.TargetHost, p.TargetPath, p.Reason)
+	redaction.MustAssertNoCredentials(p.TargetHost, p.ResolvedIP, p.TargetPath, p.Reason)
 	// BodyShape is a known enum — reject anything else so a
 	// malformed TS client cannot inject arbitrary strings into the
 	// downstream contract. validEgressBranch / validEgressDecision

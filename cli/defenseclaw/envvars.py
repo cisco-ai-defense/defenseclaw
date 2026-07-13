@@ -90,6 +90,7 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 # Special-case: DEFENSECLAW_SCHEMA_VALIDATION is "off" to disable (the
 # inverse pattern). Tracked explicitly to keep ``is_truthy`` clean.
 _DISABLE_BY_OFF = frozenset({"DEFENSECLAW_SCHEMA_VALIDATION"})
+_ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"})
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,8 @@ class EnvVar:
             return False
         if self.name in _DISABLE_BY_OFF:
             return v != "on"
+        if self.name in _ACTIVE_WHEN_NONEMPTY:
+            return True
         return v in _TRUTHY
 
 

@@ -1783,6 +1783,7 @@ class GuardrailConfig:
     model_name: str = ""  # alias exposed to OpenClaw, e.g. "claude-opus"
     api_key_env: str = ""  # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
     api_base: str = ""  # base URL override for Azure, custom endpoints
+    allow_private_upstreams: list[str] = field(default_factory=list)
     # OriginalModel is NOT a secret-bearing LLM config field — it just
     # records the upstream model name the client sees rewritten onto
     # outgoing requests (Bifrost model-routing). Orthogonal to ``llm``.
@@ -2901,6 +2902,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
+        guardrail.pop("allow_private_upstreams", None)
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
     # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
@@ -4033,6 +4036,12 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     hilt_raw = raw.get("hilt")
     if hilt_raw is None:
         hilt_raw = raw.get("hitl")
+    private_upstreams_raw = raw.get("allow_private_upstreams", [])
+    private_upstreams = (
+        [str(value).strip() for value in private_upstreams_raw if str(value).strip()]
+        if isinstance(private_upstreams_raw, (list, tuple))
+        else []
+    )
     return GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
@@ -4044,6 +4053,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         model_name=raw.get("model_name", ""),
         api_key_env=raw.get("api_key_env", ""),
         api_base=raw.get("api_base", ""),
+        allow_private_upstreams=private_upstreams,
         original_model=raw.get("original_model", ""),
         block_message=raw.get("block_message", ""),
         judge=_merge_judge(raw.get("judge")),

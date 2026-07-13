@@ -32,6 +32,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -1761,6 +1762,9 @@ func validateAllowPrivateUpstreams(ips []string) error {
 		if ip == nil {
 			return fmt.Errorf("guardrail.allow_private_upstreams: %q is not a valid IP address", s)
 		}
+		if netguard.IsCloudMetadataIP(ip) {
+			return fmt.Errorf("guardrail.allow_private_upstreams: cloud metadata address %q is not allowed", s)
+		}
 		if ip.IsLoopback() {
 			return fmt.Errorf("guardrail.allow_private_upstreams: loopback address %q is not allowed (Ollama uses a dedicated bypass)", s)
 		}
@@ -1768,9 +1772,6 @@ func validateAllowPrivateUpstreams(ips []string) error {
 			return fmt.Errorf("guardrail.allow_private_upstreams: %q is not a valid upstream address", s)
 		}
 		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			if v4 := ip.To4(); v4 != nil && v4[0] == 169 && v4[1] == 254 {
-				return fmt.Errorf("guardrail.allow_private_upstreams: cloud metadata address %q is not allowed", s)
-			}
 			return fmt.Errorf("guardrail.allow_private_upstreams: link-local address %q is not allowed", s)
 		}
 	}

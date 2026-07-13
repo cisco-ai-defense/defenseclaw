@@ -394,6 +394,39 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
                     resolver=stub({"loopback.internal": ["127.0.0.1"]}),
                 )
 
+    def test_mapped_loopback_never_exempted(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "127.0.0.1"},
+        ):
+            with self.assertRaises(SSRFError):
+                guard_url(
+                    "https://loopback.internal/v1",
+                    resolver=stub({"loopback.internal": ["::ffff:127.0.0.1"]}),
+                )
+
+    def test_mapped_metadata_never_exempted(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "169.254.169.254"},
+        ):
+            with self.assertRaises(SSRFError):
+                guard_url(
+                    "https://metadata.internal/v1",
+                    resolver=stub({"metadata.internal": ["::ffff:169.254.169.254"]}),
+                )
+
+    def test_ipv6_metadata_never_exempted(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "fd00:ec2::254"},
+        ):
+            with self.assertRaises(SSRFError):
+                guard_url(
+                    "https://metadata.internal/v1",
+                    resolver=stub({"metadata.internal": ["fd00:ec2::254"]}),
+                )
+
     def test_allowed_private_upstream_multiple_ips(self):
         with patch.dict(
             os.environ,

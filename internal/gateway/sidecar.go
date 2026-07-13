@@ -1141,6 +1141,10 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || otelReload
 	rulePackReload := rulePackNeedsReload(oldCfg, newCfg)
 	judgeReload := judgeNeedsReload(oldCfg, newCfg)
+	privateUpstreamsReload := !reflect.DeepEqual(
+		oldCfg.Guardrail.AllowPrivateUpstreams,
+		newCfg.Guardrail.AllowPrivateUpstreams,
+	)
 
 	next := *newCfg
 	if next.Gateway.Token == "" && current.Gateway.Token != "" {
@@ -1226,6 +1230,13 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	appliedCfg := current
 	if !onlyConfigReloadModeChanged(oldCfg, newCfg) {
 		appliedCfg = s.publishConfig(&next)
+	}
+	if privateUpstreamsReload {
+		// Replace, rather than merge, so removing the last entry takes effect.
+		// Drop pooled transports as well: an already-idle connection otherwise
+		// bypasses DialContext and could survive an allowlist revocation.
+		netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(appliedCfg.Guardrail.AllowPrivateUpstreams))
+		providerHTTPClient.CloseIdleConnections()
 	}
 
 	if otelReload {

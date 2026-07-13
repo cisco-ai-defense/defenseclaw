@@ -105,6 +105,24 @@ func TestIsPrivateOrReserved_LinkLocalNeverExempted(t *testing.T) {
 	}
 }
 
+func TestIsPrivateOrReserved_IPv6MetadataNeverExempted(t *testing.T) {
+	metadata := net.ParseIP("fd00:ec2::254")
+	SetAllowedPrivateIPs([]net.IP{metadata})
+	defer SetAllowedPrivateIPs(nil)
+
+	if !IsPrivateOrReserved(metadata) {
+		t.Error("expected true: IPv6 cloud metadata must never be exempted")
+	}
+}
+
+func TestIsHardDeniedIP_NormalizesIPv4MappedIPv6(t *testing.T) {
+	for _, raw := range []string{"::ffff:127.0.0.1", "::ffff:169.254.169.254"} {
+		if !IsHardDeniedIP(net.ParseIP(raw)) {
+			t.Errorf("IsHardDeniedIP(%s) = false, want true", raw)
+		}
+	}
+}
+
 func TestParseAllowedPrivateUpstreams_Empty(t *testing.T) {
 	ips := ParseAllowedPrivateUpstreams(nil)
 	if len(ips) != 0 {

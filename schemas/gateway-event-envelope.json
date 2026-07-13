@@ -187,10 +187,11 @@
       "required": ["branch", "decision", "source"],
       "properties": {
         "target_host":    { "type": ["string", "null"] },
+        "resolved_ip":    { "type": ["string", "null"], "format": "ip-address" },
         "target_path":    { "type": ["string", "null"] },
         "body_shape":     { "type": ["string", "null"], "enum": ["", "none", "messages", "prompt", "input", "contents", "unknown", null] },
         "looks_like_llm": { "type": ["boolean", "null"] },
-        "branch":         { "type": "string", "enum": ["known", "shape", "passthrough"] },
+        "branch":         { "type": "string", "enum": ["known", "shape", "passthrough", "private-upstream"] },
         "decision":       { "type": "string", "enum": ["allow", "block"] },
         "reason":         { "type": ["string", "null"] },
         "source":         { "type": "string", "enum": ["go", "ts"] }

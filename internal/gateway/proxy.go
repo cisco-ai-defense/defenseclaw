@@ -1293,7 +1293,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
-	resp, err := providerHTTPClient.Do(upstreamReq)
+	resp, err := doProviderRequest(upstreamReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
@@ -2374,18 +2374,7 @@ func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL st
 		return true
 	}
 	if host := u.Hostname(); host != "" {
-		if isPrivateHostAllowlisted(host) {
-			emitEgress(r.Context(), gatewaylog.EgressPayload{
-				TargetHost:   host,
-				TargetPath:   r.URL.Path,
-				LooksLikeLLM: true,
-				Branch:       "private-upstream",
-				Decision:     "allow",
-				Reason:       "private-ip-allowed",
-				Source:       "go",
-			})
-			fmt.Fprintf(os.Stderr, "[guardrail] ALLOWED chat: private-host target %s (operator allowlist)\n", host)
-		} else if isPrivateHost(host) &&
+		if isPrivateHost(host) &&
 			!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
 			!passthroughAllowPrivateForTest {
 			emitEgress(r.Context(), gatewaylog.EgressPayload{
@@ -5235,7 +5224,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	providerName := inferProviderFromURL(upstreamURL)
 	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
 
-	resp, err := providerHTTPClient.Do(upReq)
+	resp, err := doProviderRequest(upReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return

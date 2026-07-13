@@ -710,14 +710,16 @@ type DiffEntry struct {
 // Field semantics:
 //   - TargetHost: destination hostname (not the full URL — we never
 //     log the query string to avoid leaking API keys).
+//   - ResolvedIP: concrete remote peer observed by Go's HTTP transport.
+//     Set only for private-upstream events; TS callers cannot attest it.
 //   - TargetPath: URL pathname only, trimmed to 256 chars. Useful
 //     for distinguishing /chat/completions vs /messages.
 //   - BodyShape: BodyShapeNone | messages | prompt | input | contents.
 //     Empty for non-body requests (GETs reported from the TS side).
 //   - LooksLikeLLM: true when the request hit a known provider OR
 //     the shape classifier matched.
-//   - Branch: known | shape | passthrough. The three-branch Layer 1
-//     policy — downstream alerting keys on this for each surface.
+//   - Branch: known | shape | passthrough | private-upstream. The latter
+//     records use of an operator-approved private destination.
 //   - Decision: allow | block. Paired with Branch because a "shape"
 //     branch can produce either depending on allow_unknown_llm_domains.
 //   - Reason: stable short identifier matching the Go emitter's
@@ -728,6 +730,7 @@ type DiffEntry struct {
 //     a red flag that one layer has a stale allowlist.
 type EgressPayload struct {
 	TargetHost   string `json:"target_host,omitempty"`
+	ResolvedIP   string `json:"resolved_ip,omitempty"`
 	TargetPath   string `json:"target_path,omitempty"`
 	BodyShape    string `json:"body_shape,omitempty"`
 	LooksLikeLLM bool   `json:"looks_like_llm,omitempty"`

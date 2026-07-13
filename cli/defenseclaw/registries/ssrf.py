@@ -42,6 +42,22 @@ from urllib.parse import urlparse
 # running over Tailscale or other CGNAT-routed overlays opt in via
 # ``DEFENSECLAW_ALLOW_CGNAT=1``, the same env var the Go side honours.
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_CLOUD_METADATA_IPS = frozenset(
+    {
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("169.254.170.2"),
+        ipaddress.ip_address("fd00:ec2::254"),
+    }
+)
+
+
+def _normalize_ip(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Normalize IPv4-mapped IPv6 before applying security predicates."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        return ip.ipv4_mapped
+    return ip
 
 
 def _cgnat_allowed() -> bool:
@@ -68,7 +84,7 @@ def _allowed_private_ips() -> frozenset[ipaddress.IPv4Address | ipaddress.IPv6Ad
         if not part:
             continue
         try:
-            result.add(ipaddress.ip_address(part))
+            result.add(_normalize_ip(ipaddress.ip_address(part)))
         except ValueError:
             continue
     return frozenset(result)
@@ -76,11 +92,15 @@ def _allowed_private_ips() -> frozenset[ipaddress.IPv4Address | ipaddress.IPv6Ad
 
 def _is_allowed_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if ip is in the operator-configured private allowlist."""
-    if ip.is_loopback or ip.is_link_local:
+    check_ip = _normalize_ip(ip)
+    if (
+        check_ip.is_loopback
+        or check_ip.is_link_local
+        or check_ip.is_multicast
+        or check_ip.is_unspecified
+        or check_ip in _CLOUD_METADATA_IPS
+    ):
         return False
-    check_ip = ip
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        check_ip = ip.ipv4_mapped
     return check_ip in _allowed_private_ips()
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
