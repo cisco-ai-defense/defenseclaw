@@ -112,10 +112,30 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert 'pip check --python "${venv_python}"' in smoke
     assert "Resolved the published ${FROM_VERSION} wheel's own dependency graph" in smoke
     assert "start_source_gateway_canary" in smoke
-    assert "is running before resolver handoff" in smoke
+    assert "is version-bound healthy before resolver handoff" in smoke
     assert 'stage_authenticated_baseline "${baseline}"' in protocol
     assert "required bridge authentication failed" in protocol
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
+
+
+def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
+    start = smoke.index("seed_pre_v8_otel_fixture() {")
+    end = smoke.index("\n}\n\nseed_v8_observability_fixture()", start)
+    fixture = smoke[start:end]
+
+    assert "guardrail:\n  enabled: false" in fixture
+    assert "gateway:\n  fleet_mode: disabled" in fixture
+    assert "watcher:\n    enabled: false" in fixture
+
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text()
+    assert '"${GW_STATE}" == "running" || "${GW_STATE}" == "disabled"' in resolver
+    assert '"${GW_VERSION}" == "${RELEASE_VERSION}"' in resolver
+    assert "fleet uplink is disabled by configuration" in resolver
+    assert 'gateway_health.get("state") in {"running", "disabled"}' in resolver
+    assert 'gateway.get("state") in {"running", "disabled"}' in resolver
+    assert '"${health_state}" == "running" || "${health_state}" == "disabled"' in resolver
+    assert '"${health_state}" != "running" && "${health_state}" != "disabled"' in resolver
 
 
 def _posix_protected_materializer_program() -> str:

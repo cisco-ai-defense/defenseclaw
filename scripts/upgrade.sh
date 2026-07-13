@@ -2492,7 +2492,7 @@ if resume_unsealed_bridge:
                 probe.returncode == 0
                 and (probe.stdout or "").strip() == "200"
                 and isinstance(gateway_health, dict)
-                and gateway_health.get("state") == "running"
+                and gateway_health.get("state") in {"running", "disabled"}
                 and isinstance(provenance, dict)
                 and provenance.get("binary_version") == bridge_version
             ):
@@ -2732,7 +2732,7 @@ if source_was_running:
                 probe.returncode == 0
                 and (probe.stdout or "").strip() == "200"
                 and isinstance(gateway, dict)
-                and gateway.get("state") == "running"
+                and gateway.get("state") in {"running", "disabled"}
                 and isinstance(provenance, dict)
                 and provenance.get("binary_version") == source_version
             ):
@@ -5098,7 +5098,7 @@ PY
         || die "Could not inspect source gateway health before stopping services."
     health_state="${health_fields%%$'\t'*}"
     health_version="${health_fields#*$'\t'}"
-    if [[ "${health_state}" == "running" ]]; then
+    if [[ "${health_state}" == "running" || "${health_state}" == "disabled" ]]; then
         [[ "${health_version}" == "${CURRENT_VERSION}" ]] \
             || die "A gateway is healthy but reports ${health_version:-missing}, not source ${CURRENT_VERSION}; refusing before stopping services."
         [[ "${pid_state}" == "live" ]] \
@@ -5199,7 +5199,8 @@ bridge_source_health_check() {
         health_fields="$(bridge_source_health_observation)" || return 1
         state="${health_fields%%$'\t'*}"
         version="${health_fields#*$'\t'}"
-        if [[ "${state}" == "running" && "${version}" == "${CURRENT_VERSION}" ]]; then
+        if [[ ( "${state}" == "running" || "${state}" == "disabled" ) \
+              && "${version}" == "${CURRENT_VERSION}" ]]; then
             return 0
         fi
         sleep 1
@@ -5215,7 +5216,7 @@ bridge_phase1_gateway_quiesced() {
     [[ "${pid_state}" != "live" ]] || return 1
     health_fields="$(bridge_source_health_observation)" || return 1
     health_state="${health_fields%%$'\t'*}"
-    [[ "${health_state}" != "running" ]]
+    [[ "${health_state}" != "running" && "${health_state}" != "disabled" ]]
 }
 
 bridge_phase1_gateway_activation_owned() {
@@ -5460,7 +5461,8 @@ PY
         [[ "${pid_state}" != "live" ]] || rollback_failed=1
         health_fields="$(bridge_source_health_observation)" || rollback_failed=1
         health_state="${health_fields%%$'\t'*}"
-        [[ "${health_state}" != "running" ]] || rollback_failed=1
+        [[ "${health_state}" != "running" && "${health_state}" != "disabled" ]] \
+            || rollback_failed=1
     fi
     if [[ "${rollback_failed}" -eq 0 ]] && command -v openclaw >/dev/null 2>&1; then
         OPENCLAW_HOME="${OPENCLAW_HOME}" openclaw gateway restart 9>&- >/dev/null 2>&1 \
@@ -6088,12 +6090,18 @@ print(f"{state}\t{version}")
         LAST_STATE="${GW_STATE}"
     fi
 
-    if [[ "${GW_STATE}" == "running" && "${GW_VERSION}" != "${RELEASE_VERSION}" ]]; then
+    if [[ ( "${GW_STATE}" == "running" || "${GW_STATE}" == "disabled" ) \
+          && "${GW_VERSION}" != "${RELEASE_VERSION}" ]]; then
         info "    gateway version: ${GW_VERSION} (expected ${RELEASE_VERSION})"
     fi
 
-    if [[ "${GW_STATE}" == "running" && "${GW_VERSION}" == "${RELEASE_VERSION}" ]]; then
-        ok "Gateway is healthy"
+    if [[ ( "${GW_STATE}" == "running" || "${GW_STATE}" == "disabled" ) \
+          && "${GW_VERSION}" == "${RELEASE_VERSION}" ]]; then
+        if [[ "${GW_STATE}" == "disabled" ]]; then
+            ok "Gateway API is healthy; fleet uplink is disabled by configuration"
+        else
+            ok "Gateway is healthy"
+        fi
         HEALTH_OK=1
         break
     fi

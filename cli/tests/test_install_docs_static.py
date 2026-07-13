@@ -1890,6 +1890,11 @@ def test_windows_install_protected_materialization_binds_exact_signed_outer_byte
     assert "$script:WheelInnerSha256 = Copy-AuthenticatedPrivateArtifact" in installer
     assert "$script:GatewayArchiveInnerSha256 = Copy-AuthenticatedPrivateArtifact" in installer
     assert "Assert-ExactPrivateArtifactDigest -Path $gatewayZip" in installer
+    assert "$expandedGateway=Join-Path $extract \"defenseclaw.exe\"" in installer
+    assert "$expandedGatewaySha256=(Get-FileHash -LiteralPath $expandedGateway" in installer
+    assert "$script:GatewayBinary=Join-Path $script:PolicyDir \"defenseclaw.exe\"" in installer
+    assert "$script:GatewayBinarySha256=Copy-AuthenticatedPrivateArtifact -Source $expandedGateway" in installer
+    assert "Set-PrivateFileAcl -Path $script:GatewayBinary" not in installer
     assert "Assert-ExactPrivateArtifactDigest -Path $script:GatewayBinary" in installer
     assert "Assert-ExactPrivateArtifactDigest -Path $whlPath" in installer
     main = installer[installer.index("function Main {") :]

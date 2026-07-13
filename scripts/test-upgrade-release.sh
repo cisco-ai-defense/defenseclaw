@@ -154,14 +154,14 @@ gateway = payload.get("gateway") if isinstance(payload, dict) else None
 provenance = payload.get("provenance") if isinstance(payload, dict) else None
 if (
     not isinstance(gateway, dict)
-    or gateway.get("state") != "running"
+    or gateway.get("state") not in {"running", "disabled"}
     or not isinstance(provenance, dict)
     or provenance.get("binary_version") != sys.argv[2]
 ):
     raise SystemExit(1)
 PY
         then
-            ok "Published source gateway ${FROM_VERSION} is running before resolver handoff"
+            ok "Published source gateway ${FROM_VERSION} is version-bound healthy before resolver handoff"
             return 0
         fi
         sleep 0.25
@@ -1109,6 +1109,12 @@ seed_pre_v8_otel_fixture() {
     mkdir -p "${SMOKE_HOME}/.defenseclaw"
     cat >"${SMOKE_HOME}/.defenseclaw/config.yaml" <<YAML
 config_version: ${FROM_CONFIG_VERSION}
+guardrail:
+  enabled: false
+gateway:
+  fleet_mode: disabled
+  watcher:
+    enabled: false
 otel:
   enabled: true
   protocol: grpc
