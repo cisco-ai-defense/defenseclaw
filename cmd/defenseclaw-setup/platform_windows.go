@@ -17,10 +17,19 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+func publishStableHookRuntime(source, dataRoot, transactionID string) error {
+	return hookruntime.Publish(source, dataRoot, transactionID)
+}
+
+func disableStableHookRuntime(transactionID string) error {
+	return hookruntime.Disable(transactionID)
+}
 
 type pidState struct {
 	PID           int    `json:"pid"`

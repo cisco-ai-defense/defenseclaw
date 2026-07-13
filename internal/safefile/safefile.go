@@ -251,6 +251,23 @@ func ProtectFile(path string) error {
 	return protectFile(path, f)
 }
 
+// ValidatePrivateDirectory verifies that path is an existing, non-link
+// directory protected for the current user and the platform's trusted system
+// principal. Unlike ProtectDirectory it never changes the path. It is intended
+// for security-sensitive readers that must fail closed when private state has
+// been replaced or its permissions have drifted.
+func ValidatePrivateDirectory(path string) error {
+	return validatePrivateProtection(path, true)
+}
+
+// ValidatePrivateFile verifies that path is an existing, non-link regular file
+// protected for the current user and the platform's trusted system principal.
+// It performs no repair so a reader cannot silently bless attacker-controlled
+// state before consuming it.
+func ValidatePrivateFile(path string) error {
+	return validatePrivateProtection(path, false)
+}
+
 func validateRegularFilePath(path string) (os.FileInfo, error) {
 	dir := filepath.Dir(path)
 	if dir == "" {

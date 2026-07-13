@@ -87,15 +87,10 @@ const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 const windowsHookBinaryName = "defenseclaw-hook.exe"
 const nativeWindowsInstallStateMaxBytes = 128 * 1024
 
-// windowsSafePATHCommandPrefix disables cmd.exe's implicit current-directory
-// executable lookup before resolving a command through PATH. Codex runs hook
-// commands as a single `cmd.exe /C <command>` argument on Windows. A command
-// whose first token is a quoted absolute path is re-escaped by CreateProcess
-// and reaches cmd.exe as a literal `\"C:\\...\"`, so the hook never starts.
-//
-// Using the installer-provided PATH entry avoids that quoting failure. Setting
-// NoDefaultCurrentDirectoryInExePath prevents an untrusted repository from
-// shadowing defenseclaw-hook.exe in the session working directory.
+// windowsSafePATHCommandPrefix is retained only to recognize and remove hook
+// registrations written by older installers. Current native setup writes a
+// stable absolute LocalAppData launcher through an encoded system PowerShell
+// command and does not depend on a stale process PATH.
 const windowsSafePATHCommandPrefix = "set NoDefaultCurrentDirectoryInExePath=1&& "
 
 // defenseclawHookBinaryOverride is a test seam for exercising generated
@@ -129,14 +124,12 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if goos != "windows" {
 		return unixCommand
 	}
-	// Codex passes the full command as one argument to cmd.exe /C. A leading
-	// quoted executable path is escaped by Windows process argument encoding and
-	// becomes part of argv[0], so cmd.exe returns exit code 1 without launching
-	// the hook. Resolve the stable installer-provided binary name through
-	// PATH, with current-directory lookup disabled to prevent repository
-	// shadowing.
+	// Codex's generic command field can still be selected by older builds that
+	// do not understand command_windows. Use the same stable absolute launcher
+	// and shell-independent encoded system PowerShell boundary as the current
+	// command_windows field; never fall back to a session's stale PATH.
 	if connector == "codex" {
-		return windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + connector
+		return windowsNativePowerShellHookCommand(connector)
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
 	// characters through to direct exec. Put only tokenizer-safe arguments in
@@ -204,7 +197,19 @@ func packagedWindowsHookBinary(executable string) string {
 	if strings.TrimSpace(expectedRoot) == "" {
 		return ""
 	}
-	return packagedWindowsHookBinaryAtRoot(executable, expectedRoot)
+	physicalHook := packagedWindowsHookBinaryAtRoot(executable, expectedRoot)
+	if physicalHook == "" {
+		physicalHook = packagedWindowsHookBinaryAtUninstallRoot(executable, expectedRoot)
+	}
+	if physicalHook == "" {
+		return ""
+	}
+	// Native setup publishes this exact signed launcher outside InstallRoot
+	// before connector configuration. Returning the Known-Folder-derived path
+	// keeps Codex/Claude commands stable across install-tree replacement and
+	// uninstall; it also prevents a project or stale process PATH from selecting
+	// a different executable.
+	return canonicalNativeWindowsHookBinary()
 }
 
 // packagedWindowsHookBinaryAtRoot verifies a packaged gateway and returns its
@@ -213,23 +218,54 @@ func packagedWindowsHookBinary(executable string) string {
 // it as an argument here keeps arbitrary fixture roots available to tests
 // without weakening the production trust boundary.
 func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
+	return packagedWindowsHookBinaryAtLayout(executable, expectedRoot, expectedRoot)
+}
+
+// packagedWindowsHookBinaryAtUninstallRoot recognizes the exact random trash
+// tree created by native setup after its durable uninstall commit. Connector
+// teardown runs the gateway from that tree because InstallRoot has already
+// been atomically removed. The embedded install state continues to bind every
+// logical path to expectedRoot, and only a strict `.uninstall.<128-bit hex>`
+// sibling is accepted. This lets teardown recognize the stable hook command
+// without trusting an environment variable or arbitrary relocated checkout.
+func packagedWindowsHookBinaryAtUninstallRoot(executable, expectedRoot string) string {
 	executable, err := filepath.Abs(executable)
 	if err != nil {
 		return ""
 	}
 	commandDir := filepath.Dir(executable)
-	installRoot := filepath.Dir(commandDir)
-	if strings.TrimSpace(expectedRoot) == "" || !sameWindowsInstallPath(installRoot, expectedRoot) {
+	physicalRoot := filepath.Dir(commandDir)
+	expectedRoot, err = filepath.Abs(expectedRoot)
+	if err != nil || strings.TrimSpace(expectedRoot) == "" ||
+		!sameWindowsInstallPath(filepath.Dir(physicalRoot), filepath.Dir(expectedRoot)) {
 		return ""
 	}
-	expectedGateway := filepath.Join(installRoot, "bin", windowsGatewayBinaryName)
-	hookBinary := filepath.Join(installRoot, "bin", windowsHookBinaryName)
+	prefix := filepath.Base(expectedRoot) + ".uninstall."
+	physicalBase := filepath.Base(physicalRoot)
+	if !strings.HasPrefix(physicalBase, prefix) || !validNativeWindowsTransactionID(strings.TrimPrefix(physicalBase, prefix)) {
+		return ""
+	}
+	return packagedWindowsHookBinaryAtLayout(executable, physicalRoot, expectedRoot)
+}
+
+func packagedWindowsHookBinaryAtLayout(executable, physicalRoot, declaredRoot string) string {
+	executable, err := filepath.Abs(executable)
+	if err != nil {
+		return ""
+	}
+	physicalRoot, err = filepath.Abs(physicalRoot)
+	if err != nil || strings.TrimSpace(declaredRoot) == "" {
+		return ""
+	}
+	commandDir := filepath.Join(physicalRoot, "bin")
+	expectedGateway := filepath.Join(commandDir, windowsGatewayBinaryName)
+	hookBinary := filepath.Join(commandDir, windowsHookBinaryName)
 	if !sameWindowsInstallPath(executable, expectedGateway) ||
 		!stableNativeWindowsPE(executable) || !stableNativeWindowsPE(hookBinary) {
 		return ""
 	}
 
-	statePath := filepath.Join(installRoot, "installer", "install-state.json")
+	statePath := filepath.Join(physicalRoot, "installer", "install-state.json")
 	body, ok := readStableNativeWindowsFile(statePath, nativeWindowsInstallStateMaxBytes)
 	if !ok {
 		return ""
@@ -242,9 +278,9 @@ func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
 		return ""
 	}
 	expectedPaths := [][2]string{
-		{state.InstallRoot, installRoot},
-		{state.CommandDir, commandDir},
-		{state.Runtime, filepath.Join(installRoot, "runtime", "python")},
+		{state.InstallRoot, declaredRoot},
+		{state.CommandDir, filepath.Join(declaredRoot, "bin")},
+		{state.Runtime, filepath.Join(declaredRoot, "runtime", "python")},
 	}
 	for _, pair := range expectedPaths {
 		if strings.TrimSpace(pair[0]) == "" || !sameWindowsInstallPath(pair[0], pair[1]) {
@@ -252,6 +288,18 @@ func packagedWindowsHookBinaryAtRoot(executable, expectedRoot string) string {
 		}
 	}
 	return hookBinary
+}
+
+func validNativeWindowsTransactionID(value string) bool {
+	if len(value) != 32 || value != strings.ToLower(value) {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func sameWindowsInstallPath(left, right string) bool {
@@ -345,10 +393,14 @@ func powershellQuoteLiteral(value string) string {
 }
 
 func windowsAntigravityHookCommand() string {
-	return windowsNativeHookCommand("antigravity")
+	return windowsNativePowerShellHookCommand("antigravity")
 }
 
 func windowsNativeHookCommand(connector string) string {
+	return windowsNativePowerShellHookCommand(connector)
+}
+
+func windowsNativePowerShellHookCommand(connector string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -384,6 +436,15 @@ func powershellEncodedCommand(script string) string {
 // native (non-file) command does not carry.
 func isNativeHookCommand(cmd string) bool {
 	cmd = strings.TrimSpace(cmd)
+	// Current Codex and Antigravity registrations use a system PowerShell
+	// EncodedCommand so an absolute path containing spaces reaches CreateProcess
+	// without shell interpolation. Compare against the exact commands we emit;
+	// accepting arbitrary encoded scripts would let teardown claim foreign hooks.
+	for _, connectorName := range []string{"codex", "antigravity"} {
+		if cmd == windowsNativePowerShellHookCommand(connectorName) {
+			return true
+		}
+	}
 	// Codex's Windows command uses PATH with current-directory lookup disabled;
 	// strip only that exact hardening prefix before applying the existing strict
 	// executable and connector signature checks.

@@ -10,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -26,6 +28,48 @@ const (
 
 // hookExecutableOverride is a test seam for an immutable packaged layout.
 var hookExecutableOverride string
+
+var nativeHookRuntimeSnapshot struct {
+	sync.Mutex
+	prepared   bool
+	executable string
+	state      hookruntime.State
+	recognized bool
+	err        error
+}
+
+func nativeHookExecutable() string {
+	if hookExecutableOverride != "" {
+		return hookExecutableOverride
+	}
+	executable, _ := os.Executable()
+	return executable
+}
+
+// NativeHookRuntimeNoop reports whether this process is the canonical stable
+// Windows launcher while its installer-owned state is disabled or unsafe. The
+// launcher must exit before Cobra or hook fail-mode environment is evaluated,
+// so a long-running agent can never turn an uninstalled cached command into a
+// strict-availability block.
+func NativeHookRuntimeNoop() bool {
+	executable := nativeHookExecutable()
+	state, recognized, err := hookruntime.ReadTrustedForExecutable(executable)
+	nativeHookRuntimeSnapshot.Lock()
+	nativeHookRuntimeSnapshot.prepared = true
+	nativeHookRuntimeSnapshot.executable = executable
+	nativeHookRuntimeSnapshot.state = state
+	nativeHookRuntimeSnapshot.recognized = recognized
+	nativeHookRuntimeSnapshot.err = err
+	nativeHookRuntimeSnapshot.Unlock()
+	if !recognized {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	return !state.Active() || !filepath.IsAbs(state.DataRoot) ||
+		!windowsHookPathHasNoReparsePoints(state.DataRoot)
+}
 
 type nativeHookInstallState struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -41,13 +85,38 @@ type nativeHookInstallState struct {
 // source builds and legacy layouts so their existing developer behavior is
 // preserved.
 func trustedNativeHookHome() (string, bool) {
-	executable := hookExecutableOverride
-	if executable == "" {
-		var err error
-		executable, err = os.Executable()
-		if err != nil {
-			return "", false
+	executable := nativeHookExecutable()
+	if strings.TrimSpace(executable) == "" {
+		return "", false
+	}
+	nativeHookRuntimeSnapshot.Lock()
+	prepared := nativeHookRuntimeSnapshot.prepared && sameWindowsHookPath(nativeHookRuntimeSnapshot.executable, executable)
+	preparedState := nativeHookRuntimeSnapshot.state
+	preparedRecognized := nativeHookRuntimeSnapshot.recognized
+	preparedErr := nativeHookRuntimeSnapshot.err
+	nativeHookRuntimeSnapshot.Unlock()
+	if prepared && preparedRecognized {
+		if preparedErr == nil && preparedState.Active() && filepath.IsAbs(preparedState.DataRoot) &&
+			windowsHookPathHasNoReparsePoints(preparedState.DataRoot) {
+			return filepath.Clean(preparedState.DataRoot), true
 		}
+		// main exits before Cobra for every recognized non-active/unsafe state.
+		// Returning a trusted empty value here keeps direct callers fail-closed
+		// without performing a second state read across the uninstall boundary.
+		return "", true
+	}
+	if state, recognized, stateErr := hookruntime.ReadTrustedForExecutable(executable); recognized {
+		if stateErr == nil && state.Active() && filepath.IsAbs(state.DataRoot) &&
+			windowsHookPathHasNoReparsePoints(state.DataRoot) {
+			return filepath.Clean(state.DataRoot), true
+		}
+		// The canonical stable launcher never falls back to project environment,
+		// even while publishing or after uninstall. main exits it as a no-op; the
+		// fallback only keeps direct unit callers deterministic.
+		if profile, err := windows.KnownFolderPath(windows.FOLDERID_Profile, windows.KF_FLAG_DEFAULT); err == nil {
+			return filepath.Join(profile, config.DefaultDataDirName), true
+		}
+		return "", true
 	}
 	base := filepath.Base(executable)
 	if !strings.EqualFold(base, nativeHookLauncherName) && !strings.EqualFold(base, nativeHookGatewayName) {

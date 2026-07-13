@@ -1021,6 +1021,13 @@ func startMissingServices(gatewayPath, dataRoot string, wanted serviceState) (se
 
 func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	if transaction.Action == "uninstall" {
+		// Agent clients cache hook commands for the lifetime of their process.
+		// Disable the stable launcher before touching connector configuration or
+		// user data; the launcher itself deliberately survives every uninstall
+		// mode and returns success for those cached invocations.
+		if err := disableStableHookRuntime(transaction.ID); err != nil {
+			return fmt.Errorf("disable stable hook runtime: %w", err)
+		}
 		publishedGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 		gatewayPath := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
 		if pathExists(transaction.TrashPath) {
@@ -1102,6 +1109,17 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		); err != nil {
 			return err
 		}
+	}
+	// Publish the signed no-console launcher outside both InstallRoot and
+	// DataRoot before connector configuration writes absolute commands. The
+	// publishing/active handshake makes this step idempotent under committed
+	// transaction recovery and re-enables a data-preserving reinstall.
+	if err := publishStableHookRuntime(
+		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-hook.exe"),
+		transaction.DataRoot,
+		transaction.ID,
+	); err != nil {
+		return fmt.Errorf("publish stable hook runtime: %w", err)
 	}
 	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 	if err := teardownSupersededConnectors(

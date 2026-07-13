@@ -33,6 +33,13 @@ var (
 )
 
 func main() {
+	// The stable Windows launcher survives uninstall because agent clients may
+	// cache its absolute command for the lifetime of their process. Disabled,
+	// publishing, missing, or unsafe installer state is an intentional no-op;
+	// check it before parsing project-inherited environment or fail-mode flags.
+	if cli.NativeHookRuntimeNoop() {
+		os.Exit(0)
+	}
 	if !isHookEntrypoint(os.Args[1:]) {
 		fmt.Fprintln(os.Stderr, "defenseclaw-hook: expected hook or notify subcommand")
 		os.Exit(2)

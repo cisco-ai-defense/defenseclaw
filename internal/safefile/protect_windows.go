@@ -38,6 +38,35 @@ func protectDirectory(path string) error {
 	return setPrivateDACL(path, true)
 }
 
+func validatePrivateProtection(path string, wantDirectory bool) error {
+	if err := rejectReparseChain(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (wantDirectory && !info.IsDir()) ||
+		(!wantDirectory && !info.Mode().IsRegular()) {
+		return fmt.Errorf("safefile: private path has an unexpected type: %s", path)
+	}
+	owned, err := windowsPathOwnedByCurrentUser(path)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("safefile: private path is not owned by the current user: %s", path)
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("safefile: private path has an unsafe DACL: %s", path)
+	}
+	return nil
+}
+
 func withLockedDirectory(path string, write func() error) error {
 	ptr, err := winpath.UTF16Ptr(path)
 	if err != nil {
