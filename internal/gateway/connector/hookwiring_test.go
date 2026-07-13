@@ -486,7 +486,7 @@ func main() {
 	if len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != "claudecode" {
 		os.Exit(9)
 	}
-	if err := os.WriteFile(os.Getenv("DEFENSECLAW_HOOK_PROBE"), []byte(strings.Join(os.Args[1:], "|")), 0600); err != nil {
+	if err := os.WriteFile(os.Getenv("DC_TEST_HOOK_PROBE"), []byte(strings.Join(os.Args[1:], "|")), 0600); err != nil {
 		os.Exit(10)
 	}
 }
@@ -501,7 +501,7 @@ func main() {
 	command := hookInvocationCommandFor("windows", "claudecode", "")
 
 	ps := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command)
-	ps.Env = append(os.Environ(), "DEFENSECLAW_HOOK_PROBE="+probeOutput)
+	ps.Env = append(os.Environ(), "DC_TEST_HOOK_PROBE="+probeOutput)
 	if out, err := ps.CombinedOutput(); err != nil {
 		t.Fatalf("Claude Code-style PowerShell launch failed: %v\ncommand: %s\noutput: %s", err, command, out)
 	}
