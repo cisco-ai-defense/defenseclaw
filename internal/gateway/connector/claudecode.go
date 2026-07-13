@@ -753,6 +753,14 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 // restoreClaudeCodeHooks restores the original hooks from the backup file.
 // Uses file locking to match patchClaudeCodeHooks and prevent corruption.
 func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
+	settingsPath := claudeCodeSettingsPath()
+	if _, err := os.Stat(filepath.Dir(settingsPath)); err != nil {
+		if os.IsNotExist(err) {
+			return c.discardRestoreMetadata(opts)
+		}
+		return fmt.Errorf("stat Claude Code settings directory: %w", err)
+	}
+
 	backup, err := c.loadBackup(opts.DataDir)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -761,22 +769,17 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 		backup = claudeCodeBackup{}
 	}
 
-	settingsPath := claudeCodeSettingsPath()
-
 	return withFileLock(settingsPath, func() error {
 		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
 			return fmt.Errorf("managed settings restore: %w", err)
 		} else if restored {
-			os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
-			return nil
+			return c.discardRestoreMetadata(opts)
 		}
 
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
-				discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
-				return nil
+				return c.discardRestoreMetadata(opts)
 			}
 			return fmt.Errorf("read claude settings for restore: %w", err)
 		}
@@ -842,10 +845,20 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			return fmt.Errorf("write restored settings: %w", err)
 		}
 
-		os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
-		discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
-		return nil
+		return c.discardRestoreMetadata(opts)
 	})
+}
+
+func (c *ClaudeCodeConnector) discardRestoreMetadata(opts SetupOpts) error {
+	for _, path := range []string{
+		filepath.Join(opts.DataDir, "claudecode_backup.json"),
+		managedFileBackupPath(opts.DataDir, c.Name(), "settings.json"),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove Claude Code restore metadata %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // hookMarker is the version-agnostic prefix written on line 2 of every

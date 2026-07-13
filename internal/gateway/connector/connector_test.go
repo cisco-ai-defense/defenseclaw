@@ -5282,6 +5282,77 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 	}
 }
 
+func TestClaudeCode_Teardown_MissingSettingsParentDoesNotRecreateIt(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"env":{"PATH":"/usr/bin"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	legacyBackup := filepath.Join(dir, "claudecode_backup.json")
+	managedBackup := managedFileBackupPath(dir, c.Name(), "settings.json")
+	for _, path := range []string{legacyBackup, managedBackup} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected Claude restore metadata %s: %v", path, err)
+		}
+	}
+	unrelated := filepath.Join(dir, "operator-data.txt")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	otherBackup := managedFileBackupPath(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(otherBackup), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherBackup, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.RemoveAll(settingsDir); err != nil {
+		t.Fatalf("remove settings parent: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := c.Teardown(context.Background(), opts); err != nil {
+			t.Fatalf("Teardown attempt %d: %v", attempt, err)
+		}
+		if _, err := os.Lstat(settingsDir); !os.IsNotExist(err) {
+			t.Fatalf("Teardown attempt %d recreated settings directory: %v", attempt, err)
+		}
+		if _, err := os.Lstat(settingsPath + ".lock"); !os.IsNotExist(err) {
+			t.Fatalf("Teardown attempt %d left settings lock: %v", attempt, err)
+		}
+	}
+	for _, path := range []string{legacyBackup, managedBackup} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("Claude restore metadata survived teardown at %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{unrelated, otherBackup} {
+		if data, err := os.ReadFile(path); err != nil || string(data) != "keep" {
+			t.Fatalf("unrelated state changed at %s: data=%q err=%v", path, data, err)
+		}
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+}
+
 // TestClaudeCode_Setup_PreservesNonOtelEnvKeys guards the partial-
 // merge contract: when the operator has set non-OTel keys in
 // settings.json's env block (e.g. PATH, NODE_OPTIONS), Setup must
