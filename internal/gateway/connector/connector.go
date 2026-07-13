@@ -71,7 +71,11 @@ type SetupOpts struct {
 	// receive this connector-scoped token instead.
 	HookAPIToken       string
 	HookAPITokenScoped bool
-	Interactive        bool
+	// OTLPPathToken is a connector-scoped credential embedded only in the
+	// loopback /otlp/<connector>/<token>/v1/<signal> namespace. It must never
+	// be reused as a general API or hook bearer.
+	OTLPPathToken string
+	Interactive   bool
 	// ManagedEnterprise marks hook scripts installed by the privileged
 	// enterprise guardian. Managed scripts ignore user-controlled home and
 	// disable-sentinel overrides and derive their data directory from the

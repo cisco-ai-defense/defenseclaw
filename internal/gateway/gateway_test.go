@@ -6396,6 +6396,34 @@ func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 	}
 }
 
+func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex:  "codex-scoped-token",
+		connector.OTLPScopeClaude: "claude-scoped-token",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/claudecode/codex-scoped-token/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized || *called {
+		t.Fatalf("Codex token crossed into Claude namespace: status=%d called=%v", rr.Code, *called)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/codex/codex-scoped-token/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !*called {
+		t.Fatalf("Codex token rejected from its own namespace: status=%d called=%v", rr.Code, *called)
+	}
+}
+
 // TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
 // H-2 follow-up: the path-token branch of apiCSRFProtect skips the
 // X-DefenseClaw-Client header (OTLP exporters can't set arbitrary

@@ -186,6 +186,33 @@ func (s NativeOTLPSpec) signalEndpoint(signal NativeOTLPSignal) string {
 	return strings.TrimRight(strings.TrimSpace(s.Endpoint), "/") + path
 }
 
+func isScopedOTLPEndpoint(endpoint, apiAddr string, scope OTLPPathTokenScope, signal NativeOTLPSignal) bool {
+	wantBase, err := url.Parse("http://" + apiAddr)
+	if err != nil {
+		return false
+	}
+	got, err := url.Parse(endpoint)
+	if err != nil || got.Scheme != wantBase.Scheme || !strings.EqualFold(got.Host, wantBase.Host) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(got.Path, "/"), "/")
+	return len(parts) == 5 && parts[0] == "otlp" && parts[1] == string(scope) &&
+		parts[2] != "" && parts[3] == "v1" && parts[4] == string(signal)
+}
+
+func isScopedOTLPBaseEndpoint(endpoint, apiAddr string, scope OTLPPathTokenScope) bool {
+	wantBase, err := url.Parse("http://" + apiAddr)
+	if err != nil {
+		return false
+	}
+	got, err := url.Parse(endpoint)
+	if err != nil || got.Scheme != wantBase.Scheme || !strings.EqualFold(got.Host, wantBase.Host) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(got.Path, "/"), "/")
+	return len(parts) == 3 && parts[0] == "otlp" && parts[1] == string(scope) && parts[2] != ""
+}
+
 // pathTokenBaseEndpoint returns the path-token endpoint WITHOUT a
 // signal suffix. Vendor exporters that auto-append /v1/<signal> to
 // their configured base (Gemini CLI's settings.json otlpEndpoint
@@ -225,6 +252,9 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 	out := map[string]string{}
 
 	endpoint := strings.TrimRight(strings.TrimSpace(s.Endpoint), "/")
+	if strings.TrimSpace(s.PathToken) != "" {
+		endpoint = s.pathTokenBaseEndpoint()
+	}
 	if endpoint != "" {
 		out["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
 	}

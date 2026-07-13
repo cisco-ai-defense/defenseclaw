@@ -35,6 +35,8 @@ func TestIsValidOTLPScope_NegativeCases(t *testing.T) {
 	}{
 		{"empty", "", false},
 		{"validGemini", OTLPScopeGeminiCLI, true},
+		{"validCodex", OTLPScopeCodex, true},
+		{"validClaude", OTLPScopeClaude, true},
 		{"upper", "GEMINICLI", false},
 		{"trailingSpace", "geminicli ", false},
 		{"leadingSpace", " geminicli", false},

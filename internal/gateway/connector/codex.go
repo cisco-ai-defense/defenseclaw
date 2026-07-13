@@ -115,6 +115,12 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// removed — Codex talks directly to its native upstream and
 	// DefenseClaw only observes via hooks + OTel.
 
+	otlpToken, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+	if err != nil {
+		return fmt.Errorf("codex scoped OTLP token: %w", err)
+	}
+	opts.OTLPPathToken = otlpToken
+
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
 	// connector method; generic inspect-* scripts come from the
@@ -411,10 +417,9 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 //     table; and
 //   - operator-visible doctor reports.
 //
-// Endpoint is the gateway's loopback OTLP-HTTP receiver. Headers
-// carry the gateway token + CSRF client identifier; the spec
-// renderer canonicalizes header keys to lower-case so the resulting
-// TOML matches the wire format codex's deserializer expects.
+// Endpoint is the gateway's connector-scoped loopback OTLP receiver. The
+// credential lives only in /otlp/codex/<token>/... and cannot authenticate
+// general API or Claude traffic. Headers retain source attribution only.
 //
 // ServiceName / ResourceAttributes are intentionally omitted —
 // codex's documented [otel] schema doesn't accept those keys, and
@@ -427,12 +432,13 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 // log_user_prompt = true so prompts flow through native telemetry
 // alongside the hook channel.
 func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
+	otlpToken := strings.TrimSpace(opts.OTLPPathToken)
+	if otlpToken == "" && opts.DataDir != "" {
+		otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+	}
 	headers := map[string]string{
 		"x-defenseclaw-source": "codex",
 		"x-defenseclaw-client": "codex-otel/1.0",
-	}
-	if opts.APIToken != "" {
-		headers["x-defenseclaw-token"] = opts.APIToken
 	}
 	// Intentionally NOT setting ServiceName / ResourceAttributes
 	// on codex's NativeOTLPSpec — see F1 rationale below.
@@ -471,6 +477,8 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 			Endpoint:       "http://" + opts.APIAddr,
 			Protocol:       "json",
 			Headers:        headers,
+			PathToken:      otlpToken,
+			PathScope:      OTLPScopeCodex,
 			LogUserPrompts: redaction.DisableAll(),
 		},
 		// Profile-driven callbacks are the canonical shape for
@@ -1383,10 +1391,10 @@ func codexOtelBlockLooksManaged(v interface{}, opts SetupOpts) bool {
 	if !ok {
 		return false
 	}
-	return codexExporterLooksManaged(m["exporter"], "http://"+opts.APIAddr+"/v1/logs")
+	return codexExporterLooksManaged(m["exporter"], opts.APIAddr)
 }
 
-func codexExporterLooksManaged(v interface{}, endpoint string) bool {
+func codexExporterLooksManaged(v interface{}, apiAddr string) bool {
 	exporter, ok := v.(map[string]interface{})
 	if !ok {
 		return false
@@ -1395,7 +1403,9 @@ func codexExporterLooksManaged(v interface{}, endpoint string) bool {
 	if !ok {
 		return false
 	}
-	if got, _ := otlpHTTP["endpoint"].(string); got != endpoint {
+	got, _ := otlpHTTP["endpoint"].(string)
+	direct := "http://" + apiAddr + "/v1/logs"
+	if got != direct && !isScopedOTLPEndpoint(got, apiAddr, OTLPScopeCodex, NativeOTLPSignalLogs) {
 		return false
 	}
 	headers, _ := otlpHTTP["headers"].(map[string]interface{})

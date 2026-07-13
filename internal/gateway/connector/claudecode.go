@@ -65,6 +65,12 @@ func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy {
 }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	otlpToken, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeClaude)
+	if err != nil {
+		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
+	}
+	opts.OTLPPathToken = otlpToken
+
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: hand the connector itself so HookScriptOwner is the
 	// single source of truth for which vendor templates land here.
@@ -287,8 +293,9 @@ func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 
 // HookProfile implements HookProfileProvider. The returned
 // NativeOTLPSpec is the declarative form of buildClaudeCodeOtelEnv:
-// an env-block targeting the gateway's loopback OTLP-HTTP receiver,
-// with per-signal exporter env vars + CSRF / token / source headers.
+// an env-block targeting the gateway's connector-scoped loopback OTLP-HTTP
+// receiver, with source headers and a path token that has no general API
+// authority.
 // buildClaudeCodeOtelEnv renders this spec via spec.EnvBlock()
 // instead of computing the map by hand.
 //
@@ -298,12 +305,13 @@ func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 // script for fail-closed handling), and OTEL_LOG_USER_PROMPTS when
 // redaction is disabled.
 func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
+	otlpToken := strings.TrimSpace(opts.OTLPPathToken)
+	if otlpToken == "" && opts.DataDir != "" {
+		otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude)
+	}
 	headers := map[string]string{
 		"x-defenseclaw-source": "claudecode",
 		"x-defenseclaw-client": "claudecode-otel/1.0",
-	}
-	if opts.APIToken != "" {
-		headers["x-defenseclaw-token"] = opts.APIToken
 	}
 	failMode := "open"
 	if strings.TrimSpace(opts.HookFailMode) != "" {
@@ -334,6 +342,8 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			Endpoint:           "http://" + opts.APIAddr,
 			Protocol:           "http/json",
 			Headers:            headers,
+			PathToken:          otlpToken,
+			PathScope:          OTLPScopeClaude,
 			PerSignal:          false,
 			ServiceName:        "claudecode",
 			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},
@@ -621,10 +631,9 @@ var claudeCodeOtelEnvKeys = []string{
 }
 
 // buildClaudeCodeOtelEnv returns the OTel env vars Claude Code's
-// settings.json should inject into the CLI process env. Endpoint is
-// the gateway's OTLP-HTTP receiver; headers carry the gateway token
-// so the receiver can authenticate the Claude CLI process the same
-// way the hook script does. Service name + resource attributes mark
+// settings.json should inject into the CLI process env. Endpoint is a
+// connector-scoped gateway path; no master or hook bearer is exposed to the
+// Claude process. Service name + resource attributes mark
 // telemetry as originating from a Claude Code process so the gateway
 // can fan out to per-connector dashboards.
 //
@@ -736,7 +745,15 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 	case "DEFENSECLAW_FAIL_MODE":
 		return true
 	case "OTEL_EXPORTER_OTLP_ENDPOINT":
-		return managed != "" && got == managed
+		if managed != "" && got == managed {
+			return true
+		}
+		base := strings.TrimRight(managed, "/")
+		if index := strings.Index(base, "/otlp/"); index >= 0 {
+			base = base[:index]
+		}
+		return strings.HasPrefix(base, "http://") &&
+			isScopedOTLPBaseEndpoint(got, strings.TrimPrefix(base, "http://"), OTLPScopeClaude)
 	case "OTEL_EXPORTER_OTLP_HEADERS":
 		return strings.Contains(got, "x-defenseclaw-source=claudecode") ||
 			strings.Contains(got, "x-defenseclaw-client=claudecode-otel/1.0") ||

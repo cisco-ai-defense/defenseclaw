@@ -33,9 +33,31 @@ import (
 func fixedSetupOpts(t *testing.T) SetupOpts {
 	t.Helper()
 	return SetupOpts{
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-		DataDir:  t.TempDir(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "tok-test",
+		OTLPPathToken: strings.Repeat("a", 64),
+		DataDir:       t.TempDir(),
+	}
+}
+
+func TestScopedOTLPEndpointRecognitionIsExact(t *testing.T) {
+	token := strings.Repeat("a", 64)
+	base := "http://127.0.0.1:18970/otlp/claudecode/" + token
+	if !isScopedOTLPBaseEndpoint(base, "127.0.0.1:18970", OTLPScopeClaude) {
+		t.Fatal("valid connector-scoped base endpoint was rejected")
+	}
+	if !isScopedOTLPEndpoint(base+"/v1/logs", "127.0.0.1:18970", OTLPScopeClaude, NativeOTLPSignalLogs) {
+		t.Fatal("valid connector-scoped signal endpoint was rejected")
+	}
+	for _, endpoint := range []string{
+		base + "/extra",
+		base + "/v1/traces",
+		"http://127.0.0.1:18970/otlp/codex/" + token,
+		"http://localhost:18970/otlp/claudecode/" + token,
+	} {
+		if isScopedOTLPBaseEndpoint(endpoint, "127.0.0.1:18970", OTLPScopeClaude) {
+			t.Errorf("foreign or malformed base endpoint accepted: %q", endpoint)
+		}
 	}
 }
 
@@ -101,9 +123,12 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		if !strings.HasPrefix(ep, "http://"+opts.APIAddr) {
 			t.Errorf("%s.otlp-http.endpoint = %q; want http://%s prefix", signal, ep, opts.APIAddr)
 		}
+		if !strings.Contains(ep, "/otlp/codex/"+opts.OTLPPathToken+"/v1/") {
+			t.Errorf("%s.otlp-http.endpoint = %q; want scoped Codex path", signal, ep)
+		}
 		hdrs := toStringMap(otlp["headers"])
-		if hdrs["x-defenseclaw-token"] != opts.APIToken {
-			t.Errorf("%s.otlp-http.headers[x-defenseclaw-token] = %q; want %q", signal, hdrs["x-defenseclaw-token"], opts.APIToken)
+		if _, leaked := hdrs["x-defenseclaw-token"]; leaked {
+			t.Errorf("%s.otlp-http.headers leaked the general API token: %v", signal, hdrs)
 		}
 		if hdrs["x-defenseclaw-source"] != "codex" {
 			t.Errorf("%s.otlp-http.headers[x-defenseclaw-source] = %q; want \"codex\"", signal, hdrs["x-defenseclaw-source"])
@@ -157,12 +182,14 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want http://%s prefix",
 			env["OTEL_EXPORTER_OTLP_ENDPOINT"], opts.APIAddr)
 	}
+	if !strings.Contains(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "/otlp/claudecode/"+opts.OTLPPathToken) {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want scoped Claude path", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
 
 	headers := splitOTelHeader(env["OTEL_EXPORTER_OTLP_HEADERS"])
 	wantHeaders := map[string]bool{
 		"x-defenseclaw-source=claudecode":          true,
 		"x-defenseclaw-client=claudecode-otel/1.0": true,
-		"x-defenseclaw-token=" + opts.APIToken:     true,
 	}
 	for _, h := range headers {
 		delete(wantHeaders, h)
@@ -170,6 +197,9 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	if len(wantHeaders) != 0 {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing entries %v; got %v",
 			wantHeaders, env["OTEL_EXPORTER_OTLP_HEADERS"])
+	}
+	if strings.Contains(env["OTEL_EXPORTER_OTLP_HEADERS"], "x-defenseclaw-token=") {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS leaked the general API token: %s", env["OTEL_EXPORTER_OTLP_HEADERS"])
 	}
 
 	resAttrs := splitOTelHeader(env["OTEL_RESOURCE_ATTRIBUTES"])

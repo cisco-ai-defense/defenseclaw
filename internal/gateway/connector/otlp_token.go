@@ -50,12 +50,11 @@ import (
 type OTLPPathTokenScope string
 
 const (
-	// OTLPScopeGeminiCLI is the scope value for Gemini CLI's
-	// settings.json telemetry path-token. Any new hook-only
-	// connector that needs a path-token must add a new constant
-	// here so the allow-list in OTLPPathTokenScopes() rejects
-	// typos at compile time.
+	// Every hook-only connector that persists an OTLP credential in agent
+	// configuration gets a distinct namespace here.
 	OTLPScopeGeminiCLI OTLPPathTokenScope = "geminicli"
+	OTLPScopeCodex     OTLPPathTokenScope = "codex"
+	OTLPScopeClaude    OTLPPathTokenScope = "claudecode"
 )
 
 // OTLPPathTokenScopes returns the closed allow-list of scopes that
@@ -64,7 +63,7 @@ const (
 // guaranteeing that a new scope can never be added in one half of
 // the codebase without the other.
 func OTLPPathTokenScopes() []OTLPPathTokenScope {
-	return []OTLPPathTokenScope{OTLPScopeGeminiCLI}
+	return []OTLPPathTokenScope{OTLPScopeGeminiCLI, OTLPScopeCodex, OTLPScopeClaude}
 }
 
 // otlpScopeRE prevents a future caller from sneaking a path traversal
