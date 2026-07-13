@@ -465,7 +465,7 @@ func gatewayAutoStartConfigured(gatewayPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return value == gatewayAutoStartCommand(gatewayPath), nil
+	return value == gatewayAutoStartCommand(gatewayPath) || value == legacyGatewayAutoStartCommand(gatewayPath), nil
 }
 
 func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
@@ -488,8 +488,8 @@ func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoSta
 	if enabled {
 		want = gatewayAutoStartCommand(gatewayPath)
 	}
-	ownedValue := gatewayAutoStartCommand(gatewayPath)
-	if snapshot.Existed && previous != ownedValue {
+	owned := previous == gatewayAutoStartCommand(gatewayPath) || previous == legacyGatewayAutoStartCommand(gatewayPath)
+	if snapshot.Existed && !owned {
 		if enabled {
 			return snapshot, false, fmt.Errorf("refusing to replace unrelated %s startup registration", gatewayAutoStartValueName)
 		}

@@ -29,6 +29,10 @@ The installed product is intentionally mixed-runtime:
 - `bin\defenseclaw.exe` and the scanner launchers are small native Go launchers.
 - `bin\defenseclaw-gateway.exe` and `bin\defenseclaw-hook.exe` remain the
   existing native Go programs.
+- `bin\defenseclaw-startup.exe` is a console-free native logon helper. It
+  launches the adjacent gateway hidden and pins its data home to the current
+  Windows user's `.defenseclaw` directory instead of trusting inherited
+  process environment.
 - The existing Python CLI/TUI runs from an embedded, managed CPython runtime
   under `runtime\python`. The installer does not claim to turn the CLI/TUI into
   a native GUI application.
@@ -86,9 +90,10 @@ requested instead of silently degrading to an unusable provider.
 
 Local and pull-request builds are unsigned and are labeled as such in Installed
 Apps. Release builds require real Authenticode credentials. Before the payload
-manifest is hashed, the builder signs the native CLI launcher, gateway, and hook
-entry point; the installed scanner launchers are byte-identical copies of that
-signed CLI launcher. It then signs the outer setup executable. The build imports
+manifest is hashed, the builder signs the native CLI launcher, console-free
+startup helper, gateway, and hook entry point; the installed scanner launchers
+are byte-identical copies of that signed CLI launcher. It then signs the outer
+setup executable. The build imports
 the PFX temporarily into the current-user certificate store, invokes SignTool
 by certificate thumbprint, uses an allowlisted HTTPS timestamp endpoint,
 verifies the exact publisher `Cisco Systems, Inc.` on every signed executable,

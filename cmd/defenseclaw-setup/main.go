@@ -68,6 +68,11 @@ func runCapturedSetupCommand(timeout time.Duration, env []string, name string, a
 }
 
 func gatewayAutoStartCommand(gatewayPath string) string {
+	startupPath := filepath.Join(filepath.Dir(gatewayPath), "defenseclaw-startup.exe")
+	return `"` + startupPath + `"`
+}
+
+func legacyGatewayAutoStartCommand(gatewayPath string) string {
 	return `"` + gatewayPath + `" start`
 }
 
@@ -99,6 +104,7 @@ type payloadManifest struct {
 	UpgradeManifest    string            `json:"upgrade_manifest"`
 	SitePackages       string            `json:"site_packages"`
 	Launcher           string            `json:"launcher"`
+	StartupLauncher    string            `json:"startup_launcher"`
 	CosignVerifier     string            `json:"cosign_verifier"`
 	Unsigned           bool              `json:"unsigned"`
 	Toolchain          map[string]string `json:"toolchain"`
@@ -800,6 +806,12 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		return fmt.Errorf("install CLI launcher: %w", err)
 	}
 	if err := copyFile(
+		filepath.Join(payload.Root, payload.Manifest.StartupLauncher),
+		filepath.Join(staging, "bin", "defenseclaw-startup.exe"),
+	); err != nil {
+		return fmt.Errorf("install startup launcher: %w", err)
+	}
+	if err := copyFile(
 		filepath.Join(payload.Root, payload.Manifest.CosignVerifier),
 		filepath.Join(staging, "runtime", "tools", "cosign.exe"),
 	); err != nil {
@@ -1157,6 +1169,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		manifest.PythonEmbed,
 		manifest.SitePackages,
 		manifest.Launcher,
+		manifest.StartupLauncher,
 		manifest.CosignVerifier,
 		manifest.UpgradeManifest,
 	}

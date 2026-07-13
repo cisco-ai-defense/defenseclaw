@@ -438,6 +438,10 @@ $launcher = Join-Path $payload "defenseclaw-launcher.exe"
 Invoke-CheckedProcess "go" @(
     "build", "-ldflags", "-s -w", "-o", $launcher, "./cmd/defenseclaw-launcher"
 )
+$startupLauncher = Join-Path $payload "defenseclaw-startup.exe"
+Invoke-CheckedProcess "go" @(
+    "build", "-ldflags", "-s -w -H=windowsgui", "-o", $startupLauncher, "./cmd/defenseclaw-startup"
+)
 
 $gatewayPayloadDir = Join-Path $build 'gateway-payload'
 Remove-SafeTree $gatewayPayloadDir $build
@@ -445,7 +449,7 @@ Remove-SafeTree $gatewayPayloadDir $build
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
-$payloadSigned = Sign-FilesIfConfigured @($launcher, $gatewayBinary, $hookBinary) $build
+$payloadSigned = Sign-FilesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
 $embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
 Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip
 
@@ -473,6 +477,7 @@ $manifest = [ordered]@{
     upgrade_manifest = 'upgrade-manifest.json'
     site_packages = "site-packages.zip"
     launcher = "defenseclaw-launcher.exe"
+    startup_launcher = "defenseclaw-startup.exe"
     cosign_verifier = 'cosign.exe'
     unsigned = -not $payloadSigned
     toolchain = [ordered]@{

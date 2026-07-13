@@ -252,9 +252,12 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 }
 
 func TestGatewayAutoStartCommandQuotesPath(t *testing.T) {
-	path := `C:\Users\Jane Doe\DefenseClaw\defenseclaw-gateway.exe`
-	if got, want := gatewayAutoStartCommand(path), `"C:\Users\Jane Doe\DefenseClaw\defenseclaw-gateway.exe" start`; got != want {
+	path := `C:\Users\Jane Doe\DefenseClaw\bin\defenseclaw-gateway.exe`
+	if got, want := gatewayAutoStartCommand(path), `"C:\Users\Jane Doe\DefenseClaw\bin\defenseclaw-startup.exe"`; got != want {
 		t.Fatalf("auto-start command = %q, want %q", got, want)
+	}
+	if got, want := legacyGatewayAutoStartCommand(path), `"C:\Users\Jane Doe\DefenseClaw\bin\defenseclaw-gateway.exe" start`; got != want {
+		t.Fatalf("legacy auto-start command = %q, want %q", got, want)
 	}
 }
 
@@ -478,6 +481,7 @@ func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
 		PythonEmbed:        "python.zip",
 		SitePackages:       "site-packages.zip",
 		Launcher:           "launcher.exe",
+		StartupLauncher:    "startup.exe",
 		UpgradeManifest:    "upgrade-manifest.json",
 		Files:              map[string]string{},
 	}

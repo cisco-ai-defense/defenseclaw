@@ -1815,6 +1815,7 @@ function Invoke-SetupAcceptance {
     $processPathBefore = $env:PATH
     $trustedPrefixesBefore = [Environment]::GetEnvironmentVariable('DEFENSECLAW_TRUSTED_BIN_PREFIXES')
     $launcher = Join-Path $installRoot 'bin\defenseclaw.exe'
+    $startup = Join-Path $installRoot 'bin\defenseclaw-startup.exe'
     $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
     $hook = Join-Path $installRoot 'bin\defenseclaw-hook.exe'
     $python = Join-Path $installRoot 'runtime\python\python.exe'
@@ -1879,7 +1880,7 @@ function Invoke-SetupAcceptance {
         }
 
         foreach ($required in @(
-            $launcher, $gateway, $hook, $python, $cosign,
+            $launcher, $startup, $gateway, $hook, $python, $cosign,
             (Join-Path $installRoot 'bin\skill-scanner.exe'),
             (Join-Path $installRoot 'bin\mcp-scanner.exe'),
             (Join-Path $installRoot 'bin\defenseclaw-observability.exe')
@@ -1890,7 +1891,7 @@ function Invoke-SetupAcceptance {
         }
         if ($requireSignedProduct) {
             foreach ($productExecutable in @(
-                $launcher, $gateway, $hook,
+                $launcher, $startup, $gateway, $hook,
                 (Join-Path $installRoot 'bin\skill-scanner.exe'),
                 (Join-Path $installRoot 'bin\mcp-scanner.exe'),
                 (Join-Path $installRoot 'bin\defenseclaw-observability.exe')
@@ -1987,7 +1988,7 @@ function Invoke-SetupAcceptance {
 
         Assert-PackagedDoctorSmoke $launcher $logs
         Set-MinimalGatewayAcceptanceConfig $python
-        Invoke-Installed $gateway @('start') -Timeout 90 -Log (Join-Path $logs 'setup-gateway-start.log') | Out-Null
+        Invoke-Installed $startup @() -Timeout 90 -Log (Join-Path $logs 'setup-gateway-startup.log') | Out-Null
         Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 -Log (Join-Path $logs 'setup-watchdog-start.log') | Out-Null
         Invoke-Installed $gateway @('status') -Timeout 30 | Out-Null
         Invoke-Installed $gateway @('watchdog', 'status') -Timeout 30 | Out-Null
