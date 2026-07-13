@@ -625,9 +625,9 @@ func (w *setupWizard) openTerminal() {
 }
 
 func systemPowerShellPath() (string, error) {
-	buffer := make([]uint16, windows.MAX_PATH)
+	buffer := make([]uint16, 32768)
 	ret, _, err := procGetSystemDirectory.Call(uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
-	if ret == 0 || int(ret) > len(buffer) {
+	if ret == 0 || int(ret) >= len(buffer) {
 		return "", fmt.Errorf("GetSystemDirectoryW failed: %w", err)
 	}
 	return filepath.Join(windows.UTF16ToString(buffer[:ret]), "WindowsPowerShell", "v1.0", "powershell.exe"), nil

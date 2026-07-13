@@ -39,6 +39,34 @@ func TestOwnedUserPathRemovalPreservesLaterEntries(t *testing.T) {
 	}
 }
 
+func TestOwnedUserPathRemovalPreservesDuplicateAddedLater(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	other := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps`
+	current := commandDir + ";" + other + ";" + commandDir
+
+	got, err := removeOwnedUserPathEntry(current, commandDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := other + ";" + commandDir
+	if got != want {
+		t.Fatalf("PATH after owned removal = %q, want %q", got, want)
+	}
+}
+
+func TestOwnedUserPathRemovalRefusesReorderedEntry(t *testing.T) {
+	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
+	current := `C:\Users\runneradmin\bin;` + commandDir
+
+	got, err := removeOwnedUserPathEntry(current, commandDir, false)
+	if err == nil {
+		t.Fatal("reordered managed PATH entry was removed without an ownership proof")
+	}
+	if got != current {
+		t.Fatalf("PATH changed on refused removal: %q", got)
+	}
+}
+
 func TestLegacyAppendedUserPathRemovalPreservesTrailingSeparator(t *testing.T) {
 	commandDir := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw\bin`
 	before := `C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps;`
