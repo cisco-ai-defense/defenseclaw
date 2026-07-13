@@ -426,6 +426,29 @@ func unregisterInstalledApp() error {
 
 const gatewayAutoStartValueName = "DefenseClawGateway"
 
+func gatewayAutoStartConfigured(gatewayPath string) (bool, error) {
+	key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Run`,
+		registry.QUERY_VALUE,
+	)
+	if err == registry.ErrNotExist {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer key.Close()
+	value, _, err := key.GetStringValue(gatewayAutoStartValueName)
+	if err == registry.ErrNotExist {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return value == gatewayAutoStartCommand(gatewayPath), nil
+}
+
 func configureGatewayAutoStart(gatewayPath string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
 	key, _, err := registry.CreateKey(
 		registry.CURRENT_USER,

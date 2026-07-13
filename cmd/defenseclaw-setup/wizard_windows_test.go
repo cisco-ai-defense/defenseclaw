@@ -138,3 +138,56 @@ func TestOptionsFromWizardSelectionsMatrix(t *testing.T) {
 		}
 	}
 }
+
+func TestInteractiveInstallDefaultsPreserveExistingSelections(t *testing.T) {
+	state := &installState{Connector: "claudecode", Mode: "action"}
+	opts := applyInteractiveInstallDefaults(options{Action: "install"}, state, true, true)
+	if opts.Connector != "claudecode" || opts.Mode != "action" || !opts.StartGateway {
+		t.Fatalf("existing interactive defaults were not preserved: %+v", opts)
+	}
+	if opts.ConnectorSet || opts.ModeSet || opts.StartGatewaySet {
+		t.Fatalf("defaults were incorrectly marked as explicit arguments: %+v", opts)
+	}
+}
+
+func TestInteractiveInstallDefaultsRespectExplicitSelections(t *testing.T) {
+	state := &installState{Connector: "claudecode", Mode: "action"}
+	opts := applyInteractiveInstallDefaults(options{
+		Action:          "install",
+		Connector:       "none",
+		Mode:            "observe",
+		StartGateway:    false,
+		ConnectorSet:    true,
+		ModeSet:         true,
+		StartGatewaySet: true,
+	}, state, true, true)
+	if opts.Connector != "none" || opts.Mode != "observe" || opts.StartGateway {
+		t.Fatalf("explicit interactive arguments were overwritten: %+v", opts)
+	}
+}
+
+func TestInteractiveInstallDefaultsRestoreRequiredGateway(t *testing.T) {
+	state := &installState{Connector: "codex", Mode: "observe"}
+	opts := applyInteractiveInstallDefaults(options{Action: "install"}, state, false, true)
+	if !opts.StartGateway {
+		t.Fatalf("configured connector did not restore the required gateway: %+v", opts)
+	}
+}
+
+func TestInteractiveInstallDefaultsPreserveCLIOnlyOptOut(t *testing.T) {
+	state := &installState{Connector: "none", Mode: "observe"}
+	opts := applyInteractiveInstallDefaults(options{Action: "install"}, state, false, true)
+	if opts.StartGateway {
+		t.Fatalf("existing CLI-only autostart opt-out was lost: %+v", opts)
+	}
+	fresh := applyInteractiveInstallDefaults(options{Action: "install"}, nil, false, false)
+	if !fresh.StartGateway {
+		t.Fatalf("fresh interactive install did not retain the checked default: %+v", fresh)
+	}
+}
+
+func TestHighWord(t *testing.T) {
+	if got := highWord(0x12345678); got != 0x1234 {
+		t.Fatalf("highWord = %#x, want %#x", got, 0x1234)
+	}
+}

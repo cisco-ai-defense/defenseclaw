@@ -63,9 +63,10 @@ const (
 	bmSetCheck = 0x00F1
 	bstChecked = 1
 
-	cbAddString = 0x0143
-	cbGetCurSel = 0x0147
-	cbSetCurSel = 0x014E
+	cbAddString  = 0x0143
+	cbGetCurSel  = 0x0147
+	cbSetCurSel  = 0x014E
+	cbnSelChange = 1
 
 	pbmSetMarquee = wmUser + 10
 
@@ -201,8 +202,8 @@ func runInteractiveWizard(opts options, installRoot, dataRoot string) (int, erro
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	if opts.Action == "install" && !opts.StartGateway {
-		opts.StartGateway = true
+	if opts.Action == "install" {
+		opts = interactiveInstallOptions(opts, installRoot)
 	}
 	wiz := &setupWizard{
 		opts:        opts,
@@ -302,7 +303,7 @@ func setupWndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr 
 	switch message {
 	case wmCommand:
 		if wiz != nil {
-			wiz.handleCommand(lowWord(uint32(wParam)))
+			wiz.handleCommand(lowWord(uint32(wParam)), highWord(uint32(wParam)))
 			return 0
 		}
 	case wmClose:
@@ -361,6 +362,7 @@ func (w *setupWizard) createControls() error {
 	if w.opts.StartGateway {
 		procSendMessage.Call(w.start, bmSetCheck, bstChecked, 0)
 	}
+	w.syncGatewayChoice()
 	if w.opts.DeleteUserData {
 		procSendMessage.Call(w.deleteData, bmSetCheck, bstChecked, 0)
 	}
@@ -465,8 +467,12 @@ func primaryLabel(action string) string {
 	}
 }
 
-func (w *setupWizard) handleCommand(id uint16) {
+func (w *setupWizard) handleCommand(id, notification uint16) {
 	switch id {
+	case idConnector:
+		if notification == cbnSelChange {
+			w.syncGatewayChoice()
+		}
 	case idPrimary:
 		if w.done {
 			procDestroyWindow.Call(w.hwnd)
@@ -485,6 +491,17 @@ func (w *setupWizard) handleCommand(id uint16) {
 	case idOpenTerm:
 		w.openTerminal()
 	}
+}
+
+func (w *setupWizard) syncGatewayChoice() {
+	required := connectorValue(selection(w.connector)) != "none"
+	if required {
+		procSendMessage.Call(w.start, bmSetCheck, bstChecked, 0)
+		setText(w.start, "Gateway starts at sign-in (required for selected connector)")
+	} else {
+		setText(w.start, "Start gateway now and at sign-in")
+	}
+	procEnableWindow.Call(w.start, boolToUintptr(!required))
 }
 
 func (w *setupWizard) startAction() {
@@ -667,6 +684,45 @@ func optionsFromWizardSelections(opts options, connectorSelection, modeSelection
 	return opts
 }
 
+func interactiveInstallOptions(opts options, installRoot string) options {
+	state, err := loadExistingInstallState(installRoot)
+	if err != nil {
+		// runInstall reports invalid or unsafe installer state inside the wizard,
+		// where a windowsgui build can show the failure to the user.
+		return opts
+	}
+	if state == nil {
+		return applyInteractiveInstallDefaults(opts, nil, false, false)
+	}
+	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+	autoStart, autoStartErr := gatewayAutoStartConfigured(gatewayPath)
+	return applyInteractiveInstallDefaults(opts, state, autoStart, autoStartErr == nil)
+}
+
+func applyInteractiveInstallDefaults(opts options, state *installState, autoStart, autoStartKnown bool) options {
+	if state == nil {
+		if !opts.StartGatewaySet {
+			opts.StartGateway = true
+		}
+		return opts
+	}
+	if !opts.ConnectorSet && validConnector(state.Connector) {
+		opts.Connector = state.Connector
+	}
+	if !opts.ModeSet && validMode(state.Mode) {
+		opts.Mode = state.Mode
+	}
+	if !opts.StartGatewaySet {
+		if autoStartKnown {
+			opts.StartGateway = autoStart
+		}
+		// Hook connectors require the gateway even when an older installation
+		// has lost its Run-key registration. Repair should restore that invariant.
+		opts.StartGateway = opts.StartGateway || opts.Connector != "none"
+	}
+	return opts
+}
+
 func centerWindow(hwnd uintptr, width, height int32) {
 	screenW, _, _ := procGetSystemMetrics.Call(0)
 	screenH, _, _ := procGetSystemMetrics.Call(1)
@@ -688,4 +744,8 @@ func boolToUintptr(value bool) uintptr {
 
 func lowWord(value uint32) uint16 {
 	return uint16(value & 0xffff)
+}
+
+func highWord(value uint32) uint16 {
+	return uint16((value >> 16) & 0xffff)
 }
