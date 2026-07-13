@@ -686,20 +686,18 @@ def _capture_scan_stdout() -> Iterator[io.StringIO]:
     saved_fd: int | None = None
     tmp = None
 
-    for stream in (original_stdout, getattr(sys, "__stdout__", None)):
-        if stream is None:
-            continue
-        try:
-            fd = stream.fileno()
-            break
-        except (AttributeError, io.UnsupportedOperation, OSError):
-            continue
-    if fd is None:
-        try:
-            os.fstat(1)
-            fd = 1
-        except OSError:
-            fd = None
+    try:
+        os.fstat(1)
+        fd = 1
+    except OSError:
+        for stream in (original_stdout, getattr(sys, "__stdout__", None)):
+            if stream is None:
+                continue
+            try:
+                fd = stream.fileno()
+                break
+            except (AttributeError, io.UnsupportedOperation, OSError):
+                continue
 
     if fd is not None:
         try:
