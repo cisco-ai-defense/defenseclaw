@@ -190,9 +190,17 @@ function Get-TrustedTimestampUrl {
     return $uri.AbsoluteUri
 }
 
-function Sign-SetupIfConfigured([string]$SetupPath, [string]$BuildRoot) {
+function Sign-FilesIfConfigured([string[]]$Paths, [string]$BuildRoot) {
+    if (-not $Paths -or $Paths.Count -eq 0) {
+        throw 'Authenticode signing requires at least one file.'
+    }
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Authenticode signing input is missing: $path"
+        }
+    }
     if ($SkipSigning) {
-        Write-Warning "Skipping Authenticode signing by request; artifact is unsigned."
+        Write-Warning "Skipping Authenticode signing by request; product executables are unsigned."
         return $false
     }
     $cert64 = [Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_BASE64")
@@ -225,18 +233,21 @@ function Sign-SetupIfConfigured([string]$SetupPath, [string]$BuildRoot) {
         if ($signer.Count -ne 1 -or -not $signer[0].HasPrivateKey) {
             throw 'The imported Authenticode certificate did not expose exactly one signing private key.'
         }
-        Invoke-CheckedProcess $signtool @(
-            'sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', (Get-TrustedTimestampUrl),
-            '/s', 'My', '/sha1', $thumbprint, $SetupPath
-        )
-        $signature = Get-AuthenticodeSignature -LiteralPath $SetupPath
-        $publisher = if ($signature.SignerCertificate) {
-            $signature.SignerCertificate.GetNameInfo(
-                [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
+        $timestampUrl = Get-TrustedTimestampUrl
+        foreach ($path in $Paths) {
+            Invoke-CheckedProcess $signtool @(
+                'sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', $timestampUrl,
+                '/s', 'My', '/sha1', $thumbprint, $path
             )
-        } else { '' }
-        if ($signature.Status -ne 'Valid' -or $publisher -ne 'Cisco Systems, Inc.') {
-            throw "Authenticode signature validation failed: status=$($signature.Status), publisher=$publisher"
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            $publisher = if ($signature.SignerCertificate) {
+                $signature.SignerCertificate.GetNameInfo(
+                    [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
+                )
+            } else { '' }
+            if ($signature.Status -ne 'Valid' -or $publisher -ne 'Cisco Systems, Inc.') {
+                throw "Authenticode signature validation failed for ${path}: status=$($signature.Status), publisher=$publisher"
+            }
         }
         return $true
     } finally {
@@ -275,10 +286,6 @@ if (-not $Version) { $Version = Get-ProjectVersion }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
     throw "Invalid version for installer payload: $Version"
 }
-$willSign = -not $SkipSigning -and
-    -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_BASE64")) -and
-    -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_PASSWORD"))
-
 $gatewayZip = Join-Path $dist "defenseclaw_${Version}_windows_amd64.zip"
 $wheel = Join-Path $dist "defenseclaw-$Version-py3-none-any.whl"
 $upgradeManifest = Join-Path $dist 'upgrade-manifest.json'
@@ -432,7 +439,16 @@ Invoke-CheckedProcess "go" @(
     "build", "-ldflags", "-s -w", "-o", $launcher, "./cmd/defenseclaw-launcher"
 )
 
-Copy-RequiredFile $gatewayZip (Join-Path $payload (Split-Path -Leaf $gatewayZip))
+$gatewayPayloadDir = Join-Path $build 'gateway-payload'
+Remove-SafeTree $gatewayPayloadDir $build
+[IO.Directory]::CreateDirectory($gatewayPayloadDir) | Out-Null
+Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
+$gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
+$hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
+$payloadSigned = Sign-FilesIfConfigured @($launcher, $gatewayBinary, $hookBinary) $build
+$embeddedGatewayZip = Join-Path $payload (Split-Path -Leaf $gatewayZip)
+Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip
+
 Copy-RequiredFile $wheel (Join-Path $payload (Split-Path -Leaf $wheel))
 Copy-RequiredFile $pythonZip (Join-Path $payload $PythonEmbedName)
 Copy-RequiredFile $cosignVerifier (Join-Path $payload 'cosign.exe')
@@ -458,7 +474,7 @@ $manifest = [ordered]@{
     site_packages = "site-packages.zip"
     launcher = "defenseclaw-launcher.exe"
     cosign_verifier = 'cosign.exe'
-    unsigned = -not $willSign
+    unsigned = -not $payloadSigned
     toolchain = [ordered]@{
         go = (& go version)
         uv = (& uv --version)
@@ -498,7 +514,8 @@ try {
     Remove-Item -LiteralPath $embeddedPayload -Force -ErrorAction SilentlyContinue
 }
 
-$signed = Sign-SetupIfConfigured $setupPath $build
+$setupSigned = Sign-FilesIfConfigured @($setupPath) $build
+$signed = $setupSigned -and $payloadSigned
 
 $shaPath = "$setupPath.sha256"
 "$(Get-FileHashHex $setupPath)  $(Split-Path -Leaf $setupPath)" |
@@ -515,6 +532,8 @@ $provenance = [ordered]@{
     inputs = [ordered]@{
         gateway_archive = (Split-Path -Leaf $gatewayZip)
         gateway_archive_sha256 = Get-FileHashHex $gatewayZip
+        embedded_gateway_archive_sha256 = Get-FileHashHex $embeddedGatewayZip
+        product_executables_authenticode_signed = $payloadSigned
         wheel = (Split-Path -Leaf $wheel)
         wheel_sha256 = Get-FileHashHex $wheel
         python_embed = $PythonEmbedName

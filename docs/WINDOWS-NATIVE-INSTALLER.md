@@ -85,12 +85,15 @@ treated as a managed release. An OSS Windows install configured as
 requested instead of silently degrading to an unusable provider.
 
 Local and pull-request builds are unsigned and are labeled as such in Installed
-Apps. Release builds require real Authenticode credentials. The build imports
+Apps. Release builds require real Authenticode credentials. Before the payload
+manifest is hashed, the builder signs the native CLI launcher, gateway, and hook
+entry point; the installed scanner launchers are byte-identical copies of that
+signed CLI launcher. It then signs the outer setup executable. The build imports
 the PFX temporarily into the current-user certificate store, invokes SignTool
 by certificate thumbprint, uses an allowlisted HTTPS timestamp endpoint,
-verifies the exact publisher `Cisco Systems, Inc.`, and removes the certificate
-and private build directory in a `finally` path. No development certificate or
-fabricated Cisco signature is generated.
+verifies the exact publisher `Cisco Systems, Inc.` on every signed executable,
+and removes the certificate and private build directory in a `finally` path. No
+development certificate or fabricated Cisco signature is generated.
 
 ## Install and maintenance layout
 
@@ -142,8 +145,10 @@ Those installations must be serviced by the enterprise deployment channel.
 ## Release and certification gate
 
 The release workflow builds setup on `windows-latest`, requires real signing
-credentials, emits SHA-256, SBOM, and provenance outputs, and adds the signed
-EXE to the final checksum manifest before the immutable release is created.
+credentials, runs the full native install/repair/connector/uninstall acceptance
+suite against that exact signed EXE (including installed-publisher validation),
+emits SHA-256, SBOM, and provenance outputs, and adds the signed EXE to the final
+checksum manifest before the immutable release is created.
 macOS and Linux artifacts continue through their existing build path.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the

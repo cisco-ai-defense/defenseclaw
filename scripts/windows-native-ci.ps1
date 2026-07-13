@@ -53,6 +53,33 @@ function Assert-NativeWindowsX64 {
     }
 }
 
+function Get-CiscoAuthenticodeState([string]$Path) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $publisher = if ($signature.SignerCertificate) {
+        $signature.SignerCertificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+    } else { '' }
+    return [pscustomobject]@{
+        Status = [string]$signature.Status
+        Publisher = $publisher
+    }
+}
+
+function Assert-CiscoAuthenticodeSignature([string]$Path) {
+    $state = Get-CiscoAuthenticodeState $Path
+    if ($state.Status -ne 'Valid' -or $state.Publisher -ne 'Cisco Systems, Inc.') {
+        throw "Cisco Authenticode validation failed for ${Path}: status=$($state.Status), publisher=$($state.Publisher)"
+    }
+}
+
+function Test-PathWithin([string]$Path, [string]$Root) {
+    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $parent = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    return $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Assert-NoReparseAncestors([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $drive = [IO.Path]::GetPathRoot($full)
@@ -1760,6 +1787,14 @@ function Invoke-SetupAcceptance {
     if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
         throw "native setup executable not found: $setup"
     }
+    $setupAuthenticode = Get-CiscoAuthenticodeState $setup
+    $requireSignedProduct = $setupAuthenticode.Status -eq 'Valid'
+    if ($requireSignedProduct -and $setupAuthenticode.Publisher -ne 'Cisco Systems, Inc.') {
+        throw "signed setup has unexpected publisher: $($setupAuthenticode.Publisher)"
+    }
+    if (-not $requireSignedProduct -and $setupAuthenticode.Status -ne 'NotSigned') {
+        throw "setup Authenticode status is neither Valid nor NotSigned: $($setupAuthenticode.Status)"
+    }
     $logs = Join-Path $root 'logs'
     [IO.Directory]::CreateDirectory($logs) | Out-Null
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
@@ -1842,6 +1877,16 @@ function Invoke-SetupAcceptance {
         )) {
             if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
                 throw "setup install did not create required file: $required"
+            }
+        }
+        if ($requireSignedProduct) {
+            foreach ($productExecutable in @(
+                $launcher, $gateway, $hook,
+                (Join-Path $installRoot 'bin\skill-scanner.exe'),
+                (Join-Path $installRoot 'bin\mcp-scanner.exe'),
+                (Join-Path $installRoot 'bin\defenseclaw-observability.exe')
+            )) {
+                Assert-CiscoAuthenticodeSignature $productExecutable
             }
         }
         $env:DEFENSECLAW_HOME = $dataRoot
