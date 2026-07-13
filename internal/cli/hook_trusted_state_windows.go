@@ -19,6 +19,7 @@ import (
 const (
 	nativeHookLauncherName  = "defenseclaw-hook.exe"
 	nativeHookGatewayName   = "defenseclaw-gateway.exe"
+	powerShellHookStateName = "defenseclaw-hook-state.json"
 	nativeHookStateMaxBytes = 64 << 10
 )
 
@@ -66,28 +67,45 @@ func trustedNativeHookHome() (string, bool) {
 	commandDir := filepath.Dir(executable)
 	installRoot := filepath.Dir(commandDir)
 	statePath := filepath.Join(installRoot, "installer", "install-state.json")
-	if !windowsHookPathHasNoReparsePoints(statePath) {
+	state, ok := readNativeHookInstallState(statePath)
+	if !ok {
+		// The standalone PowerShell installer predates the native setup EXE and
+		// publishes binaries directly under ~/.local/bin. Its adjacent protected
+		// state binds a custom DEFENSECLAW_HOME without trusting project env.
+		statePath = filepath.Join(commandDir, powerShellHookStateName)
+		state, ok = readNativeHookInstallState(statePath)
+	}
+	if !ok {
 		return fallbackHome, true
 	}
-	info, err := os.Lstat(statePath)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeHookStateMaxBytes {
-		return fallbackHome, true
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		return fallbackHome, true
-	}
-	var state nativeHookInstallState
-	if json.Unmarshal(data, &state) != nil || state.SchemaVersion != 1 ||
-		state.InstallKind != "native-windows-exe" || state.InstallScope != "user" {
-		return fallbackHome, true
-	}
-	if !sameWindowsHookPath(state.InstallRoot, installRoot) ||
-		!sameWindowsHookPath(state.CommandDir, commandDir) ||
+	validNative := state.InstallKind == "native-windows-exe" && state.InstallScope == "user" &&
+		sameWindowsHookPath(state.InstallRoot, installRoot)
+	validPowerShell := state.InstallKind == "powershell-windows" && state.InstallScope == "user" &&
+		sameWindowsHookPath(state.InstallRoot, commandDir)
+	if (!validNative && !validPowerShell) || !sameWindowsHookPath(state.CommandDir, commandDir) ||
 		!filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
 		return fallbackHome, true
 	}
 	return filepath.Clean(state.DataRoot), true
+}
+
+func readNativeHookInstallState(statePath string) (nativeHookInstallState, bool) {
+	if !windowsHookPathHasNoReparsePoints(statePath) {
+		return nativeHookInstallState{}, false
+	}
+	info, err := os.Lstat(statePath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeHookStateMaxBytes {
+		return nativeHookInstallState{}, false
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return nativeHookInstallState{}, false
+	}
+	var state nativeHookInstallState
+	if json.Unmarshal(data, &state) != nil || state.SchemaVersion != 1 {
+		return nativeHookInstallState{}, false
+	}
+	return state, true
 }
 
 func sameWindowsHookPath(left, right string) bool {

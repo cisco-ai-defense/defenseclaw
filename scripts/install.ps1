@@ -1203,6 +1203,7 @@ function New-PairedInstallBackup {
     $names = @(
         "defenseclaw-gateway.exe",
         "defenseclaw-hook.exe",
+        "defenseclaw-hook-state.json",
         "defenseclaw.cmd",
         "defenseclaw.exe"
     )
@@ -1248,12 +1249,14 @@ function Restore-PairedInstallBackup {
         [string]$Venv,
         [switch]$RestoreGateway,
         [switch]$RestoreHook,
+        [switch]$RestoreHookState,
         [switch]$RestoreCli,
         [switch]$RestoreLauncher
     )
     $names = @()
     if ($RestoreGateway) { $names += "defenseclaw-gateway.exe" }
     if ($RestoreHook) { $names += "defenseclaw-hook.exe" }
+    if ($RestoreHookState) { $names += "defenseclaw-hook-state.json" }
     if ($RestoreLauncher) { $names += @("defenseclaw.cmd", "defenseclaw.exe") }
     foreach ($name in $names) {
         $target = Join-Path $InstallRoot $name
@@ -1295,6 +1298,31 @@ public static class DefenseClawWindowsFile {
     public static extern bool MoveFileEx(
         string existingFile, string replacementFile, int flags);
 }
+
+function Publish-HookInstallState {
+    param([string]$InstallRoot, [string]$DataRoot)
+    $target = Join-Path $InstallRoot "defenseclaw-hook-state.json"
+    $temporary = Join-Path ([IO.Path]::GetTempPath()) `
+        ("defenseclaw-hook-state." + [guid]::NewGuid().ToString("N") + ".json")
+    $state = [ordered]@{
+        schema_version = 1
+        install_kind = "powershell-windows"
+        install_scope = "user"
+        install_root = [IO.Path]::GetFullPath($InstallRoot)
+        command_dir = [IO.Path]::GetFullPath($InstallRoot)
+        data_root = [IO.Path]::GetFullPath($DataRoot)
+    }
+    try {
+        [IO.File]::WriteAllText(
+            $temporary,
+            ($state | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Replace-ManagedInstallFile -Source $temporary -Target $target -InstallRoot $InstallRoot
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
 '@
             }
             # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH. Unlike
@@ -1315,7 +1343,7 @@ public static class DefenseClawWindowsFile {
 }
 
 function Test-PairedInstalledState {
-    param([object]$Artifacts, [string]$GatewayPath, [string]$HookPath, [string]$Venv, [string]$InstallRoot)
+    param([object]$Artifacts, [string]$GatewayPath, [string]$HookPath, [string]$Venv, [string]$InstallRoot, [string]$DataRoot)
     if ((Get-FileHash -LiteralPath $GatewayPath -Algorithm SHA256).Hash -ne
         (Get-FileHash -LiteralPath $Artifacts.Gateway -Algorithm SHA256).Hash) {
         throw "Installed gateway does not match the staged artifact"
@@ -1329,6 +1357,16 @@ function Test-PairedInstalledState {
         throw "Installed gateway version identity does not match the staged artifact"
     }
     Test-ManagedEnvironment -Venv $Venv
+
+    $hookStatePath = Join-Path $InstallRoot "defenseclaw-hook-state.json"
+    $hookState = Get-Content -LiteralPath $hookStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$hookState.install_kind -ne "powershell-windows" -or
+        -not [IO.Path]::GetFullPath([string]$hookState.install_root).Equals(
+            [IO.Path]::GetFullPath($InstallRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        -not [IO.Path]::GetFullPath([string]$hookState.data_root).Equals(
+            [IO.Path]::GetFullPath($DataRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Installed hook state is not bound to the managed install and data roots"
+    }
 
     $shim = Join-Path $InstallRoot "defenseclaw.cmd"
     $shadow = Join-Path $InstallRoot "defenseclaw.exe"
@@ -1371,6 +1409,7 @@ function Invoke-PairedInstallTransaction {
     $oldStopped = $false
     $gatewayReplaced = $false
     $hookReplaced = $false
+    $hookStateReplaced = $false
     $cliMutationStarted = $false
     $launcherMutationStarted = $false
     $newGatewayStartAttempted = $false
@@ -1413,6 +1452,10 @@ function Invoke-PairedInstallTransaction {
             -InstallRoot $InstallDir
         $hookReplaced = $true
 
+        $phase = "publish-hook-state"
+        Publish-HookInstallState -InstallRoot $InstallDir -DataRoot $DefenseClawHome
+        $hookStateReplaced = $true
+
         $phase = "repair-cli"
         $cliMutationStarted = $true
         Install-Cli -WheelPath $Artifacts.Wheel -DeferLauncher
@@ -1423,7 +1466,7 @@ function Invoke-PairedInstallTransaction {
 
         $phase = "validate-installed-state"
         Test-PairedInstalledState -Artifacts $Artifacts -GatewayPath $gatewayPath `
-            -HookPath $hookPath -Venv $Venv -InstallRoot $InstallDir
+            -HookPath $hookPath -Venv $Venv -InstallRoot $InstallDir -DataRoot $DefenseClawHome
 
         if ($wasRunning) {
             $phase = "restart-new-gateway"
@@ -1453,12 +1496,13 @@ function Invoke-PairedInstallTransaction {
                     Wait-GatewayFileRelease -GatewayPath $gatewayPath
                 }
             }
-            $artifactMutationOccurred = $gatewayReplaced -or $hookReplaced -or
+            $artifactMutationOccurred = $gatewayReplaced -or $hookReplaced -or $hookStateReplaced -or
                 $cliMutationStarted -or $launcherMutationStarted
             if ($null -ne $backup -and $artifactMutationOccurred) {
                 Restore-PairedInstallBackup -Backup $backup -ManagedHome $DefenseClawHome `
                     -InstallRoot $InstallDir -Venv $Venv `
                     -RestoreGateway:$gatewayReplaced -RestoreHook:$hookReplaced `
+                    -RestoreHookState:$hookStateReplaced `
                     -RestoreCli:$cliMutationStarted -RestoreLauncher:$launcherMutationStarted
                 $rollbackOutcomes += "restored paired artifacts"
             }

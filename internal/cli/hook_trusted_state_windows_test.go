@@ -119,3 +119,40 @@ func TestTrustedNativeHookHomeRejectsStateBoundToAnotherInstall(t *testing.T) {
 		t.Fatalf("mismatched installer state did not fall back safely: home=%q native=%v", home, ok)
 	}
 }
+
+func TestTrustedNativeHookHomeUsesPowerShellInstallState(t *testing.T) {
+	commandDir := filepath.Join(t.TempDir(), ".local", "bin")
+	dataRoot := filepath.Join(t.TempDir(), "custom-defenseclaw-home")
+	for _, dir := range []string{commandDir, dataRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executable := filepath.Join(commandDir, nativeHookLauncherName)
+	if err := os.WriteFile(executable, []byte("test launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := nativeHookInstallState{
+		SchemaVersion: 1,
+		InstallKind:   "powershell-windows",
+		InstallScope:  "user",
+		InstallRoot:   commandDir,
+		CommandDir:    commandDir,
+		DataRoot:      dataRoot,
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(commandDir, powerShellHookStateName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := hookExecutableOverride
+	hookExecutableOverride = executable
+	t.Cleanup(func() { hookExecutableOverride = previous })
+
+	home, ok := trustedNativeHookHome()
+	if !ok || !sameWindowsHookPath(home, dataRoot) {
+		t.Fatalf("PowerShell state resolved home=%q native=%v, want %q", home, ok, dataRoot)
+	}
+}
