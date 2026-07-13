@@ -1675,6 +1675,19 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_WAIT_PROCESS_EXIT",
+      "category": "test_fixture",
+      "purpose": "Activate the short-lived helper subprocess used to verify that native Windows daemon shutdown waits on the original process handle.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/daemon/proc_windows_flags_test.go:95", "description": "Native Windows daemon test binary enters its delayed-exit helper mode"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_WINDOWS_PROCESS_HELPER",
       "category": "test_fixture",
       "purpose": "Activate the isolated subprocess entry point used by native Windows process-snapshot tests.",

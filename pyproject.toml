@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "click>=8.1.8,<9",
+    "click>=8.3.3,<9",
     "pyyaml==6.0.3",
     "requests==2.33.0",
     # The scanner/TUI runtime is one dependency set.  DefenseClaw uses the
