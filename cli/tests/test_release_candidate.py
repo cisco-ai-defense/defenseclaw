@@ -529,6 +529,67 @@ def test_certificate_canonicalization_accepts_canonical_raw_pem(tmp_path: Path) 
     assert certificate.read_bytes() == TEST_CERTIFICATE_PEM
 
 
+def test_windows_named_and_opened_certificate_timestamp_views_do_not_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+    real_lstat = Path.lstat
+
+    def timestamp_skewed_lstat(candidate: Path):
+        info = real_lstat(candidate)
+        if candidate != certificate:
+            return info
+
+        class _TimestampSkewedStat:
+            st_ctime_ns = info.st_ctime_ns + 1
+
+            def __getattr__(self, name: str):
+                return getattr(info, name)
+
+        return _TimestampSkewedStat()
+
+    monkeypatch.setattr(Path, "lstat", timestamp_skewed_lstat)
+
+    release_candidate.canonicalize_release_certificate(certificate)
+
+    assert certificate.read_bytes() == TEST_CERTIFICATE_PEM
+
+
+def test_release_certificate_same_api_timestamp_change_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
+    real_lstat = Path.lstat
+    certificate_lstat_calls = 0
+
+    def timestamp_mutating_lstat(candidate: Path):
+        nonlocal certificate_lstat_calls
+        info = real_lstat(candidate)
+        if candidate != certificate:
+            return info
+        certificate_lstat_calls += 1
+        changed = certificate_lstat_calls > 1
+
+        class _TimestampMutatedStat:
+            st_ctime_ns = info.st_ctime_ns + int(changed)
+
+            def __getattr__(self, name: str):
+                return getattr(info, name)
+
+        return _TimestampMutatedStat()
+
+    monkeypatch.setattr(Path, "lstat", timestamp_mutating_lstat)
+
+    with pytest.raises(release_candidate.CandidateError, match="changed while being read"):
+        release_candidate.canonicalize_release_certificate(certificate)
+
+    assert certificate.read_bytes() == TEST_CERTIFICATE_WRAPPER
+
+
 @pytest.mark.parametrize(
     "payload",
     [

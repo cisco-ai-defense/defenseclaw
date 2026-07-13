@@ -46,6 +46,154 @@ def _powershell_python_here_string(source: str, variable: str) -> str:
     return source[start : source.index("\n'@", start)]
 
 
+def _powershell_checksum_parser(source: str) -> str:
+    version_helpers = source[
+        source.index("function Assert-Version {") : source.index("function Test-Integer {")
+    ]
+    checksum_parser = source[
+        source.index("function Read-Checksums {") : source.index("function Assert-Hash {")
+    ]
+    return (
+        "Set-StrictMode -Version Latest\n"
+        "$ErrorActionPreference='Stop'\n"
+        "$script:VersionPattern='^\\d+\\.\\d+\\.\\d+$'\n"
+        "function Fail { param([string]$Message) throw $Message }\n"
+        + version_helpers
+        + checksum_parser
+    )
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_checksum_parser_accepts_only_signed_legacy_goreleaser_rows(
+    tmp_path: Path,
+) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    parser = _powershell_checksum_parser(source)
+    checksums = tmp_path / "checksums.txt"
+    digest = "a" * 64
+    artifact = "defenseclaw-0.8.3-py3-none-any.whl"
+    checksums.write_text(
+        "\n".join(
+            (
+                f"{digest}  defenseclaw_darwin_amd64_v1/defenseclaw",
+                f"{digest}  defenseclaw_darwin_arm64_v8.0/defenseclaw",
+                f"{digest}  defenseclaw_linux_amd64_v1/defenseclaw",
+                f"{digest}  defenseclaw_linux_arm64_v8.0/defenseclaw",
+                f"{digest}  defenseclaw_windows_amd64_v1/defenseclaw.exe",
+                f"{digest}  defenseclaw_windows_arm64_v8.0/defenseclaw.exe",
+                f"{digest}  {artifact}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = (
+        parser
+        + "\n$parsed=Read-Checksums -Path $env:CHECKSUMS -ReleaseVersion '0.8.3'\n"
+        + f"if($parsed.Count -ne 1 -or -not $parsed.ContainsKey('{artifact}')){{exit 9}}\n"
+    )
+
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "CHECKSUMS": str(checksums),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_checksum_parser_accepts_modern_flat_manifest(tmp_path: Path) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    parser = _powershell_checksum_parser(source)
+    checksums = tmp_path / "checksums.txt"
+    artifact = "defenseclaw-0.8.4-py3-none-any.whl"
+    checksums.write_text(f"{'a' * 64}  {artifact}\n", encoding="utf-8")
+    command = (
+        parser
+        + "\n$parsed=Read-Checksums -Path $env:CHECKSUMS -ReleaseVersion '0.8.4'\n"
+        + f"if($parsed.Count -ne 1 -or -not $parsed.ContainsKey('{artifact}')){{exit 9}}\n"
+    )
+
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "CHECKSUMS": str(checksums),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+@pytest.mark.parametrize(
+    ("release_version", "nested_name"),
+    [
+        ("0.8.4", "defenseclaw_windows_amd64_v1/defenseclaw.exe"),
+        ("0.8.3", "unknown/path"),
+        ("0.8.3", "../checksums.txt"),
+        ("0.8.3", r"unknown\path"),
+    ],
+)
+def test_windows_checksum_parser_rejects_modern_or_unknown_nested_rows(
+    tmp_path: Path,
+    release_version: str,
+    nested_name: str,
+) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    parser = _powershell_checksum_parser(source)
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text(f"{'a' * 64}  {nested_name}\n", encoding="utf-8")
+    command = (
+        parser
+        + f"\nRead-Checksums -Path $env:CHECKSUMS -ReleaseVersion '{release_version}'\n"
+    )
+
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "CHECKSUMS": str(checksums),
+        },
+    )
+
+    assert completed.returncode != 0
+    assert "Invalid checksum artifact name." in completed.stderr
+
+
 def test_windows_installer_refuses_existing_install_before_any_dependency_or_artifact_work() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)

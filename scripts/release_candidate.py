@@ -101,15 +101,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return (
         info.st_dev,
         info.st_ino,
         stat.S_IFMT(info.st_mode),
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
     )
+
+
+def _file_state(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (*_file_identity(info), info.st_ctime_ns)
 
 
 def _directory_identity(info: os.stat_result) -> tuple[int, int, int]:
@@ -125,6 +128,12 @@ def _read_release_certificate(path: Path) -> tuple[bytes, os.stat_result, os.sta
         raise CandidateError(f"release certificate parent is unavailable: {path.parent}") from exc
     if not stat.S_ISDIR(parent_info.st_mode):
         raise CandidateError(f"release certificate parent must be a real directory: {path.parent}")
+    try:
+        named_before = path.lstat()
+    except OSError as exc:
+        raise CandidateError(f"release certificate is unavailable: {path}") from exc
+    if not stat.S_ISREG(named_before.st_mode):
+        raise CandidateError(f"release certificate must be a regular file: {path}")
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -157,12 +166,18 @@ def _read_release_certificate(path: Path) -> tuple[bytes, os.stat_result, os.sta
         except OSError as exc:
             raise CandidateError(f"release certificate disappeared while being read: {path}") from exc
         if (
-            _file_identity(opened) != _file_identity(opened_after)
-            or _file_identity(opened_after) != _file_identity(named_after)
+            # CPython on Windows exposes creation time as pathname st_ctime,
+            # but NTFS change time as descriptor st_ctime. Bind the pathname
+            # to the descriptor without comparing those incompatible fields,
+            # then retain ctime in each same-API mutation check.
+            _file_identity(named_before) != _file_identity(opened)
+            or _file_identity(named_after) != _file_identity(opened_after)
+            or _file_state(named_before) != _file_state(named_after)
+            or _file_state(opened) != _file_state(opened_after)
             or bytes_read != opened_after.st_size
         ):
             raise CandidateError(f"release certificate changed while being read: {path}")
-        return b"".join(chunks), opened_after, parent_info
+        return b"".join(chunks), named_after, parent_info
     finally:
         os.close(descriptor)
 
@@ -229,7 +244,7 @@ def _atomic_replace_release_certificate(
         current_file = path.lstat()
         current_parent = path.parent.lstat()
         if (
-            _file_identity(current_file) != _file_identity(expected_file)
+            _file_state(current_file) != _file_state(expected_file)
             or _directory_identity(current_parent) != _directory_identity(expected_parent)
         ):
             raise CandidateError("release certificate path changed before atomic publication")
