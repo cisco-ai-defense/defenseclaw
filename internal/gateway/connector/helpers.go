@@ -156,7 +156,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 		adapter := strings.TrimSuffix(unixCommand, ".sh") + ".ps1"
 		return "& " + powershellQuoteLiteral(adapter)
 	}
-	return windowsQuoteExe(defenseclawHookBinary()) + " " + nativeHookFlag + connector
+	// Claude Code evaluates hook command strings with PowerShell on Windows.
+	// A quoted executable path alone is only a string expression there; the
+	// call operator is required to invoke it. Use a single-quoted literal so an
+	// install path cannot introduce PowerShell interpolation.
+	return "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + connector
 }
 
 // defenseclawHookBinary returns the stable installed launcher path on Windows.
@@ -381,6 +385,12 @@ func isNativeHookCommand(cmd string) bool {
 	if strings.HasPrefix(cmd, windowsSafePATHCommandPrefix) {
 		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, windowsSafePATHCommandPrefix))
 	}
+	// PowerShell shell-string connectors require the call operator before an
+	// absolute executable path. Strip only the standalone operator; the strict
+	// executable and connector checks below still establish ownership.
+	if strings.HasPrefix(cmd, "& ") {
+		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, "& "))
+	}
 	marker := " " + nativeHookFlag
 	idx := strings.LastIndex(cmd, marker)
 	if idx <= 0 {
@@ -396,8 +406,13 @@ func isNativeHookCommand(cmd string) bool {
 			return false
 		}
 		exe = exe[1 : len(exe)-1]
+	} else if strings.HasPrefix(exe, `'`) || strings.HasSuffix(exe, `'`) {
+		if len(exe) < 2 || !strings.HasPrefix(exe, `'`) || !strings.HasSuffix(exe, `'`) {
+			return false
+		}
+		exe = strings.ReplaceAll(exe[1:len(exe)-1], `''`, `'`)
 	}
-	if exe == "" || strings.ContainsAny(exe, `"'`) {
+	if exe == "" || strings.Contains(exe, `"`) {
 		return false
 	}
 	return isDefenseClawHookExecutable(exe)

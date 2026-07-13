@@ -376,7 +376,8 @@ func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
 // path; Windows Cursor uses the PowerShell object-pipeline adapter while other
-// connectors invoke the native Go `hook` subcommand directly.
+// connectors invoke the native Go `hook` subcommand directly. PowerShell
+// shell-string connectors include its call operator.
 func TestHookInvocationCommand(t *testing.T) {
 	const unix = "/home/u/.defenseclaw/hooks/codex-hook.sh"
 	const cursorUnix = "/home/u/.defenseclaw/hooks/cursor-hook.sh"
@@ -428,7 +429,7 @@ func TestHookInvocationCommand(t *testing.T) {
 	// absolute, quoted, installer-managed launcher. It must never regress to a
 	// bare or PATH-resolved form that an untrusted current directory can shadow.
 	claude := hookInvocationCommandFor("windows", "claudecode", unix)
-	wantClaude := windowsQuoteExe(windowsExe) + " " + nativeHookFlag + "claudecode"
+	wantClaude := "& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + "claudecode"
 	if claude != wantClaude {
 		t.Errorf("claudecode command = %q, want %q", claude, wantClaude)
 	}
@@ -458,6 +459,58 @@ func TestHookInvocationCommand(t *testing.T) {
 		!strings.Contains(decoded, nativeHookFlag+"antigravity") ||
 		!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
 		t.Errorf("antigravity encoded command lost managed launcher or hardening:\n%s", decoded)
+	}
+}
+
+// TestClaudeCodeWindowsHookCommandRunsInPowerShell reproduces the Windows
+// shell boundary that treats a quoted path as a string unless it is preceded
+// by PowerShell's call operator.
+func TestClaudeCodeWindowsHookCommandRunsInPowerShell(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell launch semantics are Windows-specific")
+	}
+
+	root := filepath.Join(t.TempDir(), "Install Root With Spaces")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(root, windowsHookBinaryName)
+	source := filepath.Join(root, "hook-probe.go")
+	probeOutput := filepath.Join(root, "hook-args.txt")
+	body := `package main
+import (
+	"os"
+	"strings"
+)
+func main() {
+	if len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != "claudecode" {
+		os.Exit(9)
+	}
+	if err := os.WriteFile(os.Getenv("DEFENSECLAW_HOOK_PROBE"), []byte(strings.Join(os.Args[1:], "|")), 0600); err != nil {
+		os.Exit(10)
+	}
+}
+`
+	if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("go", "build", "-o", helper, source).CombinedOutput(); err != nil {
+		t.Fatalf("build hook probe: %v\n%s", err, out)
+	}
+	setHookBinaryOverride(t, helper)
+	command := hookInvocationCommandFor("windows", "claudecode", "")
+
+	ps := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command)
+	ps.Env = append(os.Environ(), "DEFENSECLAW_HOOK_PROBE="+probeOutput)
+	if out, err := ps.CombinedOutput(); err != nil {
+		t.Fatalf("Claude Code-style PowerShell launch failed: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	got, err := os.ReadFile(probeOutput)
+	if err != nil {
+		t.Fatalf("read hook probe output: %v", err)
+	}
+	if string(got) != "hook|--connector|claudecode" {
+		t.Fatalf("hook args = %q", got)
 	}
 }
 
@@ -734,7 +787,7 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 		"hooks": []interface{}{
 			map[string]interface{}{
 				"type":    "command",
-				"command": `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector claudecode`,
+				"command": `& 'C:\Program Files\DefenseClaw\defenseclaw-hook.exe' hook --connector claudecode`,
 			},
 		},
 	}

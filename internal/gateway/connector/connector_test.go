@@ -1459,6 +1459,7 @@ func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
 	}
 	valid := []string{
 		`"C:\Users\test\.local\bin\defenseclaw-gateway.exe" hook --connector claudecode`,
+		`& "C:\Users\test\.local\bin\defenseclaw-gateway.exe" hook --connector claudecode`,
 		`"C:\Users\test\src\defenseclaw-gateway.exe" hook --connector claudecode`,
 		`defenseclaw-gateway.exe hook --connector claudecode`,
 	}
@@ -1475,6 +1476,7 @@ func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
 		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode & whoami`,
 		`"C:\Tools\defenseclaw-gateway.exe hook --connector claudecode`,
 		`C:\Program Files\DefenseClaw\defenseclaw-gateway.exe hook --connector claudecode`,
+		`& whoami; "C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode`,
 	}
 	for _, command := range invalid {
 		if isLegacyClaudeCodeNativeHookCommand(command) {

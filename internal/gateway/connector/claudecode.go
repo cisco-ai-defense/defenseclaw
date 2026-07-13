@@ -955,6 +955,12 @@ func isLegacyClaudeCodeNativeHookCommand(command string) bool {
 		return false
 	}
 	command = strings.TrimSpace(command)
+	// Accept commands operators repaired manually by adding PowerShell's call
+	// operator, so Setup can replace them with the current managed launcher
+	// without duplicating every Claude Code hook.
+	if strings.HasPrefix(command, "& ") {
+		command = strings.TrimSpace(strings.TrimPrefix(command, "& "))
+	}
 	marker := " " + nativeHookFlag
 	idx := strings.LastIndex(command, marker)
 	if idx <= 0 || strings.TrimSpace(command[idx+len(marker):]) != "claudecode" {
