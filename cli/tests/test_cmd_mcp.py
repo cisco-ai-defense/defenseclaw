@@ -398,7 +398,7 @@ class TestMCPScan(MCPCommandTestBase):
         ]
         mock_scan.side_effect = ValueError("connection refused")
 
-        runner = CliRunner()
+        runner = CliRunner(mix_stderr=False)
         result = runner.invoke(
             mcp,
             ["scan", "--all", "--connector", "codex", "--json"],
@@ -1043,7 +1043,7 @@ class TestMCPScan(MCPCommandTestBase):
 
         mock_scan.side_effect = _fail
 
-        runner = CliRunner()
+        runner = CliRunner(mix_stderr=False)
         result = runner.invoke(
             mcp,
             ["scan", "node_repl", "--connector", "codex", "--json"],

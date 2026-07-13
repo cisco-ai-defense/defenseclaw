@@ -261,6 +261,12 @@ jobs:
       # pip-audit here, not by DefenseClaw at runtime, and we install
       # exclusively from PyPI via uv with locked hashes (uv.lock).
       #
+      # TODO: Remove --ignore-vuln PYSEC-2026-2132 once
+      # cisco-ai-mcp-scanner's litellm dependency no longer pins click==8.1.8.
+      # The advisory affects click.edit(), which DefenseClaw does not call;
+      # requiring the fixed Click 8.3.3 currently makes wheel installation
+      # unsatisfiable because litellm==1.83.7 requires Click 8.1.8 exactly.
+      #
       # Previously ignored, now fixed by bumping cisco-ai-skill-scanner to
       # >=2.0.11 + overriding starlette>=1.0.1 and python-dotenv>=1.2.2 in
       # pyproject.toml:
@@ -271,7 +277,7 @@ jobs:
       # Use OSV for the vulnerability database so an outage in PyPI's
       # package-metadata JSON API does not turn the audit red before
       # pip-audit can evaluate the installed environment.
-      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
+      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196 --ignore-vuln PYSEC-2026-2132
 
   ts-build-test:
     name: TypeScript Build & Test
