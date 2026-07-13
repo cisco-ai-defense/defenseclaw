@@ -1800,6 +1800,7 @@ function New-FreshInstallOwnedDirectory {
 function Add-PrivateDirectoryRollbackResidue {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [System.Collections.Generic.List[string]]$Residue
     )
     foreach ($token in @($script:RollbackSafetyLedger.Keys | Sort-Object)) {

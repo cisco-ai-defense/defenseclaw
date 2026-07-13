@@ -6461,6 +6461,26 @@ def _rollback_capture_identity(info: os.stat_result) -> tuple[int, int, int, int
     )
 
 
+def _rollback_named_capture_matches(named: os.stat_result, opened: os.stat_result) -> bool:
+    """Compare a named rollback source with its pinned descriptor.
+
+    Windows can expose different timestamp representations for ``lstat`` and
+    ``fstat`` even when both describe the same file object.  Object identity,
+    type, and size remain stable across those APIs.  The descriptor-only
+    before/after comparison still covers timestamp changes while the payload
+    is read, so this exception does not weaken concurrent-mutation detection.
+    POSIX retains the original exact metadata comparison.
+    """
+
+    if os.name != "nt":
+        return _rollback_capture_identity(named) == _rollback_capture_identity(opened)
+    return (
+        os.path.samestat(named, opened)
+        and stat.S_IFMT(named.st_mode) == stat.S_IFMT(opened.st_mode)
+        and named.st_size == opened.st_size
+    )
+
+
 def _v8_recovery_entries(
     path: str,
     descriptor: int | None,
@@ -6743,7 +6763,7 @@ def _capture_rollback_file(active_path: str, backup_path: str, *, required: bool
     try:
         opened = os.fstat(source_descriptor)
         opened_identity = _rollback_capture_identity(opened)
-        if not stat.S_ISREG(opened.st_mode) or opened_identity != _rollback_capture_identity(info):
+        if not stat.S_ISREG(opened.st_mode) or not _rollback_named_capture_matches(info, opened):
             raise OSError(f"rollback source changed while opening: {active_path}")
 
         if os.name == "nt":
@@ -6792,7 +6812,15 @@ def _capture_rollback_file(active_path: str, backup_path: str, *, required: bool
             or stat.S_ISLNK(named.st_mode)
             or getattr(named, "st_file_attributes", 0) & 0x00000400
             or not stat.S_ISREG(named.st_mode)
-            or _rollback_capture_identity(named) != opened_identity
+            or not _rollback_named_capture_matches(named, after)
+            # Windows named/handle timestamp representations can differ, but
+            # two lstat snapshots use the same API. Keep that exact
+            # named-before/named-after comparison so a same-object, same-size
+            # write after the descriptor read is still detected.
+            or (
+                os.name == "nt"
+                and _rollback_capture_identity(named) != _rollback_capture_identity(info)
+            )
         ):
             raise OSError(f"rollback source changed while being read: {active_path}")
 

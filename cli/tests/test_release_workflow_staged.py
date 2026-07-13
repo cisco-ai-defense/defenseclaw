@@ -19,6 +19,7 @@ PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
 WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
+POSIX_FRESH_RELEASE = ROOT / "scripts/test-fresh-install-release.sh"
 
 
 def _workflow() -> dict[str, object]:
@@ -587,3 +588,13 @@ def test_protocol_refusal_contract_option_preserves_shared_matrix_arguments() ->
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "0.8.3|seed|1"
+
+
+def test_posix_fresh_release_uses_physical_temp_home_and_surfaces_installer_log() -> None:
+    source = POSIX_FRESH_RELEASE.read_text(encoding="utf-8")
+
+    workdir = source.index('WORKDIR="$(mktemp -d')
+    canonical = source.index('WORKDIR="$(cd "${WORKDIR}" && pwd -P)"')
+    home = source.index('export HOME="${WORKDIR}/home"')
+    assert workdir < canonical < home
+    assert 'cat "${WORKDIR}/install.log" >&2' in source

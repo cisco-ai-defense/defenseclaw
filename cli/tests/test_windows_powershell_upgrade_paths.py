@@ -135,6 +135,13 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     ):
         assert contract in source
 
+    rollback_residue = source[
+        source.index("function Add-PrivateDirectoryRollbackResidue") : source.index(
+            "function Initialize-FreshInstallAttempt"
+        )
+    ]
+    assert "[AllowEmptyCollection()]" in rollback_residue
+
     open_handle_start = source.index("private static SafeFileHandle OpenHandle")
     open_handle_end = source.index("private static SafeFileHandle OpenParentHandle")
     assert open_handle_start < open_handle_end
@@ -327,7 +334,6 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
     )
     assert "canonical binding and current location are unverified" in source
     assert "claim will close when the installer exits" in source
-
     path_publish = source[source.index("function Add-ToPath") : source.index("# -- Success")]
     assert "Persistent User PATH is shared registry state" in path_publish
     assert "Persistent User PATH was not modified" in path_publish
@@ -367,6 +373,18 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
 
     legacy_gateway = source[source.index("function Install-Gateway") : source.index("function Install-Cli")]
     assert "Remove-PrivateDirectory -Path $tmp" in legacy_gateway
+
+
+def test_windows_phase_one_custody_keeps_pep427_wheel_names() -> None:
+    resolver = RESOLVER.read_text(encoding="utf-8")
+    harness = RELEASE_HARNESS.read_text(encoding="utf-8")
+
+    assert 'Join-Path $root "source.whl"' not in resolver
+    assert 'Join-Path $root "bridge.whl"' not in resolver
+    assert '"defenseclaw-$sourceVersion-py3-none-any.whl"' in resolver
+    assert '"defenseclaw-$bridgeVersion-py3-none-any.whl"' in resolver
+    assert '"defenseclaw-$([string]$payload.source_version)-py3-none-any.whl"' in harness
+    assert '"defenseclaw-$([string]$payload.bridge_version)-py3-none-any.whl"' in harness
 
 
 def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract() -> None:

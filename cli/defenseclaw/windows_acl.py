@@ -166,7 +166,7 @@ class _WindowsApi(Protocol):
 
     def _open_regular_mutator_exclusive(self, path: str) -> int: ...
 
-    def open_directory_no_delete(self, path: str) -> int: ...
+    def open_directory_no_delete(self, path: str, *, protect_name: bool = True) -> int: ...
 
     def assert_real_directory(self, handle: int) -> None: ...
 
@@ -440,12 +440,26 @@ class _CtypesWindowsApi:
             self._raise_last_error("CreateFileW(exclusive lease)")
         return int(handle)
 
-    def open_directory_no_delete(self, path: str) -> int:
-        """Bind a directory while denying rename/delete sharing to peers."""
+    def open_directory_no_delete(self, path: str, *, protect_name: bool = True) -> int:
+        """Bind a directory while denying rename/delete sharing to peers.
+
+        A name-protecting lease requests ``DELETE`` access itself.  Merely
+        omitting ``FILE_SHARE_DELETE`` is insufficient when the caller can
+        rename a directory through ``FILE_DELETE_CHILD`` on its parent.  The
+        requested delete access binds later rename/delete attempts to this
+        exact handle, while the omitted share flag denies competing handles.
+
+        Ancestor-validation handles do not request ``DELETE`` because a user
+        commonly lacks that right on volume roots and system-owned parents.
+        The final name-protecting descendant lease prevents those validated
+        ancestors from being renamed while the chain is held: Windows refuses
+        to rename a directory whose subtree contains an open handle that did
+        not grant delete sharing.
+        """
 
         handle = self._create_file(
             path,
-            _FILE_READ_ATTRIBUTES,
+            _FILE_READ_ATTRIBUTES | (_DELETE if protect_name else 0),
             _FILE_SHARE_READ | _FILE_SHARE_WRITE,
             None,
             _OPEN_EXISTING,
@@ -834,6 +848,7 @@ class _CtypesWindowsApi:
 
 
 _api: _WindowsApi | None = None
+_directory_name_leases = threading.local()
 
 
 def _get_api() -> _WindowsApi:
@@ -999,18 +1014,39 @@ def _windows_directory_prefixes(path: str) -> tuple[str, ...]:
     return tuple(prefixes)
 
 
+def _held_directory_name_keys() -> set[str]:
+    keys = getattr(_directory_name_leases, "keys", None)
+    if keys is None:
+        keys = set()
+        _directory_name_leases.keys = keys
+    return keys
+
+
 @contextmanager
-def hold_directory(path: str) -> Iterator[None]:
-    """Hold one real directory open without ``FILE_SHARE_DELETE``."""
+def hold_directory(path: str, *, protect_name: bool = True) -> Iterator[None]:
+    """Hold one real directory, optionally binding its namespace entry."""
 
     if os.name != "nt":
         raise WindowsAclError("Windows directory leases require Windows")
+    key = ntpath.normcase(_windows_directory_prefixes(path)[-1])
+    active_name_leases = _held_directory_name_keys()
+    if protect_name and key in active_name_leases:
+        # Handle-bound file mutators intentionally reacquire their parent
+        # chain. Reuse the already-held exact name lease in the same thread;
+        # opening another DELETE handle would correctly conflict with the
+        # first lease's missing FILE_SHARE_DELETE.
+        yield
+        return
     api = _get_api()
-    handle = api.open_directory_no_delete(path)
+    handle = api.open_directory_no_delete(path, protect_name=protect_name)
     try:
         api.assert_real_directory(handle)
+        if protect_name:
+            active_name_leases.add(key)
         yield
     finally:
+        if protect_name:
+            active_name_leases.discard(key)
         api.close_handle(handle)
 
 
@@ -1018,9 +1054,11 @@ def hold_directory(path: str) -> Iterator[None]:
 def hold_directory_chain(path: str) -> Iterator[None]:
     """Prevent every absolute-path ancestor from being renamed or replaced."""
 
+    prefixes = _windows_directory_prefixes(path)
     with ExitStack() as held:
-        for prefix in _windows_directory_prefixes(path):
-            held.enter_context(hold_directory(prefix))
+        for prefix in prefixes[:-1]:
+            held.enter_context(hold_directory(prefix, protect_name=False))
+        held.enter_context(hold_directory(prefixes[-1], protect_name=True))
         yield
 
 

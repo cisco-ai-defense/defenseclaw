@@ -1152,7 +1152,9 @@ if (
 gateway = os.path.join(backup_dir, "phase1-source-gateway")
 require_file(gateway)
 bridge_gateway = os.path.join(backup_dir, "phase1-bridge-gateway")
-bridge_wheel = os.path.join(backup_dir, "phase1-bridge-wheel.whl")
+bridge_wheel = os.path.join(
+    backup_dir, f"defenseclaw-{bridge_version}-2-py3-none-any.whl"
+)
 require_file(bridge_gateway)
 require_file(bridge_wheel)
 if digest(bridge_gateway) != bridge_gateway_sha256 or digest(bridge_wheel) != bridge_wheel_sha256:
@@ -1864,7 +1866,16 @@ def root_state() -> tuple[dict[str, int | None], dict[str, dict[str, int] | None
 
 
 def command_version(command):
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+    probe_environment = os.environ.copy()
+    probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        command,
+        env=probe_environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
     match = re.search(r"(?<![\d.])(\d+\.\d+\.\d+)(?![\d.])", (completed.stdout or "") + (completed.stderr or ""))
     if completed.returncode != 0 or match is None:
         raise RuntimeError(f"could not verify restored command: {command[0]}")
@@ -2063,7 +2074,9 @@ if os.path.dirname(backup_dir) != backup_root:
 require_directory(backup_dir, private=True)
 source_gateway = os.path.join(backup_dir, "phase1-source-gateway")
 bridge_gateway = os.path.join(backup_dir, "phase1-bridge-gateway")
-bridge_wheel = os.path.join(backup_dir, "phase1-bridge-wheel.whl")
+bridge_wheel = os.path.join(
+    backup_dir, f"defenseclaw-{payload['bridge_version']}-2-py3-none-any.whl"
+)
 state_root = os.path.join(backup_dir, "phase1-state")
 state_manifest = os.path.join(state_root, "manifest.json")
 active_manifest = os.path.join(state_root, "active-manifest.json")
@@ -3326,6 +3339,7 @@ BRIDGE_RECOVERY_PLAN_ID=""
 BRIDGE_STATE_SNAPSHOT_READY=0
 BRIDGE_EXPECTED_GATEWAY_SHA256=""
 BRIDGE_EXPECTED_WHEEL_SHA256=""
+BRIDGE_WHEEL_CUSTODY_PATH=""
 BRIDGE_SOURCE_VENV_IDENTITY_SHA256=""
 
 upgrade_exit_trap() {
@@ -5023,12 +5037,15 @@ prepare_bridge_phase1_custody() {
             "${BACKUP_DIR}/phase1-bridge-gateway" 2>/dev/null \
             || die "Could not normalize the verified bridge gateway for rollback identity; no services changed."
     fi
-    cp "${STAGING_DIR}/${whl_name}" "${BACKUP_DIR}/phase1-bridge-wheel.whl" \
+    BRIDGE_WHEEL_CUSTODY_PATH="${BACKUP_DIR}/${whl_name}"
+    [[ "${whl_name}" == "defenseclaw-${RELEASE_VERSION}-2-py3-none-any.whl" ]] \
+        || die "Verified bridge wheel has a noncanonical materialized filename; no services changed."
+    cp "${STAGING_DIR}/${whl_name}" "${BRIDGE_WHEEL_CUSTODY_PATH}" \
         || die "Could not retain the verified bridge wheel activation; no services changed."
-    chmod 600 "${BACKUP_DIR}/phase1-bridge-wheel.whl"
+    chmod 600 "${BRIDGE_WHEEL_CUSTODY_PATH}"
     read -r BRIDGE_EXPECTED_GATEWAY_SHA256 BRIDGE_EXPECTED_WHEEL_SHA256 < <(python3 - \
         "${BACKUP_DIR}/phase1-bridge-gateway" \
-        "${BACKUP_DIR}/phase1-bridge-wheel.whl" <<'PY'
+        "${BRIDGE_WHEEL_CUSTODY_PATH}" <<'PY'
 import hashlib
 import sys
 
@@ -5102,7 +5119,7 @@ PY
 
 activate_bridge_phase1_cli() {
     local uv_bin source_venv_backup bridge_version bridge_seed
-    [[ -n "${whl_name:-}" && -f "${BACKUP_DIR}/phase1-bridge-wheel.whl" ]] \
+    [[ -n "${whl_name:-}" && -f "${BRIDGE_WHEEL_CUSTODY_PATH}" ]] \
         || die "Bridge CLI artifact is unavailable during activation"
     uv_bin="$(command -v uv 2>/dev/null || true)"
     source_venv_backup="${BACKUP_DIR}/phase1-source-venv"
@@ -5167,7 +5184,7 @@ PY
 
     "${uv_bin}" --no-config venv "${DEFENSECLAW_VENV}" --allow-existing --python "${BRIDGE_PYTHON_INTERPRETER}" --quiet \
         || die "Could not create the bridge CLI environment"
-    "${uv_bin}" --no-config pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet --offline "${BACKUP_DIR}/phase1-bridge-wheel.whl" \
+    "${uv_bin}" --no-config pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet --offline "${BRIDGE_WHEEL_CUSTODY_PATH}" \
         || die "Failed to install the bridge CLI wheel"
     bridge_version="$("${DEFENSECLAW_VENV}/bin/python" -c 'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the installed bridge CLI"
@@ -5419,7 +5436,7 @@ PY
     restored_gateway_version="$("${INSTALL_DIR}/defenseclaw-gateway" --version 2>&1 \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     [[ "${restored_gateway_version}" == "${CURRENT_VERSION}" ]] || rollback_failed=1
-    restored_cli_version="$("${DEFENSECLAW_VENV}/bin/defenseclaw" --version 2>&1 \
+    restored_cli_version="$(PYTHONDONTWRITEBYTECODE=1 "${DEFENSECLAW_VENV}/bin/defenseclaw" --version 2>&1 \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     [[ "${restored_cli_version}" == "${CURRENT_VERSION}" ]] || rollback_failed=1
 
