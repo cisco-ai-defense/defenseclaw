@@ -49,8 +49,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/routing"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/training"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"github.com/google/uuid"
@@ -544,6 +546,77 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 	return snapshot
 }
 
+// buildTranslateInput converts config.RoutingConfig to routing.TranslateInput.
+func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
+	if cfg == nil {
+		return routing.TranslateInput{}
+	}
+
+	rcfg := cfg.Routing
+	input := routing.TranslateInput{
+		Port:      rcfg.Port,
+		Algorithm: rcfg.Algorithm,
+	}
+
+	// Models
+	for _, m := range rcfg.Models {
+		input.Models = append(input.Models, routing.TranslateModel{
+			Name:            m.Name,
+			Provider:        m.Provider,
+			Model:           m.Model,
+			BaseURL:         m.BaseURL,
+			APIKeyEnv:       m.APIKeyEnv,
+			Capabilities:    m.Capabilities,
+			CostPer1kTokens: m.CostPer1kTokens,
+			Weight:          m.Weight,
+		})
+	}
+
+	// Signals
+	for _, k := range rcfg.Signals.Keywords {
+		input.Signals.Keywords = append(input.Signals.Keywords, routing.TranslateKeyword{
+			Name:     k.Name,
+			Keywords: k.Keywords,
+			Operator: k.Operator,
+		})
+	}
+	input.Signals.EmbeddingEnabled = rcfg.Signals.Embedding.Enabled
+	input.Signals.EmbeddingThreshold = rcfg.Signals.Embedding.Threshold
+	input.Signals.DomainEnabled = rcfg.Signals.Domain.Enabled
+	input.Signals.ComplexityEnabled = rcfg.Signals.Complexity.Enabled
+	input.Signals.ContextThresholds = rcfg.Signals.ContextLength.Thresholds
+
+	// Decisions
+	for _, d := range rcfg.Decisions {
+		dec := routing.TranslateDecision{
+			Name:      d.Name,
+			Priority:  d.Priority,
+			Operator:  d.Operator,
+			ModelRefs: d.ModelRefs,
+			Algorithm: d.Algorithm,
+		}
+		for _, c := range d.Conditions {
+			dec.Conditions = append(dec.Conditions, routing.TranslateCondition{
+				Signal:        c.Type,
+				MinConfidence: 0.0,
+				Value:         c.Name,
+			})
+		}
+		input.Decisions = append(input.Decisions, dec)
+	}
+
+	// Embedding config
+	input.EmbeddingProvider = rcfg.Embedding.Provider
+	input.EmbeddingBaseURL = rcfg.Embedding.BaseURL
+	input.EmbeddingModel = rcfg.Embedding.Model
+
+	// LLM classifier config
+	input.LLMBaseURL = rcfg.LLMClassifier.BaseURL
+	input.LLMModel = rcfg.LLMClassifier.Model
+
+	return input
+}
+
 func (s *Sidecar) otelSnapshot() *telemetry.Provider {
 	if s == nil {
 		return nil
@@ -634,6 +707,100 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	if strings.EqualFold(s.currentConfig().Guardrail.Host, "localhost") {
 		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.host is set to \"localhost\" which may resolve to IPv6 (::1) on macOS.\n")
 		fmt.Fprintf(os.Stderr, "[sidecar]          The proxy binds 127.0.0.1 only. Set guardrail.host to \"127.0.0.1\" to avoid silent connection failures.\n")
+	}
+
+	// Initialize semantic router (managed or remote).
+	if s.currentConfig().Routing.Enabled {
+		orchCfg := routing.OrchestratorConfig{
+			Enabled:        true,
+			Version:        s.currentConfig().Routing.Version,
+			Port:           s.currentConfig().Routing.Port,
+			DataDir:        s.currentConfig().DataDir,
+			RemoteEndpoint: s.currentConfig().Routing.Remote.Endpoint,
+			TimeoutMs:      s.currentConfig().Routing.Remote.TimeoutMs,
+			TranslateInput: buildTranslateInput(s.currentConfig()),
+		}
+		result, err := routing.StartManagedRouter(runCtx, orchCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[routing] startup failed: %v (routing disabled)\n", err)
+			emitError(runCtx, "routing", "init-failed", "semantic router disabled", err)
+		} else if result != nil {
+			timeoutMs := orchCfg.TimeoutMs
+			if timeoutMs == 0 {
+				timeoutMs = 50
+			}
+			RegisterModelRouter(NewRemoteModelRouter(result.Endpoint, timeoutMs))
+			fmt.Fprintf(os.Stderr, "[guardrail] semantic model router enabled (endpoint=%s)\n", result.Endpoint)
+			if result.Lifecycle != nil {
+				defer result.Lifecycle.Stop()
+			}
+		}
+	}
+
+	// Initialize training pipeline if enabled.
+	if s.currentConfig().Training.Enabled {
+		trainingDBPath := filepath.Join(s.currentConfig().DataDir, "training-store.db")
+		trainingStore, err := training.NewStore(trainingDBPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[training] store init failed: %v (training disabled)\n", err)
+		} else {
+			// Start capturer (async trace writes)
+			capturer := training.NewCapturer(trainingStore)
+			defer capturer.Stop()
+
+			// Start llama-server (only if binary is available)
+			modelsDir := s.currentConfig().Training.ModelsDir
+			if modelsDir == "" {
+				modelsDir = filepath.Join(s.currentConfig().DataDir, "models")
+			}
+			if _, lookErr := exec.LookPath("llama-server"); lookErr != nil {
+				fmt.Fprintf(os.Stderr, "[training] llama-server not found on PATH (install with: brew install llama.cpp)\n")
+			} else {
+				llamaSrv := training.NewLlamaServer(training.LlamaConfig{
+					ModelsDir: modelsDir,
+					Port:      s.currentConfig().Training.LlamaServerPort,
+				})
+				if err := llamaSrv.Start(runCtx); err != nil {
+					fmt.Fprintf(os.Stderr, "[training] llama-server start failed: %v\n", err)
+				} else {
+					defer llamaSrv.Stop()
+				}
+			}
+
+			// Start auto-trigger
+			registry, err := training.NewRegistry(modelsDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[training] registry init failed: %v\n", err)
+			}
+			pipeline := training.NewPipeline(trainingStore, registry)
+
+			// Build TriggerConfig from config.Training.Categories
+			var triggers []training.CategoryTrigger
+			for _, cat := range s.currentConfig().Training.Categories {
+				if !cat.AutoTrigger {
+					continue
+				}
+				triggers = append(triggers, training.CategoryTrigger{
+					Name:      cat.Name,
+					MinTraces: cat.MinTraces,
+					PipelineCfg: training.PipelineConfig{
+						Category:  cat.Name,
+						BaseModel: cat.BaseModel,
+						Algorithm: cat.Algorithm,
+					},
+				})
+			}
+			if len(triggers) > 0 {
+				trigger := training.NewAutoTrigger(trainingStore, pipeline, training.TriggerConfig{
+					Categories: triggers,
+				})
+				trigger.Start(runCtx)
+				defer trigger.Stop()
+			}
+
+			fmt.Fprintf(os.Stderr, "[training] pipeline enabled (backend=%s, categories=%d)\n",
+				s.currentConfig().Training.Backend, len(s.currentConfig().Training.Categories))
+		}
 	}
 
 	// Initialize OPA engine before goroutines so both the watcher and the
