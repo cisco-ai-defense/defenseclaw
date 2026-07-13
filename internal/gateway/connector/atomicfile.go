@@ -36,6 +36,15 @@ import (
 // repo and symlink ~/.codex/config.toml or ~/.claude/settings.json; preserving
 // that filesystem shape is part of the teardown contract.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileWithReplace(path, data, perm, safefile.ReplaceFile)
+}
+
+func atomicWriteFileWithReplace(
+	path string,
+	data []byte,
+	perm os.FileMode,
+	replace func(string, string) error,
+) error {
 	writePath, err := resolveAtomicWritePath(path)
 	if err != nil {
 		return err
@@ -45,7 +54,12 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)
 	}
-	if atomicFileAlreadyMatches(writePath, data, perm) {
+	// On Windows a previous MoveFileEx(MOVEFILE_WRITE_THROUGH) may have
+	// published these bytes and still reported a late flush failure. Visible
+	// equality cannot prove the directory entry is durable, so retry through a
+	// fresh write-through replacement. POSIX callers retain the metadata-stable
+	// no-op path after their parent-directory fsync succeeds.
+	if runtime.GOOS != "windows" && atomicFileAlreadyMatches(writePath, data, perm) {
 		return nil
 	}
 
@@ -72,13 +86,34 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("sync temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := safefile.ReplaceFile(tmpPath, writePath); err != nil {
+	if err := replace(tmpPath, writePath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
+	}
+	// MoveFileEx(MOVEFILE_WRITE_THROUGH) supplies the Windows durability
+	// boundary. POSIX rename needs an explicit parent-directory fsync.
+	if runtime.GOOS != "windows" {
+		directory, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("open parent directory for sync: %w", err)
+		}
+		syncErr := directory.Sync()
+		closeErr := directory.Close()
+		if syncErr != nil {
+			return fmt.Errorf("sync parent directory: %w", syncErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close parent directory after sync: %w", closeErr)
+		}
 	}
 	return nil
 }

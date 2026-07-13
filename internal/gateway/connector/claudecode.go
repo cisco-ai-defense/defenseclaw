@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -507,6 +508,7 @@ type claudeCodeHookGroup struct {
 	eventType string
 	matcher   string
 	timeout   int
+	async     bool
 }
 
 func newClaudeCodeHookGroup(eventType, matcher string) claudeCodeHookGroup {
@@ -514,6 +516,12 @@ func newClaudeCodeHookGroup(eventType, matcher string) claudeCodeHookGroup {
 		eventType: eventType,
 		matcher:   matcher,
 		timeout:   hookexec.ClaudeCodeHookTimeoutSeconds(eventType),
+		// MessageDisplay is observational: the server records its streamed
+		// response delta but cannot return an enforcement decision for this
+		// event. Running it synchronously adds interactive latency without a
+		// security benefit. Every other registered surface remains synchronous
+		// so tool, permission, lifecycle, and stop decisions can block.
+		async: eventType == "MessageDisplay",
 	}
 }
 
@@ -681,101 +689,192 @@ func claudeCodeHandlerEnforces(handler map[string]interface{}, opts SetupOpts) b
 // hooks, and registers DefenseClaw hooks for all Claude Code events.
 // The read-modify-write cycle is protected by an advisory file lock to
 // prevent corruption from concurrent gateway starts.
+func claudeCodeHookInvocation(hookScript string) (string, []string) {
+	hookCommand := hookInvocationCommand("claudecode", filepath.ToSlash(hookScript))
+	if runtime.GOOS == "windows" {
+		return defenseclawHookBinary(), []string{"hook", "--connector", "claudecode"}
+	}
+	return hookCommand, nil
+}
+
 func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript string) error {
 	// On Unix the agent runs the bundled .sh hook (ToSlash is a no-op there).
 	// On Windows Claude Code's exec form invokes the native launcher directly,
 	// without Git Bash or PowerShell parsing an absolute path that may contain
 	// spaces. Older shell-form commands are still recognized during migration.
-	hookCommand := hookInvocationCommand("claudecode", filepath.ToSlash(hookScript))
-	hookArgs := []string(nil)
-	if runtime.GOOS == "windows" {
-		hookCommand = defenseclawHookBinary()
-		hookArgs = []string{"hook", "--connector", "claudecode"}
-	}
+	hookCommand, hookArgs := claudeCodeHookInvocation(hookScript)
 	settingsPath := claudeCodeSettingsPath()
 
 	return withFileLock(settingsPath, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
 			return fmt.Errorf("capture claude settings backup: %w", err)
 		}
-
-		settings := map[string]interface{}{}
-		data, err := os.ReadFile(settingsPath)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("read claude settings: %w", err)
-		}
-		if len(data) > 0 {
-			if err := json.Unmarshal(data, &settings); err != nil {
-				return fmt.Errorf("parse claude settings: %w", err)
-			}
-		}
-
-		backup, backupErr := c.loadBackup(opts.DataDir)
-		if backupErr != nil {
-			if !os.IsNotExist(backupErr) {
-				return fmt.Errorf("load claudecode backup: %w", backupErr)
-			}
-			backup = claudeCodeBackup{}
-			if hooks, ok := settings["hooks"]; ok {
-				raw, _ := json.Marshal(hooks)
-				backup.OriginalHooks = raw
-				backup.HadHooksKey = true
-			}
-		}
-
-		hooks, _ := settings["hooks"].(map[string]interface{})
-		if hooks == nil {
-			hooks = map[string]interface{}{}
-		}
-
-		hooksDir := filepath.Join(opts.DataDir, "hooks")
-		managedCommands := append([]string(nil), backup.ManagedHookCommands...)
-		for key, hk := range hooks {
-			hooks[key] = removeOwnedClaudeCodeHooks(hk, hooksDir, managedCommands)
-		}
-
-		for _, group := range hookGroups {
-			handler := map[string]interface{}{
-				"type":    "command",
-				"command": hookCommand,
-				"timeout": group.timeout,
-			}
-			if hookArgs != nil {
-				handler["args"] = hookArgs
-			}
-			entry := map[string]interface{}{
-				"hooks": []interface{}{handler},
-			}
-			if group.matcher != "" {
-				entry["matcher"] = group.matcher
-			}
-
-			existing, _ := hooks[group.eventType].([]interface{})
-			hooks[group.eventType] = append(existing, entry)
-		}
-
-		settings["hooks"] = hooks
-
-		out, err := json.MarshalIndent(settings, "", "  ")
+		managedBackup, err := loadManagedFileBackupForTransform(
+			opts.DataDir,
+			c.Name(),
+			"settings.json",
+			settingsPath,
+		)
 		if err != nil {
-			return fmt.Errorf("marshal claude settings: %w", err)
+			return fmt.Errorf("load managed claude settings backup: %w", err)
+		}
+		baseBackup, backupErr := c.loadBackup(opts.DataDir)
+		backupExists := backupErr == nil
+		if backupErr != nil && !os.IsNotExist(backupErr) {
+			return fmt.Errorf("load claudecode backup: %w", backupErr)
 		}
 
-		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
+		var backupToSave claudeCodeBackup
+		var transformed []byte
+		exactBackupSafe := true
+		if err := atomicTransformFile(settingsPath, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
+				exactBackupSafe = false
+			}
+			settings := map[string]interface{}{}
+			if len(data) > 0 {
+				if err := json.Unmarshal(data, &settings); err != nil {
+					return atomicTransformResult{}, fmt.Errorf("parse claude settings: %w", err)
+				}
+			}
+
+			backup := baseBackup
+			backup.ManagedHookCommands = append([]string(nil), baseBackup.ManagedHookCommands...)
+			if !backupExists {
+				if hooks, ok := settings["hooks"]; ok {
+					raw, _ := json.Marshal(hooks)
+					backup.OriginalHooks = raw
+					backup.HadHooksKey = true
+				}
+				// Capture the pristine env block in the hooks transaction, before
+				// patchClaudeCodeOtelEnv can overwrite any operator OTel values. If
+				// the process stops between the two config replacements, teardown
+				// still has the durable pre-DefenseClaw env state.
+				if envRaw, present := settings["env"]; present {
+					envMap, ok := envRaw.(map[string]interface{})
+					if !ok {
+						return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw)
+					}
+					raw, err := json.Marshal(envMap)
+					if err != nil {
+						return atomicTransformResult{}, fmt.Errorf("capture original Claude env: %w", err)
+					}
+					backup.OriginalEnv = raw
+					backup.HadEnvKey = true
+				}
+			}
+
+			hooks, _ := settings["hooks"].(map[string]interface{})
+			if hooks == nil {
+				hooks = map[string]interface{}{}
+			}
+			hooksDir := filepath.Join(opts.DataDir, "hooks")
+			managedCommands := append([]string(nil), backup.ManagedHookCommands...)
+			for key, hk := range hooks {
+				hooks[key] = removeOwnedClaudeCodeHooks(hk, hooksDir, managedCommands)
+			}
+			for _, group := range hookGroups {
+				handler := map[string]interface{}{
+					"type":    "command",
+					"command": hookCommand,
+					"timeout": group.timeout,
+				}
+				if group.async {
+					handler["async"] = true
+				}
+				if hookArgs != nil {
+					handler["args"] = hookArgs
+				}
+				entry := map[string]interface{}{"hooks": []interface{}{handler}}
+				if group.matcher != "" {
+					entry["matcher"] = group.matcher
+				}
+				existing, _ := hooks[group.eventType].([]interface{})
+				hooks[group.eventType] = append(existing, entry)
+			}
+			settings["hooks"] = hooks
+			if err := verifyClaudeCodeHookMatrix(hooks, hookCommand, hookArgs, hooksDir); err != nil {
+				return atomicTransformResult{}, fmt.Errorf("verify DefenseClaw Claude Code hooks: %w", err)
+			}
+
+			out, err := json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("marshal claude settings: %w", err)
+			}
+			// Verify the exact JSON representation Claude Code will parse. This
+			// catches type/field drift (including asynchronous aliases) before the
+			// settings file is replaced.
+			rendered := map[string]interface{}{}
+			if err := json.Unmarshal(out, &rendered); err != nil {
+				return atomicTransformResult{}, fmt.Errorf("parse rendered claude settings: %w", err)
+			}
+			renderedHooks, ok := rendered["hooks"].(map[string]interface{})
+			if !ok {
+				return atomicTransformResult{}, fmt.Errorf("rendered Claude hooks have unsupported type %T", rendered["hooks"])
+			}
+			if err := verifyClaudeCodeHookMatrix(renderedHooks, hookCommand, hookArgs, hooksDir); err != nil {
+				return atomicTransformResult{}, fmt.Errorf("verify rendered DefenseClaw Claude Code hooks: %w", err)
+			}
+			if runtime.GOOS == "windows" {
+				// Exec-form hooks are recognized by their exact argument vector. Keep
+				// this legacy list empty so an unrelated use of the same executable
+				// with different arguments can never be removed by command alone.
+				backup.ManagedHookCommands = nil
+			} else {
+				backup.ManagedHookCommands = []string{hookCommand}
+			}
+			backupToSave = backup
+			transformed = append([]byte(nil), out...)
+			if exactBackupSafe {
+				if err := updateManagedFileBackupPostHashValue(
+					opts.DataDir,
+					c.Name(),
+					"settings.json",
+					settingsPath,
+					managedFileSnapshotHash(transformed, true),
+				); err != nil {
+					return atomicTransformResult{}, fmt.Errorf("publish intended Claude hooks backup hash: %w", err)
+				}
+			}
+			return atomicTransformResult{Data: out}, nil
+		}); err != nil {
+			if !exactBackupSafe {
+				discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
+			}
 			return err
 		}
-		if runtime.GOOS == "windows" {
-			// Exec-form hooks are recognized by their exact argument vector. Keep
-			// this legacy list empty so an unrelated use of the same executable
-			// with different arguments can never be removed by command alone.
-			backup.ManagedHookCommands = nil
-		} else {
-			backup.ManagedHookCommands = []string{hookCommand}
-		}
-		if err := c.saveBackup(opts.DataDir, backup); err != nil {
+		if err := c.saveBackup(opts.DataDir, backupToSave); err != nil {
 			return fmt.Errorf("save claudecode backup: %w", err)
 		}
-		return nil
+		persisted, err := os.ReadFile(settingsPath)
+		if err != nil {
+			return fmt.Errorf("read persisted Claude settings for verification: %w", err)
+		}
+		persistedSettings := map[string]interface{}{}
+		if err := json.Unmarshal(persisted, &persistedSettings); err != nil {
+			return fmt.Errorf("parse persisted Claude settings for verification: %w", err)
+		}
+		persistedHooks, ok := persistedSettings["hooks"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("persisted Claude hooks have unsupported type %T", persistedSettings["hooks"])
+		}
+		if err := verifyClaudeCodeHookMatrix(persistedHooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks")); err != nil {
+			return fmt.Errorf("verify persisted DefenseClaw Claude Code hooks: %w", err)
+		}
+		if !bytes.Equal(persisted, transformed) {
+			exactBackupSafe = false
+		}
+		if !exactBackupSafe {
+			discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
+			return nil
+		}
+		return updateManagedFileBackupPostHashValue(
+			opts.DataDir,
+			c.Name(),
+			"settings.json",
+			settingsPath,
+			managedFileSnapshotHash(transformed, true),
+		)
 	})
 }
 
@@ -846,74 +945,147 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 // pristine backup — we never re-snapshot a partially-modified env.
 func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 	settingsPath := claudeCodeSettingsPath()
+	hookCommand, hookArgs := claudeCodeHookInvocation(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
 
 	return withFileLock(settingsPath, func() error {
-		settings := map[string]interface{}{}
-		data, err := os.ReadFile(settingsPath)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("read claude settings: %w", err)
-		}
-		if len(data) > 0 {
-			if err := json.Unmarshal(data, &settings); err != nil {
-				return fmt.Errorf("parse claude settings: %w", err)
-			}
-		}
-
-		existing, _ := settings["env"].(map[string]interface{})
-		if existing == nil {
-			existing = map[string]interface{}{}
-		}
-
-		// Backup: only on first patch. patchClaudeCodeHooks runs
-		// before this method in Setup() and creates the backup file
-		// with HadHooksKey populated; here we augment the SAME
-		// backup with HadEnvKey/OriginalEnv. This keeps the file
-		// single-source-of-truth for Teardown.
-		backup, backupErr := c.loadBackup(opts.DataDir)
-		if backupErr != nil {
-			if !os.IsNotExist(backupErr) {
-				return fmt.Errorf("load claudecode backup (otel env): %w", backupErr)
-			}
-			backup = claudeCodeBackup{}
-		}
-		if !backup.HadEnvKey && len(backup.OriginalEnv) == 0 {
-			if envRaw, present := settings["env"]; present {
-				envMap, _ := envRaw.(map[string]interface{})
-				pristine := map[string]interface{}{}
-				for k, v := range envMap {
-					pristine[k] = v
-				}
-				if raw, err := json.Marshal(pristine); err == nil {
-					backup.OriginalEnv = raw
-				}
-				backup.HadEnvKey = true
-			}
-		}
-		managedEnv := buildClaudeCodeOtelEnv(opts)
-		backup.ManagedEnv = make(map[string]string, len(managedEnv))
-		for key, value := range managedEnv {
-			backup.ManagedEnv[key] = value
-		}
-		if err := c.saveBackup(opts.DataDir, backup); err != nil {
-			return fmt.Errorf("save claudecode backup (otel env): %w", err)
-		}
-
-		// Overwrite our OTel keys with current values. Operator-set
-		// keys outside our list (PATH, NODE_OPTIONS, etc.) are
-		// preserved verbatim — we never touch them.
-		for k, v := range managedEnv {
-			existing[k] = v
-		}
-		settings["env"] = existing
-
-		out, err := json.MarshalIndent(settings, "", "  ")
+		managedBackup, err := loadManagedFileBackupForTransform(
+			opts.DataDir,
+			c.Name(),
+			"settings.json",
+			settingsPath,
+		)
 		if err != nil {
-			return fmt.Errorf("marshal claude settings (otel env): %w", err)
+			return fmt.Errorf("load managed claude settings backup: %w", err)
 		}
-		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
+		baseBackup, err := c.loadBackup(opts.DataDir)
+		if err != nil {
+			return fmt.Errorf("load claudecode backup for OTel env: %w", err)
+		}
+
+		var backupToSave claudeCodeBackup
+		backupNeedsSave := false
+		var transformed []byte
+		exactBackupSafe := true
+		if err := atomicTransformFile(settingsPath, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
+				exactBackupSafe = false
+			}
+			settings := map[string]interface{}{}
+			if len(data) > 0 {
+				if err := json.Unmarshal(data, &settings); err != nil {
+					return atomicTransformResult{}, fmt.Errorf("parse claude settings: %w", err)
+				}
+			}
+
+			existing := map[string]interface{}{}
+			if envRaw, present := settings["env"]; present {
+				var ok bool
+				existing, ok = envRaw.(map[string]interface{})
+				if !ok {
+					return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw)
+				}
+			}
+
+			// Backup: only on first patch. patchClaudeCodeHooks runs
+			// before this method in Setup() and creates the backup file
+			// with HadHooksKey populated; here we augment the SAME
+			// backup with HadEnvKey/OriginalEnv. This keeps the file
+			// single-source-of-truth for Teardown.
+			backup := baseBackup
+			backup.ManagedHookCommands = append([]string(nil), baseBackup.ManagedHookCommands...)
+			backup.ManagedEnv = make(map[string]string, len(baseBackup.ManagedEnv))
+			for key, value := range baseBackup.ManagedEnv {
+				backup.ManagedEnv[key] = value
+			}
+			if !backup.HadEnvKey && len(backup.OriginalEnv) == 0 {
+				if envRaw, present := settings["env"]; present {
+					envMap, ok := envRaw.(map[string]interface{})
+					if !ok {
+						return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw)
+					}
+					pristine := map[string]interface{}{}
+					for k, v := range envMap {
+						pristine[k] = v
+					}
+					if raw, err := json.Marshal(pristine); err == nil {
+						backup.OriginalEnv = raw
+					}
+					backup.HadEnvKey = true
+				}
+			}
+			managedEnv := buildClaudeCodeOtelEnv(opts)
+			backup.ManagedEnv = make(map[string]string, len(managedEnv))
+			for key, value := range managedEnv {
+				backup.ManagedEnv[key] = value
+			}
+			backupNeedsSave = true
+			backupToSave = backup
+
+			// Overwrite our OTel keys with current values. Operator-set
+			// keys outside our list (PATH, NODE_OPTIONS, etc.) are
+			// preserved verbatim — we never touch them.
+			for k, v := range managedEnv {
+				existing[k] = v
+			}
+			settings["env"] = existing
+
+			out, err := json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("marshal claude settings (otel env): %w", err)
+			}
+			transformed = append([]byte(nil), out...)
+			if exactBackupSafe {
+				if err := updateManagedFileBackupPostHashValue(
+					opts.DataDir,
+					c.Name(),
+					"settings.json",
+					settingsPath,
+					managedFileSnapshotHash(transformed, true),
+				); err != nil {
+					return atomicTransformResult{}, fmt.Errorf("publish intended Claude OTel backup hash: %w", err)
+				}
+			}
+			return atomicTransformResult{Data: out}, nil
+		}); err != nil {
+			if !exactBackupSafe {
+				discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
+			}
 			return err
 		}
-		return updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "settings.json", settingsPath)
+		if backupNeedsSave {
+			if err := c.saveBackup(opts.DataDir, backupToSave); err != nil {
+				return fmt.Errorf("save claudecode backup (otel env): %w", err)
+			}
+		}
+		persisted, err := os.ReadFile(settingsPath)
+		if err != nil {
+			return fmt.Errorf("read persisted Claude settings after OTel patch: %w", err)
+		}
+		persistedSettings := map[string]interface{}{}
+		if err := json.Unmarshal(persisted, &persistedSettings); err != nil {
+			return fmt.Errorf("parse persisted Claude settings after OTel patch: %w", err)
+		}
+		persistedHooks, ok := persistedSettings["hooks"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("persisted Claude hooks after OTel patch have unsupported type %T", persistedSettings["hooks"])
+		}
+		if err := verifyClaudeCodeHookMatrix(persistedHooks, hookCommand, hookArgs, filepath.Join(opts.DataDir, "hooks")); err != nil {
+			return fmt.Errorf("verify persisted DefenseClaw Claude Code hooks after OTel patch: %w", err)
+		}
+		if !bytes.Equal(persisted, transformed) {
+			exactBackupSafe = false
+		}
+		if !exactBackupSafe {
+			discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
+			return nil
+		}
+		return updateManagedFileBackupPostHashValue(
+			opts.DataDir,
+			c.Name(),
+			"settings.json",
+			settingsPath,
+			managedFileSnapshotHash(transformed, true),
+		)
 	})
 }
 
@@ -936,95 +1108,96 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 		}
 		backup = claudeCodeBackup{}
 	}
+	managedBackup, err := loadManagedFileBackupForTransform(
+		opts.DataDir,
+		c.Name(),
+		"settings.json",
+		settingsPath,
+	)
+	if err != nil {
+		return fmt.Errorf("load managed settings backup: %w", err)
+	}
 
 	err = withFileLock(settingsPath, func() error {
-		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
-			return fmt.Errorf("managed settings restore: %w", err)
-		} else if restored {
-			return c.discardRestoreMetadata(opts)
-		}
-
-		data, err := os.ReadFile(settingsPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return c.discardRestoreMetadata(opts)
+		if err := atomicTransformFile(settingsPath, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+			if exact, ok := managedFileBackupTransform(managedBackup, data, exists); ok {
+				return exact, nil
 			}
-			return fmt.Errorf("read claude settings for restore: %w", err)
-		}
+			if !exists {
+				return atomicTransformResult{Remove: true}, nil
+			}
+			settings := map[string]interface{}{}
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return atomicTransformResult{}, fmt.Errorf("parse claude settings for restore: %w", err)
+			}
 
-		settings := map[string]interface{}{}
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("parse claude settings for restore: %w", err)
-		}
-
-		if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
-			hooksDir := filepath.Join(opts.DataDir, "hooks")
-			for eventType, val := range hooks {
-				remaining := removeOwnedClaudeCodeHooks(val, hooksDir, backup.ManagedHookCommands)
-				if len(remaining) == 0 {
-					delete(hooks, eventType)
-				} else {
-					hooks[eventType] = remaining
+			if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
+				hooksDir := filepath.Join(opts.DataDir, "hooks")
+				for eventType, val := range hooks {
+					remaining := removeOwnedClaudeCodeHooks(val, hooksDir, backup.ManagedHookCommands)
+					if len(remaining) == 0 {
+						delete(hooks, eventType)
+					} else {
+						hooks[eventType] = remaining
+					}
 				}
-			}
-			if len(hooks) == 0 {
+				if len(hooks) == 0 {
+					delete(settings, "hooks")
+				} else {
+					settings["hooks"] = hooks
+				}
+			} else if !backup.HadHooksKey {
 				delete(settings, "hooks")
-			} else {
-				settings["hooks"] = hooks
 			}
-		} else if !backup.HadHooksKey {
-			delete(settings, "hooks")
-		}
 
-		// Restore each env key only when its current value is still the exact
-		// value written by the most recent Setup. An operator edit after Setup
-		// transfers ownership back to the operator and must survive teardown.
-		if envMap, ok := settings["env"].(map[string]interface{}); ok {
-			originalEnv := map[string]interface{}{}
-			if backup.HadEnvKey && len(backup.OriginalEnv) > 0 {
-				if err := json.Unmarshal(backup.OriginalEnv, &originalEnv); err != nil {
-					return fmt.Errorf("parse original Claude env backup: %w", err)
+			// Restore each env key only when its current value is still the exact
+			// value written by the most recent Setup. An operator edit after Setup
+			// transfers ownership back to the operator and must survive teardown.
+			if envMap, ok := settings["env"].(map[string]interface{}); ok {
+				originalEnv := map[string]interface{}{}
+				if backup.HadEnvKey && len(backup.OriginalEnv) > 0 {
+					if err := json.Unmarshal(backup.OriginalEnv, &originalEnv); err != nil {
+						return atomicTransformResult{}, fmt.Errorf("parse original Claude env backup: %w", err)
+					}
 				}
-			}
-			managedEnv := backup.ManagedEnv
-			if len(managedEnv) == 0 {
-				// Compatibility for backups created before exact managed values
-				// were recorded, and for best-effort backupless cleanup.
-				managedEnv = buildClaudeCodeOtelEnv(opts)
-			}
-			for _, key := range claudeCodeOtelEnvKeys {
-				written, managed := managedEnv[key]
-				current, present := envMap[key].(string)
-				if !managed || !present || current != written {
-					continue
+				managedEnv := backup.ManagedEnv
+				if len(managedEnv) == 0 {
+					// Compatibility for backups created before exact managed values
+					// were recorded, and for best-effort backupless cleanup.
+					managedEnv = buildClaudeCodeOtelEnv(opts)
 				}
-				if original, existed := originalEnv[key]; existed {
-					envMap[key] = original
+				for _, key := range claudeCodeOtelEnvKeys {
+					written, managed := managedEnv[key]
+					current, present := envMap[key].(string)
+					if !managed || !present || current != written {
+						continue
+					}
+					if original, existed := originalEnv[key]; existed {
+						envMap[key] = original
+					} else {
+						delete(envMap, key)
+					}
+				}
+
+				if backup.HadEnvKey {
+					settings["env"] = envMap
+				} else if len(envMap) == 0 {
+					// Pristine state had no env block AND there are no
+					// operator-added non-OTel keys: drop entirely.
+					delete(settings, "env")
 				} else {
-					delete(envMap, key)
+					settings["env"] = envMap
 				}
 			}
 
-			if backup.HadEnvKey {
-				settings["env"] = envMap
-			} else if len(envMap) == 0 {
-				// Pristine state had no env block AND there are no
-				// operator-added non-OTel keys: drop entirely.
-				delete(settings, "env")
-			} else {
-				settings["env"] = envMap
+			out, err := json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("marshal restored settings: %w", err)
 			}
-		}
-
-		out, err := json.MarshalIndent(settings, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal restored settings: %w", err)
-		}
-
-		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
+			return atomicTransformResult{Data: out}, nil
+		}); err != nil {
 			return fmt.Errorf("write restored settings: %w", err)
 		}
-
 		return c.discardRestoreMetadata(opts)
 	})
 	// The settings parent can disappear before the lock file is opened (for
@@ -1145,6 +1318,150 @@ func isClaudeCodeNativeExecHook(hook map[string]interface{}) bool {
 		}
 	}
 	return true
+}
+
+type claudeCodeOwnedHookLocation struct {
+	groupIndex   int
+	handlerIndex int
+	matcher      interface{}
+	handler      map[string]interface{}
+}
+
+func ownedClaudeCodeHookLocations(rawGroups interface{}, hooksDir string) ([]claudeCodeOwnedHookLocation, error) {
+	groups, ok := rawGroups.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("event groups have unsupported type %T", rawGroups)
+	}
+	locations := make([]claudeCodeOwnedHookLocation, 0, 1)
+	for groupIndex, rawGroup := range groups {
+		group, ok := rawGroup.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		handlers, ok := group["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for handlerIndex, rawHandler := range handlers {
+			if !isOwnedHookHandler(rawHandler, hooksDir) {
+				continue
+			}
+			handler, ok := rawHandler.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			locations = append(locations, claudeCodeOwnedHookLocation{
+				groupIndex:   groupIndex,
+				handlerIndex: handlerIndex,
+				matcher:      group["matcher"],
+				handler:      handler,
+			})
+		}
+	}
+	return locations, nil
+}
+
+// claudeCodeHandlerAsync treats every spelling accepted by current and older
+// Claude Code settings decoders as asynchronous. In particular,
+// asyncRewake/async_rewake must not slip through a verifier that only checks
+// async: an asynchronous PreToolUse or PermissionRequest hook cannot block.
+func claudeCodeHandlerAsync(handler map[string]interface{}) (bool, error) {
+	active := false
+	for _, key := range []string{"async", "asyncRewake", "async_rewake"} {
+		raw, exists := handler[key]
+		if !exists {
+			continue
+		}
+		value, ok := raw.(bool)
+		if !ok {
+			return false, fmt.Errorf("%s has unsupported type %T", key, raw)
+		}
+		active = active || value
+	}
+	return active, nil
+}
+
+func claudeCodeHookInteger(value interface{}) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), int64(int(typed)) == typed
+	case float64:
+		converted := int(typed)
+		return converted, float64(converted) == typed
+	default:
+		return 0, false
+	}
+}
+
+// verifyClaudeCodeHookMatrix validates the exact DefenseClaw-owned effective
+// user registration. Unrelated operator hooks may coexist, but every required
+// event must have exactly one owned command with its expected matcher, timeout,
+// argv, and blocking behavior. MessageDisplay is the sole asynchronous surface:
+// it is observational and has no enforcement verdict.
+func verifyClaudeCodeHookMatrix(
+	hooks map[string]interface{},
+	expectedCommand string,
+	expectedArgs []string,
+	hooksDir string,
+) error {
+	expectedEvents := make(map[string]struct{}, len(hookGroups))
+	for _, expected := range hookGroups {
+		expectedEvents[expected.eventType] = struct{}{}
+		locations, err := ownedClaudeCodeHookLocations(hooks[expected.eventType], hooksDir)
+		if err != nil {
+			return fmt.Errorf("%s: %w", expected.eventType, err)
+		}
+		if len(locations) != 1 {
+			return fmt.Errorf("%s has %d DefenseClaw handlers, want 1", expected.eventType, len(locations))
+		}
+		location := locations[0]
+		var expectedMatcher interface{}
+		if expected.matcher != "" {
+			expectedMatcher = expected.matcher
+		}
+		if !codexValueMatches(location.matcher, expectedMatcher) {
+			return fmt.Errorf("%s matcher = %#v, want %#v", expected.eventType, location.matcher, expectedMatcher)
+		}
+		if kind, _ := location.handler["type"].(string); kind != "command" {
+			return fmt.Errorf("%s handler type = %#v, want command", expected.eventType, location.handler["type"])
+		}
+		if command, _ := location.handler["command"].(string); command != expectedCommand {
+			return fmt.Errorf("%s command = %q, want %q", expected.eventType, command, expectedCommand)
+		}
+		if expectedArgs == nil {
+			if _, exists := location.handler["args"]; exists {
+				return fmt.Errorf("%s has unexpected args %#v", expected.eventType, location.handler["args"])
+			}
+		} else if !codexValueMatches(location.handler["args"], expectedArgs) {
+			return fmt.Errorf("%s args = %#v, want %#v", expected.eventType, location.handler["args"], expectedArgs)
+		}
+		timeout, ok := claudeCodeHookInteger(location.handler["timeout"])
+		if !ok || timeout != expected.timeout {
+			return fmt.Errorf("%s timeout = %#v, want %d", expected.eventType, location.handler["timeout"], expected.timeout)
+		}
+		asynchronous, err := claudeCodeHandlerAsync(location.handler)
+		if err != nil {
+			return fmt.Errorf("%s handler: %w", expected.eventType, err)
+		}
+		if asynchronous != expected.async {
+			if asynchronous {
+				return fmt.Errorf("%s DefenseClaw handler is asynchronous and cannot enforce policy", expected.eventType)
+			}
+			return fmt.Errorf("%s observational handler must be asynchronous", expected.eventType)
+		}
+	}
+	for eventType, rawGroups := range hooks {
+		if _, expected := expectedEvents[eventType]; expected {
+			continue
+		}
+		locations, _ := ownedClaudeCodeHookLocations(rawGroups, hooksDir)
+		if len(locations) > 0 {
+			return fmt.Errorf("unexpected event %s has %d DefenseClaw handlers", eventType, len(locations))
+		}
+	}
+	return nil
 }
 
 // scriptHasMarker reads the first 512 bytes of a file and checks for the

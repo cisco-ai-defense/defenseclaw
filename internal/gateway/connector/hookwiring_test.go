@@ -413,15 +413,17 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
 	}
 
-	// Codex passes this string to cmd.exe /C as one argument. Do not use the
-	// quoted absolute-path form that Windows re-escapes into a literal argv[0].
+	// Codex passes this string to cmd.exe /C as one argument. The outer command
+	// uses an unquoted system PowerShell path and an encoded script; the decoded
+	// script invokes the stable absolute launcher with PowerShell's call operator.
 	codex := hookInvocationCommandFor("windows", "codex", unix)
-	wantCodex := windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + "codex"
+	wantCodex := windowsNativePowerShellHookCommand("codex")
 	if codex != wantCodex {
 		t.Errorf("codex command = %q, want %q", codex, wantCodex)
 	}
-	if strings.ContainsAny(codex, `"'`) {
-		t.Errorf("codex cmd.exe command contains quote characters: %q", codex)
+	decodedCodex := decodePowerShellEncodedCommandForTest(t, codex)
+	if want := "& " + powershellQuoteLiteral(windowsExe) + " " + nativeHookFlag + "codex"; !strings.Contains(decodedCodex, want) {
+		t.Errorf("decoded codex command = %q, want invocation %q", decodedCodex, want)
 	}
 	if !isNativeHookCommand(codex) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
@@ -645,11 +647,13 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	}
 
 	command := hookInvocationCommandFor("windows", "codex", "")
-	wantTail := windowsHookBinaryName + " " + nativeHookFlag + "codex"
-	probe := strings.Replace(command, wantTail, "where.exe cmd.exe", 1)
-	if probe == command {
-		t.Fatalf("generated Codex command %q did not contain %q", command, wantTail)
+	decoded := decodePowerShellEncodedCommandForTest(t, command)
+	wantInvocation := "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "codex"
+	probeScript := strings.Replace(decoded, wantInvocation, "& 'where.exe' 'cmd.exe'", 1)
+	if probeScript == decoded {
+		t.Fatalf("decoded Codex command %q did not contain %q", decoded, wantInvocation)
 	}
+	probe := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(probeScript)
 	comspec := os.Getenv("COMSPEC")
 	if comspec == "" {
 		comspec = "cmd.exe"
@@ -760,8 +764,9 @@ func TestShellWordPassesNativeCommandThrough(t *testing.T) {
 	}
 }
 
-// TestBuildCodexHooksTableUsesSupportedTrustFlow verifies DefenseClaw leaves
-// trust decisions to Codex and supplies its absolute native Windows override.
+// TestBuildCodexHooksTableUsesSupportedTrustFlow verifies the event-table
+// builder supplies Codex's absolute native Windows override. Position-aware
+// trust state is added only after this table is merged with existing hooks.
 func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	const cmd = windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + "codex"
 	const configPath = "/home/u/.codex/config.toml"
@@ -792,7 +797,7 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	}
 
 	if _, ok := table["state"]; ok {
-		t.Fatal("buildCodexHooksTable synthesized unsupported trust state")
+		t.Fatal("buildCodexHooksTable added state before final merge positions were known")
 	}
 }
 
