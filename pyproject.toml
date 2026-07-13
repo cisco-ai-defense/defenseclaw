@@ -6,7 +6,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "click>=8.3.3,<9",
+    # Floor stays at 8.1.8 (not the patched 8.3.3) so the published-wheel
+    # install path — a plain `uv pip install` that ignores the [tool.uv]
+    # litellm override below — can still resolve: cisco-ai-mcp-scanner pulls
+    # litellm==1.83.7 there, which hard-pins click==8.1.8. The locked/synced
+    # env (which honors the litellm>=1.84 override) resolves click to a
+    # patched 8.4.x, so `uv run pip-audit` sees no click advisory.
+    "click>=8.1.8,<9",
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
