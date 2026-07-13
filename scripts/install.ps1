@@ -1298,6 +1298,24 @@ public static class DefenseClawWindowsFile {
     public static extern bool MoveFileEx(
         string existingFile, string replacementFile, int flags);
 }
+'@
+            }
+            # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH. Unlike
+            # Move-Item -Force, this has an explicit Windows overwrite contract.
+            if (-not [DefenseClawWindowsFile]::MoveFileEx($temporary, $Target, 9)) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw [System.ComponentModel.Win32Exception]::new(
+                    $errorCode, "Could not atomically replace '$Target'"
+                )
+            }
+        } else {
+            [System.IO.File]::Move($temporary, $Target)
+        }
+        Set-ManagedPathProtection -Path $Target
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
 
 function Publish-HookInstallState {
     param([string]$InstallRoot, [string]$DataRoot)
@@ -1319,24 +1337,6 @@ function Publish-HookInstallState {
             [Text.UTF8Encoding]::new($false)
         )
         Replace-ManagedInstallFile -Source $temporary -Target $target -InstallRoot $InstallRoot
-    } finally {
-        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-    }
-}
-'@
-            }
-            # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH. Unlike
-            # Move-Item -Force, this has an explicit Windows overwrite contract.
-            if (-not [DefenseClawWindowsFile]::MoveFileEx($temporary, $Target, 9)) {
-                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                throw [System.ComponentModel.Win32Exception]::new(
-                    $errorCode, "Could not atomically replace '$Target'"
-                )
-            }
-        } else {
-            [System.IO.File]::Move($temporary, $Target)
-        }
-        Set-ManagedPathProtection -Path $Target
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }

@@ -100,6 +100,7 @@ def _transaction_functions() -> str:
             "Restore-PairedInstallBackup",
             "Set-ManagedPathProtection",
             "Replace-ManagedInstallFile",
+            "Publish-HookInstallState",
             "Invoke-PairedInstallTransaction",
         )
     )
