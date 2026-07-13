@@ -119,6 +119,19 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
 
 
+def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_schema() -> None:
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text()
+
+    assert 'installed_refusal_mode="artifact-provenance"' in protocol
+    assert 'elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature' in protocol
+    assert (
+        "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks"
+        in protocol
+    )
+    assert "checksums.txt is not signed (no Sigstore signature/certificate assets were published)" in protocol
+    assert "Modern release provenance is mandatory; --allow-unverified cannot override it." in protocol
+
+
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
     start = smoke.index("seed_pre_v8_otel_fixture() {")
