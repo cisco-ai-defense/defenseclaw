@@ -113,12 +113,22 @@ class WindowsHookDoctorTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _config(self, connector: str, command: str, *, extra_command: str = "") -> Path:
+    def _config(
+        self,
+        connector: str,
+        command: str,
+        *,
+        extra_command: str = "",
+        windows_command: str | None = None,
+        codex_features: bool = True,
+    ) -> Path:
         if connector == "codex":
             path = self.profile / ".codex" / "config.toml"
             path.parent.mkdir(exist_ok=True)
+            selected_windows = windows_command or command
             escaped_extra = extra_command.replace("\\", "\\\\").replace('"', '\\"')
             escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+            escaped_windows = selected_windows.replace("\\", "\\\\").replace('"', '\\"')
             specs = (
                 ("SessionStart", "startup|resume|clear", 30),
                 ("UserPromptSubmit", None, 30),
@@ -136,18 +146,19 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 matcher_text = "" if matcher is None else f'matcher = "{matcher}", '
                 groups = (
                     f'{event} = [{{ {matcher_text}hooks = [{{ type = "command", '
-                    f'command = "{escaped}", command_windows = "{escaped}", timeout = {timeout} }}] }}'
+                    f'command = "{escaped}", command_windows = "{escaped_windows}", timeout = {timeout} }}] }}'
                 )
                 if event == "PostToolUse" and escaped_extra:
                     groups += f', {{ hooks = [{{ type = "command", command = "{escaped_extra}", timeout = 30 }}] }}'
                 rows.append(groups + "]")
             path.write_text(
-                "[features]\nhooks = true\n\n[hooks]\n" + "\n".join(rows) + "\n",
+                (("[features]\nhooks = true\n\n" if codex_features else "") + "[hooks]\n") + "\n".join(rows) + "\n",
                 encoding="utf-8",
             )
         else:
             path = self.profile / ".claude" / "settings.json"
             path.parent.mkdir(exist_ok=True)
+            bare_exec = not any(token in command for token in (" hook ", "-File ", "-EncodedCommand "))
             events: dict[str, object] = {}
             matchers = {
                 "SessionStart": "startup|resume|clear|compact",
@@ -203,6 +214,8 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 "ElicitationResult",
             ):
                 handler: dict[str, object] = {"type": "command", "command": command, "timeout": 30}
+                if bare_exec:
+                    handler["args"] = ["hook", "--connector", "claudecode"]
                 if event == "MessageDisplay":
                     handler["async"] = True
                 entry: dict[str, object] = {"hooks": [handler]}
@@ -212,6 +225,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
                     entry["matcher"] = "*"
                 events[event] = [entry]
             if extra_command:
+                assert isinstance(events["PostToolUse"], list)
                 events["PostToolUse"].append({"hooks": [{"type": "command", "command": extra_command, "timeout": 30}]})
             path.write_text(json.dumps({"hooks": events}), encoding="utf-8")
         self._lock(connector, path)
@@ -744,7 +758,12 @@ class WindowsHookDoctorTests(unittest.TestCase):
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
             f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
         )
-        config = self._config("codex", command)
+        config = self._config(
+            "codex",
+            f'"{runtime}" hook --connector codex',
+            windows_command=command,
+            codex_features=False,
+        )
 
         check = self._validate("codex", config)
         self.assertEqual(check.state, "healthy", check.detail)
@@ -762,7 +781,13 @@ class WindowsHookDoctorTests(unittest.TestCase):
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
             f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
         )
-        config = self._config("codex", command)
+        runtime = self._runtime()
+        config = self._config(
+            "codex",
+            f'"{runtime}" hook --connector codex',
+            windows_command=command,
+            codex_features=False,
+        )
 
         check = self._validate("codex", config)
         self.assertEqual(check.state, "stale", check.detail)
@@ -989,6 +1014,96 @@ class WindowsHookDoctorTests(unittest.TestCase):
             check = self._validate("claudecode", config, managed_settings_paths=None)
 
         self.assertEqual(check.state, "healthy", check.detail)
+
+    def test_codex_requires_complete_trusted_event_matrix(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        body = config.read_text(encoding="utf-8")
+        config.write_text(
+            "\n".join(line for line in body.splitlines() if not line.startswith("Stop = ")) + "\n",
+            encoding="utf-8",
+        )
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "missing", check.detail)
+        self.assertIn("Stop", check.detail)
+
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        body = config.read_text(encoding="utf-8")
+        config.write_text(body.replace('trusted_hash = "sha256:', 'trusted_hash = "sha256:0', 1), encoding="utf-8")
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("not trusted", check.detail)
+
+    def test_codex_rejects_non_command_handler(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        body = config.read_text(encoding="utf-8")
+        config.write_text(body.replace('type = "command"', 'type = "http"', 1), encoding="utf-8")
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "malformed", check.detail)
+        self.assertIn("type", check.detail)
+
+    def test_claude_requires_command_type_and_rejects_async_rewake(self) -> None:
+        runtime = self._runtime()
+        for key, on_group in (("asyncRewake", False), ("async_rewake", True)):
+            with self.subTest(key=key, on_group=on_group):
+                config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+                document = json.loads(config.read_text(encoding="utf-8"))
+                group = document["hooks"]["PreToolUse"][0]
+                target = group if on_group else group["hooks"][0]
+                target[key] = True
+                config.write_text(json.dumps(document), encoding="utf-8")
+                check = self._validate("claudecode", config)
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn(key, check.detail)
+
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        document = json.loads(config.read_text(encoding="utf-8"))
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["type"] = "http"
+        config.write_text(json.dumps(document), encoding="utf-8")
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "malformed", check.detail)
+
+    def test_claude_message_display_must_be_observational_async(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        document = json.loads(config.read_text(encoding="utf-8"))
+        document["hooks"]["MessageDisplay"][0]["hooks"][0]["async"] = False
+        config.write_text(json.dumps(document), encoding="utf-8")
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("MessageDisplay", check.detail)
+
+    def test_codex_managed_only_policy_is_reported_from_exact_source(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        requirements = self.root / "ProgramData" / "OpenAI" / "Codex" / "requirements.toml"
+        requirements.parent.mkdir(parents=True)
+        requirements.write_text("allow_managed_hooks_only = true\n", encoding="utf-8")
+        with patch("defenseclaw.doctor_hooks._codex_system_requirements_path", return_value=str(requirements)):
+            check = self._validate("codex", config)
+        self.assertEqual(check.state, "foreign", check.detail)
+        self.assertIn(str(requirements), check.detail)
+        self.assertIn("allow_managed_hooks_only", check.detail)
+
+    def test_codex_cloud_effective_policy_uses_trusted_discovered_binary(self) -> None:
+        runtime = self._runtime()
+        config = self._config("codex", f'"{runtime}" hook --connector codex')
+        codex = self.root / "Codex" / "codex.exe"
+        codex.parent.mkdir()
+        codex.write_bytes(b"MZ")
+        (self.data / "agent_discovery.json").write_text(
+            json.dumps({"agents": {"codex": {"installed": True, "binary_path": str(codex)}}}),
+            encoding="utf-8",
+        )
+        source = f"Codex app-server {codex} effective requirements"
+        with (
+            patch("defenseclaw.inventory.agent_discovery._is_trusted_binary_path", return_value=True),
+            patch("defenseclaw.doctor_hooks._inspect_codex_app_server_policy", return_value=(True, source)),
+        ):
+            check = self._validate("codex", config)
+        self.assertEqual(check.state, "foreign", check.detail)
+        self.assertIn(source, check.detail)
 
     def test_missing_registrations_have_only_native_repair_guidance(self) -> None:
         for connector, filename, repair in (
